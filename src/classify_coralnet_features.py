@@ -51,6 +51,7 @@ log_memory_usage('Initial memory usage')
 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 bucketname = "coralnet-mermaid-share"
 prefix = "coralnet_public_features/"
+path = f'allsource/return_msg_ba_{current_time}.pkl'
 
 with open('secrets.json') as f:
     secrets = json.load(f)
@@ -61,7 +62,6 @@ fs = fs.S3FileSystem(
     secret_key=secrets["AWS_SECRET_ACCESS_KEY"]
 )
 
-# TODO check this is the most efficient way to load in parquet
 # Load Parquet file from S3 bucket using s3_client
 parquet_file = "pyspacer-test/allsource/selected_subsample_ModRes_reduced.parquet"
 logger.info('Reading parquet file from S3 bucket')
