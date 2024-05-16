@@ -1,5 +1,8 @@
-IMAGE=mermaid/mermaid-classifier
+IMAGE ?= mermaid/mermaid-classifier
+FEATURE_VECTOR_BUCKET ?= "coralnet-mermaid-share"
+PARQUET_FILE ?= "pyspacer-test/allsource/selected_subsample_ModRes_reduced.parquet"
 
+MERMAID_S3_BUCKET ?= "pyspacer-test"
 
 build:
 	docker build --no-cache -t $(IMAGE) .
