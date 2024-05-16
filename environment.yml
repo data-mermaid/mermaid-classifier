@@ -1,0 +1,39 @@
+name: mermaid-dev  # Replace with your desired environment name
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - dask
+  - dask-ml
+  - dask-expr
+  - duckdb
+  - jupyter
+  - jupyter-server-proxy
+  - pytorch
+  - pytorch-cuda=12.1
+  - torchvision
+  - keras
+  - pyarrow
+  - holoviews
+  - itables
+  - hvplot
+  - bokeh
+  - boto3
+  - botocore
+  - s3transfer
+  - s3fs
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - ipykernel
+  - nb_conda_kernels # weird bug with quarto and jupyter 
+  - pip
+  - pip:
+    - python-dotenv
+    - nbformat
+
