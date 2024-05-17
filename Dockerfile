@@ -33,13 +33,13 @@ COPY environment.yml .
 RUN conda env create -f environment.yml
 
 # Make RUN commands use the new environment:
-SHELL ["conda", "run", "-n", "mermaid-dev", "/bin/bash", "-c"]
+SHELL ["conda", "run", "-n", "mermaid-spacer", "/bin/bash", "-c"]
 
 # Demonstrate the environment is activated:
-RUN conda run -n mermaid-dev python -c "import spacer"
+RUN conda run -n mermaid-spacer python -c "import spacer"
 
 WORKDIR /app
 
 # The code to run when container is started:
-COPY src/classify_coralnet_features.py .
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "mermaid-dev", "python", "classify_coralnet_features.py"]
+COPY src/ .
+ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "mermaid-spacer", "python"]
