@@ -1,4 +1,4 @@
-name: mermaid-dev  # Replace with your desired environment name
+name: mermaid-spacer # Replace with your desired environment name
 channels:
   - conda-forge
   - defaults
@@ -8,6 +8,7 @@ dependencies:
   - numpy
   - duckdb
   - pyarrow
+  - psutil
   - boto3
   - botocore
   - s3transfer
