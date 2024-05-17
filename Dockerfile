@@ -41,5 +41,5 @@ RUN conda run -n mermaid-dev python -c "import spacer"
 WORKDIR /app
 
 # The code to run when container is started:
-COPY src/base.py .
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "mermaid-dev", "python", "src/base.py"]
+COPY src/classify_coralnet_features.py .
+ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "mermaid-dev", "python", "classify_coralnet_features.py"]
