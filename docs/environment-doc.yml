@@ -36,4 +36,5 @@ dependencies:
   - pip:
     - python-dotenv
     - nbformat
+    - pyspacer==0.9.0
 

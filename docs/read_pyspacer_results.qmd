@@ -18,9 +18,6 @@ import numpy as np
 import hvplot.dask
 import hvplot.pandas  # noqa
 import dask.dataframe as dd
-import dask.array as da 
-import dask.bag as db
-
 
 pd.options.plotting.backend = 'holoviews'
 ```
