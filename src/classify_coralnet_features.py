@@ -22,6 +22,7 @@ from spacer.messages import DataLocation, TrainClassifierMsg, TrainingTaskLabels
 from spacer.tasks import (
     train_classifier,
 )
+from spacer.task_utils import preprocess_labels
 from dotenv import load_dotenv
 
 load_dotenv()
