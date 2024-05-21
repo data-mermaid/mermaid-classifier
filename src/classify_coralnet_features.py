@@ -2,38 +2,41 @@
 Train and classify from multisource (or project) using featurevector files provided on S3.
 
 """
-import json
 import logging
 import os
 import pickle
-import threading
 from datetime import datetime
 
-import boto3
+#import boto3
 import duckdb
 import numpy as np
-import pandas as pd
 import psutil
 import pyarrow.parquet as pq
-import pyarrow as pa
 import s3fs
-from botocore.exceptions import BotoCoreError, ClientError
 
 from pyarrow import fs
 from sklearn.model_selection import train_test_split
 
 from spacer.data_classes import ImageLabels
 from spacer.messages import DataLocation, TrainClassifierMsg, TrainingTaskLabels
-from spacer.task_utils import preprocess_labels
 from spacer.tasks import (
     train_classifier,
 )
-from spacer.task_utils import preprocess_labels
+from dotenv import load_dotenv
 
+load_dotenv()
+# Set up the environment variables
+current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+bucketname = os.getenv('FEATURE_VECTOR_BUCKET')
+run_name = os.getenv('RUN_NAME')
+mermaid_s3_bucket = os.getenv('MERMAID_S3_BUCKET')
+parquet_file = os.getenv('PARQUET_FILE')
+#prefix = "coralnet_public_features/"
+path = f'allsource/return_msg_ba_{current_time}.pkl'
 
 # Set up logging 
 logging.basicConfig(
-    filename='mod_res.log',
+    filename=f'{run_name}.log',
      filemode='w',
     level=logging.INFO,  # Set the logging level (e.g., INFO, DEBUG, ERROR)
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -48,33 +51,37 @@ logger.info('Setting up connections')
 log_memory_usage('Initial memory usage')
 # Set up connections
 # Set up Sources
-current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-bucketname = "coralnet-mermaid-share"
-prefix = "coralnet_public_features/"
-path = f'allsource/return_msg_ba_{current_time}.pkl'
-
-with open('secrets.json') as f:
-    secrets = json.load(f)
+# Use Pandas and s3fs to read the csv from s3
+s3 = s3fs.S3FileSystem(
+    anon=False,
+    use_ssl=True,
+    client_kwargs={
+        "region_name": os.getenv('S3_REGION'),
+        "endpoint_url": os.getenv('S3_ENDPOINT'),
+        "verify": True,
+    }
+)
 # Use pyarrow to read the parquet file from S3
 fs = fs.S3FileSystem(
-    region=secrets["AWS_REGION"],
-    access_key=secrets["AWS_ACCESS_KEY_ID"],
-    secret_key=secrets["AWS_SECRET_ACCESS_KEY"]
+    region=os.getenv("S3_REGION"),
+    access_key=os.getenv("S3_ACCESS_KEY"),
+    secret_key=os.getenv("S3_SECRET_KEY"),
 )
 
 # Load Parquet file from S3 bucket using s3_client
-parquet_file = "pyspacer-test/allsource/selected_subsample_ModRes_reduced.parquet"
+
 logger.info('Reading parquet file from S3 bucket')
 log_memory_usage('Memory usage after reading parquet file')
 
-
-#selected_sources = pq.read_table(parquet_file, filesystem=fs)
 selected_sources = pq.read_table(parquet_file, filesystem=fs)
+
 # Connect to DuckDB
 logger.info('Connecting to DuckDB')
 conn = duckdb.connect()
 
 selected_sources = conn.execute("SELECT * FROM selected_sources").fetchdf()
+# only do 100 rows for testing
+selected_sources = selected_sources.head(100)
 log_memory_usage('Memory usage after wrangling in DuckDB')
 #
 # Remove label counts lower than 1
@@ -125,10 +132,10 @@ train_msg = TrainClassifierMsg(
     features_loc=DataLocation("s3", bucket_name=bucketname, key=""),
     previous_model_locs=[],
     model_loc=DataLocation(
-        "s3", bucket_name="pyspacer-test", key="allsource" + f"/classifier_ba_{current_time}.pkl"
+        "s3", bucket_name=mermaid_s3_bucket, key="allsource" + f"/classifier_ba_{current_time}.pkl"
     ),
     valresult_loc=DataLocation(
-        "s3", bucket_name="pyspacer-test", key="allsource" + f"/valresult_ba_{current_time}.json"
+        "s3", bucket_name=mermaid_s3_bucket, key="allsource" + f"/valresult_ba_{current_time}.json"
     ),
     feature_cache_dir=TrainClassifierMsg.FeatureCache.AUTO,
 )
@@ -149,8 +156,8 @@ path = f'allsource/return_msg_ba_{current_time}.pkl'
 # Use pickle to serialize the object
 return_msg_bytes = pickle.dumps(return_msg)
 # Use s3fs to write the bytes to the file
-with s3.open(path, 'wb') as f:
-    f.write(return_msg_bytes)
+#with s3.open(path, 'wb') as f:
+#    f.write(return_msg_bytes)
 
 ref_accs_str = ", ".join([f"{100*acc:.1f}" for acc in return_msg.ref_accs])
 
