@@ -1,0 +1,471 @@
+---
+title: "Pre-Processing Notebook for Train Splits"
+author: "Lauren Yee"
+format: 
+  html:
+    code-fold: false
+    theme: zephyr
+    toc: true
+    embed-resources: true
+    code-overflow: wrap
+    code-tools: true
+  pdf: 
+    number_sections: true
+    fig_width: 6
+    fig_height: 4
+    fig_caption: true
+    highlight: pygments
+    theme: zephyr
+    toc: true
+    code_folding: show
+    keep_tex: true
+    latex_engine: xelatex
+execute:
+    warning: false
+
+---
+
+This notebook is used to pre-process the data for the train splits. The data is loaded from a parquet file, filtered by sources, and labels. The data is then aggregated by the highest level BA, Mermaid Parent, and Label ID. The data is then subsampled to address class imbalance issues. The data is then written to a parquet file to go into our training pipeline.
+
+```{python}
+import json
+import os
+import pickle
+import s3fs
+import hvplot.pandas
+import duckdb
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pyarrow import fs
+from bokeh.models import NumeralTickFormatter
+from dotenv import load_dotenv
+from datetime import datetime
+from itables import show
+load_dotenv()
+pd.set_option('display.float_format', '{:.2f}'.format)
+```
+
+
+## Sources 
+
+::: {.callout-note}
+- Source to keep were derived from WCS (Iain) based on expert knowledge.
+- Set up S3 connections to read the sources to keep from the CoralNetSourcesToKeep.csv file.
+:::
+
+
+```{python}
+# Iains filtering
+# Use Pandas and s3fs to read the csv from s3
+s3 = s3fs.S3FileSystem(
+    anon=False,
+    use_ssl=True,
+    client_kwargs={
+        "region_name": os.environ['S3_REGION'],
+        "endpoint_url": os.environ['S3_ENDPOINT'],
+        "aws_access_key_id": os.environ['S3_ACCESS_KEY'],
+        "aws_secret_access_key": os.environ['S3_SECRET_KEY'],
+        "verify": True,
+    }
+)
+sources_to_keep = pd.read_csv(s3.open('mvp/CoralNetSourcesToKeep.csv', mode='rb'))
+```
+
+- Reformating table to match the CoralNet sources table
+- Filtering the sources based on the ToKeep column == 1
+- Prefixing the source_id strings with an 's'
+
+```{python}
+# Change Source ID to source_id and format source_id as string
+sources_to_keep = sources_to_keep.rename(columns={"Source ID": "source_id"})
+
+sources_to_keep["source_id"] = sources_to_keep["source_id"].astype(str)
+# Filter the sources based on ToKeep column  == 1
+sources_to_keep = sources_to_keep[sources_to_keep["ToKeep"] == 1]
+# prefix source_id strings with an 's'
+sources_to_keep["source_id"] = "s" + sources_to_keep["source_id"]
+```
+
+```{python}
+total_sources = sources_to_keep.shape[0]
+```
+
+The total number of sources after filtering is `{python} total_sources`
+
+## Labels Matching
+
+- These labels are from WCS (Iain) and are used to filter the data based on the labels that are to be kept. 
+
+```{python}
+# May cut of labels from Iain finished reassigning the labels again for a new model. The new file is in the shared google drive and I have attached it to the following trello card (#142): https://trello.com/c/MgERyHpL. The new labels are in the column called "CoralFocus2Label" and when you run the new model you should also remove any of the labels that have been reassigned as "Other"
+labels_mermaid = pd.read_csv(s3.open('mvp/CoralNetMermaidMatchedCoralFocusModel2Reassign_20240503.csv'))
+
+# Remove columns with 'model' and/or 'Notes' in the column name
+labels_mermaid = labels_mermaid.loc[:, ~labels_mermaid.columns.str.contains('model|Model|Notes')]
+
+```
+
+```{python}
+labels_mermaid.columns
+```
+
+### Filter the Labels
+
+- The labels are filtered based on a binary where the `ToKeep` column is equal to 1 for rows/labels that are to be kept.
+
+```{python}
+labels_to_keep = labels_mermaid[labels_mermaid["ToKeep"] == 1]
+labels_to_keep.shape
+```
+
+```{python}
+# Check for null values in labels_to_keep
+labels_to_keep.isnull().sum()
+```
+
+## Load Parquet File
+
+- Load the parquet file into a DuckDB table
+- Create a DuckDB table called annotation_table
+- Create the feature vector parsing in duckdb
+- Add a new column 'key' to the table
+
+```{python}
+# Use pyarrow to read the parquet file from S3
+fs = fs.S3FileSystem(
+    region=os.environ["S3_REGION"],
+    access_key=os.environ["S3_ACCESS_KEY"],
+    secret_key=os.environ["S3_SECRET_KEY"],
+)
+parquet_file = "pyspacer-test/allsource/CoralNet_Annotations_SourceID.parquet"
+df = pq.read_table(parquet_file, filesystem=fs)
+# Connect to DuckDB
+```
+
+
+
+```{python}
+# Create a DuckDB table called annotation_table
+# Create the feature vector parsing in duckdb
+# Add a new column 'key' to the table
+# Update the 'key' column with the desired values
+conn = duckdb.connect()
+
+conn.execute(
+    """
+    CREATE TABLE annotation_table AS 
+    SELECT *, 'coralnet_public_features/' || CAST(source_id AS VARCHAR) || '/features/i' || CAST("Image ID" AS VARCHAR) || '.featurevector' AS key
+    FROM df 
+    """
+)
+```
+
+## Statistics for Entire Dataset
+
+## Sources
+```{python}
+# Count number of source_id in annotation_table
+unique_sources = conn.execute("SELECT COUNT(DISTINCT source_id) FROM annotation_table").fetchdf()
+```
+
+There are `{python} unique_sources.iloc[0,0]` unique sources in the annotation table.
+
+## Label IDs
+
+```{python}
+# Count unique labels in annotation_table
+total_labels = conn.execute("SELECT COUNT(DISTINCT \"Label ID\") FROM annotation_table").fetchdf()
+```
+
+There are `{python} total_labels.iloc[0,0]` unique labels in the annotation table.
+
+```{python}
+# Count how many rows per source_id sorted by largest count to smallest
+source_counts  = conn.execute("SELECT source_id, COUNT(*) FROM annotation_table GROUP BY source_id ORDER BY COUNT(*) DESC").fetchdf()
+```
+
+There are `{python} source_counts.shape[0]` unique source_ids in the annotation table.
+
+```{python}
+# Total rows in annotation_table
+total_rows = conn.execute("SELECT COUNT(*) FROM annotation_table").fetchdf()
+```
+
+There are `{python} total_rows.iloc[0,0]` rows in the annotation table.
+
+```{python}
+# count each label ID and rename as CoralNetID
+coralnet_label_counts = conn.execute("SELECT \"Label ID\" AS CoralNetID, COUNT(*) FROM annotation_table GROUP BY \"Label ID\"").fetchdf()
+```
+
+```{python}
+coralnet_label_counts
+```
+
+
+```{python}
+# Join label_counts to labels_to_keep on Label ID
+label_counts = coralnet_label_counts.merge(labels_mermaid, on="CoralNetID")
+```
+
+## Checks
+
+- Check for missing shortcodes in the mermaid labels
+
+```{python}
+# No matches
+no_shortcode = label_counts[~label_counts["CoralNetID"].isin(labels_mermaid["CoralNetID"])]
+
+# order by count_star() descending and rename count_star() to count
+no_shortcode = no_shortcode.sort_values(by="count_star()", ascending=False).rename(columns={"count_star()": "count"})
+no_shortcode
+```
+
+# Filter by Sources
+
+-  Filter the annotation_table by the sources_to_keep
+
+```{python}
+# Selected Sources
+selected_sources = conn.execute(
+    f"""
+    CREATE TABLE selected_sources AS 
+    SELECT *
+    FROM annotation_table
+    WHERE "source_id" IN {tuple(sources_to_keep["source_id"].tolist())}
+    """
+)
+```
+
+- Load the selected_sources table into a pandas dataframe
+```{python}
+selected_sources = conn.execute("SELECT * FROM selected_sources").fetchdf()
+```
+
+```{python}
+# Count the unique number of source_ids in selected_sources
+filtered_sources = selected_sources["source_id"].nunique()
+```
+
+There are `{python} filtered_sources` unique source_ids in the selected sources table.
+
+There are `{python} selected_sources.shape[0]` rows in the selected sources table.
+
+## Filter by Label ID
+
+```{python}
+# Rename "ID" to "Label ID"
+labels_to_keep = labels_to_keep.rename(columns={"CoralNetID": "Label ID"})
+```
+
+```{python}
+# Keep only the ID, NewID, MERMAID_BA, and ToKeep columns
+labels_to_keep = labels_to_keep[["Label ID","CoralNetName", "NewCoralNetID", "MermaidBaID", "MERMAID_BA", "ToKeep", "Top100", "MermaidParent", "MermaidGfID","HighestLevelBa", "HighestLevelUUID","CoralFocusLabel","CoralFocus2Label"]]
+```
+
+## Create selected_sources_labels
+
+- Join by original Label ID
+
+```{python}
+# Filter selected_sources by Label ID in labels to keep
+selected_sources_labels = selected_sources[selected_sources["Label ID"].isin(labels_to_keep["Label ID"])]
+```
+
+```{python}
+selected_sources_labels.shape
+```
+
+
+- The number of labels removed from the total selected sources 
+
+```{python}
+# Difference  between selected sources and selected sources labels
+difference = selected_sources.shape[0] - selected_sources_labels.shape[0]
+difference
+```
+
+
+## Merge Labels to Keep to Selected Sources Labels
+
+- Get the rest of the columns so we can do more analysis
+
+```{python}
+## Join selected_sources_labels to labels_to_keep on Label ID
+selected_sources_labels = selected_sources_labels.merge(labels_to_keep, on="Label ID")
+```
+
+```{python}
+# Count total rows in selected_sources_labels
+selected_sources_labels.shape
+```
+
+## Rename Columns
+
+- Rename the `CoralFocus2Label` column to `Label ID` for consistency for future scripts 
+
+```{python}
+# Delete Label ID column and rename NewID to Label ID
+selected_sources_labels = selected_sources_labels.drop(columns=["Label ID"])
+selected_sources_labels = selected_sources_labels.rename(columns={"CoralFocus2Label": "Label ID"})
+```
+
+```{python}
+# Count the number of unique Label IDs
+selected_sources_labels["Label ID"].nunique()
+```
+
+## Remove Other Labels
+
+```{python}
+# Remove 'Other' from Label ID
+selected_sources_labels = selected_sources_labels[selected_sources_labels["Label ID"] != "Other"]
+```
+
+## Create UUIDs
+
+```{python}
+# Create mermaid_id column from MermaidBaID and MermaidGfID, if they contain an NaN, convert to blank string
+selected_sources_labels["MermaidGfID"] = selected_sources_labels["MermaidGfID"].fillna("")
+selected_sources_labels["mermaid_id"] = selected_sources_labels["MermaidBaID"].astype(str) + selected_sources_labels["MermaidGfID"].astype(str)
+```
+
+## Write to parquet
+
+```{python}
+# Save selected_sources_labels to a parquet file
+# Convert df to pyarrow
+table = pa.Table.from_pandas(selected_sources_labels)
+# Write to parquet
+pq.write_table(table, "./selected_sources_labels_CoralFocusLabel.parquet")
+```
+
+# Custom Sampling Strategy
+
+```{python}
+# Look at text label distribution of HighestLevelBa instead for easier reading
+# Also include proportion of total
+label_counts_hba = selected_sources_labels.groupby("HighestLevelBa").size().reset_index(name="counts")
+label_counts_hba['proportion'] = label_counts_hba['counts'] / label_counts_hba['counts'].sum()
+label_counts_hba = label_counts_hba.sort_values(by="counts", ascending=False)
+show(label_counts_hba, scrollable=True)
+```
+
+
+```{python}
+# Use hvplot to create a bar chart of label_counts_hba with y-axis formatted as comma separated values
+label_counts_hba.hvplot.bar(x="HighestLevelBa", y="counts", rot=90, title="Highest Level Ba Label Distribution", height=400, ylabel="Counts", xlabel="Highest Level Ba", value_label=True,  yformatter=NumeralTickFormatter(format="0,0"))
+```
+
+
+## Subsample 
+
+For classification problems, the disparity of observed classes can have a significant impact on model fit. In this case, we have a class imbalance problem where some classes are over-represented and others are under-represented. There are many ways to address this issue, such as oversampling, undersampling, or using a combination of both. 
+
+Other options may include using a specific library for imbalanced data such as [imbalanced-learn](https://imbalanced-learn.org/stable/) or SMOTE
+
+## Assumptions:
+
+### Labels to Remove
+- Unknown
+- Other
+
+### Classes to sample less of:
+
+- Rock
+- Sand
+- Rubble 
+- Silt 
+- Bare Substrate
+- Turf algae 
+
+::: {.callout-note}
+- Note some of these classes may have been removed in previous steps.
+
+- Given Turf algae is so high we ideally want to sample less of it
+
+- Other invertebrates may need to be subsampled as well or removed
+
+:::
+
+# Define your custom sampling strategy
+
+Here, you can specify either a fraction (for proportional sampling) or fixed numbers. 
+As a reminder, there are currently `{python} selected_sources_labels.shape[0]` rows in the selected_sources_labels dataframe.
+
+- Create a list of the labels we want to sample less of and the number of samples we want to take from each group.
+- In this MVP, we will sample 100,000 of each group. 
+- Alternatively, you can specify a fraction of the total number of rows in the dataframe.
+
+```{python}
+sampling_strategy_highestba = {
+    'Turf algae': 100000,
+    'Sand': 100000,
+    'Bare substrate': 100000,
+    'Rubble': 100000,
+}
+
+# Subset selected_sources_labels to only include the labels we want to sample less of
+reduce_sample = selected_sources_labels[selected_sources_labels["Label ID"].isin(sampling_strategy_highestba.keys())]
+
+# Sample n = 100000 of each group
+reduced_sampled = reduce_sample.groupby("Label ID").apply(lambda x: x.sample(n=100000, random_state=1))
+
+```
+
+```{python}
+reduced_sampled = reduced_sampled.reset_index(drop=True)
+```
+
+::: {.callout-tip}
+## Alternative Sampling Strategies
+This is one strategy of sampling. Alternatively, we could sample by :
+
+- a percentile of the total number of rows in the dataframe
+- sample by any grouping variable or taxonomy 
+- sample by source_id or image_id to account for any over representation of any one source or image.
+
+There are many possible ways to sample the data, and it is important to consider the implications of the sampling strategy on the model performance, generalizability, ecologic importance, computational resources, and time.
+
+:::
+
+## Combine the reduced sample with the rest of the selected_sources_labels 
+
+- create a new dataframe for the labels not (`~`) in the sampling strategy.
+- add the two dataframes together to create a new dataframe with the reduced sample.
+```{python}
+selected_sources_labels = selected_sources_labels[~selected_sources_labels["Label ID"].isin(sampling_strategy_highestba.keys())]
+
+## Add the reduced sample back to the selected_sources_labels
+selected_sources_labels = pd.concat([selected_sources_labels, reduced_sampled])
+
+```
+
+# New Distribution
+
+```{python}
+total_relabels = selected_sources_labels.groupby("Label ID").size().reset_index(name="counts").sort_values(by="counts", ascending=False)
+```
+
+```{python}
+show(total_relabels)
+```
+
+```{python}
+total_relabels.hvplot.bar(x="Label ID", y="counts", rot=90, title="Label ID Distribution", height=400, ylabel="Counts", xlabel="Label ID", value_label=True, yformatter=NumeralTickFormatter(format="0,0"))
+```
+
+```{python}
+total_relabels.describe()
+```
+
+
+## Write to Parquet
+
+```{python}
+# Write top100 reduced sample to parquet
+pq.write_table(pa.Table.from_pandas(selected_sources_labels), "./selected_sources_labels_Coral2FocusLabel_subsample.parquet")
+```
+

@@ -36,6 +36,7 @@ RUN curl -o quarto-linux-amd64.deb -L https://github.com/quarto-dev/quarto-cli/r
     gdebi --non-interactive quarto-linux-amd64.deb && \
     rm quarto-linux-amd64.deb
 
+RUN quarto install tinytex
 # Create the environment
 COPY environment-doc.yml .
 RUN conda env create -f environment-doc.yml
