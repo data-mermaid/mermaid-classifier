@@ -1,0 +1,22 @@
+name: mermaid-spacer # Replace with your desired environment name
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - duckdb
+  - pyarrow
+  - psutil
+  - boto3
+  - botocore
+  - s3transfer
+  - s3fs
+  - scikit-learn
+  - pip
+  - pip:
+    - python-dotenv
+    - pyspacer==0.9.0
+
+
