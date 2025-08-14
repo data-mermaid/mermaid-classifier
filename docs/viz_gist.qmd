@@ -1,0 +1,257 @@
+---
+title: "Efficient Net Feature Extraction and Classification of Coral"
+format: html
+---
+
+
+
+```{python}
+
+import json
+import pickle
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torchvision.models as models
+import torchvision.transforms as transforms
+from PIL import Image, ImageDraw, ImageFont
+
+
+```
+
+```{python}
+
+# Read in model pickle file
+
+output_path = '/home/lauren/Projects/mermaid-classification-experiments/outputs/'
+valresult_filepath = output_path + 'valresult_mod_res_2024-05-06_15-41-19.json'
+sklearn_model_path = output_path + 'classifier_9000_2024-04-04_21-35-33.pkl'
+efficient_net = '/home/lauren/Projects/pyspacer/efficientnet_b0_ver1.pt'
+# Load image for classification
+image_path = 'test_images/y5xy9viycx.jpg'
+
+```
+
+
+
+# Load the pre-trained models
+
+```{python}
+with open(sklearn_model_path, 'rb') as f:
+    clf = pickle.load(f)
+```
+
+```{python}
+
+saved_model = torch.load('/home/lauren/Projects/pyspacer/efficientnet_b0_ver1.pt')
+print(saved_model.keys())
+```
+
+
+
+```{python}
+
+# Load pre-trained EfficientNet model
+efficientnet_model = models.efficientnet_b0(pretrained=True)
+efficientnet_model.eval()  # Set the model to evaluation mode
+efficientnet_model = torch.nn.Sequential(*list(efficientnet_model.children())[:-1])
+
+# Load the pre-trained scikit-learn classifier
+with open(sklearn_model_path, 'rb') as f:
+    clf = pickle.load(f)
+
+# Define class labels (update this list with your actual class names)
+with open(valresult_filepath, 'r') as f:
+    valresult = json.load(f)
+class_labels = valresult['classes']
+
+```
+
+
+## Define Functions
+
+- Some of these are from pyspacer and others are custom functions
+- pyspacer requires specific rowcols for point locations to generate patches
+- we can likely change this for segmentation tasks or whole image classifcation TBD
+
+
+## Pyspacer functions for patch extraction
+
+```{python}
+
+def gray2rgb(im: np.ndarray) -> np.ndarray:
+    w, h = im.shape
+    ret = np.empty((w, h, 3), dtype=np.uint8)
+    ret[:, :, 0] = im
+    ret[:, :, 1] = im
+    ret[:, :, 2] = im
+    return ret
+
+
+def crop_patches(
+    im: Image, rowcols: list[tuple[int, int]], crop_size: int
+) -> list[np.ndarray]:
+    im = np.array(im)
+    if len(im.shape) == 2 or im.shape[2] == 1:
+        im = gray2rgb(im)
+    im = im[:, :, :3]  # only keep the first three color channels
+    pad = crop_size
+    im = np.pad(im, ((pad, pad), (pad, pad), (0, 0)), mode="reflect")
+    patches = [
+        crop_simple(im, (row + pad, col + pad), crop_size) for row, col in rowcols
+    ]
+    return patches
+
+
+def crop_simple(im: np.ndarray, center: tuple[int, int], crop_size: int) -> np.ndarray:
+    upper = int(center[0] - crop_size / 2)
+    left = int(center[1] - crop_size / 2)
+    return im[upper : upper + crop_size, left : left + crop_size, :]
+
+
+```
+
+
+## Custom Functions
+
+- this works but may be slightly different from pyspacer's implementation
+- preprocess_image: preprocesses the image for the model
+- extract_features: extracts features from the model
+- classify_patches: classifies the patches
+- visualize_results: visualizes the results
+
+
+```{python}
+def preprocess_image(patch: np.ndarray) -> torch.Tensor:
+    preprocess = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+    )
+    img = Image.fromarray(patch)
+    img_tensor = preprocess(img)
+    img_tensor = img_tensor.unsqueeze(0)  # Add batch dimension
+    return img_tensor
+
+
+def extract_features(image_tensor):
+    with torch.no_grad():
+        features = efficientnet_model(image_tensor)
+    features = features.numpy().flatten()  # Convert to numpy array and flatten
+    return features
+
+
+def classify_patches(image_path, rowcols, crop_size):
+    img = Image.open(image_path).convert("RGB")
+    patches = crop_patches(img, rowcols, crop_size)
+
+    predictions = []
+    probabilities = []
+
+    for patch in patches:
+        image_tensor = preprocess_image(patch)
+        features = extract_features(image_tensor)
+        prediction = clf.predict([features])
+        probability = clf.predict_proba([features])
+        predictions.append(prediction[0])
+        probabilities.append(probability[0])
+
+    return img, predictions, probabilities, rowcols
+
+
+def visualize_results(img, predictions, probabilities, rowcols):
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    for (row, col), prediction, prob in zip(rowcols, predictions, probabilities):
+        try:
+            print(f"Prediction: {prediction}, Probabilities: {prob}")  # Debug statement
+            top_class = class_labels[prediction]
+            top_prob = prob[prediction]
+            text = f"{top_class}: {top_prob:.2f}"
+            draw.text((col, row), text, fill="red", font=font)
+        except IndexError as e:
+            print(
+                f"IndexError: {e}. Prediction: {prediction}, Probabilities: {prob}, Class labels: {class_labels}"
+            )
+
+    plt.figure(figsize=(8, 8))
+    plt.imshow(img)
+    plt.axis("off")
+    plt.show()
+
+
+```
+
+## Run the functions
+```{python}
+
+# Define the locations where patches will be extracted and the patch size
+rowcols = [
+    (50, 50),
+    (1000, 1000),
+    (2500, 2500),
+    (4000, 4000),
+]  # Example patch locations
+crop_size = 100  # Example patch size
+
+# Path to the image you want to test
+image_path = "test_images/y5xy9viycx.jpg"
+img, predictions, probabilities, rowcols = classify_patches(
+    image_path, rowcols, crop_size
+)
+
+# Visualize the result
+visualize_results(img, predictions, probabilities, rowcols)
+```
+
+# Draw Patches
+
+- draw the patches on the image
+- this is useful for visualizing the patches on the image
+- you can adapt the crop_size and rowcols to your specific use case
+
+
+```{python}
+# Draw the patches on the image
+def draw_patches(image, rowcols, patch_size):
+    draw = ImageDraw.Draw(image)
+    for row, col in rowcols:
+        draw.rectangle([col, row, col + patch_size, row + patch_size], outline="red", width=10)
+    return image
+# Draw the predictions as strings over the patches
+
+def visualize_predictions(image, rowcols, predictions):
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default(size=70)
+    for (row, col), prediction in zip(rowcols, predictions):
+        try:
+            text = f"Prediction: {prediction}"
+            draw.text((col, row), text, fill="red", font=font)
+        except IndexError as e:
+            print(f"IndexError: {e}. Prediction: {prediction}")
+
+    plt.figure(figsize=(8, 8))
+    plt.imshow(image)
+    plt.axis("off")
+    plt.show()
+```
+
+```{python}
+crop_size = 64
+# Visualize the image with patches
+image = Image.open(image_path)
+image_with_patches = draw_patches(image, rowcols, crop_size)
+plt.imshow(image_with_patches)
+
+```
+
+## Viz with labels
+
+```{python}
+# Vizualize the predictions
+
+visualize_predictions(image_with_patches, rowcols, predictions)
+```

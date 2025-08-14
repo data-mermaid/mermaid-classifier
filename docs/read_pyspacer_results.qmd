@@ -1,0 +1,603 @@
+---
+title: "Reading PySpacer Results"
+format: html
+jupyter: python3
+---
+
+## Load Pyspacer Results
+
+This notebook is for reading the results of a Pyspacer run. The results are stored in a json file and a pickle file. The json file contains the validation results and the pickle file contains the model returned from pyspacer. 
+
+```{python}
+#| warning: false
+
+import pickle
+import json
+import pandas as pd
+import numpy as np
+import hvplot.dask
+import hvplot.pandas  # noqa
+import dask.dataframe as dd
+
+pd.options.plotting.backend = 'holoviews'
+```
+
+## Set Parameters
+```{python}
+#| tags: [parameters]
+#https://quarto.org/docs/computations/parameters.html
+output_path = '/home/lauren/Projects/mermaid-classification-experiments/outputs/'
+valresult_filepath = output_path + 'valresult_mod_res_2024-05-06_15-41-19.json'
+return_message_filepath = output_path + 'classifier_9000_2024-04-04_21-35-33.pkl'
+run_name = 'coral2'
+
+```
+
+## Load Label Mapping from training_preprocessing
+
+- some fixes to the label mapping file here for duplicates
+- TODO: separate this out once labels are fixed
+```{python}
+# Label Mapping
+
+label_mapping =  pd.read_csv("./output/mermaid_ba_gf.csv")
+
+```
+
+```{python}
+#| echo: false
+#| 
+label_mapping['CoralNetNames'] = label_mapping.groupby('mermaid_id')['CoralNetName'].transform(lambda x: ', '.join(x.unique()))
+```
+
+```{python}
+#| echo: false
+# Create a deduped copy of the label_mapping dataframe
+label_map = label_mapping.copy()
+# Remove CoralNetName column and drop duplicates
+#label_map = label_map.drop(columns=['CoralNetName', 'Top100']).drop_duplicates()
+```
+
+```{python}
+#| echo: false
+# Find any duplicate NewCoralNetID values
+label_map[label_map.duplicated(subset='NewCoralNetID', keep=False)]
+# Output just the NewCoralNetIDs
+y = label_map[label_map['NewCoralNetID'].duplicated(keep=False)]['NewCoralNetID'].reset_index(drop=True)
+```
+
+
+- Load return message from Pyspacer
+
+```{python}
+# open return_message_filepath as json
+with open(return_message_filepath, 'rb') as f:
+    return_msg = pickle.load(f)
+
+```
+
+- Load valresult from Pyspacer 
+- As json
+
+```{python}
+
+with open(valresult_filepath) as f:
+    valresult = json.load(f)
+
+```
+
+```{python}
+# Find other attributes in valresult
+print(valresult.keys())
+```
+
+## Create a dict
+
+- Create an empty metric store to store our metrics
+
+```{python}
+metric_store = {}
+```
+
+## Model Accuracy from Pyspacer
+```{python}
+from spacer.train_utils import calc_acc
+
+model_accuracy = round(calc_acc(valresult['gt'], valresult['est']),4)
+model_accuracy
+
+```
+
+```{python}
+metric_store['pyspacer_accuracy'] = model_accuracy
+```
+
+## Pyspacer Approach using ValResults
+
+- use the deserialize method to load the valresult
+
+```{python}
+import json
+from spacer.data_classes import ValResults
+with open(valresult_filepath) as f:
+    valresult = ValResults.deserialize(json.load(f))
+```
+
+## Convert to Pandas Dataframe
+
+- Convert the valresults into a pandas dataframe
+- Use Dask to partition for speed
+
+```{python}
+df = pd.DataFrame({
+    'Actual': pd.Categorical([valresult.classes[i] for i in valresult.gt]),
+    'Predicted': pd.Categorical([valresult.classes[i] for i in valresult.est]),
+    'Confidence': valresult.scores
+})
+
+ddf = dd.from_pandas(df, npartitions=100)
+```
+
+
+## Confusion matrix 
+
+### From sklearn
+
+```{python}
+#%matplotlib inline
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+# Compute the confusion matrix
+confusion_matrix = confusion_matrix(ddf['Actual'], ddf['Predicted'], normalize='true')
+
+# Create the ConfusionMatrixDisplay object
+displ = ConfusionMatrixDisplay(confusion_matrix, display_labels=valresult.classes)
+
+# Plot the confusion matrix with smaller text labels
+fig, ax = plt.subplots(figsize=(10, 10))  # Adjust the size of the plot
+displ.plot(include_values=False, cmap='viridis', ax=ax)  # Include values in the plot and use a colormap
+
+# Adjust the size of the text labels
+plt.xticks(fontsize=10, rotation=90)  # Adjust the size of the x-axis labels
+plt.yticks(fontsize=10)  # Adjust the size of the y-axis labels
+plt.tight_layout() 
+```
+
+
+```{python}
+# Compute counts of each Actual/Predicted combination
+confusion_counts = ddf.groupby(['Actual', 'Predicted']).size().compute()
+
+
+# Convert the Series to a DataFrame for easier manipulation
+confusion_matrix_df = confusion_counts.reset_index().rename(columns={0: 'Count'})
+
+```
+
+```{python}
+confusion_matrix_df.shape
+```
+
+```{python}
+# Filter out zero counts
+confusion_matrix_df = confusion_matrix_df[confusion_matrix_df['Count'] > 0]
+```
+
+```{python}
+confusion_matrix_df.shape
+```
+
+```{python}
+# Pivot the DataFrame to get a matrix form
+confusion_matrix_pivot = confusion_matrix_df.pivot(index='Actual', columns='Predicted', values='Count').fillna(0)
+```
+
+
+```{python}
+
+# Find any classes where actual and predicted are the same 
+confusion_matrix_df['Actual'] = confusion_matrix_df['Actual'].astype(str)
+confusion_matrix_df['Predicted'] = confusion_matrix_df['Predicted'].astype(str)
+
+# After conversion, the comparison should work without error
+correctly_classified = confusion_matrix_df[confusion_matrix_df['Actual'] == confusion_matrix_df['Predicted']]
+
+```
+
+```{python}
+p_cat = confusion_matrix_df.pivot(index='Actual', columns='Predicted', values='Count').fillna(0)
+```
+
+```{python}
+%load_ext hvplot
+# Create a heatmap of the confusion matrix
+confusion_matrix_heatmap = p_cat.hvplot.heatmap(
+    #cmap='viridis',  # Choose a colormap that suits your preference
+    
+    colorbar=True,
+    # reduce_function=np.mean,
+    xlabel='Predicted Class',
+    ylabel='Actual Class',
+    title='Confusion Matrix Heatmap'
+).opts(xrotation=90, width=800, height=500)  # Rotate the x-axis labels for better readability if needed
+
+# Display the heatmap
+confusion_matrix_heatmap
+```
+
+```{python}
+p_cat.hvplot.heatmap(
+    #cmap='viridis',  # Choose a colormap that suits your preference
+    logz=True,
+    colorbar=True,
+    clim=(1, np.nan),
+    xlabel='Predicted Class',
+    ylabel='Actual Class',
+    title='Confusion Matrix Heatmap Log Scale'
+).opts(xrotation=90, width=800, height=500)  
+```
+
+
+
+```{python}
+# Scale the counts to make the heatmap more readable
+from sklearn.preprocessing import MinMaxScaler
+scaler = MinMaxScaler()
+confusion_matrix_df['scaled_count'] = scaler.fit_transform(confusion_matrix_df['Count'].values.reshape(-1, 1))
+
+p_cat_scaled = confusion_matrix_df.pivot(index='Actual', columns='Predicted', values='scaled_count').fillna(0)
+```
+
+```{python}
+
+
+confusion_matrix_heatmap = p_cat_scaled.hvplot.heatmap(
+    colorbar=True,
+    xlabel='Predicted Class',
+    ylabel='Actual Class',
+    title='Confusion Matrix Heatmap'
+).opts(xrotation=90, width=800, height=500)
+
+display(confusion_matrix_heatmap)
+```
+
+
+```{python}
+# Treat ddf Actual and Predicted as strings
+ddf['Actual'] = ddf['Actual'].astype(str)
+ddf['Predicted'] = ddf['Predicted'].astype(str)
+
+ddf.hvplot.heatmap(x='Actual', y='Predicted', C='Confidence', reduce_function=np.mean)
+```
+
+## Transpose for Plotting
+
+```{python}
+# Get the actual and predicted labels from df
+actual_labels = ddf['Actual']
+predicted_labels = ddf['Predicted']
+```
+
+## Thresholding
+
+```{python}
+# Assign a threshold for confidence
+threshold = 0.5
+```
+
+```{python}
+## ddf is a dask dataframe containing the actual, predicted and confidence columns of the mlp model per row of annotation.
+# We want to calculate for a given class and predicted class the number of false positives, false negatives, true positives and true negatives.
+# We can then use these values to calculate the precision, recall and f1 score for each class.
+# We can also calculate the accuracy of the model by summing the true positives and true negatives and dividing by the total number of samples.
+# We can also calculate the macro average of the precision, recall and f1 score by summing the precision, recall and f1 score for each class and dividing by the number of classes.
+
+false_positives = ddf[(ddf['Actual'] != ddf['Predicted']) & (ddf['Confidence'] >= threshold)]
+false_negatives = ddf[(ddf['Actual'] == ddf['Predicted']) & (ddf['Confidence'] < threshold)]
+true_positives = ddf[(ddf['Actual'] == ddf['Predicted']) & (ddf['Confidence'] >= threshold)]
+true_negatives = ddf[(ddf['Actual'] != ddf['Predicted']) & (ddf['Confidence'] < threshold)]
+
+# Calculate the number of false positives, false negatives, true positives and true negatives
+fp = false_positives.shape[0].compute()
+fn = false_negatives.shape[0].compute()
+tp = true_positives.shape[0].compute()
+tn = true_negatives.shape[0].compute()
+
+# Calculate the precision, recall and f1 score for each class
+precision = tp / (tp + fp)
+recall = tp / (tp + fn)
+f1_score = 2 * (precision * recall) / (precision + recall)
+
+# Print the results
+print(f'False Positives: {round(fp, 2)}')
+print(f'False Negatives: {round(fn, 2)}')
+print(f'True Positives: {round(tp, 2)}')
+print(f'True Negatives: {round(tn, 2)}')
+print(f'Precision: {round(precision, 2)}')
+print(f'Recall: {round(recall, 2)}')
+print(f'F1 Score: {round(f1_score, 2)}')
+
+
+```
+
+```{python}
+# Add to metrics_store
+metric_store['fp'] = fp
+metric_store['fn'] = fn
+metric_store['tp'] = tp
+metric_store['tn'] = tn
+metric_store['precision'] = precision
+metric_store['recall'] = recall
+metric_store['f1_score'] = f1_score
+```
+
+
+
+```{python}
+#| echo: false
+# Perform the filtering using boolean indexing
+common_misclassifications = ddf[ddf['Confidence'] < threshold].compute()
+
+# To see the result, you need to compute it since Dask operations are lazy
+common_misclassifications
+```
+
+```{python}
+
+# Which classes are most commonly misclassified for another ?
+common_misclassifications['Predicted'].value_counts()
+```
+
+## Create a DataFrame 
+
+- Sort the DataFrame by 'Actual' and then 'Count' in descending order
+
+
+```{python}
+# Sort the DataFrame by 'Actual' and then 'Count' in descending order
+sorted_df = confusion_matrix_df.sort_values(by=['Actual', 'Count'], ascending=[True, False])
+
+```
+
+```{python}
+# Group by Actual and count the number of predicted classes
+sorted_df['percent'] = sorted_df.groupby('Actual')['Count'].transform(lambda x: round(x / x.sum(), 2))
+```
+
+```{python}
+# Change label_map NewCoralNetID to string
+label_map['NewCoralNetID'] = label_map['NewCoralNetID'].astype(str)
+```
+
+```{python}
+duplicates = label_map[label_map['NewCoralNetID'].duplicated(keep=False)].reset_index()
+# Print the duplicates
+print(duplicates)
+label_map = label_map.drop_duplicates(subset='NewCoralNetID', keep='first')
+```
+
+```{python}
+#join sorted_df with label_mapping 
+sorted_df = sorted_df.merge(label_map, left_on='Actual', right_on='NewCoralNetID', how='left')
+```
+
+`
+```{python}
+## Aggregate by MermaidParentID
+label_map['NewCoralNetID'] = label_map['NewCoralNetID'].astype(str)
+predicted_parent = sorted_df[['Predicted']].astype(str)
+predicted_parent = predicted_parent.merge(label_map, left_on='Predicted', right_on='NewCoralNetID', how='left')
+predicted_parent
+```
+
+```{python}
+# Drop columns from predicted_parent such as 'counts' and 'NewCoralNetID'
+predicted_parent = predicted_parent.drop(columns=['NewCoralNetID', 'counts'])
+```
+
+```{python}
+parent_group = sorted_df.merge(label_map, left_on='Predicted', right_on='NewCoralNetID', how='left', suffixes=('_actual', '_predicted'))
+```
+
+## Group by the respective MermaidParent
+```{python}
+parent_group_g = parent_group.groupby(['MermaidParent_actual', 'MermaidParent_predicted']).size().reset_index(name='counts')
+```
+
+```{python}
+pp = parent_group_g.pivot(index='MermaidParent_actual', columns='MermaidParent_predicted', values='counts').fillna(0)
+
+```
+
+```{python}
+pp.hvplot.heatmap(
+    x = 'columns',
+    y = 'index',
+    C = 'values',
+    colorbar=True,
+    xlabel='Predicted Class',
+    ylabel='Actual Class',
+    title='Mermaid Parent Heatmap'
+    ).opts(xrotation=90, width=800, height=500)
+```
+
+```{python}
+# in parent_group_g, find where mermaiedparent_actual is 'Acroporidae'
+acroporidae = parent_group_g[parent_group_g['MermaidParent_actual'] == 'Acroporidae']
+```
+
+```{python}
+pp.hvplot.heatmap(
+    x = 'columns',
+    y = 'index',
+    C = 'values',
+    colorbar=True,
+    logz=True,
+    clim=(1, np.nan),
+    xlabel='Predicted Class',
+    ylabel='Actual Class',
+    title='Confusion Matrix Heatmap'
+    ).opts(xrotation=90, width=800, height=500)
+```
+
+
+# Metrics
+
+- average='macro' calculates precision for each class and then averages them, treating all classes equally irrespective of their frequency in the dataset.
+
+```{python}
+from sklearn.metrics import precision_score, recall_score, accuracy_score
+
+# Calculate precision, recall, and accuracy
+precision = precision_score(actual_labels, predicted_labels, average='macro')
+recall = recall_score(actual_labels, predicted_labels, average='macro')
+accuracy = accuracy_score(actual_labels, predicted_labels)
+
+print(f'Precision: {precision:.2f}')
+print(f'Recall: {recall:.2f}')
+print(f'Accuracy: {accuracy:.2f}')
+```
+
+```{python}
+per_class_metrics = {}
+per_class_metrics['precision'] = precision
+per_class_metrics['recall'] = recall
+per_class_metrics['accuracy'] = accuracy
+
+```
+
+```{python}
+from sklearn.metrics import classification_report
+
+# Generate a classification report
+report = classification_report(actual_labels, predicted_labels, target_names=valresult.classes, output_dict=True)
+
+report_df = pd.DataFrame(report).T
+```
+
+```{python}
+# Print as a nice table 
+report_df
+```
+
+
+
+```{python}
+from sklearn.metrics import multilabel_confusion_matrix
+
+# Compute the multilabel confusion matrix
+mcm = multilabel_confusion_matrix(actual_labels, predicted_labels, labels=valresult.classes)
+
+
+```
+
+```{python}
+confidence = ddf['Confidence']
+```
+
+## Accuracy
+
+- recall accuracy was `{=python accuracy}`
+
+Accuracy accuracy metric might be high due to the successful performance of the majority classes. However, the minority classes might be misclassified. In such cases, the balanced accuracy metric can be used to evaluate the model's performance.
+
+### Balanced Accuracy
+
+```{python}
+from sklearn.metrics import balanced_accuracy_score
+# Calculate the balanced accuracy
+balanced_accuracy = balanced_accuracy_score(actual_labels, predicted_labels)
+
+
+```
+
+```{python}
+
+print(f'Balanced Accuracy: {balanced_accuracy:.2f}')
+
+```
+
+```{python}
+per_class_metrics['balanced_accuracy'] = balanced_accuracy
+```
+
+## Precision
+
+### Macro 
+
+```{python}
+precision_score(actual_labels, predicted_labels, average='macro') 
+```
+
+### Micro
+
+```{python}
+precision_score(actual_labels, predicted_labels, average='micro')
+```
+
+### Weighted
+```{python}
+precision_score(actual_labels, predicted_labels, average='weighted')
+```
+
+```{python}
+# Filter the percent > 0.5
+over_50 = sorted_df[sorted_df['percent'] > 0.5]
+```
+
+```{python}
+# Find where the actual and predicted classes are the same in over_50 and where they are not equal
+
+over_50_same = over_50[over_50['Actual'] == over_50['Predicted']]
+over_50_diff = over_50[over_50['Actual'] != over_50['Predicted']]
+
+# output the shapes of both dataframes to print
+over_50_same.shape, over_50_diff.shape
+
+```
+
+```{python}
+# Under threshold
+under_50 = sorted_df[sorted_df['percent'] < 0.5]
+
+# Find where the actual and predicted classes are the same in under_50 and where they are not equal
+under_50_same = under_50[under_50['Actual'] == under_50['Predicted']]
+under_50_diff = under_50[under_50['Actual'] != under_50['Predicted']]
+
+# output the shapes of both dataframes to print
+under_50_same.shape, under_50_diff.shape
+
+```
+
+```{python}
+under_50_same
+```
+
+# Most Over Predicted Classes
+
+```{python}
+# Find the count for Predicted classes in sorted_df
+# where Actial and Predicted are not the same
+over_predicted = sorted_df[sorted_df['Actual'] != sorted_df['Predicted']]['Predicted'].value_counts().reset_index()
+
+# Merge with label_map to get the CoralNetName
+over_predicted = over_predicted.merge(label_map, left_on='Predicted', right_on='NewCoralNetID', how='left')
+
+over_predicted
+
+
+```
+
+
+## Write outputs
+
+```{python}
+# Write metric_store to an excel file in the first sheet called "Metrics" with the excel file called run_name + _metrics.xlsx
+with pd.ExcelWriter(f'{output_path}/{run_name}_metrics.xlsx') as writer:
+    pd.DataFrame.from_dict(metric_store, orient='index').to_excel(writer, sheet_name='Metrics')
+    pd.DataFrame.from_dict(per_class_metrics, orient='index').to_excel(writer, sheet_name='Per_Class_Metrics')
+    pd.DataFrame.from_dict(report_df).to_excel(writer, sheet_name='Classification_Report')
+
+
+
+```
