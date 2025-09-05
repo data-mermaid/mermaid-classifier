@@ -43,6 +43,13 @@ def format_accuracy(accuracy):
     return f'{100*accuracy:.1f}%'
 
 
+def alphanumeric_only_str(s: str):
+    """
+    Return a version of s which has the non-alphanumeric chars removed.
+    """
+    return ''.join([char for char in s if char.isalnum()])
+
+
 class BenthicAttrSet:
 
     _full_hierarchy = None
@@ -144,7 +151,7 @@ def run_training(
     drop_growthforms: bool = False,
     epochs: int = 10,
     experiment_name: str | None = None,
-    run_name: str | None = None,
+    model_name: str | None = None,
     disable_mlflow: bool = False,
     annotation_limit: int | None = None,
 ):
@@ -194,10 +201,11 @@ def run_training(
     Name of the MLflow experiment in which to register the training run. If not
     given, then it's taken from the MLFLOW_EXPERIMENT_NAME env var.
 
-    run_name
+    model_name
 
-    Name of this MLflow experiment run. If not given, then a run name will be
+    Name of this MLflow experiment run's model. If not given, then a model name will be
     constructed based on the experiment parameters.
+    The run name is based on this too.
 
     disable_mlflow
 
@@ -335,30 +343,33 @@ def run_training(
     )
 
     current_time = datetime.now()
-    time_str = current_time.strftime('%Y%m%d_%H%M%S')
+    time_str = current_time.strftime('%Y%m%dT%H%M%S')
 
     experiment_params = dict(epochs=epochs)
 
-    if run_name is None:
+    # Only alphanumeric chars and hyphens are allowed in MLflow model names.
+    # So we'll use hyphens as the 'outer' word separator, and CamelCaps as
+    # the 'inner' one.
 
-        run_base_name_parts = []
+    if model_name is None:
 
         if included_benthicattrs_csv:
             as_path = Path(included_benthicattrs_csv)
-            run_base_name_parts.append(f'include_{as_path.stem}')
+            model_name = f'Include{alphanumeric_only_str(as_path.stem)}'
         elif excluded_benthicattrs_csv:
             as_path = Path(excluded_benthicattrs_csv)
-            run_base_name_parts.append(f'exclude_{as_path.stem}')
+            model_name = f'Exclude{alphanumeric_only_str(as_path.stem)}'
         else:
-            run_base_name_parts.append('all_labels')
+            model_name = 'AllLabels'
 
         if benthicattr_rollup_targets_csv:
             as_path = Path(benthicattr_rollup_targets_csv)
-            run_base_name_parts.append(f'rollup_{as_path.stem}')
+            model_name += f'-Rollup{alphanumeric_only_str(as_path.stem)}'
 
-        run_base_name_parts.append(time_str)
+        if annotation_limit:
+            model_name += f'-AnnoLimit{annotation_limit}'
 
-        run_name = '__'.join(run_base_name_parts)
+    run_name = f'{model_name}-{time_str}'
 
     logger.info(f"Experiment: {experiment_name}")
     logger.info(f"Run: {run_name}")
@@ -447,15 +458,15 @@ def run_training(
             # TODO: Ensure one of the env / requirements artifacts includes
             # the pyspacer version.
 
-            # Save the trained model
+            # Save and register the trained model.
             signature = infer_signature(params=experiment_params)
             model_info = mlflow.sklearn.log_model(
                 sk_model=load_classifier(model_loc),
-                name=run_name,
+                registered_model_name=model_name,
                 signature=signature,
             )
 
-            logger.debug(f"Model URI: {model_info.model_uri}")
+            logger.info(f"Model ID: {model_info.model_id}")
 
     logger.info(
         f"New model's accuracy: {format_accuracy(return_msg.acc)}")
