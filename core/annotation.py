@@ -9,7 +9,6 @@ from operator import itemgetter
 import os
 from pathlib import Path
 import re
-import tempfile
 from urllib.parse import urlparse
 import urllib.request
 
@@ -20,44 +19,28 @@ import mlflow
 import numpy as np
 from spacer.extractors import EfficientNetExtractor
 from spacer.messages import ClassifyImageMsg, DataLocation
-from spacer.storage import load_image, MemoryStorage, storage_factory
+from spacer.storage import load_image, storage_factory
 from spacer.tasks import classify_image
 
 from benthic_attributes import BenthicAttrHierarchy, GrowthForms
 from utils import mlflow_connect, Settings
 
 
-# It's supposed to be 32 hex digits, but we'll assume a location
-# specifier consisting of 30-34 hex digits (and nothing else)
-# is meant to be an MLflow run ID.
+# A model ID is m- followed by 32 hex digits, but we'll assume 30-32
+# hex digits is meant to be an MLflow run ID.
 # That way, if the user accidentally copies only 31 digits and
 # pastes it into this script, it'll try to find the run ID instead of
 # trying it as a filesystem path.
-MLFLOW_RUN_ID_REGEX = re.compile(r'([a-f0-9]{30,34})')
+MLFLOW_MODEL_ID_REGEX = re.compile(r'm-[a-f0-9]{30,32}')
 
 
-def model_by_mlflow_run_id(run_id: str) -> DataLocation:
+def mlflow_model_id_to_pkl_uri(model_id: str) -> str:
 
     model_filename = 'model.pkl'
     mlflow_connect()
 
-    with tempfile.TemporaryDirectory(prefix='mlflow_artifacts_') as temp_dir:
-        # We need a filesystem directory to use download_artifacts().
-        # TODO: This doesn't work. model.pkl isn't here.
-        mlflow.artifacts.download_artifacts(
-            run_id=run_id,
-            artifact_path=model_filename,
-            dst_path=temp_dir,
-        )
-        # Move the downloaded model out of the temp dir, so we can
-        # clean up the dir now (when the current context manager
-        # exits) instead of worrying about it later.
-        with open(temp_dir / model_filename, 'rb') as f:
-            model_bytes = f.read()
-        memory_loc = DataLocation('memory', key=model_filename)
-        memory_storage = MemoryStorage()
-        memory_storage.store(memory_loc.key, BytesIO(model_bytes))
-        return memory_loc
+    logged_model = mlflow.get_logged_model(model_id)
+    return logged_model.artifact_location + '/' + model_filename
 
 
 class MarkerShape(enum.Enum):
@@ -277,6 +260,16 @@ class AnnotationRun:
         if not location:
             return None
 
+        if is_classifier:
+            match = MLFLOW_MODEL_ID_REGEX.fullmatch(location)
+            if match:
+                # MLflow registered model ID.
+                # This'll require the tracking server to be running.
+                model_id = location
+                location = mlflow_model_id_to_pkl_uri(model_id)
+                # Now we have an S3 URI. Continue on to the case that parses
+                # that.
+
         try:
             # S3 URI
             # Example:
@@ -293,15 +286,6 @@ class AnnotationRun:
                 )
         except ValueError:
             pass
-
-        if is_classifier:
-            match = MLFLOW_RUN_ID_REGEX.fullmatch(location)
-            if match:
-                # MLflow run ID
-                # https://mlflow.org/docs/latest/api_reference/python_api/mlflow.artifacts.html
-                # This'll require the tracking server to be running.
-                run_id = match.groups()[0]
-                return model_by_mlflow_run_id(run_id)
 
         # Default to assuming a filesystem path
         return DataLocation('filesystem', key=location)
