@@ -22,8 +22,10 @@ from spacer.messages import ClassifyImageMsg, DataLocation
 from spacer.storage import load_image, storage_factory
 from spacer.tasks import classify_image
 
-from benthic_attributes import BenthicAttrHierarchy, GrowthForms
-from utils import mlflow_connect, Settings
+from mermaid_classifier.common.benthic_attributes import (
+    BenthicAttrHierarchy, GrowthForms)
+from mermaid_classifier.pyspacer.settings import settings
+from mermaid_classifier.pyspacer.utils import mlflow_connect
 
 
 # A model ID is m- followed by 32 hex digits, but we'll assume 30-32
@@ -53,10 +55,10 @@ class AnnotationRun:
     def __init__(
         self,
         image: str,
-        points_path: str,
-        classifier_location: str = None,
-        weights_location: str = None,
-        labelset_path: str = None,
+        points_csv: str,
+        classifier: str = None,
+        weights: str = None,
+        labelset_csv: str = None,
         num_predictions_to_save: int = 0,
         coralnet_cache_dir: str = None,
         marker_shape: str = MarkerShape.BOX.value,
@@ -67,13 +69,13 @@ class AnnotationRun:
         Image file to overlay the points on. Can be a local file path,
         an S3 URI, or a CoralNet public image ID.
 
-        points_path
+        points_csv
 
         Local path to CSV file with points. Accepted column names:
         row, column, label, score. label and score are optional; scores
         should be between 0.0 and 1.0.
 
-        classifier_location
+        classifier
 
         Classifier file location.
         Alternatively can come from environment variable
@@ -85,7 +87,7 @@ class AnnotationRun:
         given image-points, thus generating labels for each point.
         Else, the labels for each point must come from points_path.
 
-        weights_location
+        weights
 
         EfficientNet extractor weights file location.
         Alternatively can come from environment variable
@@ -94,7 +96,7 @@ class AnnotationRun:
         Can be a local path, or an S3 URI.
         Must be provided if classifier_location is provided.
 
-        labelset_path
+        labelset_csv
 
         Local path to a CSV file which maps label IDs to the names
         you want to display on the visualizer.
@@ -123,21 +125,20 @@ class AnnotationRun:
         indicate the point locations.
         See the MarkerShape Enum for the available choices.
         """
-        self.points_path = points_path
+        self.points_csv_path = points_csv
         self.num_predictions_to_save = num_predictions_to_save
         self.coralnet_cache_dir = coralnet_cache_dir
         self.marker_shape = marker_shape
 
-        settings = Settings()
         weights_location = (
-            weights_location or settings.WEIGHTS_LOCATION)
+            weights or settings.weights_location)
 
         annotations: dict[tuple[int, int], list] = defaultdict(list)
         scores: dict[tuple[int, int], list] = defaultdict(list)
 
         # Read in CSV points.
         # Labels and scores may or may not be present.
-        with open(self.points_path) as points_csv:
+        with open(self.points_csv_path) as points_csv:
             reader = csv.DictReader(points_csv)
             for csv_row in reader:
                 row = int(csv_row['row'])
@@ -161,11 +162,11 @@ class AnnotationRun:
             self.plot_title = f"CoralNet image {image_id}"
 
         classifier_loc = self.parse_location_str(
-            classifier_location,
+            classifier,
             is_classifier=True,
         )
         if classifier_loc:
-            self.plot_title += f"\nClassifier: {classifier_location}"
+            self.plot_title += f"\nClassifier: {classifier}"
 
         weights_loc = self.parse_location_str(weights_location)
 
@@ -222,7 +223,7 @@ class AnnotationRun:
             if top_label == 'None':
                 raise ValueError(f"Point {rowcol} doesn't have a label.")
 
-        if self.num_predictions_to_save > 0 and classifier_location:
+        if self.num_predictions_to_save > 0 and classifier:
             # Saving predictions back to CSV is enabled, and is applicable
             # since a classifier is being used.
             self.write_predictions(annotations, scores)
@@ -230,10 +231,10 @@ class AnnotationRun:
         unique_top_labels = set(
             label for label in self.top_annotations.values())
 
-        if labelset_path:
+        if labelset_csv:
             # Read in the label IDs to names mapping.
-            with open(labelset_path) as labelset_csv:
-                reader = csv.DictReader(labelset_csv)
+            with open(labelset_csv) as csv_f:
+                reader = csv.DictReader(csv_f)
                 self.label_ids_to_names = {
                     csv_row['id']: csv_row['name']
                     for csv_row in reader
@@ -253,8 +254,9 @@ class AnnotationRun:
                     name = hierarchy.by_id[bagf]['name']
                 self.label_ids_to_names[bagf] = name
 
+    @staticmethod
     def parse_location_str(
-        self, location: str, is_classifier: bool = False,
+        location: str, is_classifier: bool = False,
     ) -> DataLocation:
 
         if not location:
@@ -267,22 +269,33 @@ class AnnotationRun:
                 # This'll require the tracking server to be running.
                 model_id = location
                 location = mlflow_model_id_to_pkl_uri(model_id)
-                # Now we have an S3 URI. Continue on to the case that parses
-                # that.
+
+        # Now we may or may not have an MLflow-proxied URI
+        # beginning with `mlflow-artifacts:/`.
+        # If we do, un-proxy it.
+        # MLflow probably has 5 ways of un-proxying such artifact URIs, but
+        # none have worked for us for some reason, so we un-proxy it manually.
+        uri = urlparse(location)
+        if uri.scheme == 'mlflow-artifacts':
+            # So far we only handle the case where artifacts are stored in
+            # the local filesystem cwd.
+            # If other cases come up in practice, add to this code to handle
+            # those cases.
+            location = 'mlartifacts' + uri.path
 
         try:
             # S3 URI
             # Example:
             # s3://my-bucket/my-folder/model.pkl
-            url = urlparse(location)
-            if url.scheme == 's3':
+            uri = urlparse(location)
+            if uri.scheme == 's3':
                 return DataLocation(
                     's3',
-                    bucket_name=url.netloc,
+                    bucket_name=uri.netloc,
                     # url.path probably begins with a slash, which isn't
                     # what we want when ultimately passing this to boto's
                     # Object().
-                    key=url.path.strip('/'),
+                    key=uri.path.strip('/'),
                 )
         except ValueError:
             pass
@@ -352,7 +365,7 @@ class AnnotationRun:
 
         # Iterate over a reader of the points-csv file while writing
         # into a memory stream.
-        with open(self.points_path) as points_csv:
+        with open(self.points_csv_path) as points_csv:
             reader = csv.DictReader(points_csv)
 
             # Output CSV will have these columns first.
@@ -389,7 +402,7 @@ class AnnotationRun:
 
         # Write that memory stream back to the points-csv file.
         with open(
-            self.points_path, 'w', newline='', encoding='utf-8'
+            self.points_csv_path, 'w', newline='', encoding='utf-8'
         ) as points_csv:
             points_csv.write(writer_stream.getvalue())
 

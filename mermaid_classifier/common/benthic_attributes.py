@@ -102,8 +102,3 @@ def output_ba_csvs():
                 name=result['name'],
                 parent_name=parent_name,
             ))
-
-
-if __name__ == '__main__':
-
-    output_ba_csvs()

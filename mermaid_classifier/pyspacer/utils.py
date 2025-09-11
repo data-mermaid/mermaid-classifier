@@ -1,29 +1,15 @@
 import logging
 
-# python-decouple makes configuration more explicit compared to python-dotenv.
-from decouple import config
 import mlflow
 
-
-class Settings:
-    def __init__(self):
-        # This is coded up a bit oddly and boilerplate-ly because it was
-        # first an attempt to use pydantic-settings, but something about it
-        # wasn't working. So, minimal changes were made to use python-decouple
-        # instead of pydantic.
-        self.SPACER_EXTRACTORS_CACHE_DIR = config(
-            'SPACER_EXTRACTORS_CACHE_DIR')
-
-        self.MLFLOW_TRACKING_SERVER_ARN = config('MLFLOW_TRACKING_SERVER_ARN')
-
-        self.MLFLOW_DEFAULT_EXPERIMENT_NAME = config(
-            'MLFLOW_DEFAULT_EXPERIMENT_NAME')
-
-        self.WEIGHTS_LOCATION = config('WEIGHTS_LOCATION')
+from mermaid_classifier.pyspacer.settings import settings
 
 
 def logging_config_for_script(name):
-
+    """
+    Call this to set up a logging config that prints info messages,
+    and file-logs info and debug messages.
+    """
     logging.config.dictConfig({
         'version': 1,
         'formatters': {
@@ -32,7 +18,6 @@ def logging_config_for_script(name):
             }
         },
         'handlers': {
-            # Print info messages; file-log info and debug messages
             'console': {
                 'level': 'INFO',
                 'class': 'logging.StreamHandler',
@@ -57,18 +42,15 @@ def logging_config_for_script(name):
 
 
 def mlflow_connect():
-    # Navigate to your MLflow tracking server in SageMaker Studio, click the
-    # Copy icon to get the tracking server's ARN, and paste that in as this
-    # env value.
-    mlflow.set_tracking_uri(uri=Settings().MLFLOW_TRACKING_SERVER_ARN)
+    mlflow.set_tracking_uri(uri=settings.mlflow_tracking_server)
 
     try:
         # Do something to test the server connection.
         mlflow.search_experiments(max_results=1)
     except mlflow.exceptions.MlflowException as e:
-        # TODO: It takes far too long to give up and enter this block.
-        #  Ideally there'd be a way to set the max retries, or force it
-        #  to give up after N seconds.
+        # Note that this may take a long time to reach
+        # unless you set MLFLOW_HTTP_REQUEST_MAX_RETRIES to
+        # a low number.
         if "Max retries exceeded" in str(e):
             raise RuntimeError(
                 "Could not connect to the MLflow tracking server."

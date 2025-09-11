@@ -1,43 +1,81 @@
 # mermaid-classifier
 
-Code for training and deploying MERMAID image classifiers.
+This Python repository enables data scientists to experiment with PySpacer-based classifiers. It also has MERMAID-relevant utilities which aren't specific to the type of classifier being developed.
 
 
-## Notebooks
+## Overview
 
-These iPython notebooks have the most recent developments as of late 2025. These are set up to run in a SageMaker JupyterLab space. To run them:
+This project is set up as a Python package, and requires Python 3.10 or higher. Once you have the package installed in your Python environment, you can import anything from `mermaid_classifier` into your own Python modules, notebooks, etc.
 
-- Sign into AWS, open SageMaker Studio, and navigate to JupyterLab spaces. Start and open the space of your choice.
+### General utilities
 
-- After starting up and opening the JupyterLab space, open a Terminal tab and run the following:
+These are found in `mermaid_classifier.common`. Once this package is installed (see Installation section), the utilities can be imported from there.
 
-    `pip install pyspacer@git+https://github.com/coralnet/pyspacer.git@main "mlflow>=3" python-decouple ipympl`
+### PySpacer training and classification code
 
-    You'll see a message "ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. ...". Don't worry about it, because it should just be related to SageMaker-preinstalled packages that we don't use.
+This is found in `mermaid_classifier.pyspacer`.
 
-    Currently, you'll have to re-run this command once every time you shut down the space and then start it again.
+### Documentation
 
-- To start up the MLflow tracking server (needed primarily for training): from SageMaker Studio, navigate to MLflow, and start the tracking server designated for pyspacer classifiers.
+See the [docs](docs) section for usage explanations.
 
-    Note: It'll take about 20 minutes to start up, and costs about $0.60/hour (much more than the JupyterLab space) to leave up and running.
+### v1 directory
 
-- To get interactive matplotlib working (useful for viewing/saving annotation plots): [hard-refresh](https://www.howtogeek.com/672607/how-to-hard-refresh-your-web-browser-to-bypass-your-cache/) the browser tab that has the JupyterLab space open. This must be done after pip-installing ipympl.
-
-- In the File Browser on the left of the UI, navigate to the `mermaid-classifier` folder, then to the `notebooks` sub-folder.
-
-- Open the notebook (.ipynb file) of your choice.
-
-- Select "Python 3 (ipykernel)" as the notebook's kernel.
-
-- Edit and run the notebook cell of your choice, and wait for the results.
-
-If you just created a new JupyterLab space, you'll first have to set it up:
-
-- Git checkout the `mermaid-classifier` repo.
-
-- At the root of the `mermaid-classifier` repo, create a `.env` file which defines SPACER_EXTRACTORS_CACHE_DIR, MLFLOW_TRACKING_SERVER_ARN, and WEIGHTS_LOCATION.
+This is the work from MERMAID classifier version 1 which hasn't been incorporated into the current version yet.
 
 
-## v1
+## Installation
 
-This directory contains code, setup, etc. that went into MERMAID's v1 classifier and hasn't been adapted to v2 yet.
+### Python package installation
+
+Some installation examples:
+
+| Result | Command |
+| - | - |
+| Utilities only | `pip install https://github.com/data-mermaid/mermaid-classifier.git` |
+| Utilities + PySpacer-based classification | `pip install https://github.com/data-mermaid/mermaid-classifier.git[pyspacer]` |
+| Utilities + PySpacer-based classification + JupyterLab support | `pip install https://github.com/data-mermaid/mermaid-classifier.git[pyspacer,jupyterlab]` |
+| Utilities only, at non-main branch | `pip install https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name` |
+| Utilities + PySpacer-based classification, at non-main branch | `pip install https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name[pyspacer]` |
+
+To update your install, add `-U` after the word `install` in any of the above. However, if the package's version number has not been bumped up yet, you'll probably have to `pip uninstall mermaid-classifier` first, otherwise pip might think there is nothing to be updated.
+
+If you're in a SageMaker JupyterLab space:
+
+- After you shut down the space and then start it again, you'll have to re-run pip installations.
+
+- Running the pip install command from a Terminal tab should work.
+
+- At the end of the install, you'll see a message "ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. ...". That's most likely related to SageMaker-preinstalled packages that this repo doesn't deal with, so it's most likely not a concern.
+
+### Additional steps for PySpacer classifiers
+
+1. In the directory that you're running your code or notebook from, create a `.env` file which defines variables, like in the following example:
+
+    ```
+    SPACER_EXTRACTORS_CACHE_DIR=/path/to/extractors_cache
+    MLFLOW_TRACKING_SERVER=arn:aws:sagemaker:us-east-1:123412341234:mlflow-tracking-server/my-server
+    MLFLOW_DEFAULT_EXPERIMENT_NAME=Label filters and rollups
+    WEIGHTS_LOCATION=/path/to/weights.pt
+    ```
+    
+    If you're missing a required setting, you should get an error saying so when your code runs. For more information on these settings, see `mermaid_classifier/pyspacer/settings.py`.
+
+    Alternatively, you may directly set environment variables instead of using an `.env` file.
+
+2. If you're in JupyterLab, you need to have interactive matplotlib working to have pan, zoom, and save controls on annotation plots. If you want this, after pip-installing ipympl, you must [hard-refresh](https://www.howtogeek.com/672607/how-to-hard-refresh-your-web-browser-to-bypass-your-cache/) the browser tab that has the JupyterLab space open.
+
+
+## For developers
+
+Set up this project as an [editable install](https://pip.pypa.io/en/stable/topics/local-project-installs/): first git-clone this repo, then use `pip install -e <path to repo>`.
+
+### Design notes
+
+This project is set up as a Python package with a [flat project layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/).
+
+Although this project isn't on PyPI, the fact that it's set up as a package makes it easier to:
+
+- Import from this project, compared to an ad-hoc addition to `sys.path`, for example.
+
+- Manage project dependencies.
