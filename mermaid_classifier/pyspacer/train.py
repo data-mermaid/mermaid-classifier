@@ -24,8 +24,10 @@ from spacer.storage import load_classifier
 from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
-from benthic_attributes import BenthicAttrHierarchy
-from utils import logging_config_for_script, mlflow_connect, Settings
+from mermaid_classifier.common.benthic_attributes import BenthicAttrHierarchy
+from mermaid_classifier.pyspacer.settings import settings
+from mermaid_classifier.pyspacer.utils import (
+    logging_config_for_script, mlflow_connect)
 
 
 logger = logging_config_for_script('train')
@@ -222,9 +224,8 @@ def run_training(
     training annotations might be too much, but looking at a small sample
     is a good sanity check.
     """
-    settings = Settings()
     experiment_name = (
-        experiment_name or settings.MLFLOW_DEFAULT_EXPERIMENT_NAME)
+        experiment_name or settings.mlflow_default_experiment_name)
 
     if included_benthicattrs_csv and excluded_benthicattrs_csv:
         raise ValueError(
@@ -276,8 +277,7 @@ def run_training(
     #   Like a CSV with columns for site (CN or MERMAID)
     #   and source/project ID.
     # TODO: iterrows() likely won't work in terms of memory for very
-    #   large DFs. But what's the alternative if we really want all
-    #   rows' data?
+    #   large DFs. But what's the alternative?
 
     for index, row in dataframe.iterrows():
         if image_id != row['image_id']:
