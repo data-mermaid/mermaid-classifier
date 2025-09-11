@@ -85,7 +85,7 @@ class AnnotationRun:
         case the MLflow tracking server must be running).
         If a classifier is provided, it will be used to classify the
         given image-points, thus generating labels for each point.
-        Else, the labels for each point must come from points_path.
+        Else, the labels for each point must come from points_csv.
 
         weights
 
@@ -106,7 +106,7 @@ class AnnotationRun:
         num_predictions_to_save
 
         If this is not 0 (the default), classifier predictions are saved
-        back to the points_path CSV. Can be useful when comparing a
+        back to the points_csv. Can be useful when comparing a
         classifier's predictions with manual annotations (or with
         another classifier).
         The value of this option determines how many predictions are saved
@@ -207,7 +207,7 @@ class AnnotationRun:
         else:
 
             print(
-                "No classifier specified, so points_path must specify"
+                "No classifier specified, so points_csv must specify"
                 " all annotations.")
 
         # Number 1 prediction for each point.
