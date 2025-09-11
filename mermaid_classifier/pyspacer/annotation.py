@@ -23,7 +23,7 @@ from spacer.storage import load_image, storage_factory
 from spacer.tasks import classify_image
 
 from mermaid_classifier.common.benthic_attributes import (
-    BenthicAttrHierarchy, GrowthForms)
+    BenthicAttributeLibrary, GrowthFormLibrary)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import mlflow_connect
 
@@ -242,16 +242,16 @@ class AnnotationRun:
                 }
         else:
             # Use MERMAID's API to get the names.
-            hierarchy = BenthicAttrHierarchy()
-            growth_form_lookup = GrowthForms().lookup
+            ba_library = BenthicAttributeLibrary()
+            gf_library = GrowthFormLibrary()
             self.label_ids_to_names = dict()
             for bagf in unique_top_labels:
                 if '::' in bagf:
                     ba, gf = bagf.split('::')
-                    ba_name = hierarchy.by_id[ba]['name']
-                    name = ba_name + '::' + growth_form_lookup[gf]
+                    ba_name = ba_library.by_id[ba]['name']
+                    name = ba_name + '::' + gf_library.by_id[gf]
                 else:
-                    name = hierarchy.by_id[bagf]['name']
+                    name = ba_library.by_id[bagf]['name']
                 self.label_ids_to_names[bagf] = name
 
     @staticmethod

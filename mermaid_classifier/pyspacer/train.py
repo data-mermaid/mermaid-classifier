@@ -24,7 +24,8 @@ from spacer.storage import load_classifier
 from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
-from mermaid_classifier.common.benthic_attributes import BenthicAttrHierarchy
+from mermaid_classifier.common.benthic_attributes import (
+    BenthicAttributeLibrary)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -54,15 +55,15 @@ def alphanumeric_only_str(s: str):
 
 class BenthicAttrSet:
 
-    _full_hierarchy = None
+    _ba_library = None
 
     @classmethod
-    def get_hierarchy(cls):
-        # Lazy-load the full BA hierarchy, and save it at the class
+    def get_library(cls):
+        # Lazy-load the BA library, and save it at the class
         # level so we only load it once at most.
-        if cls._full_hierarchy is None:
-            cls._full_hierarchy = BenthicAttrHierarchy()
-        return cls._full_hierarchy
+        if cls._ba_library is None:
+            cls._ba_library = BenthicAttributeLibrary()
+        return cls._ba_library
 
     def __init__(self, csv_file: typing.TextIO):
         """
@@ -110,7 +111,7 @@ class BenthicAttrSet:
                 ba_id = target_value
             else:
                 # 'name'
-                ba_id = self.get_hierarchy().by_name[target_value]['id']
+                ba_id = self.get_library().by_name[target_value]['id']
             self.ba_set.add(ba_id)
 
 
@@ -139,7 +140,7 @@ class BenthicAttrRollupSpec(BenthicAttrSet):
 
     def roll_up(self, ba_id):
         # Roll up to the earliest ancestor which is a rollup target.
-        for ancestor_id in self.get_hierarchy().get_ancestor_ids(ba_id):
+        for ancestor_id in self.get_library().get_ancestor_ids(ba_id):
             if ancestor_id in self.rollup_targets:
                 return ancestor_id
         # Or don't roll up if there's no such ancestor.
