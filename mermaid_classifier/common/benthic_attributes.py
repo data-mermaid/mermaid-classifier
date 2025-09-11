@@ -7,8 +7,12 @@ import operator
 import urllib.request
 
 
-class BenthicAttrHierarchy:
-
+class BenthicAttributeLibrary:
+    """
+    Information about all MERMAID benthic attributes, organized into
+    various lookups.
+    This is intended to be a singleton class.
+    """
     def __init__(self):
         download_response = urllib.request.urlopen(
             'https://api.datamermaid.org/v1/benthicattributes/?limit=5000')
@@ -59,8 +63,11 @@ class BenthicAttrHierarchy:
         return children_ordered_by_name + children_results
 
 
-class GrowthForms:
-
+class GrowthFormLibrary:
+    """
+    Information about MERMAID growth forms, primarily an id-to-name lookup.
+    This is intended to be a singleton class.
+    """
     def __init__(self):
         download_response = urllib.request.urlopen(
             'https://api.datamermaid.org/v1/choices/')
@@ -69,12 +76,15 @@ class GrowthForms:
             if item['name'] == 'growthforms':
                 data = item['data']
                 break
-        self.lookup = {gf['id']: gf['name'] for gf in data}
+        self.by_id = {gf['id']: gf['name'] for gf in data}
 
 
 def output_ba_csvs():
-
-    hierarchy = BenthicAttrHierarchy()
+    """
+    Output CSV files of all the benthic attributes into the current directory.
+    Not the most glamorous of visualizations, but can still be handy.
+    """
+    benthic_attrs = BenthicAttributeLibrary()
 
     raw_path = 'benthic_attributes_raw.csv'
     fieldnames = ['id', 'name', 'parent']
@@ -82,11 +92,11 @@ def output_ba_csvs():
     with open(raw_path, 'w', newline='', encoding='utf-8') as raw_f:
         writer = csv.DictWriter(raw_f, fieldnames=fieldnames)
         writer.writeheader()
-        for result in hierarchy.raw_results:
+        for result in benthic_attrs.raw_results:
             writer.writerow(
                 {k: v for k, v in result.items() if k in fieldnames})
 
-    results_ordered_by_parent = hierarchy.get_descendants(None)
+    results_ordered_by_parent = benthic_attrs.get_descendants(None)
     ordered_path = 'benthic_attributes_ordered_by_parent.csv'
     fieldnames = ['name', 'parent_name']
     print(f"Writing to: {ordered_path}")
@@ -97,7 +107,7 @@ def output_ba_csvs():
             if result['parent'] is None:
                 parent_name = None
             else:
-                parent_name = hierarchy.id_to_name(result['parent'])
+                parent_name = benthic_attrs.id_to_name(result['parent'])
             writer.writerow(dict(
                 name=result['name'],
                 parent_name=parent_name,
