@@ -35,8 +35,8 @@ Some installation examples:
 | Utilities only | `pip install https://github.com/data-mermaid/mermaid-classifier.git` |
 | Utilities + PySpacer-based classification | `pip install https://github.com/data-mermaid/mermaid-classifier.git[pyspacer]` |
 | Utilities + PySpacer-based classification + JupyterLab support | `pip install https://github.com/data-mermaid/mermaid-classifier.git[pyspacer,jupyterlab]` |
-| Utilities only, at non-main branch | `pip install https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name` |
-| Utilities + PySpacer-based classification, at non-main branch | `pip install https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name[pyspacer]` |
+| Utilities only, at non-main branch | `pip install "mermaid-classifier @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
+| Utilities + PySpacer-based classification + JupyterLab support, at non-main branch | `pip install "mermaid-classifier[pyspacer,jupyterlab] @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
 
 To update your install, add `-U` after the word `install` in any of the above. However, if the package's version number has not been bumped up yet, you'll probably have to `pip uninstall mermaid-classifier` first, otherwise pip might think there is nothing to be updated.
 
