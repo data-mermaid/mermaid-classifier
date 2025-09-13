@@ -65,6 +65,26 @@ If you're in a SageMaker JupyterLab space:
 
 2. If you're in JupyterLab, you need to have interactive matplotlib working to have pan, zoom, and save controls on annotation plots. If you want this, after pip-installing ipympl, you must [hard-refresh](https://www.howtogeek.com/672607/how-to-hard-refresh-your-web-browser-to-bypass-your-cache/) the browser tab that has the JupyterLab space open.
 
+### Installation environment
+
+Although MERMAID IC is primarily targeting an AWS SageMaker environment, this package can also be set up on a local dev machine.
+
+AWS SageMaker advantages over local:
+
+- Easily and securely access private S3 files through spaces, as long as the SageMaker domain is set up with an applicable Space execution role.
+- Web-based IDE spaces with real-time collaboration.
+- MLflow tracking servers can be shared by everyone who can access the SageMaker domain.
+- Default distribution image already has many Python packages relevant to this project. This could be preferable over maintaining a 3 GB local venv.
+
+Local env advantages over SageMaker:
+
+- Don't have to worry about the AWS web session expiring every so often, and don't need constant internet to keep working.
+- More IDE choices, not just VSCode (Code Editor spaces) or JupyterLab.
+- Can run a local MLflow tracking server with very low startup and cost.
+- Easier to customize and persist the packages that are installed in the environment.
+
+If you're on a local dev machine and accessing public S3 files, the `SPACER_AWS_ANONYMOUS` setting may be useful.
+
 
 ## For developers
 
