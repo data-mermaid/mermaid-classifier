@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     mlflow_tracking_server: str = Field()
     weights_location: str = Field()
 
-    # Optional settings (may be needed in specific cases)
+    # Optional settings (may need to set in specific cases)
+    training_inputs_percent_missing_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
     spacer_aws_anonymous: Literal['False', 'True'] = 'False'
     mlflow_http_request_max_retries: str | None = None
