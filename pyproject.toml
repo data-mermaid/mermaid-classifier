@@ -38,6 +38,7 @@ pyspacer = [
     # are in an installed package, which is our intended usage.
     "pydantic-settings",
     # pandas.read_parquet() uses this for S3 files.
+    # We use this directly as well, since it's available.
     "s3fs",
 ]
 jupyterlab = [

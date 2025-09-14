@@ -18,6 +18,7 @@ except ImportError as err:
 # Might as well also use it for reading Parquet and CSV.
 import pandas as pd
 import psutil
+from s3fs.core import S3FileSystem
 from spacer.data_classes import ImageLabels
 from spacer.messages import DataLocation, TrainClassifierMsg
 from spacer.storage import load_classifier
@@ -314,6 +315,41 @@ def run_training(
 
         ba_counts[benthic_attribute_id] += 1
         bagf_counts[bagf] += 1
+
+    # Check for missing feature vector files.
+
+    s3 = S3FileSystem(anon=settings.spacer_aws_anonymous)
+    mermaid_full_paths_in_s3 = set(
+        s3.find(path=f's3://{TRAINING_BUCKET}/mermaid/'))
+    missing_filepaths = []
+    missing_count = 0
+    missing_threshold = (
+        len(labels_data)
+        * settings.training_inputs_percent_missing_allowed / 100
+    )
+    feature_bucket_paths_in_data = list(labels_data.keys())
+
+    for feature_bucket_path in feature_bucket_paths_in_data:
+        feature_full_path = f'{TRAINING_BUCKET}/{feature_bucket_path}'
+        if feature_full_path not in mermaid_full_paths_in_s3:
+            logger.warning(
+                f"Skipping feature vector because couldn't find"
+                f" the file in S3: {feature_filepath}")
+            missing_filepaths.append(feature_filepath)
+            missing_count += 1
+            del labels_data[feature_filepath]
+
+            if missing_count > missing_threshold:
+                raise RuntimeError(
+                    f"Too many feature vectors are missing"
+                    f" (at least {missing_count}), such as:"
+                    f"\n{'\n'.join(missing_filepaths[:3])}"
+                    f"\nYou can configure the tolerance for missing"
+                    f" feature vectors with the"
+                    f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
+                )
+
+    # Annotation preprocessing and other prep before training.
 
     labels = preprocess_labels(
         ImageLabels(labels_data),
