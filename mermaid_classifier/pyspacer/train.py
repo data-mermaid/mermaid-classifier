@@ -7,7 +7,9 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 import typing
+from urllib.parse import urlparse
 
+import duckdb
 try:
     import mlflow
     from mlflow.models import infer_signature
@@ -15,7 +17,7 @@ try:
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
 # MLflow requires pandas.
-# Might as well also use it for reading Parquet and CSV.
+# Might as well also use it for reading CSV.
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
@@ -35,6 +37,7 @@ from mermaid_classifier.pyspacer.utils import (
 logger = logging_config_for_script('train')
 
 
+AWS_REGION = 'us-east-1'
 TRAINING_BUCKET = 'coral-reef-training'
 
 
@@ -148,16 +151,298 @@ class BenthicAttrRollupSpec(BenthicAttrSet):
         return ba_id
 
 
+class TrainingDataset:
+
+    data: dict
+    annos_by_ba: Counter
+    annos_by_bagf: Counter
+
+    def __init__(
+        self,
+        included_benthicattrs_csv: str = None,
+        excluded_benthicattrs_csv: str = None,
+        benthicattr_rollup_targets_csv: str = None,
+        drop_growthforms: bool = False,
+        annotation_limit: int | None = None,
+    ):
+
+        if included_benthicattrs_csv and excluded_benthicattrs_csv:
+            raise ValueError(
+                "Specify one of included benthic attrs or"
+                " excluded benthic attrs, but not both.")
+
+        if included_benthicattrs_csv:
+            with open(included_benthicattrs_csv) as csv_f:
+                self.benthicattr_filter = BenthicAttrFilter(
+                    csv_f, inclusion=True)
+        elif excluded_benthicattrs_csv:
+            with open(excluded_benthicattrs_csv) as csv_f:
+                self.benthicattr_filter = BenthicAttrFilter(
+                    csv_f, inclusion=False)
+        else:
+            # No inclusion or exclusion set specified means we accept
+            # all labels.
+            # In other words, an empty exclusion set.
+            self.benthicattr_filter = BenthicAttrFilter(
+                StringIO(''), inclusion=False)
+
+        if benthicattr_rollup_targets_csv:
+            with open(benthicattr_rollup_targets_csv) as csv_f:
+                self.rollup_spec = BenthicAttrRollupSpec(csv_f)
+        else:
+            # Empty rollup-targets set, meaning nothing gets rolled up.
+            self.rollup_spec = BenthicAttrRollupSpec(StringIO(''))
+
+        # TODO: This is just MERMAID so far; also get CoralNet
+
+        # As we iterate through annotations, we'll check the image IDs
+        # against the feature vectors that are actually present in S3.
+        s3 = S3FileSystem(anon=settings.spacer_aws_anonymous)
+        mermaid_full_paths_in_s3 = set(
+            s3.find(path=f's3://{TRAINING_BUCKET}/mermaid/'))
+        missing_features = []
+
+        mermaid_annotations_s3_uri = (
+            f's3://{TRAINING_BUCKET}/mermaid/'
+            f'mermaid_confirmed_annotations.parquet'
+        )
+
+        # TODO: Option to filter by CN source (and MERMAID equiv.?).
+        #   Like a CSV with columns for site (CN or MERMAID)
+        #   and source/project ID.
+
+        annotations_by_image = self.grouped_data_rows_from_parquet(
+            mermaid_annotations_s3_uri, 'image_id')
+
+        self.data = dict()
+        self.annos_by_ba = Counter()
+        self.annos_by_bagf = Counter()
+        all_annos_count = 0
+
+        # This'll get filled in on-demand later. That way, we can abort
+        # reading in data at any time without worrying about whether
+        # this will get set.
+        self._labels = None
+
+        for rows in annotations_by_image:
+
+            # Here, in one loop iteration, we're given all the
+            # annotation rows for a single image.
+            image_id = rows[0]['image_id']
+            feature_bucket_path = f'mermaid/{image_id}_featurevector'
+            image_annotations = []
+            image_annos_by_ba = Counter()
+            image_annos_by_bagf = Counter()
+
+            # One annotation per row.
+            for row in rows:
+
+                if not self.benthicattr_filter.accepts_ba(
+                    row['benthic_attribute_id']
+                ):
+                    # This BA is being filtered out of the training data.
+                    continue
+
+                benthic_attribute_id = self.rollup_spec.roll_up(
+                    row['benthic_attribute_id'])
+
+                if row['growth_form_id'] != 'None':
+                    # MERMAID API uses :: as the BA-GF separator.
+                    bagf = '::'.join([
+                        benthic_attribute_id, row['growth_form_id']])
+                else:
+                    bagf = benthic_attribute_id
+
+                annotation = (
+                    int(row['row']),
+                    int(row['col']),
+                    bagf,
+                )
+                image_annotations.append(annotation)
+                image_annos_by_ba[benthic_attribute_id] += 1
+                image_annos_by_bagf[bagf] += 1
+
+            if (
+                annotation_limit
+                and
+                all_annos_count + len(image_annotations) > annotation_limit
+            ):
+                # Adding this image's annotations would put us
+                # over the annotation limit.
+                return
+
+            feature_full_path = f'{TRAINING_BUCKET}/{feature_bucket_path}'
+            if feature_full_path not in mermaid_full_paths_in_s3:
+                logger.warning(
+                    f"Skipping feature vector because couldn't find"
+                    f" the file in S3: {feature_bucket_path}")
+                missing_features.append(feature_bucket_path)
+                continue
+
+            self.data[feature_bucket_path] = image_annotations
+            all_annos_count += len(image_annotations)
+            self.annos_by_ba += image_annos_by_ba
+            self.annos_by_bagf += image_annos_by_bagf
+
+        missing_threshold = (
+            len(self.data)
+            * settings.training_inputs_percent_missing_allowed / 100
+        )
+        if len(missing_features) > missing_threshold:
+            raise RuntimeError(
+                f"Too many feature vectors are missing"
+                f" ({len(missing_features)}), such as:"
+                f"\n{'\n'.join(missing_features[:3])}"
+                f"\nYou can configure the tolerance for missing"
+                f" feature vectors with the"
+                f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
+            )
+
+    @staticmethod
+    def data_rows_from_parquet(
+        parquet_uri: str,
+    ) -> typing.Generator['pandas.core.series.Series', None, None]:
+        """
+        Reads from a parquet file (chunkifying to avoid memory issues),
+        and generates pandas dataframe rows.
+        """
+        duck_conn = duckdb.connect()
+
+        try:
+            duck_conn.load_extension('httpfs')
+        except duckdb.IOException:
+            # Extension not installed yet.
+            duck_conn.install_extension('httpfs')
+            duck_conn.load_extension('httpfs')
+
+        if urlparse(parquet_uri).scheme == 's3':
+            duck_conn.execute(f"SET s3_region='{AWS_REGION}'")
+            # TODO: anon=True equiv. for DuckDB? or is it even needed?
+
+        # TODO: Support getting specific rows rather than just *
+        #  to reduce the amount of data that has to be read in.
+        duck_rel = duck_conn.execute(
+            f"SELECT * FROM read_parquet('{parquet_uri}')")
+
+        # Fetch in chunks, not all at once, to avoid running out of
+        # memory.
+        # An example chunk size is 2048 rows x 12 columns.
+        #
+        # fetchmany() is similar, but returns lists of tuples instead.
+        # A dataframe provides dict-like access which is a bit nicer.
+        while True:
+            dataframe = duck_rel.fetch_df_chunk()
+            if dataframe.shape[0] == 0:
+                # Empty dataframe; no more chunks left.
+                break
+
+            # Some ways to inspect the pandas dataframe in a debugger:
+            # dataframe
+            # dataframe.columns    # Column names
+            # dataframe.iloc[0]    # First row
+            # set([row['growth_form_name']
+            #     for _index, row in dataframe.iterrows()])
+            # [(row['row'], row['col']) for _index, row in dataframe.iterrows()
+            #  if row['image_id'] == '0032dba6-8357-42e2-bace-988f99032286']
+
+            for _index, row in dataframe.iterrows():
+                # With this generator behavior, the chunkifying detail
+                # is invisible to the caller.
+                yield row
+
+    @classmethod
+    def grouped_data_rows_from_parquet(
+        cls,
+        parquet_uri: str,
+        grouping_column: str,
+    ) -> typing.Generator['pandas.core.series.Series', None, None]:
+
+        grouping_value = None
+        group_rows = []
+
+        for row in cls.data_rows_from_parquet(parquet_uri):
+            if grouping_value != row[grouping_column]:
+                if grouping_value:
+                    # End of group.
+                    yield group_rows
+
+                # Start of group.
+                grouping_value = row[grouping_column]
+                group_rows = []
+
+            group_rows.append(row)
+
+        # End of last group.
+        yield group_rows
+
+    @property
+    def labels(self):
+        if self._labels is None:
+            self._labels = preprocess_labels(
+                ImageLabels(self.data),
+                # 10% ref, 10% val, 80% train.
+                split_ratios=(0.1, 0.1),
+                split_mode=SplitMode.POINTS_STRATIFIED,
+            )
+        return self._labels
+
+    def get_stats(self):
+        return dict(
+            total_annotations=self.labels.label_count,
+            train_annotations=self.labels.train.label_count,
+            ref_annotations=self.labels.ref.label_count,
+            val_annotations=self.labels.val.label_count,
+            num_of_images=len(self.data),
+            num_of_benthic_attributes=len(self.annos_by_ba),
+            num_of_ba_gf_combinations=len(self.annos_by_bagf),
+        )
+
+    def describe_stats(self):
+        return (
+            "Proceeding to train with {total_annotations}"
+            " annotations ({train_annotations} train,"
+            " {ref_annotations} ref,"
+            " {val_annotations} val) from"
+            " {num_of_images} images."
+            " {num_of_benthic_attributes} BAs and"
+            " {num_of_ba_gf_combinations} BA-GF combos"
+            " are represented here.".format(**self.get_stats())
+        )
+
+    def log_mlflow_artifacts(self):
+
+        if self.benthicattr_filter.inclusion:
+            table_filename = 'included_benthicattrs.json'
+        else:
+            table_filename = 'excluded_benthicattrs.json'
+        mlflow.log_table(
+            self.benthicattr_filter.csv_dataframe, table_filename)
+
+        mlflow.log_table(
+            self.rollup_spec.csv_dataframe, 'rollup_spec.json')
+
+        # Not sure if logging the entirely of the inputs is worth it
+        # (since it's a lot), but we can at least log the sizes of the
+        # inputs.
+        # They don't seem like 'metrics', nor are they strictly 'params'
+        # or 'inputs', nor are they 'outputs'... so we just log as a dict.
+        mlflow.log_dict(self.get_stats(), 'input_stats.yaml')
+
+        # Log annotation count per BA and per BAGF.
+        mlflow.log_dict(self.annos_by_ba, 'ba_counts.yaml')
+        mlflow.log_dict(self.annos_by_bagf, 'bagf_counts.yaml')
+
+
 def run_training(
     included_benthicattrs_csv: str = None,
     excluded_benthicattrs_csv: str = None,
     benthicattr_rollup_targets_csv: str = None,
     drop_growthforms: bool = False,
+    annotation_limit: int | None = None,
     epochs: int = 10,
     experiment_name: str | None = None,
     model_name: str | None = None,
     disable_mlflow: bool = False,
-    annotation_limit: int | None = None,
 ):
     """
     included_benthicattrs_csv
@@ -196,6 +481,11 @@ def run_training(
     dimension of rolling up labels.
     (TODO: Implement)
 
+    annotation_limit
+
+    If specified, only get up to this many annotations for training. This can
+    help with testing since the runtime is correlated to number of annotations.
+
     epochs
 
     Number of training epochs to run.
@@ -216,11 +506,6 @@ def run_training(
     If True, don't connect to or log to a MLflow tracking server. This can
     make testing easier when running a tracking server feels onerous.
 
-    annotation_limit
-
-    If specified, only get up to this many annotations for training. This can
-    help with testing since the runtime is correlated to number of annotations.
-
     TODO: Be able to specify an example image (or set of them?) whose
     training annotations are logged along with the model. Since logging all
     training annotations might be too much, but looking at a small sample
@@ -229,155 +514,18 @@ def run_training(
     experiment_name = (
         experiment_name or settings.mlflow_default_experiment_name)
 
-    if included_benthicattrs_csv and excluded_benthicattrs_csv:
-        raise ValueError(
-            "Specify one of included benthic attrs or"
-            " excluded benthic attrs, but not both.")
-
-    if included_benthicattrs_csv:
-        with open(included_benthicattrs_csv) as csv_f:
-            benthicattr_filter = BenthicAttrFilter(csv_f, inclusion=True)
-    elif excluded_benthicattrs_csv:
-        with open(excluded_benthicattrs_csv) as csv_f:
-            benthicattr_filter = BenthicAttrFilter(csv_f, inclusion=False)
-    else:
-        # No inclusion or exclusion set specified means we accept all labels.
-        # In other words, an empty exclusion set.
-        benthicattr_filter = BenthicAttrFilter(
-            StringIO(''), inclusion=False)
-
-    if benthicattr_rollup_targets_csv:
-        with open(benthicattr_rollup_targets_csv) as csv_f:
-            rollup_spec = BenthicAttrRollupSpec(csv_f)
-    else:
-        # Empty rollup-targets set, meaning nothing gets rolled up.
-        rollup_spec = BenthicAttrRollupSpec(StringIO(''))
-
-    # Accessing annotations the same way as
-    # https://github.com/data-mermaid/image-classification-open-data
-    #
-    # TODO: This is just MERMAID so far; also get CoralNet
-    dataframe = pd.read_parquet(
-        f's3://{TRAINING_BUCKET}/mermaid/mermaid_confirmed_annotations.parquet',
-        storage_options={"anon": True},
+    training_dataset = TrainingDataset(
+        included_benthicattrs_csv=included_benthicattrs_csv,
+        excluded_benthicattrs_csv=excluded_benthicattrs_csv,
+        benthicattr_rollup_targets_csv=benthicattr_rollup_targets_csv,
+        drop_growthforms=drop_growthforms,
+        annotation_limit=annotation_limit,
     )
-    # Some ways to inspect the dataframe in a debugger
-    # (may not be the best ways):
-    # dataframe
-    # dataframe.columns    # Column names
-    # dataframe.iloc[0]    # First row
-    # set([row['growth_form_name'] for _index, row in dataframe.iterrows()])
-    # [(row['row'], row['col']) for _index, row in dataframe.iterrows()
-    #  if row['image_id'] == '0032dba6-8357-42e2-bace-988f99032286']
 
-    image_id = None
-    labels_data = dict()
-    ba_counts = Counter()
-    bagf_counts = Counter()
-
-    # TODO: Option to filter by CN source (and MERMAID equiv.?).
-    #   Like a CSV with columns for site (CN or MERMAID)
-    #   and source/project ID.
-    # TODO: iterrows() likely won't work in terms of memory for very
-    #   large DFs. But what's the alternative?
-
-    for index, row in dataframe.iterrows():
-        if image_id != row['image_id']:
-            # End of previous image's annotations, and start of
-            # another image's annotations.
-            image_id = row['image_id']
-            feature_filepath = f'mermaid/{image_id}_featurevector'
-
-            labels_data[feature_filepath] = []
-
-        if not benthicattr_filter.accepts_ba(row['benthic_attribute_id']):
-            # This BA is being filtered out of the training data.
-            continue
-
-        if annotation_limit and index >= annotation_limit:
-            break
-
-        benthic_attribute_id = rollup_spec.roll_up(row['benthic_attribute_id'])
-
-        if row['growth_form_id'] != 'None':
-            # MERMAID API uses :: as the BA-GF separator.
-            bagf = '::'.join([
-                benthic_attribute_id, row['growth_form_id']])
-        else:
-            bagf = benthic_attribute_id
-
-        annotation = (
-            int(row['row']),
-            int(row['col']),
-            bagf,
-        )
-        labels_data[feature_filepath].append(annotation)
-
-        ba_counts[benthic_attribute_id] += 1
-        bagf_counts[bagf] += 1
-
-    # Check for missing feature vector files.
-
-    s3 = S3FileSystem(anon=settings.spacer_aws_anonymous)
-    mermaid_full_paths_in_s3 = set(
-        s3.find(path=f's3://{TRAINING_BUCKET}/mermaid/'))
-    missing_filepaths = []
-    missing_count = 0
-    missing_threshold = (
-        len(labels_data)
-        * settings.training_inputs_percent_missing_allowed / 100
-    )
-    feature_bucket_paths_in_data = list(labels_data.keys())
-
-    for feature_bucket_path in feature_bucket_paths_in_data:
-        feature_full_path = f'{TRAINING_BUCKET}/{feature_bucket_path}'
-        if feature_full_path not in mermaid_full_paths_in_s3:
-            logger.warning(
-                f"Skipping feature vector because couldn't find"
-                f" the file in S3: {feature_filepath}")
-            missing_filepaths.append(feature_filepath)
-            missing_count += 1
-            del labels_data[feature_filepath]
-
-            if missing_count > missing_threshold:
-                raise RuntimeError(
-                    f"Too many feature vectors are missing"
-                    f" (at least {missing_count}), such as:"
-                    f"\n{'\n'.join(missing_filepaths[:3])}"
-                    f"\nYou can configure the tolerance for missing"
-                    f" feature vectors with the"
-                    f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
-                )
-
-    # Annotation preprocessing and other prep before training.
-
-    labels = preprocess_labels(
-        ImageLabels(labels_data),
-        # 10% ref, 10% val, 80% train.
-        split_ratios=(0.1, 0.1),
-        split_mode=SplitMode.POINTS_STRATIFIED,
-    )
+    # Other prep before training.
 
     log_memory_usage('Memory usage after creating labels')
-    input_stats = dict(
-        total_annotations=labels.label_count,
-        train_annotations=labels.train.label_count,
-        ref_annotations=labels.ref.label_count,
-        val_annotations=labels.val.label_count,
-        num_of_images=len(labels_data),
-        num_of_benthic_attributes=len(ba_counts),
-        num_of_ba_gf_combinations=len(bagf_counts),
-    )
-    logger.info(
-        "Proceeding to train with {total_annotations}"
-        " annotations ({train_annotations} train,"
-        " {ref_annotations} ref,"
-        " {val_annotations} val) from"
-        " {num_of_images} images."
-        " {num_of_benthic_attributes} BAs and"
-        " {num_of_ba_gf_combinations} BA-GF combos"
-        " are represented here.".format(**input_stats)
-    )
+    logger.info(training_dataset.describe_stats())
 
     current_time = datetime.now()
     time_str = current_time.strftime('%Y%m%dT%H%M%S')
@@ -423,7 +571,7 @@ def run_training(
         trainer_name='minibatch',
         nbr_epochs=experiment_params['epochs'],
         clf_type='MLP',
-        labels=labels,
+        labels=training_dataset.labels,
         features_loc=DataLocation(
             's3', bucket_name=TRAINING_BUCKET, key=''),
         previous_model_locs=[],
@@ -462,26 +610,7 @@ def run_training(
             accuracy_pct = return_msg.acc * 100
             mlflow.log_metric("accuracy", accuracy_pct)
 
-            if benthicattr_filter.inclusion:
-                table_filename = 'included_benthicattrs.json'
-            else:
-                table_filename = 'excluded_benthicattrs.json'
-            mlflow.log_table(
-                benthicattr_filter.csv_dataframe, table_filename)
-
-            mlflow.log_table(
-                rollup_spec.csv_dataframe, 'rollup_spec.json')
-
-            # Not sure if logging the entirely of the inputs is worth it
-            # (since it's a lot), but we can at least log the sizes of the
-            # inputs.
-            # They don't seem like 'metrics', nor are they strictly 'params'
-            # or 'inputs', nor are they 'outputs'... so we just log as a dict.
-            mlflow.log_dict(input_stats, 'input_stats.yaml')
-
-            # Log annotation count per BA and per BAGF.
-            mlflow.log_dict(ba_counts, 'ba_counts.yaml')
-            mlflow.log_dict(bagf_counts, 'bagf_counts.yaml')
+            training_dataset.log_mlflow_artifacts()
 
             # ref_accs is probably the only other part of return_msg to save.
             ref_accs_dict = dict()
