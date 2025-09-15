@@ -20,6 +20,7 @@ allow-direct-references = true
 [project.optional-dependencies]
 pyspacer = [
     "beautifulsoup4",
+    "duckdb",
     "matplotlib",
     "mlflow>=3",
     "numpy",
@@ -37,8 +38,6 @@ pyspacer = [
     # searches from cwd, which seems more practical when settings
     # are in an installed package, which is our intended usage.
     "pydantic-settings",
-    # pandas.read_parquet() uses this for S3 files.
-    # We use this directly as well, since it's available.
     "s3fs",
 ]
 jupyterlab = [
