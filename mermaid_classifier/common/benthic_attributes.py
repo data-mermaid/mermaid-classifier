@@ -34,6 +34,14 @@ class BenthicAttributeLibrary:
     def name_to_id(self, ba_name):
         return self.by_name[ba_name]['id']
 
+    def bagf_id_to_name(self, bagf_id, gf_library):
+        if '::' in bagf_id:
+            ba_id, gf_id = bagf_id.split('::')
+            ba_name = self.by_id[ba_id]['name']
+            return ba_name + '::' + gf_library.by_id[gf_id]
+        else:
+            return self.by_id[bagf_id]['name']
+
     def get_ancestor_ids(self, ba_id):
         """
         Get ancestor IDs, ordered earliest (closest to root) first.
