@@ -245,14 +245,9 @@ class AnnotationRun:
             ba_library = BenthicAttributeLibrary()
             gf_library = GrowthFormLibrary()
             self.label_ids_to_names = dict()
-            for bagf in unique_top_labels:
-                if '::' in bagf:
-                    ba, gf = bagf.split('::')
-                    ba_name = ba_library.by_id[ba]['name']
-                    name = ba_name + '::' + gf_library.by_id[gf]
-                else:
-                    name = ba_library.by_id[bagf]['name']
-                self.label_ids_to_names[bagf] = name
+            for bagf_id in unique_top_labels:
+                name = ba_library.bagf_id_to_name(bagf_id, gf_library)
+                self.label_ids_to_names[bagf_id] = name
 
     @staticmethod
     def parse_location_str(

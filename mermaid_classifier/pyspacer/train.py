@@ -3,6 +3,7 @@ Train a classifier using feature vectors and annotations
 provided on S3.
 """
 from collections import Counter
+from dataclasses import make_dataclass
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -28,7 +29,7 @@ from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
 from mermaid_classifier.common.benthic_attributes import (
-    BenthicAttributeLibrary)
+    BenthicAttributeLibrary, GrowthFormLibrary)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -421,16 +422,43 @@ class TrainingDataset:
         mlflow.log_table(
             self.rollup_spec.csv_dataframe, 'rollup_spec.json')
 
-        # Not sure if logging the entirely of the inputs is worth it
+        # Not sure if logging the entirety of the inputs is worth it
         # (since it's a lot), but we can at least log the sizes of the
         # inputs.
         # They don't seem like 'metrics', nor are they strictly 'params'
         # or 'inputs', nor are they 'outputs'... so we just log as a dict.
         mlflow.log_dict(self.get_stats(), 'input_stats.yaml')
 
-        # Log annotation count per BA and per BAGF.
-        mlflow.log_dict(self.annos_by_ba, 'ba_counts.yaml')
-        mlflow.log_dict(self.annos_by_bagf, 'bagf_counts.yaml')
+        # Log annotation count per BA and per BAGF,
+        # each sorted by most common first.
+        #
+        # For each, we construct a list of dataclass instances,
+        # which is a format that dataframes support.
+        # https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.html
+        CountLogEntry = make_dataclass(
+            'CountLogEntry',
+            [('id', str), ('name', str), ('count', int)])
+        by_ba_with_names = []
+        for ba_id, count in self.annos_by_ba.most_common():
+            ba_name = BenthicAttrSet.get_library().id_to_name(ba_id)
+            by_ba_with_names.append(CountLogEntry(
+                id=ba_id,
+                name=ba_name,
+                count=count,
+            ))
+        by_bagf_with_names = []
+        gf_library = GrowthFormLibrary()
+        for bagf_id, count in self.annos_by_bagf.most_common():
+            bagf_name = BenthicAttrSet.get_library().bagf_id_to_name(
+                bagf_id, gf_library)
+            by_bagf_with_names.append(CountLogEntry(
+                id=bagf_id,
+                name=bagf_name,
+                count=count,
+            ))
+
+        mlflow.log_table(pd.DataFrame(by_ba_with_names), 'ba_counts.json')
+        mlflow.log_table(pd.DataFrame(by_bagf_with_names), 'bagf_counts.json')
 
 
 def run_training(
