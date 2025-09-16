@@ -2,6 +2,7 @@
 Get/generate and show annotations for a specified image.
 """
 from collections import defaultdict
+import colorsys
 import csv
 import enum
 from io import BytesIO, StringIO
@@ -420,13 +421,34 @@ class AnnotationRun:
     def marker_shape_choices_str(self):
         return ', '.join(self.marker_shape_choices)
 
+    @staticmethod
+    def scale_lightness(rgba, scale_l):
+        """
+        https://stackoverflow.com/a/60562502
+        """
+        r, g, b, a = rgba
+        h, l, s = colorsys.rgb_to_hls(r, g, b)
+        new_rgb = colorsys.hls_to_rgb(h, min(1.0, l * scale_l), s=s)
+        return [*new_rgb, a]
+
     def show(self):
 
-        # Map the labelset to colors in the tab10 color set.
+        shadow_color = 'black'
+
         unique_top_labels = list(self.label_ids_to_names.keys())
+        # Use the tab10 color set as a base, but make the colors lighter/darker
+        # to go better with dark/light shadows and outlines.
+        color_set = mpl.cm.tab10(range(len(unique_top_labels)))
+        if shadow_color == 'black':
+            scale_l = 4/3
+        else:
+            # white
+            scale_l = 3/4
+        color_set = [self.scale_lightness(c, scale_l) for c in color_set]
+        # Map the labelset to colors in the color set.
         colors = dict(zip(
             unique_top_labels,
-            mpl.cm.tab10(range(len(unique_top_labels))),
+            color_set,
         ))
 
         fig = plt.gcf()
@@ -435,12 +457,13 @@ class AnnotationRun:
 
         image = load_image(self.image_loc)
         smaller_dim = min([image.width, image.height])
-        # Add image to the plot; this seems to also reverse the y axis and
-        # force the correct aspect ratio.
+        # Add image to the plot; this seems to also reverse the y axis
+        # (which we want) and force the correct aspect ratio.
         image_array = np.asarray(image)
         plt.imshow(image_array)
 
-        scatters = []
+        shadow_scatters = []
+        main_scatters = []
 
         # Add point annotations as scatter plots, with each label getting its
         # own color. By doing one scatter-plot action per label, we facilitate
@@ -456,89 +479,107 @@ class AnnotationRun:
             # Rows
             ys = [rowcol[0] for rowcol in label_rowcols]
 
-            shadow_color = 'black'
+            scatter_common_props = dict()
 
             # https://matplotlib.org/stable/api/markers_api.html
             match self.marker_shape:
+
                 case MarkerShape.BOX.value:
-                    # Marker shape: vertices forming a box
-                    marker = [(1, 1), (-1, 1), (-1, -1), (1, -1), (1, 1)]
+                    # Square shape.
+                    scatter_common_props['marker'] = 's'
                     # Patch-sized box, like in MERMAID
+                    # TODO: This isn't at all working; zooming in/out doesn't
+                    #  scale the marker
                     marker_size = EfficientNetExtractor.CROP_SIZE
-                    # Outline only, not a solid shape
-                    facecolor = 'none'
+                    # Distance offset of the score number from the marker,
+                    # if confidence scores are being shown
+                    score_offset = marker_size / 40.0
+                    # Outline only, not a filled box
+                    scatter_common_props['facecolor'] = 'none'
+
                 case MarkerShape.CROSS.value:
-                    marker = '+'
+                    scatter_common_props['marker'] = '+'
                     marker_size = smaller_dim / 15
-                    # + is already an unfilled shape
-                    facecolor = 'full'
+                    score_offset = marker_size / 50.0
+                    # + is already an unfilled shape, so don't need to
+                    # clear the facecolor.
+
                 case _:
                     raise ValueError(
                         f"Marker shape choice should be one of:"
                         f" {self.marker_shape_choices_str}")
 
-            scatter_base_props = dict(
-                marker=marker,
-                facecolor=facecolor,
-            )
-
             # 'Outline' of the marker. This is just a slightly bigger black
             # marker drawn before the main marker. This additional color lets
             # points stand out from the background more consistently.
+            #
             # TODO: Can this be merged into the legend?
-            ax.scatter(
+            #  See "legend entries with more than one legend key"
+            #  https://matplotlib.org/stable/gallery/text_labels_and_annotations/legend_demo.html
+            #  We seem to be halfway there, but need to fix the positioning
+            #  of the two markers relative to each other in the legend.
+            shadow_scatters.append(ax.scatter(
                 xs,
                 ys,
                 s=marker_size*1.15,
                 linewidths=3,
                 # Marker color
                 color=shadow_color,
-                **scatter_base_props
-            )
+                **scatter_common_props
+            ))
 
             # Main marker. Append to the array that will go into the legend.
-            scatters.append(ax.scatter(
+            main_scatters.append(ax.scatter(
                 xs,
                 ys,
                 s=marker_size,
                 linewidths=2,
                 # Marker color and shape
                 color=colors[label],
-                **scatter_base_props
+                **scatter_common_props
             ))
 
             # Write scores next to markers
-            # TODO: Offset the position based on the marker shape and size
             for rowcol in label_rowcols:
                 row, column = rowcol
                 if rowcol in self.top_scores:
                     raw_top_score = self.top_scores[rowcol]
                     score_text = f'{round(raw_top_score*100)}'
+                    score_shadow_offset = score_offset - 0.5
                     # Text 'shadow', since this seems easier to accomplish than
                     # an outline, and is almost as good.
                     ax.annotate(
                         score_text, (column, row),
-                        color=shadow_color, fontsize=12,
+                        color=shadow_color,
+                        fontsize=12,
+                        # https://matplotlib.org/stable/api/text_api.html#matplotlib.text.Text.set_fontweight
+                        fontweight='semibold',
                         # textcoords in offset units allow the text to be a
                         # consistent distance from the point marker, regardless
                         # of image scale or zoom level.
-                        xytext=(3.0, 3.0), textcoords='offset points',
+                        xytext=(score_shadow_offset, score_shadow_offset),
+                        textcoords='offset points',
                     )
                     # Main text
                     ax.annotate(
                         score_text, (column, row),
-                        color=colors[label], fontsize=12,
-                        xytext=(3.5, 3.5), textcoords='offset points',
+                        color=colors[label],
+                        fontsize=12,
+                        fontweight='semibold',
+                        xytext=(score_offset, score_offset),
+                        textcoords='offset points',
                     )
 
+        from matplotlib.legend_handler import HandlerTuple
         ax.legend(
-            scatters,
+            list(zip(shadow_scatters, main_scatters)),
             [self.label_ids_to_names[str(label_id)]
              for label_id in unique_top_labels],
             # Put the legend outside the plot, to the right
             loc='center left', bbox_to_anchor=(1, 0.5),
             # Spacing between the legend items
             labelspacing=1,
+            handler_map={tuple: HandlerTuple(ndivide=None)},
         )
 
         fig.set_size_inches(11, 7)
