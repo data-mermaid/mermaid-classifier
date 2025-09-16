@@ -62,6 +62,7 @@ class AnnotationRun:
         num_predictions_to_save: int = 0,
         coralnet_cache_dir: str = None,
         marker_shape: str = MarkerShape.BOX.value,
+        plot_title: str = None,
     ):
         """
         image
@@ -124,6 +125,12 @@ class AnnotationRun:
         Shape to use for the point markers which are drawn on the image to
         indicate the point locations.
         See the MarkerShape Enum for the available choices.
+
+        plot_title
+
+        Title at the top of the plot that visualizes the annotations.
+        If not given, a title will be generated automatically based on
+        inputs.
         """
         self.points_csv_path = points_csv
         self.num_predictions_to_save = num_predictions_to_save
@@ -155,18 +162,22 @@ class AnnotationRun:
         except ValueError:
             # Non-numeric arg; interpret as file path/URI
             self.image_loc = self.parse_location_str(image)
-            self.plot_title = image
+            auto_plot_title = image
         else:
             # Numeric arg; interpret as CoralNet image ID
             self.image_loc = self.get_coralnet_image(image_id)
-            self.plot_title = f"CoralNet image {image_id}"
+            auto_plot_title = f"CoralNet image {image_id}"
 
         classifier_loc = self.parse_location_str(
             classifier,
             is_classifier=True,
         )
         if classifier_loc:
-            self.plot_title += f"\nClassifier: {classifier}"
+            auto_plot_title += f"\nClassified by: {classifier}"
+        else:
+            auto_plot_title += f"\nAnnotations from CSV file"
+
+        self.plot_title = plot_title or auto_plot_title
 
         weights_loc = self.parse_location_str(weights_location)
 
