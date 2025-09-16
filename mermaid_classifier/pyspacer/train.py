@@ -194,6 +194,9 @@ class TrainingDataset:
             # Empty rollup-targets set, meaning nothing gets rolled up.
             self.rollup_spec = BenthicAttrRollupSpec(StringIO(''))
 
+        self.drop_growthforms = drop_growthforms
+        self.annotation_limit = annotation_limit
+
         # TODO: This is just MERMAID so far; also get CoralNet
 
         # As we iterate through annotations, we'll check the image IDs
@@ -247,12 +250,15 @@ class TrainingDataset:
                 benthic_attribute_id = self.rollup_spec.roll_up(
                     row['benthic_attribute_id'])
 
-                if row['growth_form_id'] != 'None':
+                if drop_growthforms or row['growth_form_id'] == 'None':
+                    # Either we've chosen not to get growth forms, or
+                    # this annotation has no growth form.
+                    bagf = benthic_attribute_id
+                else:
+                    # Include growth form.
                     # MERMAID API uses :: as the BA-GF separator.
                     bagf = '::'.join([
                         benthic_attribute_id, row['growth_form_id']])
-                else:
-                    bagf = benthic_attribute_id
 
                 annotation = (
                     int(row['row']),
@@ -268,8 +274,12 @@ class TrainingDataset:
                 and
                 all_annos_count + len(image_annotations) > annotation_limit
             ):
-                # Adding this image's annotations would put us
-                # over the annotation limit.
+                logger.debug(
+                    f"Currently have {all_annos_count} annotations."
+                    f" Stopping because the {len(image_annotations)}"
+                    f" annotations from the next image ({image_id})"
+                    f" would put us over the limit of {annotation_limit}."
+                )
                 return
 
             feature_full_path = f'{TRAINING_BUCKET}/{feature_bucket_path}'
@@ -318,7 +328,6 @@ class TrainingDataset:
 
         if urlparse(parquet_uri).scheme == 's3':
             duck_conn.execute(f"SET s3_region='{AWS_REGION}'")
-            # TODO: anon=True equiv. for DuckDB? or is it even needed?
 
         # TODO: Support getting specific rows rather than just *
         #  to reduce the amount of data that has to be read in.
@@ -460,6 +469,12 @@ class TrainingDataset:
         mlflow.log_table(pd.DataFrame(by_ba_with_names), 'ba_counts.json')
         mlflow.log_table(pd.DataFrame(by_bagf_with_names), 'bagf_counts.json')
 
+        other_options = dict(
+            drop_growthforms=self.drop_growthforms,
+            annotation_limit=self.annotation_limit,
+        )
+        mlflow.log_dict(other_options, 'other_options.yaml')
+
 
 def run_training(
     included_benthicattrs_csv: str = None,
@@ -507,7 +522,6 @@ def run_training(
 
     If True, discard growth forms from the training data. Basically another
     dimension of rolling up labels.
-    (TODO: Implement)
 
     annotation_limit
 
