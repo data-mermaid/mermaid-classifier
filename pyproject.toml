@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mermaid-classifier"
+version = "0.1a1"
+requires-python = ">=3.10"
+dependencies = [
+    "boto3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mermaid_classifier"]
+
+# This allows getting pyspacer from an explicit repo URL.
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[project.optional-dependencies]
+pyspacer = [
+    "beautifulsoup4",
+    "duckdb",
+    "matplotlib",
+    "mlflow>=3",
+    "numpy",
+    "pandas",
+    "psutil",
+    "pyarrow",
+    # This branch has a fix for numpy 1.26.1-.4 (which SageMaker uses
+    # at this time of writing) and also allows anonymous AWS access.
+    # These improvements will be in a stable pyspacer version later.
+    "pyspacer@git+https://github.com/coralnet/pyspacer.git@aws-profile-support-etc",
+    # python-dotenv by itself isn't explicit about what variable
+    # names it accepts.
+    # python-decouple and pydantic-settings are more explicit.
+    # The former searches for .env from __file__. The latter
+    # searches from cwd, which seems more practical when settings
+    # are in an installed package, which is our intended usage.
+    "pydantic-settings",
+    "s3fs",
+]
+jupyterlab = [
+    # For interactive matplotlib in JupyterLab. After installation, the
+    # browser tab running JupyterLab must be hard-refreshed for this to
+    # take effect.
+    "ipympl",
+]
