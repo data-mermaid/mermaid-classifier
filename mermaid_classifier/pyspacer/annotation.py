@@ -2,9 +2,7 @@
 Get/generate and show annotations for a specified image.
 """
 from collections import defaultdict
-import colorsys
 import csv
-import enum
 from io import BytesIO, StringIO
 from operator import itemgetter
 import os
@@ -25,6 +23,12 @@ from spacer.tasks import classify_image
 
 from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary, GrowthFormLibrary)
+from mermaid_classifier.common.plots import (
+    LegendSpecElement,
+    plot_legend,
+    plot_point_markers,
+    PointMarker,
+)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import mlflow_connect
 
@@ -46,11 +50,6 @@ def mlflow_model_id_to_pkl_uri(model_id: str) -> str:
     return logged_model.artifact_location + '/' + model_filename
 
 
-class MarkerShape(enum.Enum):
-    BOX = 'box'
-    CROSS = 'cross'
-
-
 class AnnotationRun:
 
     def __init__(
@@ -62,7 +61,6 @@ class AnnotationRun:
         labelset_csv: str = None,
         num_predictions_to_save: int = 0,
         coralnet_cache_dir: str = None,
-        marker_shape: str = MarkerShape.BOX.value,
         plot_title: str = None,
     ):
         """
@@ -121,12 +119,6 @@ class AnnotationRun:
         from CoralNet. Can be useful when doing multiple runs
         on the same CoralNet image.
 
-        marker_shape
-
-        Shape to use for the point markers which are drawn on the image to
-        indicate the point locations.
-        See the MarkerShape Enum for the available choices.
-
         plot_title
 
         Title at the top of the plot that visualizes the annotations.
@@ -136,7 +128,6 @@ class AnnotationRun:
         self.points_csv_path = points_csv
         self.num_predictions_to_save = num_predictions_to_save
         self.coralnet_cache_dir = coralnet_cache_dir
-        self.marker_shape = marker_shape
 
         weights_location = (
             weights or settings.weights_location)
@@ -413,42 +404,14 @@ class AnnotationRun:
         ) as points_csv:
             points_csv.write(writer_stream.getvalue())
 
-    @property
-    def marker_shape_choices(self):
-        return [enum_member.value for enum_member in MarkerShape]
-
-    @property
-    def marker_shape_choices_str(self):
-        return ', '.join(self.marker_shape_choices)
-
-    @staticmethod
-    def scale_lightness(rgba, scale_l):
-        """
-        https://stackoverflow.com/a/60562502
-        """
-        r, g, b, a = rgba
-        h, l, s = colorsys.rgb_to_hls(r, g, b)
-        new_rgb = colorsys.hls_to_rgb(h, min(1.0, l * scale_l), s=s)
-        return [*new_rgb, a]
-
     def show(self):
 
-        shadow_color = 'black'
-
         unique_top_labels = list(self.label_ids_to_names.keys())
-        # Use the tab10 color set as a base, but make the colors lighter/darker
-        # to go better with dark/light shadows and outlines.
-        color_set = mpl.cm.tab10(range(len(unique_top_labels)))
-        if shadow_color == 'black':
-            scale_l = 4/3
-        else:
-            # white
-            scale_l = 3/4
-        color_set = [self.scale_lightness(c, scale_l) for c in color_set]
+        color_list = mpl.cm.tab10(range(len(unique_top_labels)))
         # Map the labelset to colors in the color set.
-        colors = dict(zip(
+        label_ids_to_colors = dict(zip(
             unique_top_labels,
-            color_set,
+            color_list,
         ))
 
         fig = plt.gcf()
@@ -456,131 +419,68 @@ class AnnotationRun:
         ax.set_title(self.plot_title)
 
         image = load_image(self.image_loc)
-        smaller_dim = min([image.width, image.height])
         # Add image to the plot; this seems to also reverse the y axis
         # (which we want) and force the correct aspect ratio.
         image_array = np.asarray(image)
         plt.imshow(image_array)
 
-        shadow_scatters = []
-        main_scatters = []
+        point_markers = []
 
-        # Add point annotations as scatter plots, with each label getting its
-        # own color. By doing one scatter-plot action per label, we facilitate
-        # creation of the legend.
-        for label in unique_top_labels:
-            label_rowcols = [
-                rowcol for rowcol, top_label in self.top_annotations.items()
-                if top_label == label
+        for rowcol, top_label in self.top_annotations.items():
+            if rowcol in self.top_scores:
+                raw_top_score = self.top_scores[rowcol]
+                score_as_percent = round(raw_top_score*100)
+                # TODO: Score text optional; maybe shape is enough
+                score_text = str(score_as_percent)
+                # https://matplotlib.org/stable/api/markers_api.html
+                if score_as_percent >= 70:
+                    shape = 'o'
+                elif score_as_percent >= 50:
+                    shape = 's'
+                else:
+                    shape = '^'
+            else:
+                score_text = None
+                shape = 'o'
+            point_markers.append(PointMarker(
+                row=rowcol[0],
+                col=rowcol[1],
+                color=label_ids_to_colors[top_label],
+                shape=shape,
+                text=score_text,
+            ))
+
+        plot_point_markers(ax, point_markers)
+
+        label_names = [
+            self.label_ids_to_names[str(label_id)]
+            for label_id in unique_top_labels
+        ]
+        # Color legend
+        legend_spec = [
+            LegendSpecElement(color=color, shape='o', label=label)
+            for color, label in zip(color_list, label_names)
+        ]
+
+        # Shape legend; only show this if there are scores
+        if len(self.top_scores) > 0:
+            # TODO: DRY with the thresholds defined above
+            legend_spec += [
+                LegendSpecElement(
+                    color='white', shape='o', label="70% or more confidence"),
+                LegendSpecElement(color='white', shape='s', label="50-69%"),
+                LegendSpecElement(color='white', shape='^', label="49% or less"),
             ]
+        plot_legend(ax, legend_spec)
 
-            # Columns
-            xs = [rowcol[1] for rowcol in label_rowcols]
-            # Rows
-            ys = [rowcol[0] for rowcol in label_rowcols]
-
-            scatter_common_props = dict()
-
-            # https://matplotlib.org/stable/api/markers_api.html
-            match self.marker_shape:
-
-                case MarkerShape.BOX.value:
-                    # Square shape.
-                    scatter_common_props['marker'] = 's'
-                    # Patch-sized box, like in MERMAID
-                    # TODO: This isn't at all working; zooming in/out doesn't
-                    #  scale the marker
-                    marker_size = EfficientNetExtractor.CROP_SIZE
-                    # Distance offset of the score number from the marker,
-                    # if confidence scores are being shown
-                    score_offset = marker_size / 40.0
-                    # Outline only, not a filled box
-                    scatter_common_props['facecolor'] = 'none'
-
-                case MarkerShape.CROSS.value:
-                    scatter_common_props['marker'] = '+'
-                    marker_size = smaller_dim / 15
-                    score_offset = marker_size / 50.0
-                    # + is already an unfilled shape, so don't need to
-                    # clear the facecolor.
-
-                case _:
-                    raise ValueError(
-                        f"Marker shape choice should be one of:"
-                        f" {self.marker_shape_choices_str}")
-
-            # 'Outline' of the marker. This is just a slightly bigger black
-            # marker drawn before the main marker. This additional color lets
-            # points stand out from the background more consistently.
-            #
-            # TODO: Can this be merged into the legend?
-            #  See "legend entries with more than one legend key"
-            #  https://matplotlib.org/stable/gallery/text_labels_and_annotations/legend_demo.html
-            #  We seem to be halfway there, but need to fix the positioning
-            #  of the two markers relative to each other in the legend.
-            shadow_scatters.append(ax.scatter(
-                xs,
-                ys,
-                s=marker_size*1.15,
-                linewidths=3,
-                # Marker color
-                color=shadow_color,
-                **scatter_common_props
-            ))
-
-            # Main marker. Append to the array that will go into the legend.
-            main_scatters.append(ax.scatter(
-                xs,
-                ys,
-                s=marker_size,
-                linewidths=2,
-                # Marker color and shape
-                color=colors[label],
-                **scatter_common_props
-            ))
-
-            # Write scores next to markers
-            for rowcol in label_rowcols:
-                row, column = rowcol
-                if rowcol in self.top_scores:
-                    raw_top_score = self.top_scores[rowcol]
-                    score_text = f'{round(raw_top_score*100)}'
-                    score_shadow_offset = score_offset - 0.5
-                    # Text 'shadow', since this seems easier to accomplish than
-                    # an outline, and is almost as good.
-                    ax.annotate(
-                        score_text, (column, row),
-                        color=shadow_color,
-                        fontsize=12,
-                        # https://matplotlib.org/stable/api/text_api.html#matplotlib.text.Text.set_fontweight
-                        fontweight='semibold',
-                        # textcoords in offset units allow the text to be a
-                        # consistent distance from the point marker, regardless
-                        # of image scale or zoom level.
-                        xytext=(score_shadow_offset, score_shadow_offset),
-                        textcoords='offset points',
-                    )
-                    # Main text
-                    ax.annotate(
-                        score_text, (column, row),
-                        color=colors[label],
-                        fontsize=12,
-                        fontweight='semibold',
-                        xytext=(score_offset, score_offset),
-                        textcoords='offset points',
-                    )
-
-        from matplotlib.legend_handler import HandlerTuple
-        ax.legend(
-            list(zip(shadow_scatters, main_scatters)),
-            [self.label_ids_to_names[str(label_id)]
-             for label_id in unique_top_labels],
-            # Put the legend outside the plot, to the right
-            loc='center left', bbox_to_anchor=(1, 0.5),
-            # Spacing between the legend items
-            labelspacing=1,
-            handler_map={tuple: HandlerTuple(ndivide=None)},
-        )
+        # Seeing the axes with pixel numbers isn't entirely useless. But it
+        # may look a bit strange/distracting, and we can already check
+        # coordinates by mousing over the interactive plot.
+        # So we disable the ticks. However, we don't turn the axes off
+        # entirely, since it's nice to have the frame intact if panning the
+        # image.
+        ax.set_xticks([])
+        ax.set_yticks([])
 
         fig.set_size_inches(11, 7)
         plt.show()
