@@ -75,3 +75,29 @@ annotation_run = AnnotationRun(
 )
 annotation_run.show()
 ```
+
+
+## More available parameters
+
+For more details, browse [annotation.py](../../mermaid_classifier/pyspacer/annotation.py) for the start of the `__init__()` method of the `AnnotationRun` class, where the parameters are listed and explained in comments.
+
+```python
+from mermaid_classifier.pyspacer.annotation import AnnotationRun
+
+annotation_run = AnnotationRun(
+    # Can be a CoralNet public image ID.
+    image='12903',
+    points_csv='cn_12903_points.csv',
+    classifier='s3://my-bucket/classifier.pkl',
+    # Can also be specified in a .env file.
+    weights='s3://my-bucket/weights.pt',
+    # Custom mapping of label IDs to display names.
+    labelset_csv='labelset.csv',
+    # Save machine predictions back to points CSV.
+    num_predictions_to_save=5,
+    # Downloads cache when specifying images as CoralNet IDs.
+    coralnet_cache_dir='/var/tmp/coralnet_cache',
+    plot_title="Bocas del Toro classification example",
+)
+annotation_run.show()
+```
