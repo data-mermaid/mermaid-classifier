@@ -88,4 +88,22 @@ run_training(
     disable_mlflow=True,
     annotation_limit=2000,
 )
+
+# The rest of the parameters available.
+run_training(
+    included_benthicattrs_csv='labels/included.csv',
+    # Specify at most one of included and excluded, not both.
+    # excluded_benthicattrs_csv='labels/excluded.csv',
+    benthicattr_rollup_targets_csv='labels/rollups.csv',
+    drop_growthforms=True,
+    epochs=5,
+    # This basically helps to group models.
+    experiment_name="My Experiment 1",
+    # This gets date/time appended to the end of it.
+    model_name='my-model',
+    # This is already False by default, but it doesn't make sense to
+    # specify experiment and model names when MLflow usage is disabled.
+    disable_mlflow=False,
+    annotation_limit=5000,
+)
 ```
