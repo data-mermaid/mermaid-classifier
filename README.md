@@ -1,64 +1,90 @@
 # mermaid-classifier
 
-Code for training a MERMAID image classifier.
+This Python repository enables data scientists to experiment with PySpacer-based classifiers. It also has MERMAID-relevant utilities which aren't specific to the type of classifier being developed.
 
-### Prerequisites
 
-- Docker installed on your machine. If you don't have Docker installed, you can download it from [here](https://www.docker.com/products/docker-desktop).
+## Overview
 
-- coralnet-bocas zip
+This project is set up as a Python package, and requires Python 3.10 or higher. Once you have the package installed in your Python environment, you can import anything from `mermaid_classifier` into your own Python modules, notebooks, etc.
 
-- Quarto `.qmd` files require Quarto to be installed
+### General utilities
 
-installed on your machine. If you don't have Quarto installed, you can download it from [here](https://quarto.org/docs/getting-started/installation.html).
+These are found in `mermaid_classifier.common`. Once this package is installed (see Installation section), the utilities can be imported from there.
 
-#### Installing Quarto
+### PySpacer training and classification code
 
-You can install Quarto by running the following command in your terminal:
+This is found in `mermaid_classifier.pyspacer`.
 
-https://quarto.org/docs/download/
+### Documentation
 
-After installation, you can verify that Quarto is installed correctly by running:
+See the [docs](docs) section for usage explanations.
 
-`quarto --version`
+### v1 directory
 
-This should display the version of Quarto installed on your machine.
- 
+This is the work from MERMAID classifier version 1 which hasn't been incorporated into the current version yet.
 
- ## Running docker in your local machine
 
-`docker run -v $(pwd)/cache:/workspace/cache -v $(pwd)/spacer:/workspace/spacer -it pyspacer-docker bash`
+## Installation
 
-`docker build -f Dockerfile -t pyspacer .`
+### Python package installation
 
-`docker run -it pyspacer bash`
+Some installation examples:
 
-You can run: 
+| Result | Command |
+| - | - |
+| Utilities only | `pip install https://github.com/data-mermaid/mermaid-classifier.git` |
+| Utilities + PySpacer-based classification | `pip install https://github.com/data-mermaid/mermaid-classifier.git[pyspacer]` |
+| Utilities + PySpacer-based classification + JupyterLab support | `pip install https://github.com/data-mermaid/mermaid-classifier.git[pyspacer,jupyterlab]` |
+| Utilities only, at non-main branch | `pip install "mermaid-classifier @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
+| Utilities + PySpacer-based classification + JupyterLab support, at non-main branch | `pip install "mermaid-classifier[pyspacer,jupyterlab] @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
 
-`from spacer import config` 
+To update your install, add `-U` after the word `install` in any of the above. However, if the package's version number has not been bumped up yet, you'll probably have to `pip uninstall mermaid-classifier` first, otherwise pip might think there is nothing to be updated.
 
-To very that spacer installed correctly. 
+If you're in a SageMaker JupyterLab space:
 
-## Setup development environment
+- After you shut down the space and then start it again, you'll have to re-run pip installations.
 
-We setup the development environment in a Docker container with the following command.
+- Running the pip install command from a Terminal tab should work.
 
-`make build`
+- At the end of the install, you'll see a message "ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. ...". That's most likely related to SageMaker-preinstalled packages that this repo doesn't deal with, so it's most likely not a concern.
 
-This command gets the resources for training and testing, and then prepares the Docker image for the experiments. After creating the Docker image, you run the following command.
+### Additional steps for PySpacer classifiers
 
-`make run`
+1. If you're in JupyterLab, you need to have interactive matplotlib working to have pan, zoom, and save controls on annotation plots. If you want this, after pip-installing ipympl, you must [hard-refresh](https://www.howtogeek.com/672607/how-to-hard-refresh-your-web-browser-to-bypass-your-cache/) the browser tab that has the JupyterLab space open.
 
-The above command creates a Docker container from the Docker image which we create with `make build`.
+1. You'll need to specify configuration values, using either an `.env` file in the directory that you're running your script or notebook from, or by setting environment variables. See the `pyspacer_example` directory for a full example.
 
-## Classify Features
+### Installation environment
 
-To classify features, you can run the following command:
+Although MERMAID IC is primarily targeting an AWS SageMaker environment, this package can also be set up on a local dev machine.
 
-`make classify`
+AWS SageMaker advantages over local:
 
-To create a file archive of a container image, use this command, changing the name of the archive file and container to reflect the names you want to use:
+- Easily and securely access private S3 files through spaces, as long as the SageMaker domain is set up with an applicable Space execution role.
+- Web-based IDE spaces with real-time collaboration.
+- MLflow tracking servers can be shared by everyone who can access the SageMaker domain.
+- Default distribution image already has many Python packages relevant to this project. This could be preferable over maintaining a 3 GB local venv.
 
-`docker save --output archive-name.tar username/imagename:tag`
+Local env advantages over SageMaker:
 
-It’s also a good idea to archive a copy of the Dockerfile used to generate a container image along with the file archive of the container image itself.
+- Don't have to worry about the AWS web session expiring every so often, and don't need constant internet to keep working.
+- More IDE choices, not just VSCode (Code Editor spaces) or JupyterLab.
+- Can run a local MLflow tracking server with very low startup and cost.
+- Easier to customize and persist the packages that are installed in the environment.
+
+If you're on a local dev machine and accessing public S3 files, the `SPACER_AWS_ANONYMOUS` setting may be useful.
+
+
+## For developers
+
+Set up this project as an [editable install](https://pip.pypa.io/en/stable/topics/local-project-installs/): first git-clone this repo, then use `pip install -e <path to repo>`.
+
+### Design notes
+
+This project is set up as a Python package with a [flat project layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/).
+
+Although this project isn't on PyPI, the fact that it's set up as a package makes it easier to:
+
+- Import from this project, compared to an ad-hoc addition to `sys.path`, for example.
+
+- Manage project dependencies.
