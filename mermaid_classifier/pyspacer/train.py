@@ -197,8 +197,6 @@ class TrainingDataset:
         self.drop_growthforms = drop_growthforms
         self.annotation_limit = annotation_limit
 
-        # TODO: This is just MERMAID so far; also get CoralNet
-
         # As we iterate through annotations, we'll check the image IDs
         # against the feature vectors that are actually present in S3.
         s3 = S3FileSystem(anon=settings.spacer_aws_anonymous)
@@ -210,10 +208,6 @@ class TrainingDataset:
             f's3://{TRAINING_BUCKET}/mermaid/'
             f'mermaid_confirmed_annotations.parquet'
         )
-
-        # TODO: Option to filter by CN source (and MERMAID equiv.?).
-        #   Like a CSV with columns for site (CN or MERMAID)
-        #   and source/project ID.
 
         annotations_by_image = self.grouped_data_rows_from_parquet(
             mermaid_annotations_s3_uri, 'image_id')
@@ -494,7 +488,6 @@ def run_training(
     Local filepath of a CSV file, specifying either the MERMAID benthic
     attributes to accept from the training data (excluding all others), or
     the ones to leave out from the training data (including all others).
-    (TODO: Also support S3 path for potentially easier bookkeeping/sharing)
     - Specify at most one of these files, not both. If neither file is
       specified, then all MERMAID benthic attributes are accepted.
     - Mapping from CoralNet label IDs to MERMAID BA IDs will be done before
@@ -604,8 +597,8 @@ def run_training(
     # Just store the model in memory for now, since it'll be saved out to
     # MLflow later anyway.
     model_loc = DataLocation('memory', key='classifier.pkl')
-    # Not sure about saving this yet. It could at least be used to
-    # generate and log a confusion matrix.
+    # Not sure about saving this as an artifact yet. If we do, then
+    # use a location type other than 'memory'.
     valresult_loc = DataLocation('memory', key='valresult.json')
 
     train_msg = TrainClassifierMsg(
@@ -659,12 +652,6 @@ def run_training(
             for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
                 ref_accs_dict[epoch_number] = format_accuracy(acc)
             mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
-
-            # TODO: Log confusion matrix?
-            # TODO: Log valresult, or is it too big?
-
-            # TODO: Ensure one of the env / requirements artifacts includes
-            # the pyspacer version.
 
             # Save and register the trained model.
             signature = infer_signature(params=experiment_params)
