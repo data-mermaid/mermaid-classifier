@@ -50,20 +50,9 @@ If you're in a SageMaker JupyterLab space:
 
 ### Additional steps for PySpacer classifiers
 
-1. In the directory that you're running your code or notebook from, create a `.env` file which defines variables, like in the following example:
+1. If you're in JupyterLab, you need to have interactive matplotlib working to have pan, zoom, and save controls on annotation plots. If you want this, after pip-installing ipympl, you must [hard-refresh](https://www.howtogeek.com/672607/how-to-hard-refresh-your-web-browser-to-bypass-your-cache/) the browser tab that has the JupyterLab space open.
 
-    ```
-    SPACER_EXTRACTORS_CACHE_DIR=/path/to/extractors_cache
-    MLFLOW_TRACKING_SERVER=arn:aws:sagemaker:us-east-1:123412341234:mlflow-tracking-server/my-server
-    MLFLOW_DEFAULT_EXPERIMENT_NAME=Label filters and rollups
-    WEIGHTS_LOCATION=/path/to/weights.pt
-    ```
-    
-    If you're missing a required setting, you should get an error saying so when your code runs. For more information on these settings, see `mermaid_classifier/pyspacer/settings.py`.
-
-    Alternatively, you may directly set environment variables instead of using an `.env` file.
-
-2. If you're in JupyterLab, you need to have interactive matplotlib working to have pan, zoom, and save controls on annotation plots. If you want this, after pip-installing ipympl, you must [hard-refresh](https://www.howtogeek.com/672607/how-to-hard-refresh-your-web-browser-to-bypass-your-cache/) the browser tab that has the JupyterLab space open.
+1. You'll need to specify configuration values, using either an `.env` file in the directory that you're running your script or notebook from, or by setting environment variables. See the `pyspacer_example` directory for a full example.
 
 ### Installation environment
 
