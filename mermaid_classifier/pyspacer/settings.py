@@ -1,7 +1,6 @@
 import os
 from typing import Literal
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,13 +12,12 @@ class Settings(BaseSettings):
     should be UPPER_CASE.
     (Note: that matters for Linux/Mac, but might not for Windows,
     which is case-insensitive about that)
+
+    Though none of the settings are 100% strictly required, some are
+    needed in common cases.
     """
-
-    # Required settings
-    mlflow_tracking_server: str = Field()
-    weights_location: str = Field()
-
-    # Optional settings (may need to set in specific cases)
+    mlflow_tracking_server: str | None = None
+    weights_location: str | None = None
     training_inputs_percent_missing_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
     spacer_aws_anonymous: Literal['False', 'True'] = 'False'
@@ -42,6 +40,7 @@ def set_env_vars_for_packages():
     var_names = [
         # Filesystem directory to use for caching extractor weights that
         # were downloaded from S3 or from a URL.
+        # This is required if loading weights from such a source.
         'spacer_extractors_cache_dir',
         # If True, AWS is accessed without any credentials, which can
         # simplify setup while still allowing access to public S3 files.
