@@ -56,3 +56,6 @@ def mlflow_connect():
                 "Could not connect to the MLflow tracking server."
                 " Is the tracking server up and running?"
             )
+        # If it's some other kind of MlflowException, just re-raise
+        # for debugging purposes.
+        raise e
