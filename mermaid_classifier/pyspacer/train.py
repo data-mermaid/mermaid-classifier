@@ -628,7 +628,9 @@ def run_training(
 
     else:
 
-        mlflow_connect()
+        time_taken = mlflow_connect()
+        logger.info(f"Time to connect to MLflow tracking: {time_taken}")
+
         mlflow.set_experiment(experiment_name)
 
         with mlflow.start_run(run_name=run_name):
