@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import logging
 
 import mlflow
@@ -41,11 +42,12 @@ def logging_config_for_script(name):
     return logging.getLogger(name)
 
 
-def mlflow_connect():
+def mlflow_connect() -> timedelta:
     mlflow.set_tracking_uri(uri=settings.mlflow_tracking_server)
 
     try:
         # Do something to test the server connection.
+        time_before_connect = datetime.now()
         mlflow.search_experiments(max_results=1)
     except mlflow.exceptions.MlflowException as e:
         # Note that this may take a long time to reach
@@ -59,3 +61,7 @@ def mlflow_connect():
         # If it's some other kind of MlflowException, just re-raise
         # for debugging purposes.
         raise e
+
+    time_after_connect = datetime.now()
+    # Return the time taken to connect.
+    return time_after_connect - time_before_connect
