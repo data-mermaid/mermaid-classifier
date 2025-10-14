@@ -43,9 +43,10 @@ MLFLOW_MODEL_ID_REGEX = re.compile(r'm-[a-f0-9]{30,32}')
 
 def mlflow_model_id_to_pkl_uri(model_id: str) -> str:
 
-    model_filename = 'model.pkl'
-    mlflow_connect()
+    time_taken = mlflow_connect()
+    print(f"Time to connect to MLflow tracking: {time_taken}")
 
+    model_filename = 'model.pkl'
     logged_model = mlflow.get_logged_model(model_id)
     return logged_model.artifact_location + '/' + model_filename
 
