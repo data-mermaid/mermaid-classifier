@@ -12,6 +12,27 @@ run_training()
 ```
 
 
+## Choosing data sources
+
+You can create a CSV file which lists IDs of public CoralNet sources to get training data (annotations of confirmed images) from:
+
+```
+id
+23
+1579
+3064
+```
+
+Supposing that the above CSV content is entered into a file located at `sources/sample.csv`, the following code would run training on all MERMAID data plus the data from these three CoralNet sources:
+
+```python
+from mermaid_classifier.pyspacer.train import run_training
+
+run_training(
+    coralnet_sources_csv='sources/sample.csv',
+)
+```
+
 ## Excluding annotations of certain labels
 
 You can create a CSV file which enumerates certain MERMAID benthic attributes to exclude from training:
@@ -91,6 +112,9 @@ run_training(
 
 # The rest of the parameters available.
 run_training(
+    # Specifying False here means you're only training on CoralNet sources. 
+    include_mermaid=False,
+    coralnet_sources_csv='sources/sample.csv',
     included_benthicattrs_csv='labels/included.csv',
     # Specify at most one of included and excluded, not both.
     # excluded_benthicattrs_csv='labels/excluded.csv',
