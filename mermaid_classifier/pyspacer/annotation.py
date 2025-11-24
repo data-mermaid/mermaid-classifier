@@ -16,8 +16,9 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
+from spacer.data_classes import DataLocation
 from spacer.extractors import EfficientNetExtractor
-from spacer.messages import ClassifyImageMsg, DataLocation
+from spacer.messages import ClassifyImageMsg
 from spacer.storage import load_image, storage_factory
 from spacer.tasks import classify_image
 

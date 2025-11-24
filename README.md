@@ -72,7 +72,7 @@ Local env advantages over SageMaker:
 - Can run a local MLflow tracking server with very low startup and cost.
 - Easier to customize and persist the packages that are installed in the environment.
 
-If you're on a local dev machine and accessing public S3 files, the `SPACER_AWS_ANONYMOUS` setting may be useful.
+If you're on a local dev machine and accessing public S3 files, the `AWS_ANONYMOUS` setting may be useful.
 
 
 ## For developers

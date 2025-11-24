@@ -5,10 +5,10 @@ provided on S3.
 from collections import Counter
 from dataclasses import make_dataclass
 from datetime import datetime
+import enum
 from io import StringIO
 from pathlib import Path
 import typing
-from urllib.parse import urlparse
 
 import duckdb
 try:
@@ -22,14 +22,14 @@ except ImportError as err:
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
-from spacer.data_classes import ImageLabels
-from spacer.messages import DataLocation, TrainClassifierMsg
+from spacer.data_classes import DataLocation, ImageLabels
+from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
 from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
 from mermaid_classifier.common.benthic_attributes import (
-    BenthicAttributeLibrary, GrowthFormLibrary)
+    BenthicAttributeLibrary, CoralNetMermaidMapping, GrowthFormLibrary)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -38,8 +38,9 @@ from mermaid_classifier.pyspacer.utils import (
 logger = logging_config_for_script('train')
 
 
-AWS_REGION = 'us-east-1'
-TRAINING_BUCKET = 'coral-reef-training'
+class Sites(enum.Enum):
+    CORALNET = 'coralnet'
+    MERMAID = 'mermaid'
 
 
 def log_memory_usage(message):
@@ -56,6 +57,23 @@ def alphanumeric_only_str(s: str):
     Return a version of s which has the non-alphanumeric chars removed.
     """
     return ''.join([char for char in s if char.isalnum()])
+
+
+def csv_to_dataframe(csv_file: typing.TextIO):
+    """
+    CSV file to pandas dataframe. Use this for non-mathematical data
+    such as strings or integers that just represent IDs.
+
+    Throws pd.errors.EmptyDataError if there's no CSV data.
+    """
+    return pd.read_csv(
+        csv_file,
+        # Don't convert blank cells to NaN. It seems easier to
+        # just check if row.get('...') is truthy, than to
+        # check if it's NaN, when we're not dealing with mathematical
+        # data in the first place.
+        keep_default_na=False,
+    )
 
 
 class BenthicAttrSet:
@@ -78,14 +96,7 @@ class BenthicAttrSet:
         self.ba_set = set()
 
         try:
-            self.csv_dataframe = pd.read_csv(
-                csv_file,
-                # Don't convert blank cells to NaN. It seems easier to
-                # just check if row.get('...') is truthy, than to
-                # check if it's NaN, when we're not dealing with numeric
-                # data in the first place.
-                keep_default_na=False,
-            )
+            self.csv_dataframe = csv_to_dataframe(csv_file)
         except pd.errors.EmptyDataError:
             # It just errors if there's no CSV data, so we manually
             # create an empty dataframe in this case.
@@ -152,20 +163,53 @@ class BenthicAttrRollupSpec(BenthicAttrSet):
         return ba_id
 
 
-class TrainingDataset:
+class CNSourceFilter:
 
-    data: dict
-    annos_by_ba: Counter
-    annos_by_bagf: Counter
+    source_id_list: list[str]
+
+    def __init__(self, csv_file: typing.TextIO):
+        """
+        Initialize using a CSV file that specifies a set
+        of CoralNet sources.
+        """
+        csv_dataframe = csv_to_dataframe(csv_file)
+        self.source_id_list = []
+
+        csv_filename = getattr(csv_file, 'name', "<File-like obj>")
+
+        if 'id' not in csv_dataframe.columns:
+            raise ValueError(
+                f"{csv_filename}:"
+                f" doesn't have `id` column")
+
+        for index, row in csv_dataframe.iterrows():
+            source_id = row.get('id')
+            if not source_id:
+                raise ValueError(
+                    f"{csv_filename}:"
+                    f" id not found in row {index + 1}")
+            self.source_id_list.append(source_id)
+
+        if len(self.source_id_list) == 0:
+            raise ValueError("No sources specified")
+
+
+class TrainingDataset:
 
     def __init__(
         self,
+        include_mermaid: bool = True,
+        coralnet_sources_csv: str = None,
         included_benthicattrs_csv: str = None,
         excluded_benthicattrs_csv: str = None,
         benthicattr_rollup_targets_csv: str = None,
         drop_growthforms: bool = False,
         annotation_limit: int | None = None,
     ):
+        cn_source_filter = None
+        if coralnet_sources_csv:
+            with open(coralnet_sources_csv) as csv_f:
+                cn_source_filter = CNSourceFilter(csv_f)
 
         if included_benthicattrs_csv and excluded_benthicattrs_csv:
             raise ValueError(
@@ -197,37 +241,70 @@ class TrainingDataset:
         self.drop_growthforms = drop_growthforms
         self.annotation_limit = annotation_limit
 
-        # As we iterate through annotations, we'll check the image IDs
-        # against the feature vectors that are actually present in S3.
-        s3 = S3FileSystem(anon=settings.spacer_aws_anonymous)
-        mermaid_full_paths_in_s3 = set(
-            s3.find(path=f's3://{TRAINING_BUCKET}/mermaid/'))
-        missing_features = []
-
-        mermaid_annotations_s3_uri = (
-            f's3://{TRAINING_BUCKET}/mermaid/'
-            f'mermaid_confirmed_annotations.parquet'
+        # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
+        self.s3 = S3FileSystem(
+            anon=settings.aws_anonymous,
+            key=settings.aws_key_id,
+            secret=settings.aws_secret,
+            token=settings.aws_session_token,
         )
-
-        annotations_by_image = self.grouped_data_rows_from_parquet(
-            mermaid_annotations_s3_uri, 'image_id')
+        self._duck_conn = None
 
         self.data = dict()
         self.annos_by_ba = Counter()
         self.annos_by_bagf = Counter()
-        all_annos_count = 0
+        self.all_annos_count = 0
+        missing_features = []
+        mermaid_full_paths_in_s3 = set()
 
         # This'll get filled in on-demand later. That way, we can abort
         # reading in data at any time without worrying about whether
         # this will get set.
         self._labels = None
 
+        self.coralnet_mermaid_label_mapping = CoralNetMermaidMapping()
+
+        if coralnet_sources_csv:
+            self.read_coralnet_data(cn_source_filter)
+
+        if include_mermaid:
+            self.read_mermaid_data()
+
+            # When we iterate through the annotation data's images, we'll
+            # check the image IDs against the feature vectors that are
+            # actually present in S3.
+            # Note: this line can take a while to run.
+            mermaid_full_paths_in_s3 = set(
+                self.s3.find(
+                    path=f's3://{settings.mermaid_train_data_bucket}/mermaid/'
+                )
+            )
+
+        # Now this should have annotations populated.
+        if not self.duckdb_annotations_table_exists():
+            raise ValueError(
+                "No annotations from CoralNet or MERMAID, even before"
+                " label filtering.")
+
+        annotations_duckdb = self.duck_conn.execute(
+            f"SELECT * FROM annotations")
+
+        # TODO: Group by site AND image, just in case image IDs might
+        #  overlap between sites (though that's not anticipated with
+        #  CN/MM).
+        annotations_by_image = self.grouped_annotation_rows(
+            annotations_duckdb, 'image_id')
+
         for rows in annotations_by_image:
 
             # Here, in one loop iteration, we're given all the
             # annotation rows for a single image.
-            image_id = rows[0]['image_id']
-            feature_bucket_path = f'mermaid/{image_id}_featurevector'
+            first_row = rows[0]
+            site = first_row['site']
+            bucket = first_row['bucket']
+            image_id = first_row['image_id']
+            feature_bucket_path = first_row['feature_vector']
+
             image_annotations = []
             image_annos_by_ba = Counter()
             image_annos_by_bagf = Counter()
@@ -244,7 +321,14 @@ class TrainingDataset:
                 benthic_attribute_id = self.rollup_spec.roll_up(
                     row['benthic_attribute_id'])
 
-                if drop_growthforms or row['growth_form_id'] == 'None':
+                # TODO: None from CoralNet-MERMAID mapping, 'None' from
+                #  MERMAID annotations parquet. Not sure what should change
+                #  to improve consistency.
+                if (
+                    self.drop_growthforms
+                    or row['growth_form_id'] is None
+                    or row['growth_form_id'] == 'None'
+                ):
                     # Either we've chosen not to get growth forms, or
                     # this annotation has no growth form.
                     bagf = benthic_attribute_id
@@ -263,29 +347,38 @@ class TrainingDataset:
                 image_annos_by_ba[benthic_attribute_id] += 1
                 image_annos_by_bagf[bagf] += 1
 
+            impending_annotation_count = (
+                self.all_annos_count + len(image_annotations))
             if (
-                annotation_limit
+                self.annotation_limit
                 and
-                all_annos_count + len(image_annotations) > annotation_limit
+                impending_annotation_count > self.annotation_limit
             ):
                 logger.debug(
-                    f"Currently have {all_annos_count} annotations."
+                    f"Currently have {self.all_annos_count} annotations."
                     f" Stopping because the {len(image_annotations)}"
                     f" annotations from the next image ({image_id})"
-                    f" would put us over the limit of {annotation_limit}."
+                    f" would put us over the limit of {self.annotation_limit}."
                 )
                 return
 
-            feature_full_path = f'{TRAINING_BUCKET}/{feature_bucket_path}'
-            if feature_full_path not in mermaid_full_paths_in_s3:
-                logger.warning(
-                    f"Skipping feature vector because couldn't find"
-                    f" the file in S3: {feature_bucket_path}")
-                missing_features.append(feature_bucket_path)
-                continue
+            # TODO: Also check CoralNet bucket/folder for missing features.
+            if site == Sites.MERMAID.value:
+                feature_full_path = f'{bucket}/{feature_bucket_path}'
+                if feature_full_path not in mermaid_full_paths_in_s3:
+                    logger.warning(
+                        f"Skipping feature vector because couldn't find"
+                        f" the file in S3: {feature_full_path}")
+                    missing_features.append(feature_full_path)
+                    continue
 
-            self.data[feature_bucket_path] = image_annotations
-            all_annos_count += len(image_annotations)
+            feature_loc = DataLocation(
+                storage_type='s3',
+                bucket_name=bucket,
+                key=feature_bucket_path,
+            )
+            self.data[feature_loc] = image_annotations
+            self.all_annos_count += len(image_annotations)
             self.annos_by_ba += image_annos_by_ba
             self.annos_by_bagf += image_annos_by_bagf
 
@@ -303,31 +396,154 @@ class TrainingDataset:
                 f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
             )
 
-    @staticmethod
-    def data_rows_from_parquet(
-        parquet_uri: str,
+    def read_mermaid_data(self):
+
+        mermaid_annotations_s3_uri = (
+            f's3://{settings.mermaid_train_data_bucket}/mermaid/'
+            f'mermaid_confirmed_annotations.parquet'
+        )
+
+        if self.duckdb_annotations_table_exists():
+            # INSERT INTO ... BY NAME ... means that we don't have to match
+            # the column order of the existing table.
+            # https://duckdb.org/docs/stable/sql/statements/insert#insert-into--by-name
+            self.duck_conn.execute(
+                f"INSERT INTO annotations BY NAME"
+                f" SELECT"
+                f"  image_id, row, col,"
+                f"  benthic_attribute_id, growth_form_id,"
+                f" 'MERMAID' AS site,"
+                f" '{settings.mermaid_train_data_bucket}' AS bucket,"
+                f"  NULL AS project_id,"
+                f"  concat('mermaid/', image_id, '_featurevector')"
+                f"   AS feature_vector"
+                f" FROM read_parquet('{mermaid_annotations_s3_uri}')"
+            )
+        else:
+            # Didn't read any CoralNet data, so we have to create
+            # the annotations table.
+            self.duck_conn.execute(
+                f"CREATE TABLE annotations AS"
+                f" SELECT *"
+                f" FROM read_parquet('{mermaid_annotations_s3_uri}')"
+            )
+
+    def read_coralnet_data(self, cn_source_filter):
+        annotations_uri_list = []
+
+        for source_id in cn_source_filter.source_id_list:
+
+            source_folder_uri = (
+                f's3://{settings.coralnet_train_data_bucket}/s{source_id}'
+            )
+
+            # One row per point annotation,
+            # with columns including Image ID, Row, Column, Label ID
+            annotations_uri = f'{source_folder_uri}/annotations.csv'
+            annotations_uri_list.append(annotations_uri)
+
+        if self.duckdb_annotations_table_exists():
+            # Since CoralNet's data is not formatted to the open data
+            # bucket's specs yet, it's easier to read in CN data first,
+            # then transform the table to open data format, then read
+            # in MERMAID data.
+            #
+            # As opposed to reading MERMAID first, transforming to CN
+            # format, reading in CN, and transforming back to open data
+            # format.
+            raise RuntimeError(
+                "Due to format technicalities, CoralNet data must be read"
+                " in before MERMAID data.")
+
+        # Read each selected source's annotations-CSV into a single
+        # DuckDB table.
+        #
+        # `CREATE TABLE ... AS SELECT ...` is from:
+        # https://duckdb.org/docs/stable/data/csv/overview
+        #
+        # Passing a list of CSV files into read_csv() is from:
+        # https://duckdb.org/docs/stable/data/multiple_files/overview
+        self.duck_conn.execute(
+            f"CREATE TABLE annotations AS"
+            f" SELECT *"
+            f" FROM read_csv({annotations_uri_list}, filename = true)"
+        )
+
+        # 1) Normalize the column names with the open data bucket parquet
+        #  format, and
+        # 2) Create some new columns derived from the existing ones, based
+        #  on how the CoralNet data is organized. We want to do this while
+        #  still in DuckDB format, because we'd like to have data-proc
+        #  steps after a certain point to not have site-specific cases.
+        #
+        # CREATE OR REPLACE TABLE:
+        # https://duckdb.org/2024/10/11/duckdb-tricks-part-2#repeated-data-transformation-steps
+        # regexp_extract and || (concat):
+        # https://duckdb.org/docs/stable/sql/functions/text
+        # Also potentially helpful:
+        # https://betterstack.com/community/guides/scaling-python/duckdb-python/
+        self.duck_conn.execute(
+            f"CREATE OR REPLACE TABLE annotations AS"
+            f" SELECT"
+            # Fix the case of this column name to match open data bucket
+            # format.
+            f' "Row" AS row,'
+            # Make this column name match open data bucket format, and use
+            # quotes to avoid keyword clashing. Be sure to wrap in double
+            # quotes. Single quotes would get it interpreted as
+            # "give every row this constant string value".
+            f' "Column" AS col,'
+            # Later we find it easier to assume these are text, not integers.
+            # And quotes help again, this time since the name has spaces in it.
+            f' CAST("Image ID" AS VARCHAR) AS image_id,'
+            f' CAST("Label ID" AS VARCHAR) AS label_id,'
+            # Here we DO want to give every row this constant string value.
+            f" '{Sites.CORALNET.value}' AS site,"
+            f" '{settings.coralnet_train_data_bucket}' AS bucket,"
+            # Extract the source ID, and name it 'project_id' as a
+            # site-inspecific term.
+            rf" filename.regexp_extract('/s(\d+)/', 1) AS project_id,"
+            # e.g. s123/features/i456.featurevector
+            f" 's' || project_id || '/features/i' || image_id"
+            f"  || '.featurevector' AS feature_vector"
+            f" FROM annotations"
+        )
+
+        # Get all the unique CN labels in the dataset, and their
+        # frequencies.
+        cn_label_frequencies = dict(
+            self.duck_conn.execute(
+                "SELECT label_id, COUNT(*)"
+                " FROM annotations GROUP BY label_id"
+            ).fetchall()
+        )
+
+        # Add BAs and GFs to the DuckDB database, using
+        # our mapping from CoralNet label IDs to MERMAID BAs/GFs.
+        self.coralnet_mermaid_label_mapping.add_bagf_in_duckdb(
+            cn_label_ids=list(cn_label_frequencies.keys()),
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+        )
+
+    def duckdb_annotations_table_exists(self) -> bool:
+        # https://duckdb.org/docs/stable/sql/meta/information_schema
+        table_query_result = self.duck_conn.execute(
+            f"SELECT * FROM information_schema.tables"
+            f" WHERE table_name = 'annotations'"
+        ).fetchall()
+
+        # Result should be [] if doesn't exist, which 'bools' to False.
+        return bool(table_query_result)
+
+    def annotation_rows(
+        self,
+        annotations_duckdb: 'DuckDBPyRelation',
     ) -> typing.Generator['pandas.core.series.Series', None, None]:
         """
-        Reads from a parquet file (chunkifying to avoid memory issues),
+        Reads from a DuckDB relation (chunkifying to avoid memory issues),
         and generates pandas dataframe rows.
         """
-        duck_conn = duckdb.connect()
-
-        try:
-            duck_conn.load_extension('httpfs')
-        except duckdb.IOException:
-            # Extension not installed yet.
-            duck_conn.install_extension('httpfs')
-            duck_conn.load_extension('httpfs')
-
-        if urlparse(parquet_uri).scheme == 's3':
-            duck_conn.execute(f"SET s3_region='{AWS_REGION}'")
-
-        # TODO: Support getting specific rows rather than just *
-        #  to reduce the amount of data that has to be read in.
-        duck_rel = duck_conn.execute(
-            f"SELECT * FROM read_parquet('{parquet_uri}')")
-
         # Fetch in chunks, not all at once, to avoid running out of
         # memory.
         # An example chunk size is 2048 rows x 12 columns.
@@ -335,7 +551,7 @@ class TrainingDataset:
         # fetchmany() is similar, but returns lists of tuples instead.
         # A dataframe provides dict-like access which is a bit nicer.
         while True:
-            dataframe = duck_rel.fetch_df_chunk()
+            dataframe = annotations_duckdb.fetch_df_chunk()
             if dataframe.shape[0] == 0:
                 # Empty dataframe; no more chunks left.
                 break
@@ -354,17 +570,16 @@ class TrainingDataset:
                 # is invisible to the caller.
                 yield row
 
-    @classmethod
-    def grouped_data_rows_from_parquet(
-        cls,
-        parquet_uri: str,
+    def grouped_annotation_rows(
+        self,
+        annotations_duckdb: 'DuckDBPyRelation',
         grouping_column: str,
     ) -> typing.Generator['pandas.core.series.Series', None, None]:
 
         grouping_value = None
         group_rows = []
 
-        for row in cls.data_rows_from_parquet(parquet_uri):
+        for row in self.annotation_rows(annotations_duckdb):
             if grouping_value != row[grouping_column]:
                 if grouping_value:
                     # End of group.
@@ -378,6 +593,53 @@ class TrainingDataset:
 
         # End of last group.
         yield group_rows
+
+    @property
+    def duck_conn(self):
+        """
+        Return a DuckDB connection which includes the ability to read
+        files from S3.
+
+        Each TrainingDataset instance only establishes such a connection
+        once.
+
+        Limitation: each TrainingDataset can only read from a single S3
+        region.
+        """
+        if self._duck_conn is None:
+            self._duck_conn = duckdb.connect()
+
+            # Load the DuckDB extension which allows reading remote files
+            # from S3.
+            # https://duckdb.org/docs/stable/core_extensions/httpfs/overview
+            try:
+                self._duck_conn.load_extension('httpfs')
+            except duckdb.IOException:
+                # Extension not installed yet.
+                self._duck_conn.install_extension('httpfs')
+                self._duck_conn.load_extension('httpfs')
+
+            # Configure region and auth, if present.
+            # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api
+            #
+            # Beware not to use the deprecated S3 API, which has syntax like
+            # `SET s3_region = 'us-east-1'`:
+            # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api_legacy_authentication
+            query = (
+                f"CREATE OR REPLACE SECRET secret ("
+                f" TYPE s3,"
+                f" PROVIDER config,"
+            )
+            if settings.aws_key_id:
+                query += f" KEY_ID '{settings.aws_key_id}',"
+                query += f" SECRET '{settings.aws_secret}',"
+            if settings.aws_session_token:
+                query += f" SESSION_TOKEN '{settings.aws_session_token}',"
+            query += f" REGION '{settings.aws_region}')"
+
+            self._duck_conn.execute(query)
+
+        return self._duck_conn
 
     @property
     def labels(self):
@@ -471,6 +733,8 @@ class TrainingDataset:
 
 
 def run_training(
+    include_mermaid: bool = True,
+    coralnet_sources_csv: str = None,
     included_benthicattrs_csv: str = None,
     excluded_benthicattrs_csv: str = None,
     benthicattr_rollup_targets_csv: str = None,
@@ -482,6 +746,21 @@ def run_training(
     disable_mlflow: bool = False,
 ):
     """
+    include_mermaid
+
+    Whether to include MERMAID annotations or not. False can be useful for
+    any troubleshooting which is CoralNet specific.
+
+    coralnet_sources_csv
+
+    Local filepath of a CSV file, specifying CoralNet sources to include in
+    the training data.
+    Recognized columns:
+      id -- CoralNet source ID number.
+      Other informational columns can also be present and will be ignored.
+    If not specified, no CoralNet sources are included (so only MERMAID
+    projects go into training).
+
     included_benthicattrs_csv
     excluded_benthicattrs_csv
 
@@ -550,6 +829,8 @@ def run_training(
         experiment_name or settings.mlflow_default_experiment_name)
 
     training_dataset = TrainingDataset(
+        include_mermaid=include_mermaid,
+        coralnet_sources_csv=coralnet_sources_csv,
         included_benthicattrs_csv=included_benthicattrs_csv,
         excluded_benthicattrs_csv=excluded_benthicattrs_csv,
         benthicattr_rollup_targets_csv=benthicattr_rollup_targets_csv,
@@ -607,8 +888,6 @@ def run_training(
         nbr_epochs=experiment_params['epochs'],
         clf_type='MLP',
         labels=training_dataset.labels,
-        features_loc=DataLocation(
-            's3', bucket_name=TRAINING_BUCKET, key=''),
         previous_model_locs=[],
         model_loc=model_loc,
         valresult_loc=valresult_loc,
@@ -654,6 +933,9 @@ def run_training(
             for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
                 ref_accs_dict[epoch_number] = format_accuracy(acc)
             mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
+
+            # TODO: MLflow artifact with image counts from MERMAID and
+            #  from each CN source.
 
             # Save and register the trained model.
             signature = infer_signature(params=experiment_params)
