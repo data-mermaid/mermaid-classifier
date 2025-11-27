@@ -2,11 +2,11 @@
 Train a classifier using feature vectors and annotations
 provided on S3.
 """
-from collections import Counter
-from dataclasses import make_dataclass
 from datetime import datetime
 import enum
 from io import StringIO
+import itertools
+import math
 from pathlib import Path
 import typing
 
@@ -17,8 +17,6 @@ try:
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
-# MLflow requires pandas.
-# Might as well also use it for reading CSV.
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
@@ -30,6 +28,13 @@ from spacer.task_utils import preprocess_labels, SplitMode
 
 from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary, CoralNetMermaidMapping, GrowthFormLibrary)
+from mermaid_classifier.common.csv_utils import CsvSpec
+from mermaid_classifier.common.duckdb_utils import (
+    duckdb_add_column,
+    duckdb_filter_on_column,
+    duckdb_grouped_rows,
+    duckdb_transform_column,
+)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -59,24 +64,9 @@ def alphanumeric_only_str(s: str):
     return ''.join([char for char in s if char.isalnum()])
 
 
-def csv_to_dataframe(csv_file: typing.TextIO):
-    """
-    CSV file to pandas dataframe. Use this for non-mathematical data
-    such as strings or integers that just represent IDs.
+class BenthicAttrSet(CsvSpec):
 
-    Throws pd.errors.EmptyDataError if there's no CSV data.
-    """
-    return pd.read_csv(
-        csv_file,
-        # Don't convert blank cells to NaN. It seems easier to
-        # just check if row.get('...') is truthy, than to
-        # check if it's NaN, when we're not dealing with mathematical
-        # data in the first place.
-        keep_default_na=False,
-    )
-
-
-class BenthicAttrSet:
+    target_column_candidates = ['id', 'name']
 
     _ba_library = None
 
@@ -95,40 +85,18 @@ class BenthicAttrSet:
         """
         self.ba_set = set()
 
-        try:
-            self.csv_dataframe = csv_to_dataframe(csv_file)
-        except pd.errors.EmptyDataError:
-            # It just errors if there's no CSV data, so we manually
-            # create an empty dataframe in this case.
-            # We also short-circuit to prevent any other odd cases.
-            self.csv_dataframe = pd.DataFrame()
-            return
+        super().__init__(csv_file=csv_file)
 
-        csv_filename = getattr(csv_file, 'name', "<File-like obj>")
+    def per_item_init_action(self, target_column, target_value):
 
-        if 'id' in self.csv_dataframe.columns:
-            target_column = 'id'
-        elif 'name' in self.csv_dataframe.columns:
-            target_column = 'name'
+        # Regardless of what the CSV input has,
+        # sticking with IDs from here on out will make life easier.
+        if target_column == 'id':
+            ba_id = target_value
         else:
-            raise ValueError(
-                f"{csv_filename}:"
-                f"doesn't have `id` or `name` column")
-
-        for index, row in self.csv_dataframe.iterrows():
-            target_value = row.get(target_column)
-            if not target_value:
-                raise ValueError(
-                    f"{csv_filename}:"
-                    f"{target_column} not found in row {index + 1}")
-
-            # Sticking with IDs from here on out will make life easier.
-            if target_column == 'id':
-                ba_id = target_value
-            else:
-                # 'name'
-                ba_id = self.get_library().by_name[target_value]['id']
-            self.ba_set.add(ba_id)
+            # 'name'
+            ba_id = self.get_library().by_name[target_value]['id']
+        self.ba_set.add(ba_id)
 
 
 class BenthicAttrFilter(BenthicAttrSet):
@@ -142,6 +110,23 @@ class BenthicAttrFilter(BenthicAttrSet):
             return ba_id in self.ba_set
         else:
             return ba_id not in self.ba_set
+
+    def filter_in_duckdb(
+        self,
+        duck_conn: 'DuckDBPyConnection',
+        duck_table_name: str,
+        ba_id_column_name: str = 'benthic_attribute_id',
+    ):
+        """
+        Filter down the rows in the given DuckDB table, based on the
+        benthic attribute ID column and this instance's filter rules.
+        """
+        duckdb_filter_on_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name=ba_id_column_name,
+            inclusion_func=self.accepts_ba,
+        )
 
 
 class BenthicAttrRollupSpec(BenthicAttrSet):
@@ -162,8 +147,23 @@ class BenthicAttrRollupSpec(BenthicAttrSet):
         # Or don't roll up if there's no such ancestor.
         return ba_id
 
+    def roll_up_in_duckdb(
+        self,
+        duck_conn: 'DuckDBPyConnection',
+        duck_table_name: str,
+        ba_id_column_name: str = 'benthic_attribute_id',
+    ):
+        """
+        Roll up the benthic attribute IDs in the given DuckDB table,
+        based on this instance's rollup rules.
+        """
+        duckdb_transform_column(
+            duck_conn, duck_table_name, ba_id_column_name, self.roll_up)
 
-class CNSourceFilter:
+
+class CNSourceFilter(CsvSpec):
+
+    target_column_candidates = ['id']
 
     source_id_list: list[str]
 
@@ -172,26 +172,29 @@ class CNSourceFilter:
         Initialize using a CSV file that specifies a set
         of CoralNet sources.
         """
-        csv_dataframe = csv_to_dataframe(csv_file)
         self.source_id_list = []
 
-        csv_filename = getattr(csv_file, 'name', "<File-like obj>")
+        super().__init__(csv_file=csv_file)
 
-        if 'id' not in csv_dataframe.columns:
-            raise ValueError(
-                f"{csv_filename}:"
-                f" doesn't have `id` column")
+    def per_item_init_action(self, _target_column, target_value):
+        self.source_id_list.append(target_value)
 
-        for index, row in csv_dataframe.iterrows():
-            source_id = row.get('id')
-            if not source_id:
-                raise ValueError(
-                    f"{csv_filename}:"
-                    f" id not found in row {index + 1}")
-            self.source_id_list.append(source_id)
+    def is_empty(self):
+        return len(self.source_id_list) == 0
 
-        if len(self.source_id_list) == 0:
-            raise ValueError("No sources specified")
+
+class Artifacts:
+    """
+    Namespace to make it easier to track artifacts that we're
+    logging to MLflow later.
+    """
+    ba_counts: pd.DataFrame
+    bagf_counts: pd.DataFrame
+    coralnet_label_mapping: pd.DataFrame
+    coralnet_project_stats: pd.DataFrame
+    mermaid_project_stats: pd.DataFrame
+    train_summary_stats: dict
+    unmapped_labels: pd.DataFrame
 
 
 class TrainingDataset:
@@ -206,10 +209,14 @@ class TrainingDataset:
         drop_growthforms: bool = False,
         annotation_limit: int | None = None,
     ):
-        cn_source_filter = None
+        self.artifacts = Artifacts()
+
         if coralnet_sources_csv:
             with open(coralnet_sources_csv) as csv_f:
-                cn_source_filter = CNSourceFilter(csv_f)
+                self.cn_source_filter = CNSourceFilter(csv_f)
+        else:
+            # Empty set of CoralNet sources.
+            self.cn_source_filter = CNSourceFilter(StringIO(''))
 
         if included_benthicattrs_csv and excluded_benthicattrs_csv:
             raise ValueError(
@@ -251,10 +258,6 @@ class TrainingDataset:
         self._duck_conn = None
 
         self.data = dict()
-        self.annos_by_ba = Counter()
-        self.annos_by_bagf = Counter()
-        self.all_annos_count = 0
-        missing_features = []
         mermaid_full_paths_in_s3 = set()
 
         # This'll get filled in on-demand later. That way, we can abort
@@ -262,10 +265,11 @@ class TrainingDataset:
         # this will get set.
         self._labels = None
 
-        self.coralnet_mermaid_label_mapping = CoralNetMermaidMapping()
-
-        if coralnet_sources_csv:
-            self.read_coralnet_data(cn_source_filter)
+        if not self.cn_source_filter.is_empty():
+            self.read_coralnet_data()
+        else:
+            # An empty dataframe
+            self.artifacts.coralnet_project_stats = pd.DataFrame()
 
         if include_mermaid:
             self.read_mermaid_data()
@@ -279,6 +283,8 @@ class TrainingDataset:
                     path=f's3://{settings.mermaid_train_data_bucket}/mermaid/'
                 )
             )
+        else:
+            self.artifacts.mermaid_project_stats = pd.DataFrame()
 
         # Now this should have annotations populated.
         if not self.duckdb_annotations_table_exists():
@@ -286,49 +292,106 @@ class TrainingDataset:
                 "No annotations from CoralNet or MERMAID, even before"
                 " label filtering.")
 
-        annotations_duckdb = self.duck_conn.execute(
-            f"SELECT * FROM annotations")
+        self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
-        # TODO: Group by site AND image, just in case image IDs might
-        #  overlap between sites (though that's not anticipated with
-        #  CN/MM).
-        annotations_by_image = self.grouped_annotation_rows(
-            annotations_duckdb, 'image_id')
+        # Roll up benthic attributes.
+        self.rollup_spec.roll_up_in_duckdb(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+        )
+
+        if self.drop_growthforms:
+            # Null out all annotations' growth forms.
+            duckdb_transform_column(
+                duck_conn=self.duck_conn,
+                duck_table_name='annotations',
+                column_name='growth_form_id',
+                transform_func=lambda x: None,
+            )
+
+        # Filter out benthic attributes we don't want.
+        self.benthicattr_filter.filter_in_duckdb(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+        )
+
+        if self.annotation_limit:
+
+            # See how many annotations we have.
+            count_up_to_limit = self.duck_conn.execute(
+                f"SELECT count(*)"
+                f" FROM annotations"
+                f" LIMIT {self.annotation_limit + 1}"
+            ).fetchall()[0][0]
+
+            # If we're over limit, log that fact.
+            if count_up_to_limit > self.annotation_limit:
+                logger.debug(
+                    f"Truncating the train data to"
+                    f" {self.annotation_limit} annotations."
+                )
+
+            # Determine how to balance out the annotations between
+            # sites.
+            # Ideally, each site contributes half the limit; but if one
+            # site's total is less than half the limit, we grab more from
+            # the other site.
+            cn_count_up_to_limit = self.duck_conn.execute(
+                f"SELECT count(*)"
+                f" FROM annotations"
+                f" WHERE site = '{Sites.CORALNET.value}'"
+                f" LIMIT {self.annotation_limit + 1}"
+            ).fetchall()[0][0]
+            mm_count_up_to_limit = self.duck_conn.execute(
+                f"SELECT count(*)"
+                f" FROM annotations"
+                f" WHERE site = '{Sites.MERMAID.value}'"
+                f" LIMIT {self.annotation_limit + 1}"
+            ).fetchall()[0][0]
+            half_limit = math.ceil(self.annotation_limit / 2)
+            if cn_count_up_to_limit <= half_limit:
+                cn_count = cn_count_up_to_limit
+                mm_count = self.annotation_limit - cn_count
+            else:
+                mm_count = min(mm_count_up_to_limit, half_limit)
+                cn_count = self.annotation_limit - mm_count
+
+            # Get the appropriate number of annotations from each site.
+            # https://duckdb.org/docs/stable/sql/query_syntax/setops#union
+            self.duck_conn.execute(
+                f"CREATE OR REPLACE TABLE annotations AS ("
+                f" (SELECT * FROM annotations"
+                f"  WHERE site = '{Sites.CORALNET.value}'"
+                f"  LIMIT {cn_count})"
+                f" UNION ALL"
+                f" (SELECT * FROM annotations"
+                f"  WHERE site = '{Sites.MERMAID.value}'"
+                f"  LIMIT {mm_count})"
+                f")"
+            )
+
+        annotations_by_image = duckdb_grouped_rows(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            grouping_column_names=['bucket', 'feature_vector'],
+        )
 
         for rows in annotations_by_image:
 
             # Here, in one loop iteration, we're given all the
             # annotation rows for a single image.
             first_row = rows[0]
-            site = first_row['site']
             bucket = first_row['bucket']
-            image_id = first_row['image_id']
             feature_bucket_path = first_row['feature_vector']
 
             image_annotations = []
-            image_annos_by_ba = Counter()
-            image_annos_by_bagf = Counter()
 
             # One annotation per row.
             for row in rows:
 
-                if not self.benthicattr_filter.accepts_ba(
-                    row['benthic_attribute_id']
-                ):
-                    # This BA is being filtered out of the training data.
-                    continue
+                benthic_attribute_id = row['benthic_attribute_id']
 
-                benthic_attribute_id = self.rollup_spec.roll_up(
-                    row['benthic_attribute_id'])
-
-                # TODO: None from CoralNet-MERMAID mapping, 'None' from
-                #  MERMAID annotations parquet. Not sure what should change
-                #  to improve consistency.
-                if (
-                    self.drop_growthforms
-                    or row['growth_form_id'] is None
-                    or row['growth_form_id'] == 'None'
-                ):
+                if row['growth_form_id'] is None:
                     # Either we've chosen not to get growth forms, or
                     # this annotation has no growth form.
                     bagf = benthic_attribute_id
@@ -344,33 +407,6 @@ class TrainingDataset:
                     bagf,
                 )
                 image_annotations.append(annotation)
-                image_annos_by_ba[benthic_attribute_id] += 1
-                image_annos_by_bagf[bagf] += 1
-
-            impending_annotation_count = (
-                self.all_annos_count + len(image_annotations))
-            if (
-                self.annotation_limit
-                and
-                impending_annotation_count > self.annotation_limit
-            ):
-                logger.debug(
-                    f"Currently have {self.all_annos_count} annotations."
-                    f" Stopping because the {len(image_annotations)}"
-                    f" annotations from the next image ({image_id})"
-                    f" would put us over the limit of {self.annotation_limit}."
-                )
-                return
-
-            # TODO: Also check CoralNet bucket/folder for missing features.
-            if site == Sites.MERMAID.value:
-                feature_full_path = f'{bucket}/{feature_bucket_path}'
-                if feature_full_path not in mermaid_full_paths_in_s3:
-                    logger.warning(
-                        f"Skipping feature vector because couldn't find"
-                        f" the file in S3: {feature_full_path}")
-                    missing_features.append(feature_full_path)
-                    continue
 
             feature_loc = DataLocation(
                 storage_type='s3',
@@ -378,23 +414,8 @@ class TrainingDataset:
                 key=feature_bucket_path,
             )
             self.data[feature_loc] = image_annotations
-            self.all_annos_count += len(image_annotations)
-            self.annos_by_ba += image_annos_by_ba
-            self.annos_by_bagf += image_annos_by_bagf
 
-        missing_threshold = (
-            len(self.data)
-            * settings.training_inputs_percent_missing_allowed / 100
-        )
-        if len(missing_features) > missing_threshold:
-            raise RuntimeError(
-                f"Too many feature vectors are missing"
-                f" ({len(missing_features)}), such as:"
-                f"\n{'\n'.join(missing_features[:3])}"
-                f"\nYou can configure the tolerance for missing"
-                f" feature vectors with the"
-                f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
-            )
+        self.set_train_summary_stats()
 
     def read_mermaid_data(self):
 
@@ -407,31 +428,47 @@ class TrainingDataset:
             # INSERT INTO ... BY NAME ... means that we don't have to match
             # the column order of the existing table.
             # https://duckdb.org/docs/stable/sql/statements/insert#insert-into--by-name
-            self.duck_conn.execute(
-                f"INSERT INTO annotations BY NAME"
-                f" SELECT"
-                f"  image_id, row, col,"
-                f"  benthic_attribute_id, growth_form_id,"
-                f" 'MERMAID' AS site,"
-                f" '{settings.mermaid_train_data_bucket}' AS bucket,"
-                f"  NULL AS project_id,"
-                f"  concat('mermaid/', image_id, '_featurevector')"
-                f"   AS feature_vector"
-                f" FROM read_parquet('{mermaid_annotations_s3_uri}')"
-            )
+            query_start = f"INSERT INTO annotations BY NAME"
         else:
             # Didn't read any CoralNet data, so we have to create
             # the annotations table.
-            self.duck_conn.execute(
-                f"CREATE TABLE annotations AS"
-                f" SELECT *"
-                f" FROM read_parquet('{mermaid_annotations_s3_uri}')"
-            )
+            query_start = f"CREATE TABLE annotations AS"
+        self.duck_conn.execute(
+            query_start +
+            f" SELECT"
+            f"  image_id, row, col,"
+            f"  benthic_attribute_id, growth_form_id,"
+            f" '{Sites.MERMAID.value}' AS site,"
+            f" '{settings.mermaid_train_data_bucket}' AS bucket,"
+            f" 'all' AS project_id,"
+            f"  concat('mermaid/', image_id, '_featurevector')"
+            f"   AS feature_vector"
+            f" FROM read_parquet('{mermaid_annotations_s3_uri}')"
+        )
 
-    def read_coralnet_data(self, cn_source_filter):
+        # Get project-level stats before applying any further filters.
+        self.artifacts.mermaid_project_stats = self.compute_project_stats(
+            site=Sites.MERMAID.value)
+
+        # For growth forms, we get NULL/None from the CoralNet-MERMAID
+        # mapping, but the string 'None' from the MERMAID annotations
+        # parquet.
+        # Normalize the latter to NULL/None.
+        def transform_func(gf_id):
+            if gf_id is None or gf_id == 'None':
+                return None
+            return gf_id
+        duckdb_transform_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            column_name='growth_form_id',
+            transform_func=transform_func,
+        )
+
+    def read_coralnet_data(self):
         annotations_uri_list = []
 
-        for source_id in cn_source_filter.source_id_list:
+        for source_id in self.cn_source_filter.source_id_list:
 
             source_folder_uri = (
                 f's3://{settings.coralnet_train_data_bucket}/s{source_id}'
@@ -509,21 +546,60 @@ class TrainingDataset:
             f" FROM annotations"
         )
 
-        # Get all the unique CN labels in the dataset, and their
-        # frequencies.
-        cn_label_frequencies = dict(
-            self.duck_conn.execute(
-                "SELECT label_id, COUNT(*)"
-                " FROM annotations GROUP BY label_id"
-            ).fetchall()
-        )
+        # Get project-level stats before applying any further filters.
+        self.artifacts.coralnet_project_stats = self.compute_project_stats(
+            site=Sites.CORALNET.value)
 
-        # Add BAs and GFs to the DuckDB database, using
+        label_mapping = CoralNetMermaidMapping()
+        self.artifacts.coralnet_label_mapping = label_mapping.get_dataframe()
+
+        # Add BAs and GFs to the DuckDB table, using
         # our mapping from CoralNet label IDs to MERMAID BAs/GFs.
-        self.coralnet_mermaid_label_mapping.add_bagf_in_duckdb(
-            cn_label_ids=list(cn_label_frequencies.keys()),
+        def label_to_ba(label):
+            if label not in label_mapping:
+                return None
+            entry = label_mapping[label]
+            return entry.benthic_attribute_id
+        duckdb_add_column(
             duck_conn=self.duck_conn,
             duck_table_name='annotations',
+            base_column_name='label_id',
+            new_column_name='benthic_attribute_id',
+            base_to_new_func=label_to_ba,
+        )
+        def label_to_gf(label):
+            if label not in label_mapping:
+                return None
+            entry = label_mapping[label]
+            return entry.growth_form_id
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            base_column_name='label_id',
+            new_column_name='growth_form_id',
+            base_to_new_func=label_to_gf,
+        )
+
+        # The BA IS NULL rows are the ones that aren't mapped to
+        # anything in MERMAID. Save stats on these rows.
+        #
+        # TODO: It could be nice to include label names in this artifact.
+        #  That would require reading in some data which maps
+        #  CoralNet label IDs to names.
+        self.artifacts.unmapped_labels = self.duck_conn.execute(
+            "SELECT"
+            " label_id,"
+            " count(*) AS num_annotations,"
+            " count(DISTINCT project_id) AS num_projects,"
+            " FROM annotations"
+            " WHERE benthic_attribute_id IS NULL"
+            " GROUP BY label_id"
+            " ORDER BY num_annotations DESC"
+        ).fetch_df()
+
+        # Then filter out those rows before moving on.
+        self.duck_conn.execute(
+            "DELETE FROM annotations WHERE benthic_attribute_id IS NULL"
         )
 
     def duckdb_annotations_table_exists(self) -> bool:
@@ -536,63 +612,64 @@ class TrainingDataset:
         # Result should be [] if doesn't exist, which 'bools' to False.
         return bool(table_query_result)
 
-    def annotation_rows(
-        self,
-        annotations_duckdb: 'DuckDBPyRelation',
-    ) -> typing.Generator['pandas.core.series.Series', None, None]:
-        """
-        Reads from a DuckDB relation (chunkifying to avoid memory issues),
-        and generates pandas dataframe rows.
-        """
-        # Fetch in chunks, not all at once, to avoid running out of
-        # memory.
-        # An example chunk size is 2048 rows x 12 columns.
-        #
-        # fetchmany() is similar, but returns lists of tuples instead.
-        # A dataframe provides dict-like access which is a bit nicer.
-        while True:
-            dataframe = annotations_duckdb.fetch_df_chunk()
-            if dataframe.shape[0] == 0:
-                # Empty dataframe; no more chunks left.
-                break
+    def handle_missing_feature_vectors(self, mermaid_full_paths_in_s3):
 
-            # Some ways to inspect the pandas dataframe in a debugger:
-            # dataframe
-            # dataframe.columns    # Column names
-            # dataframe.iloc[0]    # First row
-            # set([row['growth_form_name']
-            #     for _index, row in dataframe.iterrows()])
-            # [(row['row'], row['col']) for _index, row in dataframe.iterrows()
-            #  if row['image_id'] == '0032dba6-8357-42e2-bace-988f99032286']
+        # Build full feature paths in DuckDB.
+        self.duck_conn.execute(
+            f"CREATE OR REPLACE TABLE annotations AS"
+            f" SELECT *,"
+            f"  bucket || '/' || feature_vector AS feature_full"
+            f" FROM annotations"
+        )
 
-            for _index, row in dataframe.iterrows():
-                # With this generator behavior, the chunkifying detail
-                # is invisible to the caller.
-                yield row
+        # Detect missing feature vectors.
+        # TODO: Also check CoralNet bucket/folder for missing features.
+        result = self.duck_conn.execute(
+            f"SELECT DISTINCT feature_full FROM annotations"
+            f" WHERE site = '{Sites.MERMAID.value}'"
+        ).fetchall()
+        mermaid_full_paths_in_annos = [tup[0] for tup in result]
+        missing_feature_paths = (
+            set(mermaid_full_paths_in_annos) - mermaid_full_paths_in_s3)
 
-    def grouped_annotation_rows(
-        self,
-        annotations_duckdb: 'DuckDBPyRelation',
-        grouping_column: str,
-    ) -> typing.Generator['pandas.core.series.Series', None, None]:
+        # Filter out missing feature vectors from annotations table.
+        duckdb_filter_on_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            column_name='feature_full',
+            inclusion_func=lambda p: p not in missing_feature_paths,
+        )
 
-        grouping_value = None
-        group_rows = []
+        # Don't need the feature_full column anymore.
+        self.duck_conn.execute(
+            f"ALTER TABLE annotations DROP feature_full"
+        )
 
-        for row in self.annotation_rows(annotations_duckdb):
-            if grouping_value != row[grouping_column]:
-                if grouping_value:
-                    # End of group.
-                    yield group_rows
+        # Abort if too many are missing.
+        missing_count = len(missing_feature_paths)
+        examples_iterator = itertools.islice(missing_feature_paths, 3)
+        examples_str = "\n".join(list(examples_iterator))
+        missing_threshold = (
+            len(self.data)
+            * settings.training_inputs_percent_missing_allowed / 100
+        )
+        if missing_count > missing_threshold:
+            raise RuntimeError(
+                f"Too many feature vectors are missing"
+                f" ({missing_count}), such as:"
+                f"\n{examples_str}"
+                f"\nYou can configure the tolerance for missing"
+                f" feature vectors with the"
+                f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
+            )
 
-                # Start of group.
-                grouping_value = row[grouping_column]
-                group_rows = []
-
-            group_rows.append(row)
-
-        # End of last group.
-        yield group_rows
+        # Log a warning if any are missing.
+        if missing_feature_paths:
+            logger.warning(
+                f"Skipping {missing_count} feature vector(s) because"
+                f" the files aren't in S3."
+                f" Example(s):"
+                f"\n{examples_str}")
 
     @property
     def duck_conn(self):
@@ -652,79 +729,188 @@ class TrainingDataset:
             )
         return self._labels
 
-    def get_stats(self):
-        return dict(
+    source_image_stats_df: pd.DataFrame
+
+    def compute_project_stats(self, site=None):
+        if site is None:
+            where_clause = ""
+        else:
+            where_clause = f"WHERE site = '{site}'"
+
+        result = self.duck_conn.execute(
+            f"SELECT site, project_id,"
+            f" count(DISTINCT image_id) AS num_images,"
+            f" count(*) AS num_annotations"
+            f" FROM annotations"
+            f" {where_clause}"
+            f" GROUP BY site, project_id"
+            # MERMAID, then CoralNet; because MERMAID's currently just
+            # one row (no projects distinction).
+            f" ORDER BY site DESC, project_id"
+        )
+        return result.fetch_df()
+
+    def set_train_summary_stats(self):
+
+        # Annotation count per BA, sorted by most common first.
+        self.duck_conn.execute(
+            "CREATE TABLE ba_counts AS"
+            " SELECT"
+            " benthic_attribute_id,"
+            " count(*) AS num_annotations,"
+            " count(DISTINCT project_id) AS num_projects"
+            " FROM annotations GROUP BY benthic_attribute_id"
+        )
+        # Add BA names alongside the IDs for readability.
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='ba_counts',
+            base_column_name='benthic_attribute_id',
+            new_column_name='benthic_attribute_name',
+            base_to_new_func=BenthicAttrSet.get_library().id_to_name,
+        )
+        # Sort by annotation count, and reorder columns
+        # while we're at it.
+        self.artifacts.ba_counts = self.duck_conn.execute(
+            "SELECT"
+            " benthic_attribute_name,"
+            " num_annotations,"
+            " num_projects,"
+            " benthic_attribute_id"
+            " FROM ba_counts"
+            " ORDER BY num_annotations DESC"
+        ).fetch_df()
+
+        # Annotation count per BAGF, most common first.
+        # We have to watch out for NULL growth form IDs since:
+        # - NULL values are ignored in most aggregate functions, like count().
+        #   https://duckdb.org/docs/stable/sql/data_types/nulls#null-and-aggregate-functions
+        # - Joining on a column with NULL values could result in those rows
+        #   being lost.
+        # So we use coalesce() to temporarily use '0' as placeholders for
+        # NULL.
+        # https://duckdb.org/docs/stable/sql/data_types/nulls#null-and-functions
+        self.duck_conn.execute(
+            "CREATE TABLE bagf_counts AS"
+            " SELECT"
+            " benthic_attribute_id,"
+            " coalesce(growth_form_id, '0') as growth_form_id,"
+            " count(*) AS num_annotations,"
+            " count(DISTINCT project_id) AS num_projects"
+            " FROM annotations"
+            " GROUP BY benthic_attribute_id, growth_form_id"
+        )
+        # Add BA names for readability.
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='bagf_counts',
+            base_column_name='benthic_attribute_id',
+            new_column_name='benthic_attribute_name',
+            base_to_new_func=BenthicAttrSet.get_library().id_to_name,
+        )
+        # Add GF names for readability.
+        gf_library = GrowthFormLibrary()
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='bagf_counts',
+            base_column_name='growth_form_id',
+            new_column_name='growth_form_name',
+            base_to_new_func=gf_library.by_id.get,
+        )
+        # Transform '0' back to NULL, now that we're done with ops that
+        # would trip on NULL.
+        duckdb_transform_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='bagf_counts',
+            column_name='growth_form_id',
+            transform_func=lambda x: None if x == '0' else x,
+        )
+        # Sort by annotation count, and reorder columns
+        # while we're at it.
+        self.artifacts.bagf_counts = self.duck_conn.execute(
+            "SELECT"
+            " benthic_attribute_name,"
+            " growth_form_name,"
+            " num_annotations,"
+            " num_projects,"
+            " benthic_attribute_id,"
+            " growth_form_id"
+            " FROM bagf_counts"
+            " ORDER BY num_annotations DESC"
+        ).fetch_df()
+
+        self.artifacts.train_summary_stats = dict(
             total_annotations=self.labels.label_count,
             train_annotations=self.labels.train.label_count,
             ref_annotations=self.labels.ref.label_count,
             val_annotations=self.labels.val.label_count,
             num_of_images=len(self.data),
-            num_of_benthic_attributes=len(self.annos_by_ba),
-            num_of_ba_gf_combinations=len(self.annos_by_bagf),
+            num_of_benthic_attributes=self.artifacts.ba_counts.shape[0],
+            num_of_ba_gf_combinations=self.artifacts.bagf_counts.shape[0],
         )
 
-    def describe_stats(self):
+    def describe_train_summary_stats(self):
         return (
-            "Proceeding to train with {total_annotations}"
-            " annotations ({train_annotations} train,"
+            "{total_annotations} annotations"
+            " ({train_annotations} train,"
             " {ref_annotations} ref,"
             " {val_annotations} val) from"
             " {num_of_images} images."
             " {num_of_benthic_attributes} BAs and"
             " {num_of_ba_gf_combinations} BA-GF combos"
-            " are represented here.".format(**self.get_stats())
+            " are represented here.".format(
+                **self.artifacts.train_summary_stats)
         )
 
     def log_mlflow_artifacts(self):
+        """
+        Log various options and stats for the training dataset.
+        """
+        mlflow.log_table(
+            self.cn_source_filter.csv_dataframe,
+            'coralnet_sources_included.json')
 
         if self.benthicattr_filter.inclusion:
-            table_filename = 'included_benthicattrs.json'
+            table_filename = 'benthic_attrs_included.json'
         else:
-            table_filename = 'excluded_benthicattrs.json'
+            table_filename = 'benthic_attrs_excluded.json'
         mlflow.log_table(
             self.benthicattr_filter.csv_dataframe, table_filename)
 
         mlflow.log_table(
             self.rollup_spec.csv_dataframe, 'rollup_spec.json')
 
-        # Not sure if logging the entirety of the inputs is worth it
-        # (since it's a lot), but we can at least log the sizes of the
-        # inputs.
-        # They don't seem like 'metrics', nor are they strictly 'params'
-        # or 'inputs', nor are they 'outputs'... so we just log as a dict.
-        mlflow.log_dict(self.get_stats(), 'input_stats.yaml')
+        # Number of images and annotations from each CN source and from
+        # MERMAID.
+        # First, before filtering (this is what's present in S3).
+        # https://pandas.pydata.org/docs/reference/api/pandas.concat.html
+        mlflow.log_table(
+            pd.concat([
+                self.artifacts.mermaid_project_stats,
+                self.artifacts.coralnet_project_stats,
+            ]),
+            'project_stats_raw.json')
+        # And here, after filtering (this is what training actually gets).
+        mlflow.log_table(
+            self.compute_project_stats(),
+            'project_stats_train_data.json')
 
-        # Log annotation count per BA and per BAGF,
-        # each sorted by most common first.
-        #
-        # For each, we construct a list of dataclass instances,
-        # which is a format that dataframes support.
-        # https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.html
-        CountLogEntry = make_dataclass(
-            'CountLogEntry',
-            [('id', str), ('name', str), ('count', int)])
-        by_ba_with_names = []
-        for ba_id, count in self.annos_by_ba.most_common():
-            ba_name = BenthicAttrSet.get_library().id_to_name(ba_id)
-            by_ba_with_names.append(CountLogEntry(
-                id=ba_id,
-                name=ba_name,
-                count=count,
-            ))
-        by_bagf_with_names = []
-        gf_library = GrowthFormLibrary()
-        for bagf_id, count in self.annos_by_bagf.most_common():
-            bagf_name = BenthicAttrSet.get_library().bagf_id_to_name(
-                bagf_id, gf_library)
-            by_bagf_with_names.append(CountLogEntry(
-                id=bagf_id,
-                name=bagf_name,
-                count=count,
-            ))
+        mlflow.log_dict(
+            self.artifacts.train_summary_stats, 'train_summary.yaml')
 
-        mlflow.log_table(pd.DataFrame(by_ba_with_names), 'ba_counts.json')
-        mlflow.log_table(pd.DataFrame(by_bagf_with_names), 'bagf_counts.json')
+        mlflow.log_table(self.artifacts.ba_counts, 'ba_counts.json')
+        mlflow.log_table(self.artifacts.bagf_counts, 'bagf_counts.json')
 
+        if not self.cn_source_filter.is_empty():
+            # These only apply if CoralNet data is included.
+            mlflow.log_table(
+                self.artifacts.coralnet_label_mapping,
+                'coralnet_label_mapping.json')
+            mlflow.log_table(
+                self.artifacts.unmapped_labels,
+                'unmapped_labels.json')
+
+        # Log other options given to the training process.
         other_options = dict(
             drop_growthforms=self.drop_growthforms,
             annotation_limit=self.annotation_limit,
@@ -841,7 +1027,8 @@ def run_training(
     # Other prep before training.
 
     log_memory_usage('Memory usage after creating labels')
-    logger.info(training_dataset.describe_stats())
+    logger.info("Proceeding to train with:")
+    logger.info(training_dataset.describe_train_summary_stats())
 
     current_time = datetime.now()
     time_str = current_time.strftime('%Y%m%dT%H%M%S')
@@ -866,6 +1053,10 @@ def run_training(
         if benthicattr_rollup_targets_csv:
             as_path = Path(benthicattr_rollup_targets_csv)
             model_name += f'-Rollup{alphanumeric_only_str(as_path.stem)}'
+
+        if coralnet_sources_csv:
+            as_path = Path(coralnet_sources_csv)
+            model_name += f'-{alphanumeric_only_str(as_path.stem)}'
 
         if annotation_limit:
             model_name += f'-AnnoLimit{annotation_limit}'
@@ -914,6 +1105,10 @@ def run_training(
 
         with mlflow.start_run(run_name=run_name):
 
+            # Log dataset artifacts first, so they can be inspected during
+            # training.
+            training_dataset.log_mlflow_artifacts()
+
             return_msg = train_classifier(train_msg)
 
             logger.info(
@@ -926,16 +1121,11 @@ def run_training(
             accuracy_pct = return_msg.acc * 100
             mlflow.log_metric("accuracy", accuracy_pct)
 
-            training_dataset.log_mlflow_artifacts()
-
             # ref_accs is probably the only other part of return_msg to save.
             ref_accs_dict = dict()
             for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
                 ref_accs_dict[epoch_number] = format_accuracy(acc)
             mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
-
-            # TODO: MLflow artifact with image counts from MERMAID and
-            #  from each CN source.
 
             # Save and register the trained model.
             signature = infer_signature(params=experiment_params)

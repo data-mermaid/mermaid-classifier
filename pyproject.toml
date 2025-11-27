@@ -24,6 +24,7 @@ pyspacer = [
     "matplotlib",
     "mlflow>=3",
     "numpy",
+    # MLflow requires pandas, so we might as well use it when convenient.
     "pandas",
     "psutil",
     "pyarrow",
