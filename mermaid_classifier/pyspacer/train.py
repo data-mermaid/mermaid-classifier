@@ -8,6 +8,7 @@ from io import StringIO
 import itertools
 import math
 from pathlib import Path
+import re
 import typing
 
 import duckdb
@@ -208,6 +209,7 @@ class TrainingDataset:
         benthicattr_rollup_targets_csv: str = None,
         drop_growthforms: bool = False,
         annotation_limit: int | None = None,
+        annotations_to_log: str | None = None,
     ):
         self.artifacts = Artifacts()
 
@@ -247,6 +249,7 @@ class TrainingDataset:
 
         self.drop_growthforms = drop_growthforms
         self.annotation_limit = annotation_limit
+        self.annotations_to_log = annotations_to_log
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
@@ -917,6 +920,39 @@ class TrainingDataset:
         )
         mlflow.log_dict(other_options, 'other_options.yaml')
 
+        # Log annotations, if specified.
+        if self.annotations_to_log is not None:
+            log_spec = self.annotations_to_log.lower()
+            self.log_annotations(log_spec)
+
+    def log_annotations(self, log_spec: str):
+        artifact_filename = f'annotations_{log_spec}.json'
+
+        if log_spec == 'all':
+            query = "SELECT * FROM annotations"
+        elif match := re.fullmatch(r's(\d+)', log_spec):
+            cn_source_id = match.groups()[0]
+            query = (
+                f"SELECT * FROM annotations"
+                f" WHERE site = '{Sites.CORALNET.value}'"
+                f" AND project_id = '{cn_source_id}'"
+            )
+        elif match := re.fullmatch(r'i(\d+)', log_spec):
+            cn_image_id = match.groups()[0]
+            query = (
+                f"SELECT * FROM annotations"
+                f" WHERE site = '{Sites.CORALNET.value}'"
+                f" AND image_id = '{cn_image_id}'"
+            )
+        else:
+            raise ValueError(
+                f"Unsupported annotations_to_log spec: {log_spec}")
+
+        mlflow.log_table(
+            self.duck_conn.execute(query).fetch_df(),
+            artifact_filename,
+        )
+
 
 def run_training(
     include_mermaid: bool = True,
@@ -926,6 +962,7 @@ def run_training(
     benthicattr_rollup_targets_csv: str = None,
     drop_growthforms: bool = False,
     annotation_limit: int | None = None,
+    annotations_to_log: str | None = None,
     epochs: int = 10,
     experiment_name: str | None = None,
     model_name: str | None = None,
@@ -986,6 +1023,17 @@ def run_training(
     If specified, only get up to this many annotations for training. This can
     help with testing since the runtime is correlated to number of annotations.
 
+    annotations_to_log
+
+    If specified, log training annotations as an MLflow artifact, in tabular
+    form. One table row per point-annotation. This can serve as a sanity
+    check, but the artifact can get quite large.
+    Supported formats:
+    'all': log all annotations
+    's123': log annotations from CoralNet source of ID 123
+    'i456': log annotations from CoralNet image of ID 456
+    <not specified>: log nothing
+
     epochs
 
     Number of training epochs to run.
@@ -1005,11 +1053,6 @@ def run_training(
 
     If True, don't connect to or log to a MLflow tracking server. This can
     make testing easier when running a tracking server feels onerous.
-
-    TODO: Be able to specify an example image (or set of them?) whose
-    training annotations are logged along with the model. Since logging all
-    training annotations might be too much, but looking at a small sample
-    is a good sanity check.
     """
     experiment_name = (
         experiment_name or settings.mlflow_default_experiment_name)
@@ -1022,6 +1065,7 @@ def run_training(
         benthicattr_rollup_targets_csv=benthicattr_rollup_targets_csv,
         drop_growthforms=drop_growthforms,
         annotation_limit=annotation_limit,
+        annotations_to_log=annotations_to_log,
     )
 
     # Other prep before training.
