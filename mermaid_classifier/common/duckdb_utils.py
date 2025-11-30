@@ -31,7 +31,7 @@ def duckdb_transform_column(
     # Create a DuckDB table for the transform spec.
     duck_conn.execute(
         f"CREATE TABLE transform_table"
-        f" ({column_name}_temp VARCHAR,"
+        f" ({column_name} VARCHAR,"
         f"  transformed_{column_name} VARCHAR)"
     )
     duck_conn.execute(
@@ -39,14 +39,13 @@ def duckdb_transform_column(
         f" {entries_str}"
     )
 
-    # Use JOIN to apply the transform.
+    # Use JOIN ... USING to apply the transform.
     duck_conn.execute(
         f"CREATE OR REPLACE TABLE {duck_table_name} AS"
         f" SELECT *"
         f" FROM {duck_table_name}"
         f"  JOIN transform_table"
-        f"  ON {duck_table_name}.{column_name}"
-        f"   = transform_table.{column_name}_temp"
+        f"  USING ({column_name})"
     )
 
     # Drop the original column.
@@ -58,10 +57,6 @@ def duckdb_transform_column(
     duck_conn.execute(
         f"ALTER TABLE {duck_table_name}"
         f" RENAME transformed_{column_name} TO {column_name}"
-    )
-    # Don't need the join column anymore.
-    duck_conn.execute(
-        f"ALTER TABLE {duck_table_name} DROP {column_name}_temp"
     )
     # Don't need the temporary table anymore.
     duck_conn.execute(
@@ -97,12 +92,9 @@ def duckdb_add_column(
     )
 
     # Create a DuckDB table for the transform spec.
-    # Use a slightly different name for the base column. We intend to
-    # clean up that column after joining, and it's easier to clean up
-    # if we use our own suffix rather than relying on an automatic suffix.
     duck_conn.execute(
         f"CREATE TABLE transform_table"
-        f" ({base_column_name}_temp VARCHAR,"
+        f" ({base_column_name} VARCHAR,"
         f"  {new_column_name} VARCHAR)"
     )
     duck_conn.execute(
@@ -110,20 +102,16 @@ def duckdb_add_column(
         f" {entries_str}"
     )
 
-    # Use JOIN to add the new column.
+    # Use JOIN ... USING to add the new column.
+    # https://duckdb.org/docs/stable/sql/query_syntax/from#conditional-joins
     duck_conn.execute(
         f"CREATE OR REPLACE TABLE {duck_table_name} AS"
         f" SELECT *"
         f" FROM {duck_table_name}"
         f"  JOIN transform_table"
-        f"  ON {duck_table_name}.{base_column_name}"
-        f"   = transform_table.{base_column_name}_temp"
+        f"  USING ({base_column_name})"
     )
 
-    # Don't need the join column anymore.
-    duck_conn.execute(
-        f"ALTER TABLE {duck_table_name} DROP {base_column_name}_temp"
-    )
     # Don't need the temporary table anymore.
     duck_conn.execute(
         f"DROP TABLE transform_table"
@@ -158,7 +146,7 @@ def duckdb_filter_on_column(
 
     duck_conn.execute(
         f"CREATE TABLE {duck_table_name}_filter"
-        f" ({column_name}_temp VARCHAR,"
+        f" ({column_name} VARCHAR,"
         f"  included BOOLEAN)"
     )
     duck_conn.execute(
@@ -173,17 +161,12 @@ def duckdb_filter_on_column(
         f" SELECT *"
         f" FROM {duck_table_name}"
         f"  JOIN {duck_table_name}_filter"
-        f"  ON {duck_table_name}.{column_name}"
-        f"   = {duck_table_name}_filter.{column_name}_temp"
+        f"  USING ({column_name})"
         f" WHERE included = true"
     )
     # Don't need the included column anymore.
     duck_conn.execute(
         f"ALTER TABLE {duck_table_name} DROP included"
-    )
-    # Don't need the join column anymore.
-    duck_conn.execute(
-        f"ALTER TABLE {duck_table_name} DROP {column_name}_temp"
     )
     # Or the *_filter table.
     duck_conn.execute(
