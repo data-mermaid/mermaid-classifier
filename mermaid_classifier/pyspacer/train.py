@@ -295,8 +295,6 @@ class TrainingDataset:
                 "No annotations from CoralNet or MERMAID, even before"
                 " label filtering.")
 
-        self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
-
         # Roll up benthic attributes.
         self.rollup_spec.roll_up_in_duckdb(
             duck_conn=self.duck_conn,
@@ -372,6 +370,8 @@ class TrainingDataset:
                 f"  LIMIT {mm_count})"
                 f")"
             )
+
+        self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
         annotations_by_image = duckdb_grouped_rows(
             duck_conn=self.duck_conn,
@@ -632,6 +632,7 @@ class TrainingDataset:
             f" WHERE site = '{Sites.MERMAID.value}'"
         ).fetchall()
         mermaid_full_paths_in_annos = [tup[0] for tup in result]
+        image_count = len(mermaid_full_paths_in_annos)
         missing_feature_paths = (
             set(mermaid_full_paths_in_annos) - mermaid_full_paths_in_s3)
 
@@ -653,7 +654,7 @@ class TrainingDataset:
         examples_iterator = itertools.islice(missing_feature_paths, 3)
         examples_str = "\n".join(list(examples_iterator))
         missing_threshold = (
-            len(self.data)
+            image_count
             * settings.training_inputs_percent_missing_allowed / 100
         )
         if missing_count > missing_threshold:
