@@ -260,20 +260,13 @@ class TrainingDataset:
         )
         self._duck_conn = None
 
-        self.data = dict()
-        mermaid_full_paths_in_s3 = set()
-
-        # This'll get filled in on-demand later. That way, we can abort
-        # reading in data at any time without worrying about whether
-        # this will get set.
-        self._labels = None
-
         if not self.cn_source_filter.is_empty():
             self.read_coralnet_data()
         else:
             # An empty dataframe
             self.artifacts.coralnet_project_stats = pd.DataFrame()
 
+        mermaid_full_paths_in_s3 = set()
         if include_mermaid:
             self.read_mermaid_data()
 
@@ -379,6 +372,8 @@ class TrainingDataset:
             grouping_column_names=['bucket', 'feature_vector'],
         )
 
+        labels_data = ImageLabels()
+
         for rows in annotations_by_image:
 
             # Here, in one loop iteration, we're given all the
@@ -416,7 +411,16 @@ class TrainingDataset:
                 bucket_name=bucket,
                 key=feature_bucket_path,
             )
-            self.data[feature_loc] = image_annotations
+            labels_data.add_image(feature_loc, image_annotations)
+
+        self.labels = preprocess_labels(
+            labels_data,
+            # 10% ref, 10% val, 80% train.
+            split_ratios=(0.1, 0.1),
+            split_mode=SplitMode.POINTS_STRATIFIED,
+        )
+
+        self.add_training_set_names()
 
         self.set_train_summary_stats()
 
@@ -451,7 +455,7 @@ class TrainingDataset:
 
         # Get project-level stats before applying any further filters.
         self.artifacts.mermaid_project_stats = self.compute_project_stats(
-            site=Sites.MERMAID.value)
+            site=Sites.MERMAID.value, has_training_sets=False)
 
         # For growth forms, we get NULL/None from the CoralNet-MERMAID
         # mapping, but the string 'None' from the MERMAID annotations
@@ -551,7 +555,7 @@ class TrainingDataset:
 
         # Get project-level stats before applying any further filters.
         self.artifacts.coralnet_project_stats = self.compute_project_stats(
-            site=Sites.CORALNET.value)
+            site=Sites.CORALNET.value, has_training_sets=False)
 
         label_mapping = CoralNetMermaidMapping()
         self.artifacts.coralnet_label_mapping = label_mapping.get_dataframe()
@@ -722,29 +726,30 @@ class TrainingDataset:
 
         return self._duck_conn
 
-    @property
-    def labels(self):
-        if self._labels is None:
-            self._labels = preprocess_labels(
-                ImageLabels(self.data),
-                # 10% ref, 10% val, 80% train.
-                split_ratios=(0.1, 0.1),
-                split_mode=SplitMode.POINTS_STRATIFIED,
-            )
-        return self._labels
-
     source_image_stats_df: pd.DataFrame
 
-    def compute_project_stats(self, site=None):
+    def compute_project_stats(self, site=None, has_training_sets=False):
         if site is None:
             where_clause = ""
         else:
             where_clause = f"WHERE site = '{site}'"
 
+        counts_sql = (
+            " count(DISTINCT image_id) AS num_images,"
+            " count(*) AS num_annotations"
+        )
+        if has_training_sets:
+            counts_sql += (
+                ","
+                " countif(training_set = 'train') AS train,"
+                " countif(training_set = 'ref') AS ref,"
+                " countif(training_set = 'val') AS val,"
+                " countif(training_set IS NULL) AS dropped"
+            )
+
         result = self.duck_conn.execute(
             f"SELECT site, project_id,"
-            f" count(DISTINCT image_id) AS num_images,"
-            f" count(*) AS num_annotations"
+            f" {counts_sql}"
             f" FROM annotations"
             f" {where_clause}"
             f" GROUP BY site, project_id"
@@ -754,15 +759,98 @@ class TrainingDataset:
         )
         return result.fetch_df()
 
+    def add_training_set_names(self):
+        """
+        Match up DuckDB annotations with train/ref/val.
+        This will add a training_set column to the annotations table.
+        """
+        # The columns here besides training_set are the ones that should
+        # uniquely identify a particular annotation.
+        self.duck_conn.execute(
+            "CREATE TABLE training_set_temp"
+            f" (bucket VARCHAR,"
+            f"  feature_vector VARCHAR,"
+            f"  row VARCHAR,"
+            f"  col VARCHAR,"
+            f"  training_set VARCHAR)"
+        )
+
+        training_sets = [
+            ('train', self.labels.train),
+            ('ref', self.labels.ref),
+            ('val', self.labels.val),
+        ]
+        # Higher means fewer DuckDB operations; lower might reduce
+        # memory usage.
+        batch_size = 50000
+
+        for set_name, training_set in training_sets:
+            values_batch: list[str] = []
+
+            for feature_loc, row, col in (
+                self.generate_training_set_annotations(training_set)
+            ):
+                tup = (
+                    feature_loc.bucket_name,
+                    feature_loc.key,
+                    row,
+                    col,
+                    set_name,
+                )
+                values_batch.append(str(tup))
+
+                if len(values_batch) > batch_size:
+                    self.duckdb_training_set_temp_write(values_batch)
+                    values_batch = []
+
+            if len(values_batch) > 0:
+                # Last batch
+                self.duckdb_training_set_temp_write(values_batch)
+
+        # Join annotations with the temp table to add the training_set info.
+        #
+        # LEFT OUTER JOIN ensures that annotations with no training_set
+        # match just get NULL for that column. A regular JOIN would instead
+        # drop those annotations rows entirely.
+        self.duck_conn.execute(
+            f"CREATE OR REPLACE TABLE annotations AS"
+            f" SELECT *"
+            f" FROM annotations"
+            f"  LEFT OUTER JOIN training_set_temp"
+            f"  USING (bucket, feature_vector, row, col)"
+        )
+
+        # Don't need the temporary table anymore.
+        self.duck_conn.execute(
+            f"DROP TABLE training_set_temp"
+        )
+
+    def duckdb_training_set_temp_write(self, values_batch: list[str]):
+        entries_str = ", ".join(values_batch)
+        self.duck_conn.execute(
+            f"INSERT INTO training_set_temp VALUES {entries_str}"
+        )
+
+    @staticmethod
+    def generate_training_set_annotations(training_set: ImageLabels):
+        for feature_loc in training_set.keys():
+            image_annotations = training_set[feature_loc]
+            for row, col, _ in image_annotations:
+                yield feature_loc, row, col
+
     def set_train_summary_stats(self):
 
-        # Annotation count per BA, sorted by most common first.
+        # Counts per BA.
         self.duck_conn.execute(
             "CREATE TABLE ba_counts AS"
             " SELECT"
             " benthic_attribute_id,"
+            " count(DISTINCT project_id) AS num_projects,"
             " count(*) AS num_annotations,"
-            " count(DISTINCT project_id) AS num_projects"
+            " countif(training_set = 'train') AS train,"
+            " countif(training_set = 'ref') AS ref,"
+            " countif(training_set = 'val') AS val,"
+            " countif(training_set IS NULL) AS dropped"
             " FROM annotations GROUP BY benthic_attribute_id"
         )
         # Add BA names alongside the IDs for readability.
@@ -773,19 +861,23 @@ class TrainingDataset:
             new_column_name='benthic_attribute_name',
             base_to_new_func=BenthicAttrSet.get_library().id_to_name,
         )
-        # Sort by annotation count, and reorder columns
+        # Sort by total annotation count, and reorder columns
         # while we're at it.
         self.artifacts.ba_counts = self.duck_conn.execute(
             "SELECT"
             " benthic_attribute_name,"
-            " num_annotations,"
             " num_projects,"
+            " num_annotations,"
+            " train,"
+            " ref,"
+            " val,"
+            " dropped,"
             " benthic_attribute_id"
             " FROM ba_counts"
             " ORDER BY num_annotations DESC"
         ).fetch_df()
 
-        # Annotation count per BAGF, most common first.
+        # Counts per BAGF.
         # We have to watch out for NULL growth form IDs since:
         # - NULL values are ignored in most aggregate functions, like count().
         #   https://duckdb.org/docs/stable/sql/data_types/nulls#null-and-aggregate-functions
@@ -799,8 +891,12 @@ class TrainingDataset:
             " SELECT"
             " benthic_attribute_id,"
             " coalesce(growth_form_id, '0') as growth_form_id,"
+            " count(DISTINCT project_id) AS num_projects,"
             " count(*) AS num_annotations,"
-            " count(DISTINCT project_id) AS num_projects"
+            " countif(training_set = 'train') AS train,"
+            " countif(training_set = 'ref') AS ref,"
+            " countif(training_set = 'val') AS val,"
+            " countif(training_set IS NULL) AS dropped"
             " FROM annotations"
             " GROUP BY benthic_attribute_id, growth_form_id"
         )
@@ -835,34 +931,72 @@ class TrainingDataset:
             "SELECT"
             " benthic_attribute_name,"
             " growth_form_name,"
-            " num_annotations,"
             " num_projects,"
+            " num_annotations,"
+            " train,"
+            " ref,"
+            " val,"
+            " dropped,"
             " benthic_attribute_id,"
             " growth_form_id"
             " FROM bagf_counts"
             " ORDER BY num_annotations DESC"
         ).fetch_df()
 
+        # Overall counts.
+        counts = self.duck_conn.execute(
+            "SELECT"
+            " count(*),"
+            " count(DISTINCT image_id)"
+            " FROM annotations"
+        ).fetchall()[0]
+        total_annotations = counts[0]
+        num_of_images = counts[1]
+        num_of_bas = self.artifacts.ba_counts.shape[0]
+        num_of_bagfs = self.artifacts.bagf_counts.shape[0]
+
+        # Stratified splitting will drop annotations of BAGFs which are rare
+        # enough to not reach the 1 annotation threshold for ref/val.
+        # Here we count what has been dropped.
+        counts = self.duck_conn.execute(
+            "SELECT"
+            " count(*),"
+            " count(DISTINCT benthic_attribute_id),"
+            " count(DISTINCT (benthic_attribute_id, growth_form_id))"
+            " FROM annotations"
+            " WHERE training_set IS NOT NULL"
+        ).fetchall()[0]
+        non_dropped_annotations = counts[0]
+        non_dropped_bas = counts[1]
+        non_dropped_bagfs = counts[2]
+        annotations_dropped = total_annotations - non_dropped_annotations
+        bas_dropped = num_of_bas - non_dropped_bas
+        bagfs_dropped = num_of_bagfs - non_dropped_bagfs
+
         self.artifacts.train_summary_stats = dict(
-            total_annotations=self.labels.label_count,
-            train_annotations=self.labels.train.label_count,
-            ref_annotations=self.labels.ref.label_count,
-            val_annotations=self.labels.val.label_count,
-            num_of_images=len(self.data),
-            num_of_benthic_attributes=self.artifacts.ba_counts.shape[0],
-            num_of_ba_gf_combinations=self.artifacts.bagf_counts.shape[0],
+            annotations=total_annotations,
+            annotations_train=self.labels.train.label_count,
+            annotations_ref=self.labels.ref.label_count,
+            annotations_val=self.labels.val.label_count,
+            annotations_dropped=annotations_dropped,
+            images=num_of_images,
+            bas=num_of_bas,
+            bas_dropped=bas_dropped,
+            bagfs=num_of_bagfs,
+            bagfs_dropped=bagfs_dropped,
         )
 
     def describe_train_summary_stats(self):
         return (
-            "{total_annotations} annotations"
-            " ({train_annotations} train,"
-            " {ref_annotations} ref,"
-            " {val_annotations} val) from"
-            " {num_of_images} images."
-            " {num_of_benthic_attributes} BAs and"
-            " {num_of_ba_gf_combinations} BA-GF combos"
-            " are represented here.".format(
+            "{annotations} annotations"
+            " ({annotations_train} train,"
+            " {annotations_ref} ref,"
+            " {annotations_val} val,"
+            " {annotations_dropped} dropped during stratification) from"
+            " {images} images."
+            " Representation: {bas} BAs and"
+            " {bagfs} BA-GF combos"
+            " (dropped: {bas_dropped} BAs, {bagfs_dropped} BA-GFs).".format(
                 **self.artifacts.train_summary_stats)
         )
 
@@ -896,7 +1030,7 @@ class TrainingDataset:
             'project_stats_raw.json')
         # And here, after filtering (this is what training actually gets).
         mlflow.log_table(
-            self.compute_project_stats(),
+            self.compute_project_stats(has_training_sets=True),
             'project_stats_train_data.json')
 
         mlflow.log_dict(
