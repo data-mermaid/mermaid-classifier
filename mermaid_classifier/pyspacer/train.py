@@ -29,11 +29,13 @@ from spacer.task_utils import preprocess_labels, SplitMode
 
 from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary, CoralNetMermaidMapping, GrowthFormLibrary)
-from mermaid_classifier.common.csv_utils import CsvSpec
+from mermaid_classifier.common.csv_utils import ColumnSpec, CsvSpec
 from mermaid_classifier.common.duckdb_utils import (
     duckdb_add_column,
     duckdb_filter_on_column,
     duckdb_grouped_rows,
+    duckdb_replace_column,
+    duckdb_replace_value_in_column,
     duckdb_transform_column,
 )
 from mermaid_classifier.pyspacer.settings import settings
@@ -65,106 +67,205 @@ def alphanumeric_only_str(s: str):
     return ''.join([char for char in s if char.isalnum()])
 
 
-class BenthicAttrSet(CsvSpec):
+class LabelFilter(CsvSpec):
+    """
+    A CSV-defined spec which says what benthic attribute + growth form
+    combos to include in, or exclude from, training data.
+    """
+    column_specs = [
+        ColumnSpec(name='ba_id', allow_blank=False),
+        ColumnSpec(name='gf_id'),
+    ]
+    # MERMAID API uses this as the BA-GF separator.
+    sep = '::'
 
-    target_column_candidates = ['id', 'name']
-
-    _ba_library = None
-
-    @classmethod
-    def get_library(cls):
-        # Lazy-load the BA library, and save it at the class
-        # level so we only load it once at most.
-        if cls._ba_library is None:
-            cls._ba_library = BenthicAttributeLibrary()
-        return cls._ba_library
-
-    def __init__(self, csv_file: typing.TextIO):
-        """
-        Initialize using a local CSV file that specifies a set
-        of MERMAID benthic attributes.
-        """
-        self.ba_set = set()
+    def __init__(self, csv_file: typing.TextIO, inclusion: bool = True):
+        self.bagf_set: set[tuple[str, str]] = set()
 
         super().__init__(csv_file=csv_file)
 
-    def per_item_init_action(self, target_column, target_value):
-
-        # Regardless of what the CSV input has,
-        # sticking with IDs from here on out will make life easier.
-        if target_column == 'id':
-            ba_id = target_value
-        else:
-            # 'name'
-            ba_id = self.get_library().by_name[target_value]['id']
-        self.ba_set.add(ba_id)
-
-
-class BenthicAttrFilter(BenthicAttrSet):
-
-    def __init__(self, *args, inclusion: bool = True, **kwargs):
-        super().__init__(*args, **kwargs)
         self.inclusion = inclusion
 
-    def accepts_ba(self, ba_id):
-        if self.inclusion:
-            return ba_id in self.ba_set
+    def per_row_init_action(self, row):
+        # Ensure absent values are just None, not '' or None.
+        self.bagf_set.add((row['ba_id'], row.get('gf_id') or None))
+
+    def accepts_bagf(self, bagf_id: str):
+        if self.sep in bagf_id:
+            ba_id, gf_id = bagf_id.split(self.sep)
         else:
-            return ba_id not in self.ba_set
+            ba_id = bagf_id
+            gf_id = None
+
+        if self.inclusion:
+            return (ba_id, gf_id) in self.bagf_set
+        else:
+            return (ba_id, gf_id) not in self.bagf_set
 
     def filter_in_duckdb(
         self,
         duck_conn: 'DuckDBPyConnection',
         duck_table_name: str,
         ba_id_column_name: str = 'benthic_attribute_id',
+        gf_id_column_name: str = 'growth_form_id',
     ):
         """
         Filter down the rows in the given DuckDB table, based on the
-        benthic attribute ID column and this instance's filter rules.
+        benthic attribute ID and growth form ID columns, and this
+        instance's filter rules.
         """
+        # Concatenate BA+GF so that we can define the filter as a
+        # single-column operation.
+        # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
+        # "NULL inputs are skipped." So a NULL GF results in just the BA.
+        duck_conn.execute(
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT"
+            f"  *,"
+            f"  concat_ws("
+            f"   '{self.sep}', {ba_id_column_name}, {gf_id_column_name})"
+            f"   AS bagf_id"
+            f" FROM {duck_table_name}"
+        )
+
+        # Filter.
         duckdb_filter_on_column(
             duck_conn=duck_conn,
             duck_table_name=duck_table_name,
-            column_name=ba_id_column_name,
-            inclusion_func=self.accepts_ba,
+            column_name='bagf_id',
+            inclusion_func=self.accepts_bagf,
+        )
+
+        # Don't need the combined BAGF column anymore.
+        duck_conn.execute(
+            f"ALTER TABLE {duck_table_name} DROP bagf_id"
         )
 
 
-class BenthicAttrRollupSpec(BenthicAttrSet):
+class LabelRollupSpec(CsvSpec):
+    """
+    A CSV-defined spec which says what BA+GF combos to roll up to
+    what other BA+GF combos.
+    """
+    column_specs = [
+        ColumnSpec(name='from_ba_id', allow_blank=False),
+        ColumnSpec(name='from_gf_id'),
+        ColumnSpec(name='to_ba_id', allow_blank=False),
+        ColumnSpec(name='to_gf_id'),
+    ]
+    # MERMAID API uses this as the BA-GF separator.
+    sep = '::'
 
     def __init__(self, *args, **kwargs):
-        """
-        The CSV file should list rollup targets. For each target, any label
-        that is a descendant of a target gets rolled up to that target.
-        """
-        super().__init__(*args, **kwargs)
-        self.rollup_targets = self.ba_set
+        self.lookup = dict()
 
-    def roll_up(self, ba_id):
-        # Roll up to the earliest ancestor which is a rollup target.
-        for ancestor_id in self.get_library().get_ancestor_ids(ba_id):
-            if ancestor_id in self.rollup_targets:
-                return ancestor_id
-        # Or don't roll up if there's no such ancestor.
-        return ba_id
+        super().__init__(*args, **kwargs)
+
+    def per_row_init_action(self, row):
+        # Ensure absent values are just None, not '' or None.
+        key = (row['from_ba_id'], row.get('from_gf_id') or None)
+        value = (row['to_ba_id'], row.get('to_gf_id') or None)
+        self.lookup[key] = value
+
+    def roll_up(self, bagf_id: str) -> str:
+        if self.sep in bagf_id:
+            ba_id, gf_id = bagf_id.split(self.sep)
+        else:
+            ba_id = bagf_id
+            gf_id = None
+
+        if (ba_id, gf_id) in self.lookup:
+            new_ba_id, new_gf_id = self.lookup[(ba_id, gf_id)]
+            if new_gf_id:
+                return new_ba_id + self.sep + new_gf_id
+            else:
+                return new_ba_id
+        # If this BAGF is not in the rollup spec, then we leave the
+        # BAGF as is.
+        return bagf_id
 
     def roll_up_in_duckdb(
         self,
         duck_conn: 'DuckDBPyConnection',
         duck_table_name: str,
         ba_id_column_name: str = 'benthic_attribute_id',
+        gf_id_column_name: str = 'growth_form_id',
     ):
         """
-        Roll up the benthic attribute IDs in the given DuckDB table,
+        Roll up the BA IDs and GF IDs in the given DuckDB table,
         based on this instance's rollup rules.
         """
+        # Concatenate BA+GF so that we can define the rollup as a
+        # single-column transform.
+        # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
+        # "NULL inputs are skipped." So a NULL GF results in just the BA.
+        duck_conn.execute(
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT"
+            f"  *,"
+            f"  concat_ws("
+            f"   '{self.sep}', {ba_id_column_name}, {gf_id_column_name})"
+            f"   AS bagf_id"
+            f" FROM {duck_table_name}"
+        )
+
+        # Apply the rollup.
         duckdb_transform_column(
-            duck_conn, duck_table_name, ba_id_column_name, self.roll_up)
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name='bagf_id',
+            transform_func=self.roll_up,
+        )
+
+        # Propagate rolled-up BAGF back to the split BA-GF fields.
+        # https://duckdb.org/docs/stable/sql/functions/text#split_partstring-separator-index
+        # "If the index is outside the bounds of the list, return an
+        # empty string (to match PostgreSQL's behavior)." So if there's no
+        # growth form, then that gets an empty string.
+        duck_conn.execute(
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT"
+            f"  *,"
+            f"  bagf_id.split_part('{self.sep}', 1)"
+            f"   AS rollup_{ba_id_column_name},"
+            f"  bagf_id.split_part('{self.sep}', 2)"
+            f"   AS rollup_{gf_id_column_name}"
+            f" FROM {duck_table_name}"
+        )
+        duckdb_replace_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name=ba_id_column_name,
+            new_values_column_name=f"rollup_{ba_id_column_name}",
+        )
+        duckdb_replace_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name=gf_id_column_name,
+            new_values_column_name=f"rollup_{gf_id_column_name}",
+        )
+
+        # The string manipulation would have given '' instead of NULL
+        # for empty growth forms. Convert back to NULL.
+        duckdb_replace_value_in_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name=gf_id_column_name,
+            old_value='',
+            new_value=None,
+        )
+
+        # Don't need the combined BAGF column anymore.
+        duck_conn.execute(
+            f"ALTER TABLE {duck_table_name} DROP bagf_id"
+        )
 
 
 class CNSourceFilter(CsvSpec):
 
-    target_column_candidates = ['id']
+    column_specs = [
+        ColumnSpec(name='id', allow_blank=False),
+    ]
 
     source_id_list: list[str]
 
@@ -177,8 +278,8 @@ class CNSourceFilter(CsvSpec):
 
         super().__init__(csv_file=csv_file)
 
-    def per_item_init_action(self, _target_column, target_value):
-        self.source_id_list.append(target_value)
+    def per_row_init_action(self, row):
+        self.source_id_list.append(row['id'])
 
     def is_empty(self):
         return len(self.source_id_list) == 0
@@ -204,9 +305,9 @@ class TrainingDataset:
         self,
         include_mermaid: bool = True,
         coralnet_sources_csv: str = None,
-        included_benthicattrs_csv: str = None,
-        excluded_benthicattrs_csv: str = None,
-        benthicattr_rollup_targets_csv: str = None,
+        label_rollup_spec_csv: str = None,
+        included_labels_csv: str = None,
+        excluded_labels_csv: str = None,
         drop_growthforms: bool = False,
         annotation_limit: int | None = None,
         annotations_to_log: str | None = None,
@@ -220,32 +321,32 @@ class TrainingDataset:
             # Empty set of CoralNet sources.
             self.cn_source_filter = CNSourceFilter(StringIO(''))
 
-        if included_benthicattrs_csv and excluded_benthicattrs_csv:
-            raise ValueError(
-                "Specify one of included benthic attrs or"
-                " excluded benthic attrs, but not both.")
+        if label_rollup_spec_csv:
+            self.rollup_spec = LabelRollupSpec(
+                label_rollup_spec_csv)
+        else:
+            # Empty rollup-targets set, meaning nothing gets rolled up.
+            self.rollup_spec = LabelRollupSpec(StringIO(''))
 
-        if included_benthicattrs_csv:
-            with open(included_benthicattrs_csv) as csv_f:
-                self.benthicattr_filter = BenthicAttrFilter(
+        if included_labels_csv and excluded_labels_csv:
+            raise ValueError(
+                "Specify one of included labels or"
+                " excluded labels, but not both.")
+
+        if included_labels_csv:
+            with open(included_labels_csv) as csv_f:
+                self.label_filter = LabelFilter(
                     csv_f, inclusion=True)
-        elif excluded_benthicattrs_csv:
-            with open(excluded_benthicattrs_csv) as csv_f:
-                self.benthicattr_filter = BenthicAttrFilter(
+        elif excluded_labels_csv:
+            with open(excluded_labels_csv) as csv_f:
+                self.label_filter = LabelFilter(
                     csv_f, inclusion=False)
         else:
             # No inclusion or exclusion set specified means we accept
             # all labels.
             # In other words, an empty exclusion set.
-            self.benthicattr_filter = BenthicAttrFilter(
+            self.label_filter = LabelFilter(
                 StringIO(''), inclusion=False)
-
-        if benthicattr_rollup_targets_csv:
-            with open(benthicattr_rollup_targets_csv) as csv_f:
-                self.rollup_spec = BenthicAttrRollupSpec(csv_f)
-        else:
-            # Empty rollup-targets set, meaning nothing gets rolled up.
-            self.rollup_spec = BenthicAttrRollupSpec(StringIO(''))
 
         self.drop_growthforms = drop_growthforms
         self.annotation_limit = annotation_limit
@@ -288,7 +389,7 @@ class TrainingDataset:
                 "No annotations from CoralNet or MERMAID, even before"
                 " label filtering.")
 
-        # Roll up benthic attributes.
+        # Roll up BAGFs.
         self.rollup_spec.roll_up_in_duckdb(
             duck_conn=self.duck_conn,
             duck_table_name='annotations',
@@ -303,8 +404,8 @@ class TrainingDataset:
                 transform_func=lambda x: None,
             )
 
-        # Filter out benthic attributes we don't want.
-        self.benthicattr_filter.filter_in_duckdb(
+        # Filter out BAGFs we don't want.
+        self.label_filter.filter_in_duckdb(
             duck_conn=self.duck_conn,
             duck_table_name='annotations',
         )
@@ -507,6 +608,9 @@ class TrainingDataset:
         #
         # Passing a list of CSV files into read_csv() is from:
         # https://duckdb.org/docs/stable/data/multiple_files/overview
+        #
+        # CSV options:
+        # https://duckdb.org/docs/stable/data/csv/overview#parameters
         self.duck_conn.execute(
             f"CREATE TABLE annotations AS"
             f" SELECT *"
@@ -840,6 +944,8 @@ class TrainingDataset:
 
     def set_train_summary_stats(self):
 
+        ba_library = BenthicAttributeLibrary()
+
         # Counts per BA.
         self.duck_conn.execute(
             "CREATE TABLE ba_counts AS"
@@ -859,7 +965,7 @@ class TrainingDataset:
             duck_table_name='ba_counts',
             base_column_name='benthic_attribute_id',
             new_column_name='benthic_attribute_name',
-            base_to_new_func=BenthicAttrSet.get_library().id_to_name,
+            base_to_new_func=ba_library.id_to_name,
         )
         # Sort by total annotation count, and reorder columns
         # while we're at it.
@@ -906,7 +1012,7 @@ class TrainingDataset:
             duck_table_name='bagf_counts',
             base_column_name='benthic_attribute_id',
             new_column_name='benthic_attribute_name',
-            base_to_new_func=BenthicAttrSet.get_library().id_to_name,
+            base_to_new_func=ba_library.id_to_name,
         )
         # Add GF names for readability.
         gf_library = GrowthFormLibrary()
@@ -919,11 +1025,12 @@ class TrainingDataset:
         )
         # Transform '0' back to NULL, now that we're done with ops that
         # would trip on NULL.
-        duckdb_transform_column(
+        duckdb_replace_value_in_column(
             duck_conn=self.duck_conn,
             duck_table_name='bagf_counts',
             column_name='growth_form_id',
-            transform_func=lambda x: None if x == '0' else x,
+            old_value='0',
+            new_value=None,
         )
         # Sort by annotation count, and reorder columns
         # while we're at it.
@@ -1008,12 +1115,12 @@ class TrainingDataset:
             self.cn_source_filter.csv_dataframe,
             'coralnet_sources_included.json')
 
-        if self.benthicattr_filter.inclusion:
-            table_filename = 'benthic_attrs_included.json'
+        if self.label_filter.inclusion:
+            table_filename = 'labels_included.json'
         else:
-            table_filename = 'benthic_attrs_excluded.json'
+            table_filename = 'labels_excluded.json'
         mlflow.log_table(
-            self.benthicattr_filter.csv_dataframe, table_filename)
+            self.label_filter.csv_dataframe, table_filename)
 
         mlflow.log_table(
             self.rollup_spec.csv_dataframe, 'rollup_spec.json')
@@ -1092,9 +1199,9 @@ class TrainingDataset:
 def run_training(
     include_mermaid: bool = True,
     coralnet_sources_csv: str = None,
-    included_benthicattrs_csv: str = None,
-    excluded_benthicattrs_csv: str = None,
-    benthicattr_rollup_targets_csv: str = None,
+    label_rollup_spec_csv: str = None,
+    included_labels_csv: str = None,
+    excluded_labels_csv: str = None,
     drop_growthforms: bool = False,
     annotation_limit: int | None = None,
     annotations_to_log: str | None = None,
@@ -1119,39 +1226,46 @@ def run_training(
     If not specified, no CoralNet sources are included (so only MERMAID
     projects go into training).
 
-    included_benthicattrs_csv
-    excluded_benthicattrs_csv
+    label_rollup_spec_csv
 
-    Local filepath of a CSV file, specifying either the MERMAID benthic
-    attributes to accept from the training data (excluding all others), or
-    the ones to leave out from the training data (including all others).
-    - Specify at most one of these files, not both. If neither file is
-      specified, then all MERMAID benthic attributes are accepted.
-    - Mapping from CoralNet label IDs to MERMAID BA IDs will be done before
-      applying these inclusions/exclusions.
-    - Growth forms are ignored here.
+    Local filepath of a CSV file, specifying what MERMAID BA+GF combos to
+    roll up to what other BA+GF combos. For example, roll up
+    Acropora::Branching to Hard coral::Branching; or roll up
+    Porites::Massive to Porites (without growth form specified).
+    - If this file isn't specified, then nothing gets rolled up.
     - Recognized columns:
-      id -- A MERMAID benthic attribute ID (a UUID).
-      name -- Human-readable name of a MERMAID benthic attribute. If an id
-        column is present, name is ignored. Else, the name column is used
-        instead. Either id or name must be present.
+      from_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
+        roll up from.
+      from_gf_id -- MERMAID growth form ID (a UUID) of a combo to
+        roll up from.
+      to_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
+        roll up to.
+      to_gf_id -- MERMAID growth form ID (a UUID) of a combo to
+        roll up to.
       Other informational columns can also be present and will be ignored.
 
-    benthicattr_rollup_targets_csv
+    included_labels_csv
+    excluded_labels_csv
 
-    Local filepath of a CSV file, specifying the MERMAID benthic attributes
-    to roll up to. So if this includes Acroporidae for example, then all
-    descendants of Acroporidae (Acropora, Acropora arabensis, Alveopora...)
-    get rolled up to Acroporidae for training.
-    - If this file isn't specified, then nothing gets rolled up.
-    - Growth forms are ignored here.
-    - Recognized columns and their semantics are the same as
-      included_benthicattrs_csv.
+    Local filepath of a CSV file, specifying either the MERMAID benthic
+    attribute + growth form combos to accept into the training data
+    (excluding all others), or the ones to leave out from the training
+    data (including all others).
+    - Specify at most one of these files, not both. If neither file is
+      specified, then all MERMAID benthic attribute + growth form combos
+      are accepted.
+    - Mapping from CoralNet label IDs to MERMAID BAGFs, and rolling up
+      BAGFs, will be done before applying these inclusions/exclusions.
+    - Recognized columns:
+      ba_id -- A MERMAID benthic attribute ID (a UUID).
+      gf_id -- A MERMAID growth form ID (a UUID).
+      Other informational columns can also be present and will be ignored.
 
     drop_growthforms
 
-    If True, discard growth forms from the training data. Basically another
-    dimension of rolling up labels.
+    If True, discard all growth forms from the training data. Technically
+    redundant with the rollup spec, but this is a very simple-to-specify
+    option which can be useful.
 
     annotation_limit
 
@@ -1195,9 +1309,9 @@ def run_training(
     training_dataset = TrainingDataset(
         include_mermaid=include_mermaid,
         coralnet_sources_csv=coralnet_sources_csv,
-        included_benthicattrs_csv=included_benthicattrs_csv,
-        excluded_benthicattrs_csv=excluded_benthicattrs_csv,
-        benthicattr_rollup_targets_csv=benthicattr_rollup_targets_csv,
+        label_rollup_spec_csv=label_rollup_spec_csv,
+        included_labels_csv=included_labels_csv,
+        excluded_labels_csv=excluded_labels_csv,
         drop_growthforms=drop_growthforms,
         annotation_limit=annotation_limit,
         annotations_to_log=annotations_to_log,
@@ -1220,17 +1334,17 @@ def run_training(
 
     if model_name is None:
 
-        if included_benthicattrs_csv:
-            as_path = Path(included_benthicattrs_csv)
+        if included_labels_csv:
+            as_path = Path(included_labels_csv)
             model_name = f'Include{alphanumeric_only_str(as_path.stem)}'
-        elif excluded_benthicattrs_csv:
-            as_path = Path(excluded_benthicattrs_csv)
+        elif excluded_labels_csv:
+            as_path = Path(excluded_labels_csv)
             model_name = f'Exclude{alphanumeric_only_str(as_path.stem)}'
         else:
             model_name = 'AllLabels'
 
-        if benthicattr_rollup_targets_csv:
-            as_path = Path(benthicattr_rollup_targets_csv)
+        if label_rollup_spec_csv:
+            as_path = Path(label_rollup_spec_csv)
             model_name += f'-Rollup{alphanumeric_only_str(as_path.stem)}'
 
         if coralnet_sources_csv:
