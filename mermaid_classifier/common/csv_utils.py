@@ -1,4 +1,5 @@
 import abc
+import dataclasses
 import typing
 
 import pandas as pd
@@ -21,20 +22,24 @@ def csv_to_dataframe(csv_file: typing.TextIO):
     )
 
 
+@dataclasses.dataclass
+class ColumnSpec:
+    name: str | list[str]
+    allow_blank: bool = True
+
+
 class CsvSpec(abc.ABC):
     """
     A CSV file given as input to specify something, such as sources
     to accept or benthic attributes to roll up to.
 
     Subclasses should define:
-    - target_column_candidates: The first column name in this list
-      which is present in the CSV becomes the 'target column'. Every
-      row in the CSV must have a value for the target column.
+    - required_columns: Each list item here represents one required column. Each item can be A) the name of the required column, or B) a list of accepted names for the required column, and the first such name
+      which is present in the CSV is the name that's used.
     - per_item_init_action(): This base class's __init__() will call
       this method for every row in the CSV.
     """
-
-    target_column_candidates: list[str]
+    column_specs: list[ColumnSpec]
 
     def __init__(self, csv_file: typing.TextIO):
 
@@ -49,24 +54,44 @@ class CsvSpec(abc.ABC):
 
         csv_filename = getattr(csv_file, 'name', "<File-like obj>")
 
-        target_column = None
-        candidates_str = ", ".join(self.target_column_candidates)
-        for column_name in self.target_column_candidates:
-            if column_name in self.csv_dataframe.columns:
-                target_column = column_name
-        if target_column is None:
-            raise ValueError(
-                f"{csv_filename}: must have at least"
-                f" one of these columns: {candidates_str}")
+        column_names = []
+
+        for column_spec in self.column_specs:
+            if isinstance(column_spec.name, str):
+                if column_spec.name in self.csv_dataframe.columns:
+                    column_name = column_spec.name
+                else:
+                    raise ValueError(
+                        f"{csv_filename}: must have the column"
+                        f" {column_spec.name}")
+            else:
+                # List of str
+                column_name = None
+                for candidate_name in column_spec.name:
+                    if candidate_name in self.csv_dataframe.columns:
+                        column_name = candidate_name
+                        break
+                if column_name is None:
+                    candidates_str = ", ".join(column_spec.name)
+                    raise ValueError(
+                        f"{csv_filename}: must have at least"
+                        f" one of these columns: {candidates_str}")
+            column_names.append(column_name)
 
         for row_i, (_, row) in enumerate(self.csv_dataframe.iterrows()):
-            target_value = row.get(target_column)
-            if not target_value:
-                raise ValueError(
-                    f"{csv_filename}:"
-                    f"{target_column} not found in row {row_i + 1}")
+            values = dict()
+            for spec, name in zip(self.column_specs, column_names):
+                # Ensure absent values are None, not ''.
+                value = row.get(name) or None
 
-            self.per_item_init_action(target_column, target_value)
+                if not spec.allow_blank and not value:
+                    raise ValueError(
+                        f"{csv_filename}:"
+                        f"{name} not found in row {row_i + 1}")
 
-    def per_item_init_action(self, target_column, target_value):
+                values[name] = value
+
+            self.per_row_init_action(values)
+
+    def per_row_init_action(self, row: dict):
         raise NotImplementedError

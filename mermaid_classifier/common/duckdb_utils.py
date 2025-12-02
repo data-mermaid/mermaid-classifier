@@ -1,6 +1,28 @@
 import typing
 
 
+def duckdb_replace_column(
+    duck_conn: 'DuckDBPyConnection',
+    duck_table_name: str,
+    column_name: str,
+    new_values_column_name: str,
+):
+    """
+    Replace the column_name column
+    with the new_values_column_name column.
+    """
+    # Drop the original column.
+    # https://duckdb.org/docs/stable/sql/statements/alter_table
+    duck_conn.execute(
+        f"ALTER TABLE {duck_table_name} DROP {column_name}"
+    )
+    # New-values column becomes the new column.
+    duck_conn.execute(
+        f"ALTER TABLE {duck_table_name}"
+        f" RENAME {new_values_column_name} TO {column_name}"
+    )
+
+
 def duckdb_transform_column(
     duck_conn: 'DuckDBPyConnection',
     duck_table_name: str,
@@ -48,19 +70,39 @@ def duckdb_transform_column(
         f"  USING ({column_name})"
     )
 
-    # Drop the original column.
-    # https://duckdb.org/docs/stable/sql/statements/alter_table
-    duck_conn.execute(
-        f"ALTER TABLE {duck_table_name} DROP {column_name}"
-    )
     # Post-transform column becomes the new column.
-    duck_conn.execute(
-        f"ALTER TABLE {duck_table_name}"
-        f" RENAME transformed_{column_name} TO {column_name}"
+    duckdb_replace_column(
+        duck_conn,
+        duck_table_name,
+        column_name,
+        f"transformed_{column_name}",
     )
     # Don't need the temporary table anymore.
     duck_conn.execute(
         f"DROP TABLE transform_table"
+    )
+
+
+def duckdb_replace_value_in_column(
+    duck_conn: 'DuckDBPyConnection',
+    duck_table_name: str,
+    column_name: str,
+    old_value: str|None,
+    new_value: str|None,
+):
+    """
+    Replace old_value with new_value in the column_name column.
+    """
+    if old_value is None:
+        transform_func = lambda x: new_value if x is None else x
+    else:
+        transform_func = lambda x: new_value if x == old_value else x
+
+    duckdb_transform_column(
+        duck_conn=duck_conn,
+        duck_table_name=duck_table_name,
+        column_name=column_name,
+        transform_func=transform_func,
     )
 
 
