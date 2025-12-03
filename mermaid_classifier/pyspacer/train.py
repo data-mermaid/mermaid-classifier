@@ -733,8 +733,7 @@ class TrainingDataset:
             f" FROM annotations"
         )
 
-        # Detect missing feature vectors.
-        # TODO: Also check CoralNet bucket/folder for missing features.
+        # Get MERMAID feature paths for validation
         result = self.duck_conn.execute(
             f"SELECT DISTINCT feature_full FROM annotations"
             f" WHERE site = '{Sites.MERMAID.value}'"
@@ -744,18 +743,23 @@ class TrainingDataset:
         missing_feature_paths = (
             set(mermaid_full_paths_in_annos) - mermaid_full_paths_in_s3)
 
-        # Filter out missing feature vectors from annotations table.
-        duckdb_filter_on_column(
-            duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            column_name='feature_full',
-            inclusion_func=lambda p: p not in missing_feature_paths,
+        # Convert S3 paths to DuckDB table for efficient filtering
+        # This stays in DuckDB instead of pulling all paths into Python
+        s3_paths_df = pd.DataFrame({'feature_full': list(mermaid_full_paths_in_s3)})
+        self.duck_conn.execute("CREATE TEMP TABLE s3_paths AS SELECT * FROM s3_paths_df")
+
+        # Filter annotations using DuckDB JOIN (much faster than Python lambda)
+        # Use INNER JOIN to keep only annotations with features in S3
+        self.duck_conn.execute(
+            f"CREATE OR REPLACE TABLE annotations AS"
+            f" SELECT a.* FROM annotations a"
+            f" LEFT JOIN s3_paths s ON a.feature_full = s.feature_full"
+            f" WHERE a.site != '{Sites.MERMAID.value}' OR s.feature_full IS NOT NULL"
         )
 
-        # Don't need the feature_full column anymore.
-        self.duck_conn.execute(
-            f"ALTER TABLE annotations DROP feature_full"
-        )
+        # Cleanup
+        self.duck_conn.execute("DROP TABLE s3_paths")
+        self.duck_conn.execute(f"ALTER TABLE annotations DROP feature_full")
 
         # Abort if too many are missing.
         missing_count = len(missing_feature_paths)

@@ -1,4 +1,59 @@
+from contextlib import contextmanager
 import typing
+import uuid
+
+import pandas as pd
+
+
+@contextmanager
+def temp_duckdb_table(duck_conn, base_name=None):
+    """Context manager for temporary DuckDB tables with automatic cleanup."""
+    table_name = f"temp_{base_name or uuid.uuid4().hex[:8]}"
+    try:
+        yield table_name
+    finally:
+        try:
+            duck_conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+        except Exception:
+            pass  # Best effort cleanup
+
+
+def _duckdb_apply_function_via_temp_table(
+    duck_conn: 'DuckDBPyConnection',
+    duck_table_name: str,
+    source_column_name: str,
+    target_column_name: str,
+    transform_func: typing.Callable,
+) -> str:
+    """
+    Internal helper: creates a temp table with source->target column mapping
+    using the provided Python function.
+
+    Returns the name of the created temp table.
+    """
+    # Get unique values
+    tuples_with_unique_values = list(
+        duck_conn.execute(
+            f"SELECT DISTINCT {source_column_name} FROM {duck_table_name}"
+        ).fetchall()
+    )
+    unique_values = [tup[0] for tup in tuples_with_unique_values]
+
+    # Build mapping dataframe using pandas (more efficient than string building)
+    mapping_df = pd.DataFrame({
+        source_column_name: unique_values,
+        target_column_name: [transform_func(v) for v in unique_values]
+    })
+
+    # Create temp table with safe name
+    temp_table_name = f"temp_{uuid.uuid4().hex[:8]}"
+
+    # Use DuckDB's native DataFrame support (safer and faster than string building)
+    duck_conn.execute(
+        f"CREATE TABLE {temp_table_name} AS SELECT * FROM mapping_df"
+    )
+
+    return temp_table_name
 
 
 def duckdb_replace_column(
@@ -34,53 +89,31 @@ def duckdb_transform_column(
     function.
     Only supports text columns.
     """
-    tuples_with_unique_values = list(
+    transformed_col = f"transformed_{column_name}"
+    temp_table = _duckdb_apply_function_via_temp_table(
+        duck_conn, duck_table_name, column_name, transformed_col, transform_func
+    )
+
+    try:
+        # Use JOIN ... USING to apply the transform.
         duck_conn.execute(
-            f"SELECT DISTINCT {column_name} FROM {duck_table_name}"
-        ).fetchall()
-    )
-    unique_values = [tup[0] for tup in tuples_with_unique_values]
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT *"
+            f" FROM {duck_table_name}"
+            f"  JOIN {temp_table}"
+            f"  USING ({column_name})"
+        )
 
-    entries = [
-        (value, transform_func(value))
-        for value in unique_values
-    ]
-    entries_str = ', '.join(
-        f"('{v1}', {'NULL' if v2 is None else '\''+v2+'\''})"
-        for v1, v2 in entries
-    )
-
-    # Create a DuckDB table for the transform spec.
-    duck_conn.execute(
-        f"CREATE TABLE transform_table"
-        f" ({column_name} VARCHAR,"
-        f"  transformed_{column_name} VARCHAR)"
-    )
-    duck_conn.execute(
-        f"INSERT INTO transform_table VALUES"
-        f" {entries_str}"
-    )
-
-    # Use JOIN ... USING to apply the transform.
-    duck_conn.execute(
-        f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-        f" SELECT *"
-        f" FROM {duck_table_name}"
-        f"  JOIN transform_table"
-        f"  USING ({column_name})"
-    )
-
-    # Post-transform column becomes the new column.
-    duckdb_replace_column(
-        duck_conn,
-        duck_table_name,
-        column_name,
-        f"transformed_{column_name}",
-    )
-    # Don't need the temporary table anymore.
-    duck_conn.execute(
-        f"DROP TABLE transform_table"
-    )
+        # Post-transform column becomes the new column.
+        duckdb_replace_column(
+            duck_conn,
+            duck_table_name,
+            column_name,
+            transformed_col,
+        )
+    finally:
+        # Cleanup temp table
+        duck_conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
 
 
 def duckdb_replace_value_in_column(
@@ -118,46 +151,23 @@ def duckdb_add_column(
     values for a new column.
     Only supports text columns.
     """
-    tuples_with_unique_values = list(
+    temp_table = _duckdb_apply_function_via_temp_table(
+        duck_conn, duck_table_name, base_column_name, new_column_name, base_to_new_func
+    )
+
+    try:
+        # Use JOIN ... USING to add the new column.
+        # https://duckdb.org/docs/stable/sql/query_syntax/from#conditional-joins
         duck_conn.execute(
-            f"SELECT DISTINCT {base_column_name} FROM {duck_table_name}"
-        ).fetchall()
-    )
-    unique_values = [tup[0] for tup in tuples_with_unique_values]
-    entries = [
-        (value, base_to_new_func(value))
-        for value in unique_values
-    ]
-    entries_str = ', '.join(
-        f"('{v1}', {'NULL' if v2 is None else '\''+v2+'\''})"
-        for v1, v2 in entries
-    )
-
-    # Create a DuckDB table for the transform spec.
-    duck_conn.execute(
-        f"CREATE TABLE transform_table"
-        f" ({base_column_name} VARCHAR,"
-        f"  {new_column_name} VARCHAR)"
-    )
-    duck_conn.execute(
-        f"INSERT INTO transform_table VALUES"
-        f" {entries_str}"
-    )
-
-    # Use JOIN ... USING to add the new column.
-    # https://duckdb.org/docs/stable/sql/query_syntax/from#conditional-joins
-    duck_conn.execute(
-        f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-        f" SELECT *"
-        f" FROM {duck_table_name}"
-        f"  JOIN transform_table"
-        f"  USING ({base_column_name})"
-    )
-
-    # Don't need the temporary table anymore.
-    duck_conn.execute(
-        f"DROP TABLE transform_table"
-    )
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT *"
+            f" FROM {duck_table_name}"
+            f"  JOIN {temp_table}"
+            f"  USING ({base_column_name})"
+        )
+    finally:
+        # Cleanup temp table
+        duck_conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
 
 
 def duckdb_filter_on_column(
@@ -171,49 +181,28 @@ def duckdb_filter_on_column(
     specified column through a boolean function.
     Only supports text columns.
     """
-    tuples_with_unique_values = list(
+    temp_table = _duckdb_apply_function_via_temp_table(
+        duck_conn, duck_table_name, column_name, 'included', inclusion_func
+    )
+
+    try:
+        # Use JOIN to determine which annotations to keep, and
+        # WHERE to filter things down.
         duck_conn.execute(
-            f"SELECT DISTINCT {column_name} FROM {duck_table_name}"
-        ).fetchall()
-    )
-    unique_values = [tup[0] for tup in tuples_with_unique_values]
-    entries = [
-        (value, inclusion_func(value))
-        for value in unique_values
-    ]
-    entries_str = ', '.join(
-        f"('{value}', {'true' if included else 'false'})"
-        for value, included in entries
-    )
-
-    duck_conn.execute(
-        f"CREATE TABLE {duck_table_name}_filter"
-        f" ({column_name} VARCHAR,"
-        f"  included BOOLEAN)"
-    )
-    duck_conn.execute(
-        f"INSERT INTO {duck_table_name}_filter VALUES"
-        f" {entries_str}"
-    )
-
-    # Use JOIN to determine which annotations to keep, and
-    # WHERE to filter things down.
-    duck_conn.execute(
-        f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-        f" SELECT *"
-        f" FROM {duck_table_name}"
-        f"  JOIN {duck_table_name}_filter"
-        f"  USING ({column_name})"
-        f" WHERE included = true"
-    )
-    # Don't need the included column anymore.
-    duck_conn.execute(
-        f"ALTER TABLE {duck_table_name} DROP included"
-    )
-    # Or the *_filter table.
-    duck_conn.execute(
-        f"DROP TABLE {duck_table_name}_filter"
-    )
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT *"
+            f" FROM {duck_table_name}"
+            f"  JOIN {temp_table}"
+            f"  USING ({column_name})"
+            f" WHERE included = true"
+        )
+        # Don't need the included column anymore.
+        duck_conn.execute(
+            f"ALTER TABLE {duck_table_name} DROP included"
+        )
+    finally:
+        # Cleanup temp table
+        duck_conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
 
 
 def duckdb_batched_rows(
