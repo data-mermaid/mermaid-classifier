@@ -117,6 +117,8 @@ run_training(
     experiment_name="My Experiment 1",
     # This gets date/time appended to the end of it.
     model_name='my-model',
+    # Logs all input annotations to MLflow. Also possible to just log a subset.
+    annotations_to_log='all',
     # This is already False by default, but it doesn't make sense to
     # specify experiment and model names when MLflow usage is disabled.
     disable_mlflow=False,
