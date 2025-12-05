@@ -258,6 +258,11 @@ def duckdb_grouped_rows(
     duck_table_name: str,
     grouping_column_names: list[str],
 ) -> typing.Generator[pd.core.series.Series, None, None]:
+    """
+    Fetch rows from the given DuckDB table in groups, with each group
+    consisting of all rows that have a particular set of values in the
+    given columns.
+    """
 
     # Ordering by a set of columns should mean that, for any set of values
     # for those columns, all the rows with that set of values are all
