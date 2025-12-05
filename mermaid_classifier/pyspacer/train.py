@@ -5,7 +5,6 @@ provided on S3.
 from datetime import datetime
 import enum
 from io import StringIO
-import itertools
 import math
 from pathlib import Path
 import re
@@ -724,9 +723,9 @@ class TrainingDataset:
         # Result should be [] if doesn't exist, which 'bools' to False.
         return bool(table_query_result)
 
-    def handle_missing_feature_vectors(self, mermaid_full_paths_in_s3):
+    def handle_missing_feature_vectors(self, mermaid_full_paths_in_s3: set):
 
-        # Build full feature paths in DuckDB.
+        # Build the annotation data's full feature paths, in DuckDB.
         self.duck_conn.execute(
             f"CREATE OR REPLACE TABLE annotations AS"
             f" SELECT *,"
@@ -734,24 +733,68 @@ class TrainingDataset:
             f" FROM annotations"
         )
 
-        # Detect missing feature vectors.
-        # TODO: Also check CoralNet bucket/folder for missing features.
-        result = self.duck_conn.execute(
-            f"SELECT DISTINCT feature_full FROM annotations"
-            f" WHERE site = '{Sites.MERMAID.value}'"
-        ).fetchall()
-        mermaid_full_paths_in_annos = [tup[0] for tup in result]
-        image_count = len(mermaid_full_paths_in_annos)
-        missing_feature_paths = (
-            set(mermaid_full_paths_in_annos) - mermaid_full_paths_in_s3)
+        with (
+            duckdb_temp_table_name(self.duck_conn)
+            as anno_features_table_name,
+            duckdb_temp_table_name(self.duck_conn)
+            as s3_features_table_name,
+            duckdb_temp_table_name(self.duck_conn)
+            as missing_features_table_name,
+        ):
 
-        # Filter out missing feature vectors from annotations table.
-        duckdb_filter_on_column(
-            duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            column_name='feature_full',
-            inclusion_func=lambda p: p not in missing_feature_paths,
-        )
+            # Get the annotation data's unique feature paths into a table.
+            self.duck_conn.execute(
+                f"CREATE TABLE {anno_features_table_name} AS"
+                f" SELECT DISTINCT feature_full FROM annotations"
+                f" WHERE site = '{Sites.MERMAID.value}'"
+            )
+
+            # Get the S3 feature paths into another table.
+            s3_paths_df = pd.DataFrame(
+                {'feature_full': list(mermaid_full_paths_in_s3)})
+            self.duck_conn.execute(
+                f"CREATE TEMP TABLE {s3_features_table_name}"
+                f" AS SELECT * FROM s3_paths_df"
+            )
+
+            in_annotations_count = self.duck_conn.execute(
+                f"SELECT COUNT(DISTINCT feature_full) FROM annotations"
+                f" WHERE site = '{Sites.MERMAID.value}'"
+            ).fetchall()[0][0]
+
+            # Get the annotation feature paths that are missing from S3,
+            # into another table.
+            # TODO: Also check CoralNet bucket/folder for missing features.
+            self.duck_conn.execute(
+                f"CREATE TABLE {missing_features_table_name} AS"
+                f" SELECT DISTINCT a.feature_full FROM annotations a"
+                f" LEFT JOIN {s3_features_table_name} s USING (feature_full)"
+                # MERMAID annotations whose features are not found in S3.
+                f" WHERE a.site = '{Sites.MERMAID.value}'"
+                f"  AND s.feature_full IS NULL"
+            )
+
+            missing_count = self.duck_conn.execute(
+                f"SELECT COUNT(*) FROM {missing_features_table_name}"
+            ).fetchall()[0][0]
+
+            result_tuples = self.duck_conn.execute(
+                f"SELECT feature_full FROM {missing_features_table_name}"
+                f" LIMIT 3"
+            ).fetchall()
+            missing_examples = [tup[0] for tup in result_tuples]
+
+            # Filter out missing feature vectors from annotations table.
+            self.duck_conn.execute(
+                f"CREATE OR REPLACE TABLE annotations AS"
+                f" SELECT a.* FROM annotations a"
+                f" LEFT JOIN {s3_features_table_name} s USING (feature_full)"
+                # Keep all non-MERMAID annotations (since we don't yet detect
+                # which of those have features present).
+                f" WHERE a.site != '{Sites.MERMAID.value}'"
+                # Keep MERMAID annotations whose features are found in S3.
+                f"  OR s.feature_full IS NOT NULL"
+            )
 
         # Don't need the feature_full column anymore.
         self.duck_conn.execute(
@@ -759,11 +802,9 @@ class TrainingDataset:
         )
 
         # Abort if too many are missing.
-        missing_count = len(missing_feature_paths)
-        examples_iterator = itertools.islice(missing_feature_paths, 3)
-        examples_str = "\n".join(list(examples_iterator))
+        examples_str = "\n".join(missing_examples)
         missing_threshold = (
-            image_count
+            in_annotations_count
             * settings.training_inputs_percent_missing_allowed / 100
         )
         if missing_count > missing_threshold:
@@ -777,7 +818,7 @@ class TrainingDataset:
             )
 
         # Log a warning if any are missing.
-        if missing_feature_paths:
+        if missing_count > 0:
             logger.warning(
                 f"Skipping {missing_count} feature vector(s) because"
                 f" the files aren't in S3."
