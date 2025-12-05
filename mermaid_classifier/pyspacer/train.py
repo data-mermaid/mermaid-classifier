@@ -2,13 +2,13 @@
 Train a classifier using feature vectors and annotations
 provided on S3.
 """
-from collections import Counter
-from dataclasses import make_dataclass
 from datetime import datetime
+import enum
 from io import StringIO
+import math
 from pathlib import Path
+import re
 import typing
-from urllib.parse import urlparse
 
 import duckdb
 try:
@@ -17,19 +17,27 @@ try:
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
-# MLflow requires pandas.
-# Might as well also use it for reading CSV.
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
-from spacer.data_classes import ImageLabels
-from spacer.messages import DataLocation, TrainClassifierMsg
+from spacer.data_classes import DataLocation, ImageLabels
+from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
 from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
 from mermaid_classifier.common.benthic_attributes import (
-    BenthicAttributeLibrary, GrowthFormLibrary)
+    BenthicAttributeLibrary, CoralNetMermaidMapping, GrowthFormLibrary)
+from mermaid_classifier.common.csv_utils import ColumnSpec, CsvSpec
+from mermaid_classifier.common.duckdb_utils import (
+    duckdb_add_column,
+    duckdb_filter_on_column,
+    duckdb_grouped_rows,
+    duckdb_replace_column,
+    duckdb_replace_value_in_column,
+    duckdb_temp_table_name,
+    duckdb_transform_column,
+)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -38,8 +46,9 @@ from mermaid_classifier.pyspacer.utils import (
 logger = logging_config_for_script('train')
 
 
-AWS_REGION = 'us-east-1'
-TRAINING_BUCKET = 'coral-reef-training'
+class Sites(enum.Enum):
+    CORALNET = 'coralnet'
+    MERMAID = 'mermaid'
 
 
 def log_memory_usage(message):
@@ -58,193 +67,430 @@ def alphanumeric_only_str(s: str):
     return ''.join([char for char in s if char.isalnum()])
 
 
-class BenthicAttrSet:
+class LabelFilter(CsvSpec):
+    """
+    A CSV-defined spec which says what benthic attribute + growth form
+    combos to include in, or exclude from, training data.
+    """
+    column_specs = [
+        ColumnSpec(name='ba_id', allow_blank=False),
+        ColumnSpec(name='gf_id'),
+    ]
+    # MERMAID API uses this as the BA-GF separator.
+    sep = '::'
 
-    _ba_library = None
+    def __init__(self, csv_file: typing.TextIO, inclusion: bool = True):
+        self.bagf_set: set[tuple[str, str]] = set()
 
-    @classmethod
-    def get_library(cls):
-        # Lazy-load the BA library, and save it at the class
-        # level so we only load it once at most.
-        if cls._ba_library is None:
-            cls._ba_library = BenthicAttributeLibrary()
-        return cls._ba_library
+        super().__init__(csv_file=csv_file)
+
+        self.inclusion = inclusion
+
+    def per_row_init_action(self, row):
+        # Ensure absent values are just None, not '' or None.
+        self.bagf_set.add((row['ba_id'], row.get('gf_id') or None))
+
+    def accepts_bagf(self, bagf_id: str):
+        if self.sep in bagf_id:
+            ba_id, gf_id = bagf_id.split(self.sep)
+        else:
+            ba_id = bagf_id
+            gf_id = None
+
+        if self.inclusion:
+            return (ba_id, gf_id) in self.bagf_set
+        else:
+            return (ba_id, gf_id) not in self.bagf_set
+
+    def filter_in_duckdb(
+        self,
+        duck_conn: duckdb.DuckDBPyConnection,
+        duck_table_name: str,
+        ba_id_column_name: str = 'benthic_attribute_id',
+        gf_id_column_name: str = 'growth_form_id',
+    ):
+        """
+        Filter down the rows in the given DuckDB table, based on the
+        benthic attribute ID and growth form ID columns, and this
+        instance's filter rules.
+        """
+        # Concatenate BA+GF so that we can define the filter as a
+        # single-column operation.
+        # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
+        # "NULL inputs are skipped." So a NULL GF results in just the BA.
+        duck_conn.execute(
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT"
+            f"  *,"
+            f"  concat_ws("
+            f"   '{self.sep}', {ba_id_column_name}, {gf_id_column_name})"
+            f"   AS bagf_id"
+            f" FROM {duck_table_name}"
+        )
+
+        # Filter.
+        duckdb_filter_on_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name='bagf_id',
+            inclusion_func=self.accepts_bagf,
+        )
+
+        # Don't need the combined BAGF column anymore.
+        duck_conn.execute(
+            f"ALTER TABLE {duck_table_name} DROP bagf_id"
+        )
+
+
+class LabelRollupSpec(CsvSpec):
+    """
+    A CSV-defined spec which says what BA+GF combos to roll up to
+    what other BA+GF combos.
+    """
+    column_specs = [
+        ColumnSpec(name='from_ba_id', allow_blank=False),
+        ColumnSpec(name='from_gf_id'),
+        ColumnSpec(name='to_ba_id', allow_blank=False),
+        ColumnSpec(name='to_gf_id'),
+    ]
+    # MERMAID API uses this as the BA-GF separator.
+    sep = '::'
+
+    def __init__(self, *args, **kwargs):
+        self.lookup = dict()
+
+        super().__init__(*args, **kwargs)
+
+    def per_row_init_action(self, row):
+        # Ensure absent values are just None, not '' or None.
+        key = (row['from_ba_id'], row.get('from_gf_id') or None)
+        value = (row['to_ba_id'], row.get('to_gf_id') or None)
+        self.lookup[key] = value
+
+    def roll_up(self, bagf_id: str) -> str:
+        if self.sep in bagf_id:
+            ba_id, gf_id = bagf_id.split(self.sep)
+        else:
+            ba_id = bagf_id
+            gf_id = None
+
+        if (ba_id, gf_id) in self.lookup:
+            new_ba_id, new_gf_id = self.lookup[(ba_id, gf_id)]
+            if new_gf_id:
+                return new_ba_id + self.sep + new_gf_id
+            else:
+                return new_ba_id
+        # If this BAGF is not in the rollup spec, then we leave the
+        # BAGF as is.
+        return bagf_id
+
+    def roll_up_in_duckdb(
+        self,
+        duck_conn: duckdb.DuckDBPyConnection,
+        duck_table_name: str,
+        ba_id_column_name: str = 'benthic_attribute_id',
+        gf_id_column_name: str = 'growth_form_id',
+    ):
+        """
+        Roll up the BA IDs and GF IDs in the given DuckDB table,
+        based on this instance's rollup rules.
+        """
+        # Concatenate BA+GF so that we can define the rollup as a
+        # single-column transform.
+        # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
+        # "NULL inputs are skipped." So a NULL GF results in just the BA.
+        duck_conn.execute(
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT"
+            f"  *,"
+            f"  concat_ws("
+            f"   '{self.sep}', {ba_id_column_name}, {gf_id_column_name})"
+            f"   AS bagf_id"
+            f" FROM {duck_table_name}"
+        )
+
+        # Apply the rollup.
+        duckdb_transform_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name='bagf_id',
+            transform_func=self.roll_up,
+        )
+
+        # Propagate rolled-up BAGF back to the split BA-GF fields.
+        # https://duckdb.org/docs/stable/sql/functions/text#split_partstring-separator-index
+        # "If the index is outside the bounds of the list, return an
+        # empty string (to match PostgreSQL's behavior)." So if there's no
+        # growth form, then that gets an empty string.
+        duck_conn.execute(
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT"
+            f"  *,"
+            f"  bagf_id.split_part('{self.sep}', 1)"
+            f"   AS rollup_{ba_id_column_name},"
+            f"  bagf_id.split_part('{self.sep}', 2)"
+            f"   AS rollup_{gf_id_column_name}"
+            f" FROM {duck_table_name}"
+        )
+        duckdb_replace_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name=ba_id_column_name,
+            new_values_column_name=f"rollup_{ba_id_column_name}",
+        )
+        duckdb_replace_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name=gf_id_column_name,
+            new_values_column_name=f"rollup_{gf_id_column_name}",
+        )
+
+        # The string manipulation would have given '' instead of NULL
+        # for empty growth forms. Convert back to NULL.
+        duckdb_replace_value_in_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            column_name=gf_id_column_name,
+            old_value='',
+            new_value=None,
+        )
+
+        # Don't need the combined BAGF column anymore.
+        duck_conn.execute(
+            f"ALTER TABLE {duck_table_name} DROP bagf_id"
+        )
+
+
+class CNSourceFilter(CsvSpec):
+
+    column_specs = [
+        ColumnSpec(name='id', allow_blank=False),
+    ]
+
+    source_id_list: list[str]
 
     def __init__(self, csv_file: typing.TextIO):
         """
-        Initialize using a local CSV file that specifies a set
-        of MERMAID benthic attributes.
+        Initialize using a CSV file that specifies a set
+        of CoralNet sources.
         """
-        self.ba_set = set()
+        self.source_id_list = []
 
-        try:
-            self.csv_dataframe = pd.read_csv(
-                csv_file,
-                # Don't convert blank cells to NaN. It seems easier to
-                # just check if row.get('...') is truthy, than to
-                # check if it's NaN, when we're not dealing with numeric
-                # data in the first place.
-                keep_default_na=False,
-            )
-        except pd.errors.EmptyDataError:
-            # It just errors if there's no CSV data, so we manually
-            # create an empty dataframe in this case.
-            # We also short-circuit to prevent any other odd cases.
-            self.csv_dataframe = pd.DataFrame()
-            return
+        super().__init__(csv_file=csv_file)
 
-        csv_filename = getattr(csv_file, 'name', "<File-like obj>")
+    def per_row_init_action(self, row):
+        self.source_id_list.append(row['id'])
 
-        if 'id' in self.csv_dataframe.columns:
-            target_column = 'id'
-        elif 'name' in self.csv_dataframe.columns:
-            target_column = 'name'
-        else:
-            raise ValueError(
-                f"{csv_filename}:"
-                f"doesn't have `id` or `name` column")
-
-        for index, row in self.csv_dataframe.iterrows():
-            target_value = row.get(target_column)
-            if not target_value:
-                raise ValueError(
-                    f"{csv_filename}:"
-                    f"{target_column} not found in row {index + 1}")
-
-            # Sticking with IDs from here on out will make life easier.
-            if target_column == 'id':
-                ba_id = target_value
-            else:
-                # 'name'
-                ba_id = self.get_library().by_name[target_value]['id']
-            self.ba_set.add(ba_id)
+    def is_empty(self):
+        return len(self.source_id_list) == 0
 
 
-class BenthicAttrFilter(BenthicAttrSet):
-
-    def __init__(self, *args, inclusion: bool = True, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.inclusion = inclusion
-
-    def accepts_ba(self, ba_id):
-        if self.inclusion:
-            return ba_id in self.ba_set
-        else:
-            return ba_id not in self.ba_set
-
-
-class BenthicAttrRollupSpec(BenthicAttrSet):
-
-    def __init__(self, *args, **kwargs):
-        """
-        The CSV file should list rollup targets. For each target, any label
-        that is a descendant of a target gets rolled up to that target.
-        """
-        super().__init__(*args, **kwargs)
-        self.rollup_targets = self.ba_set
-
-    def roll_up(self, ba_id):
-        # Roll up to the earliest ancestor which is a rollup target.
-        for ancestor_id in self.get_library().get_ancestor_ids(ba_id):
-            if ancestor_id in self.rollup_targets:
-                return ancestor_id
-        # Or don't roll up if there's no such ancestor.
-        return ba_id
+class Artifacts:
+    """
+    Namespace to make it easier to track artifacts that we're
+    logging to MLflow later.
+    """
+    ba_counts: pd.DataFrame
+    bagf_counts: pd.DataFrame
+    coralnet_label_mapping: pd.DataFrame
+    coralnet_project_stats: pd.DataFrame
+    mermaid_project_stats: pd.DataFrame
+    train_summary_stats: dict
+    unmapped_labels: pd.DataFrame
 
 
 class TrainingDataset:
 
-    data: dict
-    annos_by_ba: Counter
-    annos_by_bagf: Counter
-
     def __init__(
         self,
-        included_benthicattrs_csv: str = None,
-        excluded_benthicattrs_csv: str = None,
-        benthicattr_rollup_targets_csv: str = None,
+        include_mermaid: bool = True,
+        coralnet_sources_csv: str = None,
+        label_rollup_spec_csv: str = None,
+        included_labels_csv: str = None,
+        excluded_labels_csv: str = None,
         drop_growthforms: bool = False,
         annotation_limit: int | None = None,
+        annotations_to_log: str | None = None,
     ):
+        self.artifacts = Artifacts()
 
-        if included_benthicattrs_csv and excluded_benthicattrs_csv:
+        if coralnet_sources_csv:
+            with open(coralnet_sources_csv) as csv_f:
+                self.cn_source_filter = CNSourceFilter(csv_f)
+        else:
+            # Empty set of CoralNet sources.
+            self.cn_source_filter = CNSourceFilter(StringIO(''))
+
+        if label_rollup_spec_csv:
+            self.rollup_spec = LabelRollupSpec(
+                label_rollup_spec_csv)
+        else:
+            # Empty rollup-targets set, meaning nothing gets rolled up.
+            self.rollup_spec = LabelRollupSpec(StringIO(''))
+
+        if included_labels_csv and excluded_labels_csv:
             raise ValueError(
-                "Specify one of included benthic attrs or"
-                " excluded benthic attrs, but not both.")
+                "Specify one of included labels or"
+                " excluded labels, but not both.")
 
-        if included_benthicattrs_csv:
-            with open(included_benthicattrs_csv) as csv_f:
-                self.benthicattr_filter = BenthicAttrFilter(
+        if included_labels_csv:
+            with open(included_labels_csv) as csv_f:
+                self.label_filter = LabelFilter(
                     csv_f, inclusion=True)
-        elif excluded_benthicattrs_csv:
-            with open(excluded_benthicattrs_csv) as csv_f:
-                self.benthicattr_filter = BenthicAttrFilter(
+        elif excluded_labels_csv:
+            with open(excluded_labels_csv) as csv_f:
+                self.label_filter = LabelFilter(
                     csv_f, inclusion=False)
         else:
             # No inclusion or exclusion set specified means we accept
             # all labels.
             # In other words, an empty exclusion set.
-            self.benthicattr_filter = BenthicAttrFilter(
+            self.label_filter = LabelFilter(
                 StringIO(''), inclusion=False)
-
-        if benthicattr_rollup_targets_csv:
-            with open(benthicattr_rollup_targets_csv) as csv_f:
-                self.rollup_spec = BenthicAttrRollupSpec(csv_f)
-        else:
-            # Empty rollup-targets set, meaning nothing gets rolled up.
-            self.rollup_spec = BenthicAttrRollupSpec(StringIO(''))
 
         self.drop_growthforms = drop_growthforms
         self.annotation_limit = annotation_limit
+        self.annotations_to_log = annotations_to_log
 
-        # As we iterate through annotations, we'll check the image IDs
-        # against the feature vectors that are actually present in S3.
-        s3 = S3FileSystem(anon=settings.spacer_aws_anonymous)
-        mermaid_full_paths_in_s3 = set(
-            s3.find(path=f's3://{TRAINING_BUCKET}/mermaid/'))
-        missing_features = []
+        # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
+        self.s3 = S3FileSystem(
+            anon=settings.aws_anonymous,
+            key=settings.aws_key_id,
+            secret=settings.aws_secret,
+            token=settings.aws_session_token,
+        )
+        self._duck_conn = None
 
-        mermaid_annotations_s3_uri = (
-            f's3://{TRAINING_BUCKET}/mermaid/'
-            f'mermaid_confirmed_annotations.parquet'
+        if not self.cn_source_filter.is_empty():
+            self.read_coralnet_data()
+        else:
+            # An empty dataframe
+            self.artifacts.coralnet_project_stats = pd.DataFrame()
+
+        mermaid_full_paths_in_s3 = set()
+        if include_mermaid:
+            self.read_mermaid_data()
+
+            # When we iterate through the annotation data's images, we'll
+            # check the image IDs against the feature vectors that are
+            # actually present in S3.
+            # Note: this line can take a while to run.
+            mermaid_full_paths_in_s3 = set(
+                self.s3.find(
+                    path=f's3://{settings.mermaid_train_data_bucket}/mermaid/'
+                )
+            )
+        else:
+            self.artifacts.mermaid_project_stats = pd.DataFrame()
+
+        # Now this should have annotations populated.
+        if not self.duckdb_annotations_table_exists():
+            raise ValueError(
+                "No annotations from CoralNet or MERMAID, even before"
+                " label filtering.")
+
+        # Roll up BAGFs.
+        self.rollup_spec.roll_up_in_duckdb(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
         )
 
-        annotations_by_image = self.grouped_data_rows_from_parquet(
-            mermaid_annotations_s3_uri, 'image_id')
+        if self.drop_growthforms:
+            # Null out all annotations' growth forms.
+            duckdb_transform_column(
+                duck_conn=self.duck_conn,
+                duck_table_name='annotations',
+                column_name='growth_form_id',
+                transform_func=lambda x: None,
+            )
 
-        self.data = dict()
-        self.annos_by_ba = Counter()
-        self.annos_by_bagf = Counter()
-        all_annos_count = 0
+        # Filter out BAGFs we don't want.
+        self.label_filter.filter_in_duckdb(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+        )
 
-        # This'll get filled in on-demand later. That way, we can abort
-        # reading in data at any time without worrying about whether
-        # this will get set.
-        self._labels = None
+        if self.annotation_limit:
+
+            # See how many annotations we have.
+            count_up_to_limit = self.duck_conn.execute(
+                f"SELECT count(*)"
+                f" FROM annotations"
+                f" LIMIT {self.annotation_limit + 1}"
+            ).fetchall()[0][0]
+
+            # If we're over limit, log that fact.
+            if count_up_to_limit > self.annotation_limit:
+                logger.debug(
+                    f"Truncating the train data to"
+                    f" {self.annotation_limit} annotations."
+                )
+
+            # Determine how to balance out the annotations between
+            # sites.
+            # Ideally, each site contributes half the limit; but if one
+            # site's total is less than half the limit, we grab more from
+            # the other site.
+            cn_count_up_to_limit = self.duck_conn.execute(
+                f"SELECT count(*)"
+                f" FROM annotations"
+                f" WHERE site = '{Sites.CORALNET.value}'"
+                f" LIMIT {self.annotation_limit + 1}"
+            ).fetchall()[0][0]
+            mm_count_up_to_limit = self.duck_conn.execute(
+                f"SELECT count(*)"
+                f" FROM annotations"
+                f" WHERE site = '{Sites.MERMAID.value}'"
+                f" LIMIT {self.annotation_limit + 1}"
+            ).fetchall()[0][0]
+            half_limit = math.ceil(self.annotation_limit / 2)
+            if cn_count_up_to_limit <= half_limit:
+                cn_count = cn_count_up_to_limit
+                mm_count = self.annotation_limit - cn_count
+            else:
+                mm_count = min(mm_count_up_to_limit, half_limit)
+                cn_count = self.annotation_limit - mm_count
+
+            # Get the appropriate number of annotations from each site.
+            # https://duckdb.org/docs/stable/sql/query_syntax/setops#union
+            self.duck_conn.execute(
+                f"CREATE OR REPLACE TABLE annotations AS ("
+                f" (SELECT * FROM annotations"
+                f"  WHERE site = '{Sites.CORALNET.value}'"
+                f"  LIMIT {cn_count})"
+                f" UNION ALL"
+                f" (SELECT * FROM annotations"
+                f"  WHERE site = '{Sites.MERMAID.value}'"
+                f"  LIMIT {mm_count})"
+                f")"
+            )
+
+        self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
+
+        annotations_by_image = duckdb_grouped_rows(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            grouping_column_names=['bucket', 'feature_vector'],
+        )
+
+        labels_data = ImageLabels()
 
         for rows in annotations_by_image:
 
             # Here, in one loop iteration, we're given all the
             # annotation rows for a single image.
-            image_id = rows[0]['image_id']
-            feature_bucket_path = f'mermaid/{image_id}_featurevector'
+            first_row = rows[0]
+            bucket = first_row['bucket']
+            feature_bucket_path = first_row['feature_vector']
+
             image_annotations = []
-            image_annos_by_ba = Counter()
-            image_annos_by_bagf = Counter()
 
             # One annotation per row.
             for row in rows:
 
-                if not self.benthicattr_filter.accepts_ba(
-                    row['benthic_attribute_id']
-                ):
-                    # This BA is being filtered out of the training data.
-                    continue
+                benthic_attribute_id = row['benthic_attribute_id']
 
-                benthic_attribute_id = self.rollup_spec.roll_up(
-                    row['benthic_attribute_id'])
-
-                if drop_growthforms or row['growth_form_id'] == 'None':
+                if row['growth_form_id'] is None:
                     # Either we've chosen not to get growth forms, or
                     # this annotation has no growth form.
                     bagf = benthic_attribute_id
@@ -260,266 +506,832 @@ class TrainingDataset:
                     bagf,
                 )
                 image_annotations.append(annotation)
-                image_annos_by_ba[benthic_attribute_id] += 1
-                image_annos_by_bagf[bagf] += 1
 
-            if (
-                annotation_limit
-                and
-                all_annos_count + len(image_annotations) > annotation_limit
-            ):
-                logger.debug(
-                    f"Currently have {all_annos_count} annotations."
-                    f" Stopping because the {len(image_annotations)}"
-                    f" annotations from the next image ({image_id})"
-                    f" would put us over the limit of {annotation_limit}."
-                )
-                return
+            feature_loc = DataLocation(
+                storage_type='s3',
+                bucket_name=bucket,
+                key=feature_bucket_path,
+            )
+            labels_data.add_image(feature_loc, image_annotations)
 
-            feature_full_path = f'{TRAINING_BUCKET}/{feature_bucket_path}'
-            if feature_full_path not in mermaid_full_paths_in_s3:
-                logger.warning(
-                    f"Skipping feature vector because couldn't find"
-                    f" the file in S3: {feature_bucket_path}")
-                missing_features.append(feature_bucket_path)
-                continue
+        self.labels = preprocess_labels(
+            labels_data,
+            # 10% ref, 10% val, 80% train.
+            split_ratios=(0.1, 0.1),
+            split_mode=SplitMode.POINTS_STRATIFIED,
+        )
 
-            self.data[feature_bucket_path] = image_annotations
-            all_annos_count += len(image_annotations)
-            self.annos_by_ba += image_annos_by_ba
-            self.annos_by_bagf += image_annos_by_bagf
+        self.add_training_set_names()
 
+        self.set_train_summary_stats()
+
+    def read_mermaid_data(self):
+
+        mermaid_annotations_s3_uri = (
+            f's3://{settings.mermaid_train_data_bucket}/mermaid/'
+            f'mermaid_confirmed_annotations.parquet'
+        )
+
+        if self.duckdb_annotations_table_exists():
+            # INSERT INTO ... BY NAME ... means that we don't have to match
+            # the column order of the existing table.
+            # https://duckdb.org/docs/stable/sql/statements/insert#insert-into--by-name
+            query_start = f"INSERT INTO annotations BY NAME"
+        else:
+            # Didn't read any CoralNet data, so we have to create
+            # the annotations table.
+            query_start = f"CREATE TABLE annotations AS"
+        self.duck_conn.execute(
+            query_start +
+            f" SELECT"
+            f"  image_id, row, col,"
+            f"  benthic_attribute_id, growth_form_id,"
+            f" '{Sites.MERMAID.value}' AS site,"
+            f" '{settings.mermaid_train_data_bucket}' AS bucket,"
+            f" 'all' AS project_id,"
+            f"  concat('mermaid/', image_id, '_featurevector')"
+            f"   AS feature_vector"
+            f" FROM read_parquet('{mermaid_annotations_s3_uri}')"
+        )
+
+        # Get project-level stats before applying any further filters.
+        self.artifacts.mermaid_project_stats = self.compute_project_stats(
+            site=Sites.MERMAID.value, has_training_sets=False)
+
+        # For growth forms, we get NULL/None from the CoralNet-MERMAID
+        # mapping, but the string 'None' from the MERMAID annotations
+        # parquet.
+        # Normalize the latter to NULL/None.
+        def transform_func(gf_id):
+            if gf_id is None or gf_id == 'None':
+                return None
+            return gf_id
+        duckdb_transform_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            column_name='growth_form_id',
+            transform_func=transform_func,
+        )
+
+    def read_coralnet_data(self):
+        annotations_uri_list = []
+
+        for source_id in self.cn_source_filter.source_id_list:
+
+            source_folder_uri = (
+                f's3://{settings.coralnet_train_data_bucket}/s{source_id}'
+            )
+
+            # One row per point annotation,
+            # with columns including Image ID, Row, Column, Label ID
+            annotations_uri = f'{source_folder_uri}/annotations.csv'
+            annotations_uri_list.append(annotations_uri)
+
+        if self.duckdb_annotations_table_exists():
+            # Since CoralNet's data is not formatted to the open data
+            # bucket's specs yet, it's easier to read in CN data first,
+            # then transform the table to open data format, then read
+            # in MERMAID data.
+            #
+            # As opposed to reading MERMAID first, transforming to CN
+            # format, reading in CN, and transforming back to open data
+            # format.
+            raise RuntimeError(
+                "Due to format technicalities, CoralNet data must be read"
+                " in before MERMAID data.")
+
+        # Read each selected source's annotations-CSV into a single
+        # DuckDB table.
+        #
+        # `CREATE TABLE ... AS SELECT ...` is from:
+        # https://duckdb.org/docs/stable/data/csv/overview
+        #
+        # Passing a list of CSV files into read_csv() is from:
+        # https://duckdb.org/docs/stable/data/multiple_files/overview
+        #
+        # CSV options:
+        # https://duckdb.org/docs/stable/data/csv/overview#parameters
+        self.duck_conn.execute(
+            f"CREATE TABLE annotations AS"
+            f" SELECT *"
+            f" FROM read_csv({annotations_uri_list}, filename = true)"
+        )
+
+        # 1) Normalize the column names with the open data bucket parquet
+        #  format, and
+        # 2) Create some new columns derived from the existing ones, based
+        #  on how the CoralNet data is organized. We want to do this while
+        #  still in DuckDB format, because we'd like to have data-proc
+        #  steps after a certain point to not have site-specific cases.
+        #
+        # CREATE OR REPLACE TABLE:
+        # https://duckdb.org/2024/10/11/duckdb-tricks-part-2#repeated-data-transformation-steps
+        # regexp_extract and || (concat):
+        # https://duckdb.org/docs/stable/sql/functions/text
+        # Also potentially helpful:
+        # https://betterstack.com/community/guides/scaling-python/duckdb-python/
+        self.duck_conn.execute(
+            f"CREATE OR REPLACE TABLE annotations AS"
+            f" SELECT"
+            # Fix the case of this column name to match open data bucket
+            # format.
+            f' "Row" AS row,'
+            # Make this column name match open data bucket format, and use
+            # quotes to avoid keyword clashing. Be sure to wrap in double
+            # quotes. Single quotes would get it interpreted as
+            # "give every row this constant string value".
+            f' "Column" AS col,'
+            # Later we find it easier to assume these are text, not integers.
+            # And quotes help again, this time since the name has spaces in it.
+            f' CAST("Image ID" AS VARCHAR) AS image_id,'
+            f' CAST("Label ID" AS VARCHAR) AS label_id,'
+            # Here we DO want to give every row this constant string value.
+            f" '{Sites.CORALNET.value}' AS site,"
+            f" '{settings.coralnet_train_data_bucket}' AS bucket,"
+            # Extract the source ID, and name it 'project_id' as a
+            # site-inspecific term.
+            rf" filename.regexp_extract('/s(\d+)/', 1) AS project_id,"
+            # e.g. s123/features/i456.featurevector
+            f" 's' || project_id || '/features/i' || image_id"
+            f"  || '.featurevector' AS feature_vector"
+            f" FROM annotations"
+        )
+
+        # Get project-level stats before applying any further filters.
+        self.artifacts.coralnet_project_stats = self.compute_project_stats(
+            site=Sites.CORALNET.value, has_training_sets=False)
+
+        label_mapping = CoralNetMermaidMapping()
+        self.artifacts.coralnet_label_mapping = label_mapping.get_dataframe()
+
+        # Add BAs and GFs to the DuckDB table, using
+        # our mapping from CoralNet label IDs to MERMAID BAs/GFs.
+        def label_to_ba(label):
+            if label not in label_mapping:
+                return None
+            entry = label_mapping[label]
+            return entry.benthic_attribute_id
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            base_column_name='label_id',
+            new_column_name='benthic_attribute_id',
+            base_to_new_func=label_to_ba,
+        )
+        def label_to_gf(label):
+            if label not in label_mapping:
+                return None
+            entry = label_mapping[label]
+            return entry.growth_form_id
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            base_column_name='label_id',
+            new_column_name='growth_form_id',
+            base_to_new_func=label_to_gf,
+        )
+
+        # The BA IS NULL rows are the ones that aren't mapped to
+        # anything in MERMAID. Save stats on these rows.
+        #
+        # TODO: It could be nice to include label names in this artifact.
+        #  That would require reading in some data which maps
+        #  CoralNet label IDs to names.
+        self.artifacts.unmapped_labels = self.duck_conn.execute(
+            "SELECT"
+            " label_id,"
+            " count(*) AS num_annotations,"
+            " count(DISTINCT project_id) AS num_projects,"
+            " FROM annotations"
+            " WHERE benthic_attribute_id IS NULL"
+            " GROUP BY label_id"
+            " ORDER BY num_annotations DESC"
+        ).fetch_df()
+
+        # Then filter out those rows before moving on.
+        self.duck_conn.execute(
+            "DELETE FROM annotations WHERE benthic_attribute_id IS NULL"
+        )
+
+    def duckdb_annotations_table_exists(self) -> bool:
+        # https://duckdb.org/docs/stable/sql/meta/information_schema
+        table_query_result = self.duck_conn.execute(
+            f"SELECT * FROM information_schema.tables"
+            f" WHERE table_name = 'annotations'"
+        ).fetchall()
+
+        # Result should be [] if doesn't exist, which 'bools' to False.
+        return bool(table_query_result)
+
+    def handle_missing_feature_vectors(self, mermaid_full_paths_in_s3: set):
+
+        # Build the annotation data's full feature paths, in DuckDB.
+        self.duck_conn.execute(
+            f"CREATE OR REPLACE TABLE annotations AS"
+            f" SELECT *,"
+            f"  bucket || '/' || feature_vector AS feature_full"
+            f" FROM annotations"
+        )
+
+        with (
+            duckdb_temp_table_name(self.duck_conn)
+            as anno_features_table_name,
+            duckdb_temp_table_name(self.duck_conn)
+            as s3_features_table_name,
+            duckdb_temp_table_name(self.duck_conn)
+            as missing_features_table_name,
+        ):
+
+            # Get the annotation data's unique feature paths into a table.
+            self.duck_conn.execute(
+                f"CREATE TABLE {anno_features_table_name} AS"
+                f" SELECT DISTINCT feature_full FROM annotations"
+                f" WHERE site = '{Sites.MERMAID.value}'"
+            )
+
+            # Get the S3 feature paths into another table.
+            s3_paths_df = pd.DataFrame(
+                {'feature_full': list(mermaid_full_paths_in_s3)})
+            self.duck_conn.execute(
+                f"CREATE TEMP TABLE {s3_features_table_name}"
+                f" AS SELECT * FROM s3_paths_df"
+            )
+
+            in_annotations_count = self.duck_conn.execute(
+                f"SELECT COUNT(DISTINCT feature_full) FROM annotations"
+                f" WHERE site = '{Sites.MERMAID.value}'"
+            ).fetchall()[0][0]
+
+            # Get the annotation feature paths that are missing from S3,
+            # into another table.
+            # TODO: Also check CoralNet bucket/folder for missing features.
+            self.duck_conn.execute(
+                f"CREATE TABLE {missing_features_table_name} AS"
+                f" SELECT DISTINCT a.feature_full FROM annotations a"
+                f" LEFT JOIN {s3_features_table_name} s USING (feature_full)"
+                # MERMAID annotations whose features are not found in S3.
+                f" WHERE a.site = '{Sites.MERMAID.value}'"
+                f"  AND s.feature_full IS NULL"
+            )
+
+            missing_count = self.duck_conn.execute(
+                f"SELECT COUNT(*) FROM {missing_features_table_name}"
+            ).fetchall()[0][0]
+
+            result_tuples = self.duck_conn.execute(
+                f"SELECT feature_full FROM {missing_features_table_name}"
+                f" LIMIT 3"
+            ).fetchall()
+            missing_examples = [tup[0] for tup in result_tuples]
+
+            # Filter out missing feature vectors from annotations table.
+            self.duck_conn.execute(
+                f"CREATE OR REPLACE TABLE annotations AS"
+                f" SELECT a.* FROM annotations a"
+                f" LEFT JOIN {s3_features_table_name} s USING (feature_full)"
+                # Keep all non-MERMAID annotations (since we don't yet detect
+                # which of those have features present).
+                f" WHERE a.site != '{Sites.MERMAID.value}'"
+                # Keep MERMAID annotations whose features are found in S3.
+                f"  OR s.feature_full IS NOT NULL"
+            )
+
+        # Don't need the feature_full column anymore.
+        self.duck_conn.execute(
+            f"ALTER TABLE annotations DROP feature_full"
+        )
+
+        # Abort if too many are missing.
+        examples_str = "\n".join(missing_examples)
         missing_threshold = (
-            len(self.data)
+            in_annotations_count
             * settings.training_inputs_percent_missing_allowed / 100
         )
-        if len(missing_features) > missing_threshold:
+        if missing_count > missing_threshold:
             raise RuntimeError(
                 f"Too many feature vectors are missing"
-                f" ({len(missing_features)}), such as:"
-                f"\n{'\n'.join(missing_features[:3])}"
+                f" ({missing_count}), such as:"
+                f"\n{examples_str}"
                 f"\nYou can configure the tolerance for missing"
                 f" feature vectors with the"
                 f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
             )
 
-    @staticmethod
-    def data_rows_from_parquet(
-        parquet_uri: str,
-    ) -> typing.Generator['pandas.core.series.Series', None, None]:
-        """
-        Reads from a parquet file (chunkifying to avoid memory issues),
-        and generates pandas dataframe rows.
-        """
-        duck_conn = duckdb.connect()
-
-        try:
-            duck_conn.load_extension('httpfs')
-        except duckdb.IOException:
-            # Extension not installed yet.
-            duck_conn.install_extension('httpfs')
-            duck_conn.load_extension('httpfs')
-
-        if urlparse(parquet_uri).scheme == 's3':
-            duck_conn.execute(f"SET s3_region='{AWS_REGION}'")
-
-        # TODO: Support getting specific rows rather than just *
-        #  to reduce the amount of data that has to be read in.
-        duck_rel = duck_conn.execute(
-            f"SELECT * FROM read_parquet('{parquet_uri}')")
-
-        # Fetch in chunks, not all at once, to avoid running out of
-        # memory.
-        # An example chunk size is 2048 rows x 12 columns.
-        #
-        # fetchmany() is similar, but returns lists of tuples instead.
-        # A dataframe provides dict-like access which is a bit nicer.
-        while True:
-            dataframe = duck_rel.fetch_df_chunk()
-            if dataframe.shape[0] == 0:
-                # Empty dataframe; no more chunks left.
-                break
-
-            # Some ways to inspect the pandas dataframe in a debugger:
-            # dataframe
-            # dataframe.columns    # Column names
-            # dataframe.iloc[0]    # First row
-            # set([row['growth_form_name']
-            #     for _index, row in dataframe.iterrows()])
-            # [(row['row'], row['col']) for _index, row in dataframe.iterrows()
-            #  if row['image_id'] == '0032dba6-8357-42e2-bace-988f99032286']
-
-            for _index, row in dataframe.iterrows():
-                # With this generator behavior, the chunkifying detail
-                # is invisible to the caller.
-                yield row
-
-    @classmethod
-    def grouped_data_rows_from_parquet(
-        cls,
-        parquet_uri: str,
-        grouping_column: str,
-    ) -> typing.Generator['pandas.core.series.Series', None, None]:
-
-        grouping_value = None
-        group_rows = []
-
-        for row in cls.data_rows_from_parquet(parquet_uri):
-            if grouping_value != row[grouping_column]:
-                if grouping_value:
-                    # End of group.
-                    yield group_rows
-
-                # Start of group.
-                grouping_value = row[grouping_column]
-                group_rows = []
-
-            group_rows.append(row)
-
-        # End of last group.
-        yield group_rows
+        # Log a warning if any are missing.
+        if missing_count > 0:
+            logger.warning(
+                f"Skipping {missing_count} feature vector(s) because"
+                f" the files aren't in S3."
+                f" Example(s):"
+                f"\n{examples_str}")
 
     @property
-    def labels(self):
-        if self._labels is None:
-            self._labels = preprocess_labels(
-                ImageLabels(self.data),
-                # 10% ref, 10% val, 80% train.
-                split_ratios=(0.1, 0.1),
-                split_mode=SplitMode.POINTS_STRATIFIED,
-            )
-        return self._labels
+    def duck_conn(self):
+        """
+        Return a DuckDB connection which includes the ability to read
+        files from S3.
 
-    def get_stats(self):
-        return dict(
-            total_annotations=self.labels.label_count,
-            train_annotations=self.labels.train.label_count,
-            ref_annotations=self.labels.ref.label_count,
-            val_annotations=self.labels.val.label_count,
-            num_of_images=len(self.data),
-            num_of_benthic_attributes=len(self.annos_by_ba),
-            num_of_ba_gf_combinations=len(self.annos_by_bagf),
+        Each TrainingDataset instance only establishes such a connection
+        once.
+
+        Limitation: each TrainingDataset can only read from a single S3
+        region.
+        """
+        if self._duck_conn is None:
+            self._duck_conn = duckdb.connect()
+
+            # Load the DuckDB extension which allows reading remote files
+            # from S3.
+            # https://duckdb.org/docs/stable/core_extensions/httpfs/overview
+            try:
+                self._duck_conn.load_extension('httpfs')
+            except duckdb.IOException:
+                # Extension not installed yet.
+                self._duck_conn.install_extension('httpfs')
+                self._duck_conn.load_extension('httpfs')
+
+            # Configure region and auth, if present.
+            # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api
+            #
+            # Beware not to use the deprecated S3 API, which has syntax like
+            # `SET s3_region = 'us-east-1'`:
+            # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api_legacy_authentication
+            if settings.aws_key_id:
+                # Manual provision of a key.
+                query = (
+                    f"CREATE OR REPLACE SECRET secret ("
+                    f" TYPE s3,"
+                    f" PROVIDER config,"
+                    f" KEY_ID '{settings.aws_key_id}',"
+                    f" SECRET '{settings.aws_secret}',"
+                )
+                if settings.aws_session_token:
+                    query += f" SESSION_TOKEN '{settings.aws_session_token}',"
+            else:
+                # The credential_chain provider allows automatically
+                # fetching AWS credentials, like through the IMDS.
+                query = (
+                    f"CREATE OR REPLACE SECRET secret ("
+                    f" TYPE s3,"
+                    f" PROVIDER credential_chain,"
+                )
+            query += f" REGION '{settings.aws_region}')"
+
+            self._duck_conn.execute(query)
+
+        return self._duck_conn
+
+    source_image_stats_df: pd.DataFrame
+
+    def compute_project_stats(self, site=None, has_training_sets=False):
+        if site is None:
+            where_clause = ""
+        else:
+            where_clause = f"WHERE site = '{site}'"
+
+        counts_sql = (
+            " count(DISTINCT image_id) AS num_images,"
+            " count(*) AS num_annotations"
+        )
+        if has_training_sets:
+            counts_sql += (
+                ","
+                " countif(training_set = 'train') AS train,"
+                " countif(training_set = 'ref') AS ref,"
+                " countif(training_set = 'val') AS val,"
+                " countif(training_set IS NULL) AS dropped"
+            )
+
+        result = self.duck_conn.execute(
+            f"SELECT site, project_id,"
+            f" {counts_sql}"
+            f" FROM annotations"
+            f" {where_clause}"
+            f" GROUP BY site, project_id"
+            # MERMAID, then CoralNet; because MERMAID's currently just
+            # one row (no projects distinction).
+            f" ORDER BY site DESC, project_id"
+        )
+        return result.fetch_df()
+
+    def add_training_set_names(self):
+        """
+        Match up DuckDB annotations with train/ref/val.
+        This will add a training_set column to the annotations table.
+        """
+        training_sets = [
+            ('train', self.labels.train),
+            ('ref', self.labels.ref),
+            ('val', self.labels.val),
+        ]
+        # Higher means fewer DuckDB operations; lower might reduce
+        # memory usage.
+        batch_size = 50000
+
+        with duckdb_temp_table_name(self.duck_conn) as temp_table_name:
+
+            # The columns here besides training_set are the ones that should
+            # uniquely identify a particular annotation.
+            self.duck_conn.execute(
+                f"CREATE TABLE {temp_table_name}"
+                f" (bucket VARCHAR,"
+                f"  feature_vector VARCHAR,"
+                f"  row VARCHAR,"
+                f"  col VARCHAR,"
+                f"  training_set VARCHAR)"
+            )
+
+            for set_name, training_set in training_sets:
+                values_batch: list[tuple] = []
+
+                for feature_loc, row, col in (
+                    self.generate_training_set_annotations(training_set)
+                ):
+                    tup = (
+                        feature_loc.bucket_name,
+                        feature_loc.key,
+                        row,
+                        col,
+                        set_name,
+                    )
+                    values_batch.append(tup)
+
+                    if len(values_batch) > batch_size:
+                        self._add_tuples_to_table(
+                            temp_table_name, values_batch)
+                        values_batch = []
+
+                if len(values_batch) > 0:
+                    # Last batch
+                    self._add_tuples_to_table(
+                        temp_table_name, values_batch)
+
+            # Join annotations with the temp table to add the training_set info.
+            #
+            # LEFT OUTER JOIN ensures that annotations with no training_set
+            # match just get NULL for that column. A regular JOIN would instead
+            # drop those annotations rows entirely.
+            self.duck_conn.execute(
+                f"CREATE OR REPLACE TABLE annotations AS"
+                f" SELECT *"
+                f" FROM annotations"
+                f"  LEFT OUTER JOIN {temp_table_name}"
+                f"  USING (bucket, feature_vector, row, col)"
+            )
+
+    def _add_tuples_to_table(self, table_name, tuples: list[tuple]):
+        df = pd.DataFrame.from_records(tuples)
+        self.duck_conn.execute(
+            f"INSERT INTO {table_name} SELECT * FROM df"
         )
 
-    def describe_stats(self):
+    @staticmethod
+    def generate_training_set_annotations(training_set: ImageLabels):
+        for feature_loc in training_set.keys():
+            image_annotations = training_set[feature_loc]
+            for row, col, _ in image_annotations:
+                yield feature_loc, row, col
+
+    def set_train_summary_stats(self):
+
+        ba_library = BenthicAttributeLibrary()
+
+        # Counts per BA.
+        self.duck_conn.execute(
+            "CREATE TABLE ba_counts AS"
+            " SELECT"
+            " benthic_attribute_id,"
+            " count(DISTINCT project_id) AS num_projects,"
+            " count(*) AS num_annotations,"
+            " countif(training_set = 'train') AS train,"
+            " countif(training_set = 'ref') AS ref,"
+            " countif(training_set = 'val') AS val,"
+            " countif(training_set IS NULL) AS dropped"
+            " FROM annotations GROUP BY benthic_attribute_id"
+        )
+        # Add BA names alongside the IDs for readability.
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='ba_counts',
+            base_column_name='benthic_attribute_id',
+            new_column_name='benthic_attribute_name',
+            base_to_new_func=ba_library.id_to_name,
+        )
+        # Sort by total annotation count, and reorder columns
+        # while we're at it.
+        self.artifacts.ba_counts = self.duck_conn.execute(
+            "SELECT"
+            " benthic_attribute_name,"
+            " num_projects,"
+            " num_annotations,"
+            " train,"
+            " ref,"
+            " val,"
+            " dropped,"
+            " benthic_attribute_id"
+            " FROM ba_counts"
+            " ORDER BY num_annotations DESC"
+        ).fetch_df()
+
+        # Counts per BAGF.
+        # We have to watch out for NULL growth form IDs since:
+        # - NULL values are ignored in most aggregate functions, like count().
+        #   https://duckdb.org/docs/stable/sql/data_types/nulls#null-and-aggregate-functions
+        # - Joining on a column with NULL values could result in those rows
+        #   being lost.
+        # So we use coalesce() to temporarily use '0' as placeholders for
+        # NULL.
+        # https://duckdb.org/docs/stable/sql/data_types/nulls#null-and-functions
+        self.duck_conn.execute(
+            "CREATE TABLE bagf_counts AS"
+            " SELECT"
+            " benthic_attribute_id,"
+            " coalesce(growth_form_id, '0') as growth_form_id,"
+            " count(DISTINCT project_id) AS num_projects,"
+            " count(*) AS num_annotations,"
+            " countif(training_set = 'train') AS train,"
+            " countif(training_set = 'ref') AS ref,"
+            " countif(training_set = 'val') AS val,"
+            " countif(training_set IS NULL) AS dropped"
+            " FROM annotations"
+            " GROUP BY benthic_attribute_id, growth_form_id"
+        )
+        # Add BA names for readability.
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='bagf_counts',
+            base_column_name='benthic_attribute_id',
+            new_column_name='benthic_attribute_name',
+            base_to_new_func=ba_library.id_to_name,
+        )
+        # Add GF names for readability.
+        gf_library = GrowthFormLibrary()
+        duckdb_add_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='bagf_counts',
+            base_column_name='growth_form_id',
+            new_column_name='growth_form_name',
+            base_to_new_func=gf_library.by_id.get,
+        )
+        # Transform '0' back to NULL, now that we're done with ops that
+        # would trip on NULL.
+        duckdb_replace_value_in_column(
+            duck_conn=self.duck_conn,
+            duck_table_name='bagf_counts',
+            column_name='growth_form_id',
+            old_value='0',
+            new_value=None,
+        )
+        # Sort by annotation count, and reorder columns
+        # while we're at it.
+        self.artifacts.bagf_counts = self.duck_conn.execute(
+            "SELECT"
+            " benthic_attribute_name,"
+            " growth_form_name,"
+            " num_projects,"
+            " num_annotations,"
+            " train,"
+            " ref,"
+            " val,"
+            " dropped,"
+            " benthic_attribute_id,"
+            " growth_form_id"
+            " FROM bagf_counts"
+            " ORDER BY num_annotations DESC"
+        ).fetch_df()
+
+        # Overall counts.
+        counts = self.duck_conn.execute(
+            "SELECT"
+            " count(*),"
+            " count(DISTINCT image_id)"
+            " FROM annotations"
+        ).fetchall()[0]
+        total_annotations = counts[0]
+        num_of_images = counts[1]
+        num_of_bas = self.artifacts.ba_counts.shape[0]
+        num_of_bagfs = self.artifacts.bagf_counts.shape[0]
+
+        # Stratified splitting will drop annotations of BAGFs which are rare
+        # enough to not reach the 1 annotation threshold for ref/val.
+        # Here we count what has been dropped.
+        counts = self.duck_conn.execute(
+            "SELECT"
+            " count(*),"
+            " count(DISTINCT benthic_attribute_id),"
+            " count(DISTINCT (benthic_attribute_id, growth_form_id))"
+            " FROM annotations"
+            " WHERE training_set IS NOT NULL"
+        ).fetchall()[0]
+        non_dropped_annotations = counts[0]
+        non_dropped_bas = counts[1]
+        non_dropped_bagfs = counts[2]
+        annotations_dropped = total_annotations - non_dropped_annotations
+        bas_dropped = num_of_bas - non_dropped_bas
+        bagfs_dropped = num_of_bagfs - non_dropped_bagfs
+
+        self.artifacts.train_summary_stats = dict(
+            annotations=total_annotations,
+            annotations_train=self.labels.train.label_count,
+            annotations_ref=self.labels.ref.label_count,
+            annotations_val=self.labels.val.label_count,
+            annotations_dropped=annotations_dropped,
+            images=num_of_images,
+            bas=num_of_bas,
+            bas_dropped=bas_dropped,
+            bagfs=num_of_bagfs,
+            bagfs_dropped=bagfs_dropped,
+        )
+
+    def describe_train_summary_stats(self):
         return (
-            "Proceeding to train with {total_annotations}"
-            " annotations ({train_annotations} train,"
-            " {ref_annotations} ref,"
-            " {val_annotations} val) from"
-            " {num_of_images} images."
-            " {num_of_benthic_attributes} BAs and"
-            " {num_of_ba_gf_combinations} BA-GF combos"
-            " are represented here.".format(**self.get_stats())
+            "{annotations} annotations"
+            " ({annotations_train} train,"
+            " {annotations_ref} ref,"
+            " {annotations_val} val,"
+            " {annotations_dropped} dropped during stratification) from"
+            " {images} images."
+            " Representation: {bas} BAs and"
+            " {bagfs} BA-GF combos"
+            " (dropped: {bas_dropped} BAs, {bagfs_dropped} BA-GFs).".format(
+                **self.artifacts.train_summary_stats)
         )
 
     def log_mlflow_artifacts(self):
-
-        if self.benthicattr_filter.inclusion:
-            table_filename = 'included_benthicattrs.json'
-        else:
-            table_filename = 'excluded_benthicattrs.json'
+        """
+        Log various options and stats for the training dataset.
+        """
         mlflow.log_table(
-            self.benthicattr_filter.csv_dataframe, table_filename)
+            self.cn_source_filter.csv_dataframe,
+            'coralnet_sources_included.json')
+
+        if self.label_filter.inclusion:
+            table_filename = 'labels_included.json'
+        else:
+            table_filename = 'labels_excluded.json'
+        mlflow.log_table(
+            self.label_filter.csv_dataframe, table_filename)
 
         mlflow.log_table(
             self.rollup_spec.csv_dataframe, 'rollup_spec.json')
 
-        # Not sure if logging the entirety of the inputs is worth it
-        # (since it's a lot), but we can at least log the sizes of the
-        # inputs.
-        # They don't seem like 'metrics', nor are they strictly 'params'
-        # or 'inputs', nor are they 'outputs'... so we just log as a dict.
-        mlflow.log_dict(self.get_stats(), 'input_stats.yaml')
+        # Number of images and annotations from each CN source and from
+        # MERMAID.
+        # First, before filtering (this is what's present in S3).
+        # https://pandas.pydata.org/docs/reference/api/pandas.concat.html
+        mlflow.log_table(
+            pd.concat([
+                self.artifacts.mermaid_project_stats,
+                self.artifacts.coralnet_project_stats,
+            ]),
+            'project_stats_raw.json')
+        # And here, after filtering (this is what training actually gets).
+        mlflow.log_table(
+            self.compute_project_stats(has_training_sets=True),
+            'project_stats_train_data.json')
 
-        # Log annotation count per BA and per BAGF,
-        # each sorted by most common first.
-        #
-        # For each, we construct a list of dataclass instances,
-        # which is a format that dataframes support.
-        # https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.html
-        CountLogEntry = make_dataclass(
-            'CountLogEntry',
-            [('id', str), ('name', str), ('count', int)])
-        by_ba_with_names = []
-        for ba_id, count in self.annos_by_ba.most_common():
-            ba_name = BenthicAttrSet.get_library().id_to_name(ba_id)
-            by_ba_with_names.append(CountLogEntry(
-                id=ba_id,
-                name=ba_name,
-                count=count,
-            ))
-        by_bagf_with_names = []
-        gf_library = GrowthFormLibrary()
-        for bagf_id, count in self.annos_by_bagf.most_common():
-            bagf_name = BenthicAttrSet.get_library().bagf_id_to_name(
-                bagf_id, gf_library)
-            by_bagf_with_names.append(CountLogEntry(
-                id=bagf_id,
-                name=bagf_name,
-                count=count,
-            ))
+        mlflow.log_dict(
+            self.artifacts.train_summary_stats, 'train_summary.yaml')
 
-        mlflow.log_table(pd.DataFrame(by_ba_with_names), 'ba_counts.json')
-        mlflow.log_table(pd.DataFrame(by_bagf_with_names), 'bagf_counts.json')
+        mlflow.log_table(self.artifacts.ba_counts, 'ba_counts.json')
+        mlflow.log_table(self.artifacts.bagf_counts, 'bagf_counts.json')
 
+        if not self.cn_source_filter.is_empty():
+            # These only apply if CoralNet data is included.
+            mlflow.log_table(
+                self.artifacts.coralnet_label_mapping,
+                'coralnet_label_mapping.json')
+            mlflow.log_table(
+                self.artifacts.unmapped_labels,
+                'unmapped_labels.json')
+
+        # Log other options given to the training process.
         other_options = dict(
             drop_growthforms=self.drop_growthforms,
             annotation_limit=self.annotation_limit,
         )
         mlflow.log_dict(other_options, 'other_options.yaml')
 
+        # Log annotations, if specified.
+        if self.annotations_to_log is not None:
+            log_spec = self.annotations_to_log.lower()
+            self.log_annotations(log_spec)
+
+    def log_annotations(self, log_spec: str):
+        artifact_filename = f'annotations_{log_spec}.json'
+
+        if log_spec == 'all':
+            query = "SELECT * FROM annotations"
+        elif match := re.fullmatch(r's(\d+)', log_spec):
+            cn_source_id = match.groups()[0]
+            query = (
+                f"SELECT * FROM annotations"
+                f" WHERE site = '{Sites.CORALNET.value}'"
+                f" AND project_id = '{cn_source_id}'"
+            )
+        elif match := re.fullmatch(r'i(\d+)', log_spec):
+            cn_image_id = match.groups()[0]
+            query = (
+                f"SELECT * FROM annotations"
+                f" WHERE site = '{Sites.CORALNET.value}'"
+                f" AND image_id = '{cn_image_id}'"
+            )
+        else:
+            raise ValueError(
+                f"Unsupported annotations_to_log spec: {log_spec}")
+
+        mlflow.log_table(
+            self.duck_conn.execute(query).fetch_df(),
+            artifact_filename,
+        )
+
 
 def run_training(
-    included_benthicattrs_csv: str = None,
-    excluded_benthicattrs_csv: str = None,
-    benthicattr_rollup_targets_csv: str = None,
+    include_mermaid: bool = True,
+    coralnet_sources_csv: str = None,
+    label_rollup_spec_csv: str = None,
+    included_labels_csv: str = None,
+    excluded_labels_csv: str = None,
     drop_growthforms: bool = False,
     annotation_limit: int | None = None,
+    annotations_to_log: str | None = None,
     epochs: int = 10,
     experiment_name: str | None = None,
     model_name: str | None = None,
     disable_mlflow: bool = False,
 ):
     """
-    included_benthicattrs_csv
-    excluded_benthicattrs_csv
+    include_mermaid
 
-    Local filepath of a CSV file, specifying either the MERMAID benthic
-    attributes to accept from the training data (excluding all others), or
-    the ones to leave out from the training data (including all others).
-    - Specify at most one of these files, not both. If neither file is
-      specified, then all MERMAID benthic attributes are accepted.
-    - Mapping from CoralNet label IDs to MERMAID BA IDs will be done before
-      applying these inclusions/exclusions.
-    - Growth forms are ignored here.
+    Whether to include MERMAID annotations or not. False can be useful for
+    any troubleshooting which is CoralNet specific.
+
+    coralnet_sources_csv
+
+    Local filepath of a CSV file, specifying CoralNet sources to include in
+    the training data.
+    Recognized columns:
+      id -- CoralNet source ID number.
+      Other informational columns can also be present and will be ignored.
+    If not specified, no CoralNet sources are included (so only MERMAID
+    projects go into training).
+
+    label_rollup_spec_csv
+
+    Local filepath of a CSV file, specifying what MERMAID BA+GF combos to
+    roll up to what other BA+GF combos. For example, roll up
+    Acropora::Branching to Hard coral::Branching; or roll up
+    Porites::Massive to Porites (without growth form specified).
+    - If this file isn't specified, then nothing gets rolled up.
     - Recognized columns:
-      id -- A MERMAID benthic attribute ID (a UUID).
-      name -- Human-readable name of a MERMAID benthic attribute. If an id
-        column is present, name is ignored. Else, the name column is used
-        instead. Either id or name must be present.
+      from_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
+        roll up from.
+      from_gf_id -- MERMAID growth form ID (a UUID) of a combo to
+        roll up from.
+      to_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
+        roll up to.
+      to_gf_id -- MERMAID growth form ID (a UUID) of a combo to
+        roll up to.
       Other informational columns can also be present and will be ignored.
 
-    benthicattr_rollup_targets_csv
+    included_labels_csv
+    excluded_labels_csv
 
-    Local filepath of a CSV file, specifying the MERMAID benthic attributes
-    to roll up to. So if this includes Acroporidae for example, then all
-    descendants of Acroporidae (Acropora, Acropora arabensis, Alveopora...)
-    get rolled up to Acroporidae for training.
-    - If this file isn't specified, then nothing gets rolled up.
-    - Growth forms are ignored here.
-    - Recognized columns and their semantics are the same as
-      included_benthicattrs_csv.
+    Local filepath of a CSV file, specifying either the MERMAID benthic
+    attribute + growth form combos to accept into the training data
+    (excluding all others), or the ones to leave out from the training
+    data (including all others).
+    - Specify at most one of these files, not both. If neither file is
+      specified, then all MERMAID benthic attribute + growth form combos
+      are accepted.
+    - Mapping from CoralNet label IDs to MERMAID BAGFs, and rolling up
+      BAGFs, will be done before applying these inclusions/exclusions.
+    - Recognized columns:
+      ba_id -- A MERMAID benthic attribute ID (a UUID).
+      gf_id -- A MERMAID growth form ID (a UUID).
+      Other informational columns can also be present and will be ignored.
 
     drop_growthforms
 
-    If True, discard growth forms from the training data. Basically another
-    dimension of rolling up labels.
+    If True, discard all growth forms from the training data. Technically
+    redundant with the rollup spec, but this is a very simple-to-specify
+    option which can be useful.
 
     annotation_limit
 
     If specified, only get up to this many annotations for training. This can
     help with testing since the runtime is correlated to number of annotations.
+
+    annotations_to_log
+
+    If specified, log training annotations as an MLflow artifact, in tabular
+    form. One table row per point-annotation. This can serve as a sanity
+    check, but the artifact can get quite large.
+    Supported formats:
+    'all': log all annotations
+    's123': log annotations from CoralNet source of ID 123
+    'i456': log annotations from CoralNet image of ID 456
+    <not specified>: log nothing
 
     epochs
 
@@ -532,35 +1344,36 @@ def run_training(
 
     model_name
 
-    Name of this MLflow experiment run's model. If not given, then a model name will be
-    constructed based on the experiment parameters.
+    Name of this MLflow experiment run's model. If not given, then a model
+    name will be constructed based on the experiment parameters.
     The run name is based on this too.
+    This name gets truncated at 50 characters to avoid a potential crash when
+    logging the model.
 
     disable_mlflow
 
     If True, don't connect to or log to a MLflow tracking server. This can
     make testing easier when running a tracking server feels onerous.
-
-    TODO: Be able to specify an example image (or set of them?) whose
-    training annotations are logged along with the model. Since logging all
-    training annotations might be too much, but looking at a small sample
-    is a good sanity check.
     """
     experiment_name = (
         experiment_name or settings.mlflow_default_experiment_name)
 
     training_dataset = TrainingDataset(
-        included_benthicattrs_csv=included_benthicattrs_csv,
-        excluded_benthicattrs_csv=excluded_benthicattrs_csv,
-        benthicattr_rollup_targets_csv=benthicattr_rollup_targets_csv,
+        include_mermaid=include_mermaid,
+        coralnet_sources_csv=coralnet_sources_csv,
+        label_rollup_spec_csv=label_rollup_spec_csv,
+        included_labels_csv=included_labels_csv,
+        excluded_labels_csv=excluded_labels_csv,
         drop_growthforms=drop_growthforms,
         annotation_limit=annotation_limit,
+        annotations_to_log=annotations_to_log,
     )
 
     # Other prep before training.
 
     log_memory_usage('Memory usage after creating labels')
-    logger.info(training_dataset.describe_stats())
+    logger.info("Proceeding to train with:")
+    logger.info(training_dataset.describe_train_summary_stats())
 
     current_time = datetime.now()
     time_str = current_time.strftime('%Y%m%dT%H%M%S')
@@ -573,21 +1386,32 @@ def run_training(
 
     if model_name is None:
 
-        if included_benthicattrs_csv:
-            as_path = Path(included_benthicattrs_csv)
+        if included_labels_csv:
+            as_path = Path(included_labels_csv)
             model_name = f'Include{alphanumeric_only_str(as_path.stem)}'
-        elif excluded_benthicattrs_csv:
-            as_path = Path(excluded_benthicattrs_csv)
+        elif excluded_labels_csv:
+            as_path = Path(excluded_labels_csv)
             model_name = f'Exclude{alphanumeric_only_str(as_path.stem)}'
         else:
             model_name = 'AllLabels'
 
-        if benthicattr_rollup_targets_csv:
-            as_path = Path(benthicattr_rollup_targets_csv)
+        if label_rollup_spec_csv:
+            as_path = Path(label_rollup_spec_csv)
             model_name += f'-Rollup{alphanumeric_only_str(as_path.stem)}'
+
+        if coralnet_sources_csv:
+            as_path = Path(coralnet_sources_csv)
+            model_name += f'-{alphanumeric_only_str(as_path.stem)}'
 
         if annotation_limit:
             model_name += f'-AnnoLimit{annotation_limit}'
+
+    # There's a 62 character limit for the 'model package group name' which is
+    # built from the model name. For example, it could be the model name
+    # with a suffix of -c78374. So we'll make the model name under 62 minus
+    # 7 characters with some leeway, to be safe. If we exceed the limit,
+    # then logging the model fails.
+    model_name = model_name[:50]
 
     run_name = f'{model_name}-{time_str}'
 
@@ -607,8 +1431,6 @@ def run_training(
         nbr_epochs=experiment_params['epochs'],
         clf_type='MLP',
         labels=training_dataset.labels,
-        features_loc=DataLocation(
-            's3', bucket_name=TRAINING_BUCKET, key=''),
         previous_model_locs=[],
         model_loc=model_loc,
         valresult_loc=valresult_loc,
@@ -635,6 +1457,10 @@ def run_training(
 
         with mlflow.start_run(run_name=run_name):
 
+            # Log dataset artifacts first, so they can be inspected during
+            # training.
+            training_dataset.log_mlflow_artifacts()
+
             return_msg = train_classifier(train_msg)
 
             logger.info(
@@ -646,8 +1472,6 @@ def run_training(
             # Note that log_metric() only takes numeric values.
             accuracy_pct = return_msg.acc * 100
             mlflow.log_metric("accuracy", accuracy_pct)
-
-            training_dataset.log_mlflow_artifacts()
 
             # ref_accs is probably the only other part of return_msg to save.
             ref_accs_dict = dict()

@@ -2,9 +2,12 @@
 
 from collections import defaultdict
 import csv
+import dataclasses
 import json
 import operator
 import urllib.request
+
+import pandas as pd
 
 
 class BenthicAttributeLibrary:
@@ -85,6 +88,86 @@ class GrowthFormLibrary:
                 data = item['data']
                 break
         self.by_id = {gf['id']: gf['name'] for gf in data}
+
+
+@dataclasses.dataclass
+class LabelMappingEntry:
+    # Since this is a Python dataclass, there's an automatically generated
+    # __init__() method which sets the fields below.
+
+    # We map from the provider's ID/label to the benthic attribute
+    # and growth form.
+    # Not all these fields are strictly necessary for the task of mapping,
+    # but they're useful to include for MLflow artifacts.
+    #
+    # Note that the order the fields appear here also determines the order
+    # they appear in the MLflow artifact, assuming these dataclass instances
+    # are passed directly into a pd.DataFrame() which serves as the artifact.
+    provider_label: str
+    benthic_attribute_name: str
+    growth_form_name: str | None
+    provider_id: str
+    benthic_attribute_id: str
+    growth_form_id: str | None
+
+
+class CoralNetMermaidMapping:
+    """
+    Mapping from CoralNet label IDs to:
+    - MERMAID benthic attribute IDs (benthic_attribute_id)
+    - MERMAID growth form IDs (growth_form_id)
+    - CoralNet label names (provider_label)
+
+    Loaded from the MERMAID API. Lazy-loaded (loaded only when a lookup
+    is actually made) and cached (only loaded from API once).
+    """
+
+    def __init__(
+        self,
+        mapping_endpoint='https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet',
+    ):
+        self._mapping = None
+        self._endpoint = mapping_endpoint
+
+    def __contains__(self, cn_label_id):
+        return cn_label_id in self.mapping
+
+    def __getitem__(self, cn_label_id):
+        try:
+            return self.mapping[cn_label_id]
+        except KeyError as e:
+            raise KeyError(f"{e} - Make sure you're passing the CoralNet label ID (not name), as a string (not int).")
+
+    def get_dataframe(self):
+        return pd.DataFrame(self.mapping.values())
+
+    @property
+    def mapping(self):
+        if self._mapping is None:
+            self._load_mapping()
+        return self._mapping
+
+    def _load_mapping(self):
+        endpoint_response = urllib.request.urlopen(self._endpoint)
+        response_json = json.loads(endpoint_response.read())
+        api_mapping = response_json['results']
+
+        while response_json['next']:
+            endpoint_response = urllib.request.urlopen(response_json['next'])
+            response_json = json.loads(endpoint_response.read())
+            api_mapping.extend(response_json['results'])
+
+        self._mapping = {
+            entry['provider_id']: LabelMappingEntry(
+                benthic_attribute_id=entry['benthic_attribute_id'],
+                growth_form_id=entry['growth_form_id'],
+                benthic_attribute_name=entry['benthic_attribute_name'],
+                growth_form_name=entry['growth_form_name'],
+                provider_id=entry['provider_id'],
+                provider_label=entry['provider_label'],
+            )
+            for entry in api_mapping
+        }
 
 
 def output_ba_csvs():

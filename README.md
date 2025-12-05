@@ -72,12 +72,16 @@ Local env advantages over SageMaker:
 - Can run a local MLflow tracking server with very low startup and cost.
 - Easier to customize and persist the packages that are installed in the environment.
 
-If you're on a local dev machine and accessing public S3 files, the `SPACER_AWS_ANONYMOUS` setting may be useful.
+If you're on a local dev machine and accessing public S3 files, the `AWS_ANONYMOUS` setting may be useful.
 
 
 ## For developers
 
 Set up this project as an [editable install](https://pip.pypa.io/en/stable/topics/local-project-installs/): first git-clone this repo, then use `pip install -e <path to repo>`.
+
+### Unit tests
+
+These can be run by, for example, changing the working directory to `tests` and then running `python -m unittest`.
 
 ### Design notes
 
