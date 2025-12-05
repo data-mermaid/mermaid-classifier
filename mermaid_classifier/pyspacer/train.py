@@ -105,7 +105,7 @@ class LabelFilter(CsvSpec):
 
     def filter_in_duckdb(
         self,
-        duck_conn: 'DuckDBPyConnection',
+        duck_conn: duckdb.DuckDBPyConnection,
         duck_table_name: str,
         ba_id_column_name: str = 'benthic_attribute_id',
         gf_id_column_name: str = 'growth_form_id',
@@ -187,7 +187,7 @@ class LabelRollupSpec(CsvSpec):
 
     def roll_up_in_duckdb(
         self,
-        duck_conn: 'DuckDBPyConnection',
+        duck_conn: duckdb.DuckDBPyConnection,
         duck_table_name: str,
         ba_id_column_name: str = 'benthic_attribute_id',
         gf_id_column_name: str = 'growth_form_id',

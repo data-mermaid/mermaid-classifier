@@ -2,12 +2,13 @@ from contextlib import contextmanager
 import typing
 import uuid
 
+import duckdb
 import pandas as pd
 
 
 @contextmanager
 def duckdb_temp_table_name(
-    duck_conn: 'DuckDBPyConnection',
+    duck_conn: duckdb.DuckDBPyConnection,
     base_name: str | None = None,
 ):
     """
@@ -37,7 +38,7 @@ def duckdb_temp_table_name(
 
 @contextmanager
 def _duckdb_temp_transform_table(
-    duck_conn: 'DuckDBPyConnection',
+    duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     source_column_name: str,
     target_column_name: str,
@@ -75,7 +76,7 @@ def _duckdb_temp_transform_table(
 
 
 def duckdb_replace_column(
-    duck_conn: 'DuckDBPyConnection',
+    duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     column_name: str,
     new_values_column_name: str,
@@ -97,7 +98,7 @@ def duckdb_replace_column(
 
 
 def duckdb_transform_column(
-    duck_conn: 'DuckDBPyConnection',
+    duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     column_name: str,
     transform_func: typing.Callable[[str|None], str|None],
@@ -133,7 +134,7 @@ def duckdb_transform_column(
 
 
 def duckdb_replace_value_in_column(
-    duck_conn: 'DuckDBPyConnection',
+    duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     column_name: str,
     old_value: str|None,
@@ -156,7 +157,7 @@ def duckdb_replace_value_in_column(
 
 
 def duckdb_add_column(
-    duck_conn: 'DuckDBPyConnection',
+    duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     base_column_name: str,
     new_column_name: str,
@@ -186,7 +187,7 @@ def duckdb_add_column(
 
 
 def duckdb_filter_on_column(
-    duck_conn: 'DuckDBPyConnection',
+    duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     column_name: str,
     inclusion_func: typing.Callable[[str|None], bool],
@@ -219,8 +220,8 @@ def duckdb_filter_on_column(
 
 
 def duckdb_batched_rows(
-    rows: 'DuckDBPyRelation',
-) -> typing.Generator['pandas.core.series.Series', None, None]:
+    rows: duckdb.DuckDBPyRelation,
+) -> typing.Generator[pd.core.series.Series, None, None]:
     """
     Reads from a DuckDB relation (chunkifying to avoid memory issues),
     and generates pandas dataframe rows.
@@ -253,10 +254,10 @@ def duckdb_batched_rows(
 
 
 def duckdb_grouped_rows(
-    duck_conn: 'DuckDBPyConnection',
+    duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     grouping_column_names: list[str],
-) -> typing.Generator['pandas.core.series.Series', None, None]:
+) -> typing.Generator[pd.core.series.Series, None, None]:
 
     # Ordering by a set of columns should mean that, for any set of values
     # for those columns, all the rows with that set of values are all
