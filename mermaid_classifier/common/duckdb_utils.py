@@ -1,4 +1,77 @@
+from contextlib import contextmanager
 import typing
+import uuid
+
+import pandas as pd
+
+
+@contextmanager
+def duckdb_temp_table_name(
+    duck_conn: 'DuckDBPyConnection',
+    base_name: str | None = None,
+):
+    """
+    Context manager for temporary DuckDB table names with automatic cleanup.
+
+    The end of this CM cleans up the table if it exists.
+    However, the caller is responsible for table creation, because it's not
+    easy for this function to accommodate the different CREATE TABLE
+    statements one might want to use. Such DuckDB statements could even
+    reference local Python variables, such as "CREATE TABLE my_table
+    AS SELECT * FROM my_dataframe" (in this case, my_dataframe).
+
+    So, think of this CM as guaranteeing the availability of the table name
+    for the duration of the CM, and not longer than that.
+    """
+    table_name = f"temp_{base_name or uuid.uuid4().hex[:8]}"
+
+    try:
+        # The wrapped code can create a table of this name and do anything
+        # with that table.
+        yield table_name
+    finally:
+        # Clean up the table regardless of whether the wrapped code
+        # runs without errors, or whether the table was even created.
+        duck_conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+@contextmanager
+def _duckdb_temp_transform_table(
+    duck_conn: 'DuckDBPyConnection',
+    duck_table_name: str,
+    source_column_name: str,
+    target_column_name: str,
+    transform_func: typing.Callable,
+):
+    """
+    Internal helper: given an existing DuckDB table and column, creates a
+    temp table mapping that column's values to a new column,
+    using the provided Python function.
+
+    Yields the name of the created temp table, and then ensures the temp
+    table is cleaned up.
+    """
+    # Get all unique values of the existing column.
+    tuples_with_unique_values = list(
+        duck_conn.execute(
+            f"SELECT DISTINCT {source_column_name} FROM {duck_table_name}"
+        ).fetchall()
+    )
+    unique_values = [tup[0] for tup in tuples_with_unique_values]
+
+    # Build mapping DataFrame using pandas. This is more efficient and less
+    # error-prone for inserting values compared to building a large
+    # INSERT INTO statement.
+    mapping_df = pd.DataFrame({
+        source_column_name: unique_values,
+        target_column_name: [transform_func(v) for v in unique_values]
+    })
+
+    with duckdb_temp_table_name(duck_conn) as temp_table_name:
+        duck_conn.execute(
+            f"CREATE TABLE {temp_table_name} AS SELECT * FROM mapping_df"
+        )
+        yield temp_table_name
 
 
 def duckdb_replace_column(
@@ -32,54 +105,30 @@ def duckdb_transform_column(
     """
     Transform the values of the specified DuckDB column using the given
     function.
-    Only supports text columns.
     """
-    tuples_with_unique_values = list(
+    with _duckdb_temp_transform_table(
+        duck_conn,
+        duck_table_name,
+        column_name,
+        f'transformed_{column_name}',
+        transform_func,
+    ) as transform_table_name:
+
+        # Use JOIN ... USING to apply the transform.
         duck_conn.execute(
-            f"SELECT DISTINCT {column_name} FROM {duck_table_name}"
-        ).fetchall()
-    )
-    unique_values = [tup[0] for tup in tuples_with_unique_values]
-
-    entries = [
-        (value, transform_func(value))
-        for value in unique_values
-    ]
-    entries_str = ', '.join(
-        f"('{v1}', {'NULL' if v2 is None else '\''+v2+'\''})"
-        for v1, v2 in entries
-    )
-
-    # Create a DuckDB table for the transform spec.
-    duck_conn.execute(
-        f"CREATE TABLE transform_table"
-        f" ({column_name} VARCHAR,"
-        f"  transformed_{column_name} VARCHAR)"
-    )
-    duck_conn.execute(
-        f"INSERT INTO transform_table VALUES"
-        f" {entries_str}"
-    )
-
-    # Use JOIN ... USING to apply the transform.
-    duck_conn.execute(
-        f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-        f" SELECT *"
-        f" FROM {duck_table_name}"
-        f"  JOIN transform_table"
-        f"  USING ({column_name})"
-    )
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT *"
+            f" FROM {duck_table_name}"
+            f"  JOIN {transform_table_name}"
+            f"  USING ({column_name})"
+        )
 
     # Post-transform column becomes the new column.
     duckdb_replace_column(
         duck_conn,
         duck_table_name,
         column_name,
-        f"transformed_{column_name}",
-    )
-    # Don't need the temporary table anymore.
-    duck_conn.execute(
-        f"DROP TABLE transform_table"
+        f'transformed_{column_name}',
     )
 
 
@@ -116,48 +165,24 @@ def duckdb_add_column(
     """
     Transform the values of the specified DuckDB 'base column' into
     values for a new column.
-    Only supports text columns.
     """
-    tuples_with_unique_values = list(
+    with _duckdb_temp_transform_table(
+        duck_conn,
+        duck_table_name,
+        base_column_name,
+        new_column_name,
+        base_to_new_func,
+    ) as transform_table_name:
+
+        # Use JOIN ... USING to add the new column.
+        # https://duckdb.org/docs/stable/sql/query_syntax/from#conditional-joins
         duck_conn.execute(
-            f"SELECT DISTINCT {base_column_name} FROM {duck_table_name}"
-        ).fetchall()
-    )
-    unique_values = [tup[0] for tup in tuples_with_unique_values]
-    entries = [
-        (value, base_to_new_func(value))
-        for value in unique_values
-    ]
-    entries_str = ', '.join(
-        f"('{v1}', {'NULL' if v2 is None else '\''+v2+'\''})"
-        for v1, v2 in entries
-    )
-
-    # Create a DuckDB table for the transform spec.
-    duck_conn.execute(
-        f"CREATE TABLE transform_table"
-        f" ({base_column_name} VARCHAR,"
-        f"  {new_column_name} VARCHAR)"
-    )
-    duck_conn.execute(
-        f"INSERT INTO transform_table VALUES"
-        f" {entries_str}"
-    )
-
-    # Use JOIN ... USING to add the new column.
-    # https://duckdb.org/docs/stable/sql/query_syntax/from#conditional-joins
-    duck_conn.execute(
-        f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-        f" SELECT *"
-        f" FROM {duck_table_name}"
-        f"  JOIN transform_table"
-        f"  USING ({base_column_name})"
-    )
-
-    # Don't need the temporary table anymore.
-    duck_conn.execute(
-        f"DROP TABLE transform_table"
-    )
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT *"
+            f" FROM {duck_table_name}"
+            f"  JOIN {transform_table_name}"
+            f"  USING ({base_column_name})"
+        )
 
 
 def duckdb_filter_on_column(
@@ -169,51 +194,28 @@ def duckdb_filter_on_column(
     """
     Filter the rows of the specified DuckDB table by passing the
     specified column through a boolean function.
-    Only supports text columns.
     """
-    tuples_with_unique_values = list(
+    with _duckdb_temp_transform_table(
+        duck_conn,
+        duck_table_name,
+        column_name,
+        'included',
+        inclusion_func,
+    ) as transform_table_name:
+
+        # Use JOIN to determine which annotations to keep, and
+        # WHERE to filter things down.
+        #
+        # SELECT only from the original table since we don't need
+        # the included column after this.
         duck_conn.execute(
-            f"SELECT DISTINCT {column_name} FROM {duck_table_name}"
-        ).fetchall()
-    )
-    unique_values = [tup[0] for tup in tuples_with_unique_values]
-    entries = [
-        (value, inclusion_func(value))
-        for value in unique_values
-    ]
-    entries_str = ', '.join(
-        f"('{value}', {'true' if included else 'false'})"
-        for value, included in entries
-    )
-
-    duck_conn.execute(
-        f"CREATE TABLE {duck_table_name}_filter"
-        f" ({column_name} VARCHAR,"
-        f"  included BOOLEAN)"
-    )
-    duck_conn.execute(
-        f"INSERT INTO {duck_table_name}_filter VALUES"
-        f" {entries_str}"
-    )
-
-    # Use JOIN to determine which annotations to keep, and
-    # WHERE to filter things down.
-    duck_conn.execute(
-        f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-        f" SELECT *"
-        f" FROM {duck_table_name}"
-        f"  JOIN {duck_table_name}_filter"
-        f"  USING ({column_name})"
-        f" WHERE included = true"
-    )
-    # Don't need the included column anymore.
-    duck_conn.execute(
-        f"ALTER TABLE {duck_table_name} DROP included"
-    )
-    # Or the *_filter table.
-    duck_conn.execute(
-        f"DROP TABLE {duck_table_name}_filter"
-    )
+            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+            f" SELECT {duck_table_name}.*"
+            f" FROM {duck_table_name}"
+            f"  JOIN {transform_table_name}"
+            f"  USING ({column_name})"
+            f" WHERE included = true"
+        )
 
 
 def duckdb_batched_rows(
