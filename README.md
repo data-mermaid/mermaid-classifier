@@ -79,6 +79,10 @@ If you're on a local dev machine and accessing public S3 files, the `AWS_ANONYMO
 
 Set up this project as an [editable install](https://pip.pypa.io/en/stable/topics/local-project-installs/): first git-clone this repo, then use `pip install -e <path to repo>`.
 
+### Unit tests
+
+These can be run by, for example, changing the working directory to `tests` and then running `python -m unittest`.
+
 ### Design notes
 
 This project is set up as a Python package with a [flat project layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/).
