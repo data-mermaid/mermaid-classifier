@@ -24,13 +24,15 @@ pyspacer = [
     "matplotlib",
     "mlflow>=3",
     "numpy",
+    # MLflow requires pandas, so we might as well use it when convenient.
     "pandas",
     "psutil",
     "pyarrow",
-    # This branch has a fix for numpy 1.26.1-.4 (which SageMaker uses
-    # at this time of writing) and also allows anonymous AWS access.
+    # This branch:
+    # - allows anonymous AWS access
+    # - allows train data to come from multiple buckets
     # These improvements will be in a stable pyspacer version later.
-    "pyspacer@git+https://github.com/coralnet/pyspacer.git@aws-profile-support-etc",
+    "pyspacer@git+https://github.com/coralnet/pyspacer.git@train-data-source-flexibility",
     # python-dotenv by itself isn't explicit about what variable
     # names it accepts.
     # python-decouple and pydantic-settings are more explicit.

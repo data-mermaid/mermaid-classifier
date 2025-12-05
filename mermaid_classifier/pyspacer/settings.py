@@ -16,11 +16,20 @@ class Settings(BaseSettings):
     Though none of the settings are 100% strictly required, some are
     needed in common cases.
     """
-    mlflow_tracking_server: str | None = None
+    # ML inputs
+    coralnet_train_data_bucket: str = 'coral-reef-training'
+    mermaid_train_data_bucket: str = 'coral-reef-training'
     weights_location: str | None = None
+    aws_region: str = 'us-east-1'
+    aws_anonymous: Literal['False', 'True'] = 'False'
+    aws_key_id: str | None = None
+    aws_secret: str | None = None
+    aws_session_token: str | None = None
+
+    # Other
+    mlflow_tracking_server: str | None = None
     training_inputs_percent_missing_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
-    spacer_aws_anonymous: Literal['False', 'True'] = 'False'
     mlflow_http_request_max_retries: str | None = None
     mlflow_default_experiment_name: str | None = None
 
@@ -37,24 +46,31 @@ def set_env_vars_for_packages():
     configured with .env, rather than having to be manually set as
     env vars.
     """
-    var_names = [
+    setting_to_env_name = dict(
         # Filesystem directory to use for caching extractor weights that
         # were downloaded from S3 or from a URL.
         # This is required if loading weights from such a source.
-        'spacer_extractors_cache_dir',
+        spacer_extractors_cache_dir='SPACER_EXTRACTORS_CACHE_DIR',
+        aws_region='SPACER_AWS_REGION',
         # If True, AWS is accessed without any credentials, which can
         # simplify setup while still allowing access to public S3 files.
-        'spacer_aws_anonymous',
+        aws_anonymous='SPACER_AWS_ANONYMOUS',
+        # Accessing private AWS data is most easily done by using the
+        # instance metadata service within AWS, but here are other
+        # ways. For example, log into AWS with SSO, choose a role to view
+        # a temporary key+secret+token for, and plug those 3 values in.
+        aws_key_id='SPACER_AWS_ACCESS_KEY_ID',
+        aws_secret='SPACER_AWS_SECRET_ACCESS_KEY',
+        aws_session_token='SPACER_AWS_SESSION_TOKEN',
         # When retrieving or saving models, this is the number of
         # exponential-backoff retries that MLflow will attempt when it's
         # having trouble connecting.
         # Default 7, but that takes forever; 2 is recommended.
-        'mlflow_http_request_max_retries',
-    ]
-    for var_name in var_names:
-        var_value = getattr(settings, var_name)
+        mlflow_http_request_max_retries='MLFLOW_HTTP_REQUEST_MAX_RETRIES',
+    )
+    for setting_name, env_var_name in setting_to_env_name.items():
+        var_value = getattr(settings, setting_name)
         if var_value:
             # Ensure the value's set in the OS environment
-            # so that spacer sees it.
-            caps_var_name = var_name.upper()
-            os.environ[caps_var_name] = var_value
+            # so that spacer or MLflow sees it.
+            os.environ[env_var_name] = var_value
