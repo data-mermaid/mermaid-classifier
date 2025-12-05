@@ -36,6 +36,7 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_grouped_rows,
     duckdb_replace_column,
     duckdb_replace_value_in_column,
+    duckdb_temp_table_name,
     duckdb_transform_column,
 )
 from mermaid_classifier.pyspacer.settings import settings
@@ -868,17 +869,6 @@ class TrainingDataset:
         Match up DuckDB annotations with train/ref/val.
         This will add a training_set column to the annotations table.
         """
-        # The columns here besides training_set are the ones that should
-        # uniquely identify a particular annotation.
-        self.duck_conn.execute(
-            "CREATE TABLE training_set_temp"
-            f" (bucket VARCHAR,"
-            f"  feature_vector VARCHAR,"
-            f"  row VARCHAR,"
-            f"  col VARCHAR,"
-            f"  training_set VARCHAR)"
-        )
-
         training_sets = [
             ('train', self.labels.train),
             ('ref', self.labels.ref),
@@ -888,51 +878,61 @@ class TrainingDataset:
         # memory usage.
         batch_size = 50000
 
-        for set_name, training_set in training_sets:
-            values_batch: list[str] = []
+        with duckdb_temp_table_name(self.duck_conn) as temp_table_name:
 
-            for feature_loc, row, col in (
-                self.generate_training_set_annotations(training_set)
-            ):
-                tup = (
-                    feature_loc.bucket_name,
-                    feature_loc.key,
-                    row,
-                    col,
-                    set_name,
-                )
-                values_batch.append(str(tup))
+            # The columns here besides training_set are the ones that should
+            # uniquely identify a particular annotation.
+            self.duck_conn.execute(
+                f"CREATE TABLE {temp_table_name}"
+                f" (bucket VARCHAR,"
+                f"  feature_vector VARCHAR,"
+                f"  row VARCHAR,"
+                f"  col VARCHAR,"
+                f"  training_set VARCHAR)"
+            )
 
-                if len(values_batch) > batch_size:
-                    self.duckdb_training_set_temp_write(values_batch)
-                    values_batch = []
+            for set_name, training_set in training_sets:
+                values_batch: list[tuple] = []
 
-            if len(values_batch) > 0:
-                # Last batch
-                self.duckdb_training_set_temp_write(values_batch)
+                for feature_loc, row, col in (
+                    self.generate_training_set_annotations(training_set)
+                ):
+                    tup = (
+                        feature_loc.bucket_name,
+                        feature_loc.key,
+                        row,
+                        col,
+                        set_name,
+                    )
+                    values_batch.append(tup)
 
-        # Join annotations with the temp table to add the training_set info.
-        #
-        # LEFT OUTER JOIN ensures that annotations with no training_set
-        # match just get NULL for that column. A regular JOIN would instead
-        # drop those annotations rows entirely.
+                    if len(values_batch) > batch_size:
+                        self._add_tuples_to_table(
+                            temp_table_name, values_batch)
+                        values_batch = []
+
+                if len(values_batch) > 0:
+                    # Last batch
+                    self._add_tuples_to_table(
+                        temp_table_name, values_batch)
+
+            # Join annotations with the temp table to add the training_set info.
+            #
+            # LEFT OUTER JOIN ensures that annotations with no training_set
+            # match just get NULL for that column. A regular JOIN would instead
+            # drop those annotations rows entirely.
+            self.duck_conn.execute(
+                f"CREATE OR REPLACE TABLE annotations AS"
+                f" SELECT *"
+                f" FROM annotations"
+                f"  LEFT OUTER JOIN {temp_table_name}"
+                f"  USING (bucket, feature_vector, row, col)"
+            )
+
+    def _add_tuples_to_table(self, table_name, tuples: list[tuple]):
+        df = pd.DataFrame.from_records(tuples)
         self.duck_conn.execute(
-            f"CREATE OR REPLACE TABLE annotations AS"
-            f" SELECT *"
-            f" FROM annotations"
-            f"  LEFT OUTER JOIN training_set_temp"
-            f"  USING (bucket, feature_vector, row, col)"
-        )
-
-        # Don't need the temporary table anymore.
-        self.duck_conn.execute(
-            f"DROP TABLE training_set_temp"
-        )
-
-    def duckdb_training_set_temp_write(self, values_batch: list[str]):
-        entries_str = ", ".join(values_batch)
-        self.duck_conn.execute(
-            f"INSERT INTO training_set_temp VALUES {entries_str}"
+            f"INSERT INTO {table_name} SELECT * FROM df"
         )
 
     @staticmethod
