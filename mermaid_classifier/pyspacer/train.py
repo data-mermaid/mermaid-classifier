@@ -1344,9 +1344,11 @@ def run_training(
 
     model_name
 
-    Name of this MLflow experiment run's model. If not given, then a model name will be
-    constructed based on the experiment parameters.
+    Name of this MLflow experiment run's model. If not given, then a model
+    name will be constructed based on the experiment parameters.
     The run name is based on this too.
+    This name gets truncated at 50 characters to avoid a potential crash when
+    logging the model.
 
     disable_mlflow
 
@@ -1403,6 +1405,13 @@ def run_training(
 
         if annotation_limit:
             model_name += f'-AnnoLimit{annotation_limit}'
+
+    # There's a 62 character limit for the 'model package group name' which is
+    # built from the model name. For example, it could be the model name
+    # with a suffix of -c78374. So we'll make the model name under 62 minus
+    # 7 characters with some leeway, to be safe. If we exceed the limit,
+    # then logging the model fails.
+    model_name = model_name[:50]
 
     run_name = f'{model_name}-{time_str}'
 
