@@ -2,6 +2,7 @@
 Train a classifier using feature vectors and annotations
 provided on S3.
 """
+import dataclasses
 from datetime import datetime
 import enum
 from io import StringIO
@@ -13,7 +14,6 @@ import typing
 import duckdb
 try:
     import mlflow
-    from mlflow.models import infer_signature
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
@@ -54,17 +54,6 @@ class Sites(enum.Enum):
 def log_memory_usage(message):
     memory_usage = psutil.virtual_memory()
     logger.debug(f"{message} - Memory usage: {memory_usage.percent}%")
-
-
-def format_accuracy(accuracy):
-    return f'{100*accuracy:.1f}%'
-
-
-def alphanumeric_only_str(s: str):
-    """
-    Return a version of s which has the non-alphanumeric chars removed.
-    """
-    return ''.join([char for char in s if char.isalnum()])
 
 
 class LabelFilter(CsvSpec):
@@ -288,7 +277,7 @@ class CNSourceFilter(CsvSpec):
 class Artifacts:
     """
     Namespace to make it easier to track artifacts that we're
-    logging to MLflow later.
+    logging later.
     """
     ba_counts: pd.DataFrame
     bagf_counts: pd.DataFrame
@@ -299,46 +288,152 @@ class Artifacts:
     unmapped_labels: pd.DataFrame
 
 
+@dataclasses.dataclass
+class DatasetOptions:
+    """
+    include_mermaid
+
+    Whether to include MERMAID annotations or not. False can be useful for
+    any troubleshooting which is CoralNet specific.
+
+    coralnet_sources_csv
+
+    Local filepath of a CSV file, specifying CoralNet sources to include in
+    the training data.
+    Recognized columns:
+      id -- CoralNet source ID number.
+      Other informational columns can also be present and will be ignored.
+    If not specified, no CoralNet sources are included (so only MERMAID
+    projects go into training).
+
+    label_rollup_spec_csv
+
+    Local filepath of a CSV file, specifying what MERMAID BA+GF combos to
+    roll up to what other BA+GF combos. For example, roll up
+    Acropora::Branching to Hard coral::Branching; or roll up
+    Porites::Massive to Porites (without growth form specified).
+    - If this file isn't specified, then nothing gets rolled up.
+    - Recognized columns:
+      from_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
+        roll up from.
+      from_gf_id -- MERMAID growth form ID (a UUID) of a combo to
+        roll up from.
+      to_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
+        roll up to.
+      to_gf_id -- MERMAID growth form ID (a UUID) of a combo to
+        roll up to.
+      Other informational columns can also be present and will be ignored.
+
+    included_labels_csv
+    excluded_labels_csv
+
+    Local filepath of a CSV file, specifying either the MERMAID benthic
+    attribute + growth form combos to accept into the training data
+    (excluding all others), or the ones to leave out from the training
+    data (including all others).
+    - Specify at most one of these files, not both. If neither file is
+      specified, then all MERMAID benthic attribute + growth form combos
+      are accepted.
+    - Mapping from CoralNet label IDs to MERMAID BAGFs, and rolling up
+      BAGFs, will be done before applying these inclusions/exclusions.
+    - Recognized columns:
+      ba_id -- A MERMAID benthic attribute ID (a UUID).
+      gf_id -- A MERMAID growth form ID (a UUID).
+      Other informational columns can also be present and will be ignored.
+
+    drop_growthforms
+
+    If True, discard all growth forms from the training data. Technically
+    redundant with the rollup spec, but this is a very simple-to-specify
+    option which can be useful.
+
+    annotation_limit
+
+    If specified, only get up to this many annotations for training. This can
+    help with testing since the runtime is correlated to number of annotations.
+    """
+    include_mermaid: bool = True
+    coralnet_sources_csv: str = None
+    label_rollup_spec_csv: str = None
+    included_labels_csv: str = None
+    excluded_labels_csv: str = None
+    drop_growthforms: bool = False
+    annotation_limit: int | None = None
+
+
+@dataclasses.dataclass
+class TrainingOptions:
+    """
+    epochs
+
+    Number of pyspacer training epochs to run.
+    """
+    epochs: int = 10
+
+
+@dataclasses.dataclass
+class MLflowOptions:
+    """
+    experiment_name
+
+    Name of the MLflow experiment in which to register the training run. If not
+    given, then it's taken from the MLFLOW_DEFAULT_EXPERIMENT_NAME setting.
+
+    model_name
+
+    Name of this MLflow experiment run's model. If not given, then a model
+    name will be constructed based on the experiment parameters.
+    The run name is based on this too.
+    This name gets truncated at 50 characters to avoid a potential crash when
+    logging the model.
+
+    annotations_to_log
+
+    If specified, log training annotations as an MLflow artifact, in tabular
+    form. One table row per point-annotation. This can serve as a sanity
+    check, but the artifact can get quite large.
+    Supported formats:
+    'all': log all annotations
+    's123': log annotations from CoralNet source of ID 123
+    'i456': log annotations from CoralNet image of ID 456
+    <not specified>: log nothing
+    """
+    experiment_name: str | None = settings.mlflow_default_experiment_name
+    model_name: str | None = None
+    annotations_to_log: str | None = None
+
+
 class TrainingDataset:
 
-    def __init__(
-        self,
-        include_mermaid: bool = True,
-        coralnet_sources_csv: str = None,
-        label_rollup_spec_csv: str = None,
-        included_labels_csv: str = None,
-        excluded_labels_csv: str = None,
-        drop_growthforms: bool = False,
-        annotation_limit: int | None = None,
-        annotations_to_log: str | None = None,
-    ):
+    def __init__(self, options: DatasetOptions):
+
         self.artifacts = Artifacts()
 
-        if coralnet_sources_csv:
-            with open(coralnet_sources_csv) as csv_f:
+        if options.coralnet_sources_csv:
+            with open(options.coralnet_sources_csv) as csv_f:
                 self.cn_source_filter = CNSourceFilter(csv_f)
         else:
             # Empty set of CoralNet sources.
             self.cn_source_filter = CNSourceFilter(StringIO(''))
 
-        if label_rollup_spec_csv:
+        if options.label_rollup_spec_csv:
             self.rollup_spec = LabelRollupSpec(
-                label_rollup_spec_csv)
+                options.label_rollup_spec_csv)
         else:
             # Empty rollup-targets set, meaning nothing gets rolled up.
             self.rollup_spec = LabelRollupSpec(StringIO(''))
 
-        if included_labels_csv and excluded_labels_csv:
+        if options.included_labels_csv and options.excluded_labels_csv:
             raise ValueError(
                 "Specify one of included labels or"
                 " excluded labels, but not both.")
 
-        if included_labels_csv:
-            with open(included_labels_csv) as csv_f:
+        if options.included_labels_csv:
+            with open(options.included_labels_csv) as csv_f:
                 self.label_filter = LabelFilter(
                     csv_f, inclusion=True)
-        elif excluded_labels_csv:
-            with open(excluded_labels_csv) as csv_f:
+        elif options.excluded_labels_csv:
+            with open(options.excluded_labels_csv) as csv_f:
                 self.label_filter = LabelFilter(
                     csv_f, inclusion=False)
         else:
@@ -347,10 +442,6 @@ class TrainingDataset:
             # In other words, an empty exclusion set.
             self.label_filter = LabelFilter(
                 StringIO(''), inclusion=False)
-
-        self.drop_growthforms = drop_growthforms
-        self.annotation_limit = annotation_limit
-        self.annotations_to_log = annotations_to_log
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
@@ -368,7 +459,7 @@ class TrainingDataset:
             self.artifacts.coralnet_project_stats = pd.DataFrame()
 
         mermaid_full_paths_in_s3 = set()
-        if include_mermaid:
+        if options.include_mermaid:
             self.read_mermaid_data()
 
             # When we iterate through the annotation data's images, we'll
@@ -395,7 +486,7 @@ class TrainingDataset:
             duck_table_name='annotations',
         )
 
-        if self.drop_growthforms:
+        if options.drop_growthforms:
             # Null out all annotations' growth forms.
             duckdb_transform_column(
                 duck_conn=self.duck_conn,
@@ -410,20 +501,20 @@ class TrainingDataset:
             duck_table_name='annotations',
         )
 
-        if self.annotation_limit:
+        if options.annotation_limit:
 
             # See how many annotations we have.
             count_up_to_limit = self.duck_conn.execute(
                 f"SELECT count(*)"
                 f" FROM annotations"
-                f" LIMIT {self.annotation_limit + 1}"
+                f" LIMIT {options.annotation_limit + 1}"
             ).fetchall()[0][0]
 
             # If we're over limit, log that fact.
-            if count_up_to_limit > self.annotation_limit:
+            if count_up_to_limit > options.annotation_limit:
                 logger.debug(
                     f"Truncating the train data to"
-                    f" {self.annotation_limit} annotations."
+                    f" {options.annotation_limit} annotations."
                 )
 
             # Determine how to balance out the annotations between
@@ -435,21 +526,21 @@ class TrainingDataset:
                 f"SELECT count(*)"
                 f" FROM annotations"
                 f" WHERE site = '{Sites.CORALNET.value}'"
-                f" LIMIT {self.annotation_limit + 1}"
+                f" LIMIT {options.annotation_limit + 1}"
             ).fetchall()[0][0]
             mm_count_up_to_limit = self.duck_conn.execute(
                 f"SELECT count(*)"
                 f" FROM annotations"
                 f" WHERE site = '{Sites.MERMAID.value}'"
-                f" LIMIT {self.annotation_limit + 1}"
+                f" LIMIT {options.annotation_limit + 1}"
             ).fetchall()[0][0]
-            half_limit = math.ceil(self.annotation_limit / 2)
+            half_limit = math.ceil(options.annotation_limit / 2)
             if cn_count_up_to_limit <= half_limit:
                 cn_count = cn_count_up_to_limit
-                mm_count = self.annotation_limit - cn_count
+                mm_count = options.annotation_limit - cn_count
             else:
                 mm_count = min(mm_count_up_to_limit, half_limit)
-                cn_count = self.annotation_limit - mm_count
+                cn_count = options.annotation_limit - mm_count
 
             # Get the appropriate number of annotations from each site.
             # https://duckdb.org/docs/stable/sql/query_syntax/setops#union
@@ -881,8 +972,6 @@ class TrainingDataset:
 
         return self._duck_conn
 
-    source_image_stats_df: pd.DataFrame
-
     def compute_project_stats(self, site=None, has_training_sets=False):
         if site is None:
             where_clause = ""
@@ -1157,68 +1246,7 @@ class TrainingDataset:
                 **self.artifacts.train_summary_stats)
         )
 
-    def log_mlflow_artifacts(self):
-        """
-        Log various options and stats for the training dataset.
-        """
-        mlflow.log_table(
-            self.cn_source_filter.csv_dataframe,
-            'coralnet_sources_included.json')
-
-        if self.label_filter.inclusion:
-            table_filename = 'labels_included.json'
-        else:
-            table_filename = 'labels_excluded.json'
-        mlflow.log_table(
-            self.label_filter.csv_dataframe, table_filename)
-
-        mlflow.log_table(
-            self.rollup_spec.csv_dataframe, 'rollup_spec.json')
-
-        # Number of images and annotations from each CN source and from
-        # MERMAID.
-        # First, before filtering (this is what's present in S3).
-        # https://pandas.pydata.org/docs/reference/api/pandas.concat.html
-        mlflow.log_table(
-            pd.concat([
-                self.artifacts.mermaid_project_stats,
-                self.artifacts.coralnet_project_stats,
-            ]),
-            'project_stats_raw.json')
-        # And here, after filtering (this is what training actually gets).
-        mlflow.log_table(
-            self.compute_project_stats(has_training_sets=True),
-            'project_stats_train_data.json')
-
-        mlflow.log_dict(
-            self.artifacts.train_summary_stats, 'train_summary.yaml')
-
-        mlflow.log_table(self.artifacts.ba_counts, 'ba_counts.json')
-        mlflow.log_table(self.artifacts.bagf_counts, 'bagf_counts.json')
-
-        if not self.cn_source_filter.is_empty():
-            # These only apply if CoralNet data is included.
-            mlflow.log_table(
-                self.artifacts.coralnet_label_mapping,
-                'coralnet_label_mapping.json')
-            mlflow.log_table(
-                self.artifacts.unmapped_labels,
-                'unmapped_labels.json')
-
-        # Log other options given to the training process.
-        other_options = dict(
-            drop_growthforms=self.drop_growthforms,
-            annotation_limit=self.annotation_limit,
-        )
-        mlflow.log_dict(other_options, 'other_options.yaml')
-
-        # Log annotations, if specified.
-        if self.annotations_to_log is not None:
-            log_spec = self.annotations_to_log.lower()
-            self.log_annotations(log_spec)
-
-    def log_annotations(self, log_spec: str):
-        artifact_filename = f'annotations_{log_spec}.json'
+    def get_annotations(self, log_spec: str):
 
         if log_spec == 'all':
             query = "SELECT * FROM annotations"
@@ -1238,236 +1266,133 @@ class TrainingDataset:
             )
         else:
             raise ValueError(
-                f"Unsupported annotations_to_log spec: {log_spec}")
+                f"Unsupported annotations log spec: {log_spec}")
 
-        mlflow.log_table(
-            self.duck_conn.execute(query).fetch_df(),
-            artifact_filename,
+        return self.duck_conn.execute(query).fetch_df()
+
+
+class TrainingRunner:
+    """
+    Base runner class.
+
+    This class can be used as-is for training, although it won't save
+    any results. Still, it doesn't have any MLflow dependency, so it
+    can be used to make testing easier when running a
+    tracking server feels onerous.
+    It could also be extended to support tracking software other than
+    MLflow.
+    """
+    dataset: TrainingDataset = None
+
+    def __init__(
+        self,
+        dataset_options: DatasetOptions = None,
+        training_options: TrainingOptions = None,
+    ):
+        self.dataset_options = dataset_options or DatasetOptions()
+        self.training_options = training_options or TrainingOptions()
+
+    def run(self, run_name: str | None = None):
+        if run_name is None:
+            run_name = self.current_time_str()
+        logger.info(f"Run: {run_name}")
+
+        self.dataset = TrainingDataset(self.dataset_options)
+
+        # Log dataset artifacts now, so they can be inspected during
+        # training.
+        self.log_dataset_artifacts()
+
+        log_memory_usage('Memory usage after creating labels')
+        logger.info("Proceeding to train with:")
+        logger.info(self.dataset.describe_train_summary_stats())
+
+        # Not sure about saving these anywhere other than memory
+        # for now.
+        model_loc = DataLocation('memory', key='classifier.pkl')
+        valresult_loc = DataLocation('memory', key='valresult.json')
+
+        train_msg = TrainClassifierMsg(
+            job_token=f'experiment_run_{run_name}',
+            trainer_name='minibatch',
+            nbr_epochs=self.training_options.epochs,
+            clf_type='MLP',
+            labels=self.dataset.labels,
+            previous_model_locs=[],
+            model_loc=model_loc,
+            valresult_loc=valresult_loc,
+            feature_cache_dir=TrainClassifierMsg.FeatureCache.AUTO,
         )
 
-
-def run_training(
-    include_mermaid: bool = True,
-    coralnet_sources_csv: str = None,
-    label_rollup_spec_csv: str = None,
-    included_labels_csv: str = None,
-    excluded_labels_csv: str = None,
-    drop_growthforms: bool = False,
-    annotation_limit: int | None = None,
-    annotations_to_log: str | None = None,
-    epochs: int = 10,
-    experiment_name: str | None = None,
-    model_name: str | None = None,
-    disable_mlflow: bool = False,
-):
-    """
-    include_mermaid
-
-    Whether to include MERMAID annotations or not. False can be useful for
-    any troubleshooting which is CoralNet specific.
-
-    coralnet_sources_csv
-
-    Local filepath of a CSV file, specifying CoralNet sources to include in
-    the training data.
-    Recognized columns:
-      id -- CoralNet source ID number.
-      Other informational columns can also be present and will be ignored.
-    If not specified, no CoralNet sources are included (so only MERMAID
-    projects go into training).
-
-    label_rollup_spec_csv
-
-    Local filepath of a CSV file, specifying what MERMAID BA+GF combos to
-    roll up to what other BA+GF combos. For example, roll up
-    Acropora::Branching to Hard coral::Branching; or roll up
-    Porites::Massive to Porites (without growth form specified).
-    - If this file isn't specified, then nothing gets rolled up.
-    - Recognized columns:
-      from_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
-        roll up from.
-      from_gf_id -- MERMAID growth form ID (a UUID) of a combo to
-        roll up from.
-      to_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
-        roll up to.
-      to_gf_id -- MERMAID growth form ID (a UUID) of a combo to
-        roll up to.
-      Other informational columns can also be present and will be ignored.
-
-    included_labels_csv
-    excluded_labels_csv
-
-    Local filepath of a CSV file, specifying either the MERMAID benthic
-    attribute + growth form combos to accept into the training data
-    (excluding all others), or the ones to leave out from the training
-    data (including all others).
-    - Specify at most one of these files, not both. If neither file is
-      specified, then all MERMAID benthic attribute + growth form combos
-      are accepted.
-    - Mapping from CoralNet label IDs to MERMAID BAGFs, and rolling up
-      BAGFs, will be done before applying these inclusions/exclusions.
-    - Recognized columns:
-      ba_id -- A MERMAID benthic attribute ID (a UUID).
-      gf_id -- A MERMAID growth form ID (a UUID).
-      Other informational columns can also be present and will be ignored.
-
-    drop_growthforms
-
-    If True, discard all growth forms from the training data. Technically
-    redundant with the rollup spec, but this is a very simple-to-specify
-    option which can be useful.
-
-    annotation_limit
-
-    If specified, only get up to this many annotations for training. This can
-    help with testing since the runtime is correlated to number of annotations.
-
-    annotations_to_log
-
-    If specified, log training annotations as an MLflow artifact, in tabular
-    form. One table row per point-annotation. This can serve as a sanity
-    check, but the artifact can get quite large.
-    Supported formats:
-    'all': log all annotations
-    's123': log annotations from CoralNet source of ID 123
-    'i456': log annotations from CoralNet image of ID 456
-    <not specified>: log nothing
-
-    epochs
-
-    Number of training epochs to run.
-
-    experiment_name
-
-    Name of the MLflow experiment in which to register the training run. If not
-    given, then it's taken from the MLFLOW_EXPERIMENT_NAME env var.
-
-    model_name
-
-    Name of this MLflow experiment run's model. If not given, then a model
-    name will be constructed based on the experiment parameters.
-    The run name is based on this too.
-    This name gets truncated at 50 characters to avoid a potential crash when
-    logging the model.
-
-    disable_mlflow
-
-    If True, don't connect to or log to a MLflow tracking server. This can
-    make testing easier when running a tracking server feels onerous.
-    """
-    experiment_name = (
-        experiment_name or settings.mlflow_default_experiment_name)
-
-    training_dataset = TrainingDataset(
-        include_mermaid=include_mermaid,
-        coralnet_sources_csv=coralnet_sources_csv,
-        label_rollup_spec_csv=label_rollup_spec_csv,
-        included_labels_csv=included_labels_csv,
-        excluded_labels_csv=excluded_labels_csv,
-        drop_growthforms=drop_growthforms,
-        annotation_limit=annotation_limit,
-        annotations_to_log=annotations_to_log,
-    )
-
-    # Other prep before training.
-
-    log_memory_usage('Memory usage after creating labels')
-    logger.info("Proceeding to train with:")
-    logger.info(training_dataset.describe_train_summary_stats())
-
-    current_time = datetime.now()
-    time_str = current_time.strftime('%Y%m%dT%H%M%S')
-
-    experiment_params = dict(epochs=epochs)
-
-    # Only alphanumeric chars and hyphens are allowed in MLflow model names.
-    # So we'll use hyphens as the 'outer' word separator, and CamelCaps as
-    # the 'inner' one.
-
-    if model_name is None:
-
-        if included_labels_csv:
-            as_path = Path(included_labels_csv)
-            model_name = f'Include{alphanumeric_only_str(as_path.stem)}'
-        elif excluded_labels_csv:
-            as_path = Path(excluded_labels_csv)
-            model_name = f'Exclude{alphanumeric_only_str(as_path.stem)}'
-        else:
-            model_name = 'AllLabels'
-
-        if label_rollup_spec_csv:
-            as_path = Path(label_rollup_spec_csv)
-            model_name += f'-Rollup{alphanumeric_only_str(as_path.stem)}'
-
-        if coralnet_sources_csv:
-            as_path = Path(coralnet_sources_csv)
-            model_name += f'-{alphanumeric_only_str(as_path.stem)}'
-
-        if annotation_limit:
-            model_name += f'-AnnoLimit{annotation_limit}'
-
-    # There's a 62 character limit for the 'model package group name' which is
-    # built from the model name. For example, it could be the model name
-    # with a suffix of -c78374. So we'll make the model name under 62 minus
-    # 7 characters with some leeway, to be safe. If we exceed the limit,
-    # then logging the model fails.
-    model_name = model_name[:50]
-
-    run_name = f'{model_name}-{time_str}'
-
-    logger.info(f"Experiment: {experiment_name}")
-    logger.info(f"Run: {run_name}")
-
-    # Just store the model in memory for now, since it'll be saved out to
-    # MLflow later anyway.
-    model_loc = DataLocation('memory', key='classifier.pkl')
-    # Not sure about saving this as an artifact yet. If we do, then
-    # use a location type other than 'memory'.
-    valresult_loc = DataLocation('memory', key='valresult.json')
-
-    train_msg = TrainClassifierMsg(
-        job_token=f'experiment_run_{run_name}',
-        trainer_name='minibatch',
-        nbr_epochs=experiment_params['epochs'],
-        clf_type='MLP',
-        labels=training_dataset.labels,
-        previous_model_locs=[],
-        model_loc=model_loc,
-        valresult_loc=valresult_loc,
-        feature_cache_dir=TrainClassifierMsg.FeatureCache.AUTO,
-    )
-
-    log_memory_usage("Memory usage before training")
-
-    if disable_mlflow:
+        log_memory_usage("Memory usage before training")
 
         return_msg = train_classifier(train_msg)
 
-    elif MLFLOW_IMPORT_ERROR:
+        logger.info(
+            f"Train time (from return msg): {return_msg.runtime:.1f} s")
+        log_memory_usage("Memory usage after training")
 
-        # Options say to use MLflow, but it couldn't be imported.
-        raise MLFLOW_IMPORT_ERROR
+        logger.info(
+            f"New model's accuracy: {self.format_accuracy(return_msg.acc)}")
 
-    else:
+        ref_accs_str = ", ".join(
+            [self.format_accuracy(acc) for acc in return_msg.ref_accs])
+        logger.debug(
+            f"Accuracy progression during training epochs: {ref_accs_str}")
+
+        return return_msg, model_loc
+
+    def log_dataset_artifacts(self):
+        """
+        This base runner doesn't have anywhere to log artifacts to.
+        Subclasses should override as appropriate.
+        """
+        pass
+
+    @staticmethod
+    def current_time_str():
+        current_time = datetime.now()
+        return current_time.strftime('%Y%m%dT%H%M%S')
+
+    @staticmethod
+    def format_accuracy(accuracy):
+        return f'{100*accuracy:.1f}%'
+
+
+class MLflowTrainingRunner(TrainingRunner):
+
+    def __init__(
+        self,
+        *args,
+        mlflow_options: MLflowOptions = None,
+        **kwargs
+    ):
+        if MLFLOW_IMPORT_ERROR:
+            # MLflow couldn't be imported.
+            raise MLFLOW_IMPORT_ERROR
 
         time_taken = mlflow_connect()
         logger.info(f"Time to connect to MLflow tracking: {time_taken}")
 
-        mlflow.set_experiment(experiment_name)
+        super().__init__(*args, **kwargs)
+        self.mlflow_options = mlflow_options or MLflowOptions()
+
+    def run(self, run_name=None):
+
+        model_name = self._get_model_name()
+        if run_name is None:
+            run_name = f'{model_name}-{self.current_time_str()}'
+
+        logger.info(f"Experiment: {self.mlflow_options.experiment_name}")
+        mlflow.set_experiment(self.mlflow_options.experiment_name)
 
         with mlflow.start_run(run_name=run_name):
 
-            # Log dataset artifacts first, so they can be inspected during
-            # training.
-            training_dataset.log_mlflow_artifacts()
+            training_options_to_log = dict(epochs=self.training_options.epochs)
 
-            return_msg = train_classifier(train_msg)
+            mlflow.log_params(training_options_to_log)
 
-            logger.info(
-                f"Train time (from return msg): {return_msg.runtime:.1f} s")
-            log_memory_usage("Memory usage after training")
-
-            mlflow.log_params(experiment_params)
+            return_msg, model_loc = super().run(run_name=run_name)
 
             # Note that log_metric() only takes numeric values.
             accuracy_pct = return_msg.acc * 100
@@ -1476,23 +1401,132 @@ def run_training(
             # ref_accs is probably the only other part of return_msg to save.
             ref_accs_dict = dict()
             for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
-                ref_accs_dict[epoch_number] = format_accuracy(acc)
+                ref_accs_dict[epoch_number] = self.format_accuracy(acc)
             mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
 
             # Save and register the trained model.
-            signature = infer_signature(params=experiment_params)
+            signature = mlflow.models.infer_signature(
+                params=training_options_to_log)
             model_info = mlflow.sklearn.log_model(
                 sk_model=load_classifier(model_loc),
                 registered_model_name=model_name,
                 signature=signature,
             )
 
-            logger.info(f"Model ID: {model_info.model_id}")
+        logger.info(f"Model ID: {model_info.model_id}")
 
-    logger.info(
-        f"New model's accuracy: {format_accuracy(return_msg.acc)}")
+        return return_msg, model_loc
 
-    ref_accs_str = ", ".join(
-        [format_accuracy(acc) for acc in return_msg.ref_accs])
-    logger.debug(
-        f"Accuracy progression during training epochs: {ref_accs_str}")
+    def _get_model_name(self):
+        """
+        Model name for MLflow logging purposes.
+
+        Only alphanumeric chars and hyphens are allowed in MLflow model names.
+        So we'll use hyphens as the 'outer' word separator, and CamelCaps as
+        the 'inner' one.
+        """
+        if self.mlflow_options.model_name is not None:
+
+            model_name = self.mlflow_options.model_name
+
+        else:
+
+            if self.dataset_options.included_labels_csv:
+                as_path = Path(self.dataset_options.included_labels_csv)
+                model_name = f'Include{self.alphanumeric_only_str(as_path.stem)}'
+            elif self.dataset_options.excluded_labels_csv:
+                as_path = Path(self.dataset_options.excluded_labels_csv)
+                model_name = f'Exclude{self.alphanumeric_only_str(as_path.stem)}'
+            else:
+                model_name = 'AllLabels'
+
+            if self.dataset_options.label_rollup_spec_csv:
+                as_path = Path(self.dataset_options.label_rollup_spec_csv)
+                model_name += f'-Rollup{self.alphanumeric_only_str(as_path.stem)}'
+
+            if self.dataset_options.coralnet_sources_csv:
+                as_path = Path(self.dataset_options.coralnet_sources_csv)
+                model_name += f'-{self.alphanumeric_only_str(as_path.stem)}'
+
+            if limit := self.dataset_options.annotation_limit:
+                model_name += f'-AnnoLimit{limit}'
+
+        # There's a 62 character limit for the 'model package group name'
+        # which is built from the model name. For example, it could be the
+        # model name with a suffix of -c78374. So we'll make the model name
+        # under 62 minus 7 characters with some leeway, to be safe. If we
+        # exceed the limit, then logging the model fails.
+        return model_name[:50]
+
+    @staticmethod
+    def alphanumeric_only_str(s: str):
+        """
+        Return a version of s which has the non-alphanumeric chars removed.
+        """
+        return ''.join([char for char in s if char.isalnum()])
+
+    def log_dataset_artifacts(self):
+        """
+        Log various options and stats for the training dataset.
+        """
+        assert self.dataset is not None
+
+        artifacts = self.dataset.artifacts
+
+        mlflow.log_table(
+            self.dataset.cn_source_filter.csv_dataframe,
+            'coralnet_sources_included.json')
+
+        if self.dataset.label_filter.inclusion:
+            table_filename = 'labels_included.json'
+        else:
+            table_filename = 'labels_excluded.json'
+        mlflow.log_table(
+            self.dataset.label_filter.csv_dataframe, table_filename)
+
+        mlflow.log_table(
+            self.dataset.rollup_spec.csv_dataframe, 'rollup_spec.json')
+
+        # Number of images and annotations from each CN source and from
+        # MERMAID.
+        # First, before filtering (this is what's present in S3).
+        # https://pandas.pydata.org/docs/reference/api/pandas.concat.html
+        mlflow.log_table(
+            pd.concat([
+                artifacts.mermaid_project_stats,
+                artifacts.coralnet_project_stats,
+            ]),
+            'project_stats_raw.json')
+        # And here, after filtering (this is what training actually gets).
+        mlflow.log_table(
+            self.dataset.compute_project_stats(has_training_sets=True),
+            'project_stats_train_data.json')
+
+        mlflow.log_dict(
+            artifacts.train_summary_stats, 'train_summary.yaml')
+
+        mlflow.log_table(artifacts.ba_counts, 'ba_counts.json')
+        mlflow.log_table(artifacts.bagf_counts, 'bagf_counts.json')
+
+        if not self.dataset.cn_source_filter.is_empty():
+            # These only apply if CoralNet data is included.
+            mlflow.log_table(
+                artifacts.coralnet_label_mapping,
+                'coralnet_label_mapping.json')
+            mlflow.log_table(
+                artifacts.unmapped_labels,
+                'unmapped_labels.json')
+
+        # Log other options given to the training process.
+        other_options = dict(
+            drop_growthforms=self.dataset_options.drop_growthforms,
+            annotation_limit=self.dataset_options.annotation_limit,
+        )
+        mlflow.log_dict(other_options, 'other_options.yaml')
+
+        # Log annotations, if specified.
+        if self.mlflow_options.annotations_to_log is not None:
+            log_spec = self.mlflow_options.annotations_to_log.lower()
+            df = self.dataset.get_annotations(log_spec)
+
+            mlflow.log_table(df, f'annotations_{log_spec}.json')
