@@ -2,13 +2,15 @@
 Train a classifier using feature vectors and annotations
 provided on S3.
 """
+from contextlib import contextmanager
 import dataclasses
-from datetime import datetime
+from datetime import datetime, timedelta
 import enum
 from io import StringIO
 import math
 from pathlib import Path
 import re
+import time
 import typing
 
 import duckdb
@@ -51,9 +53,38 @@ class Sites(enum.Enum):
     MERMAID = 'mermaid'
 
 
-def log_memory_usage(message):
-    memory_usage = psutil.virtual_memory()
-    logger.debug(f"{message} - Memory usage: {memory_usage.percent}%")
+@contextmanager
+def section_profiling(profiled_sections: list[dict], section_name: str):
+    """
+    Performance-profile a wrapped section of code and save the stats
+    (time, memory) as part of the passed structure.
+    """
+    approx_start_date = datetime.now()
+    # This is more accurate, but doesn't have time-of-day info.
+    start_time = time.perf_counter()
+
+    yield
+
+    seconds_elapsed = time.perf_counter() - start_time
+    section_profile = dict(
+        # Name for this section of code.
+        name=section_name,
+        # Number of seconds.
+        seconds=format(seconds_elapsed, '.1f'),
+        # Hours, minutes, seconds, ns.
+        hms=str(timedelta(seconds=seconds_elapsed)),
+        # Date and time, to see if the sections we've chosen skip any
+        # substantial time blocks that we should also be monitoring.
+        approx_start=approx_start_date.strftime('%b %d %H:%M:%S'),
+        memory_usage_at_end=f'{psutil.virtual_memory().percent}%',
+    )
+    profiled_sections.append(section_profile)
+
+    logger.debug(
+        f"{section_name} -"
+        f" Elapsed time = {section_profile['hms']},"
+        f" Memory usage at end = {section_profile['memory_usage_at_end']}"
+    )
 
 
 class LabelFilter(CsvSpec):
@@ -284,6 +315,7 @@ class Artifacts:
     coralnet_label_mapping: pd.DataFrame
     coralnet_project_stats: pd.DataFrame
     mermaid_project_stats: pd.DataFrame
+    profiled_sections: list[dict]
     train_summary_stats: dict
     unmapped_labels: pd.DataFrame
 
@@ -408,6 +440,7 @@ class TrainingDataset:
     def __init__(self, options: DatasetOptions):
 
         self.artifacts = Artifacts()
+        self.profiled_sections = []
 
         if options.coralnet_sources_csv:
             with open(options.coralnet_sources_csv) as csv_f:
@@ -453,24 +486,15 @@ class TrainingDataset:
         self._duck_conn = None
 
         if not self.cn_source_filter.is_empty():
-            self.read_coralnet_data()
+            with self.section_profiling("Reading CoralNet annotations"):
+                self.read_coralnet_data()
         else:
             # An empty dataframe
             self.artifacts.coralnet_project_stats = pd.DataFrame()
 
-        mermaid_full_paths_in_s3 = set()
         if options.include_mermaid:
-            self.read_mermaid_data()
-
-            # When we iterate through the annotation data's images, we'll
-            # check the image IDs against the feature vectors that are
-            # actually present in S3.
-            # Note: this line can take a while to run.
-            mermaid_full_paths_in_s3 = set(
-                self.s3.find(
-                    path=f's3://{settings.mermaid_train_data_bucket}/mermaid/'
-                )
-            )
+            with self.section_profiling("Reading MERMAID annotations"):
+                self.read_mermaid_data()
         else:
             self.artifacts.mermaid_project_stats = pd.DataFrame()
 
@@ -480,26 +504,28 @@ class TrainingDataset:
                 "No annotations from CoralNet or MERMAID, even before"
                 " label filtering.")
 
-        # Roll up BAGFs.
-        self.rollup_spec.roll_up_in_duckdb(
-            duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-        )
+        with self.section_profiling("Rollups and filtering"):
 
-        if options.drop_growthforms:
-            # Null out all annotations' growth forms.
-            duckdb_transform_column(
+            # Roll up BAGFs.
+            self.rollup_spec.roll_up_in_duckdb(
                 duck_conn=self.duck_conn,
                 duck_table_name='annotations',
-                column_name='growth_form_id',
-                transform_func=lambda x: None,
             )
 
-        # Filter out BAGFs we don't want.
-        self.label_filter.filter_in_duckdb(
-            duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-        )
+            if options.drop_growthforms:
+                # Null out all annotations' growth forms.
+                duckdb_transform_column(
+                    duck_conn=self.duck_conn,
+                    duck_table_name='annotations',
+                    column_name='growth_form_id',
+                    transform_func=lambda x: None,
+                )
+
+            # Filter out BAGFs we don't want.
+            self.label_filter.filter_in_duckdb(
+                duck_conn=self.duck_conn,
+                duck_table_name='annotations',
+            )
 
         if options.annotation_limit:
 
@@ -556,65 +582,32 @@ class TrainingDataset:
                 f")"
             )
 
-        self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
+        if options.include_mermaid:
+            # We'll check the annotation data's image IDs against the
+            # feature vectors that are actually present in S3.
+            # TODO: Also check CoralNet bucket/folder for missing features.
 
-        annotations_by_image = duckdb_grouped_rows(
-            duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            grouping_column_names=['bucket', 'feature_vector'],
-        )
-
-        labels_data = ImageLabels()
-
-        for rows in annotations_by_image:
-
-            # Here, in one loop iteration, we're given all the
-            # annotation rows for a single image.
-            first_row = rows[0]
-            bucket = first_row['bucket']
-            feature_bucket_path = first_row['feature_vector']
-
-            image_annotations = []
-
-            # One annotation per row.
-            for row in rows:
-
-                benthic_attribute_id = row['benthic_attribute_id']
-
-                if row['growth_form_id'] is None:
-                    # Either we've chosen not to get growth forms, or
-                    # this annotation has no growth form.
-                    bagf = benthic_attribute_id
-                else:
-                    # Include growth form.
-                    # MERMAID API uses :: as the BA-GF separator.
-                    bagf = '::'.join([
-                        benthic_attribute_id, row['growth_form_id']])
-
-                annotation = (
-                    int(row['row']),
-                    int(row['col']),
-                    bagf,
+            with self.section_profiling("Detecting missing feature vectors"):
+                # First, get the paths present in S3 (this can take a while).
+                mermaid_bucket = settings.mermaid_train_data_bucket
+                mermaid_full_paths_in_s3 = set(
+                    self.s3.find(
+                        path=f's3://{mermaid_bucket}/mermaid/'
+                    )
                 )
-                image_annotations.append(annotation)
+                # Check against annotation data.
+                self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
-            feature_loc = DataLocation(
-                storage_type='s3',
-                bucket_name=bucket,
-                key=feature_bucket_path,
-            )
-            labels_data.add_image(feature_loc, image_annotations)
-
-        self.labels = preprocess_labels(
-            labels_data,
-            # 10% ref, 10% val, 80% train.
-            split_ratios=(0.1, 0.1),
-            split_mode=SplitMode.POINTS_STRATIFIED,
-        )
-
-        self.add_training_set_names()
+        with self.section_profiling("Prep annotations for PySpacer"):
+            self.labels = self.prep_annotations_for_pyspacer()
+            self.add_training_set_names()
 
         self.set_train_summary_stats()
+
+    @contextmanager
+    def section_profiling(self, section_name: str):
+        with section_profiling(self.profiled_sections, section_name):
+            yield
 
     def read_mermaid_data(self):
 
@@ -855,7 +848,6 @@ class TrainingDataset:
 
             # Get the annotation feature paths that are missing from S3,
             # into another table.
-            # TODO: Also check CoralNet bucket/folder for missing features.
             self.duck_conn.execute(
                 f"CREATE TABLE {missing_features_table_name} AS"
                 f" SELECT DISTINCT a.feature_full FROM annotations a"
@@ -915,6 +907,62 @@ class TrainingDataset:
                 f" the files aren't in S3."
                 f" Example(s):"
                 f"\n{examples_str}")
+
+    def prep_annotations_for_pyspacer(self):
+
+        annotations_by_image = duckdb_grouped_rows(
+            duck_conn=self.duck_conn,
+            duck_table_name='annotations',
+            grouping_column_names=['bucket', 'feature_vector'],
+        )
+
+        labels_data = ImageLabels()
+
+        for rows in annotations_by_image:
+
+            # Here, in one loop iteration, we're given all the
+            # annotation rows for a single image.
+            first_row = rows[0]
+            bucket = first_row['bucket']
+            feature_bucket_path = first_row['feature_vector']
+
+            image_annotations = []
+
+            # One annotation per row.
+            for row in rows:
+
+                benthic_attribute_id = row['benthic_attribute_id']
+
+                if row['growth_form_id'] is None:
+                    # Either we've chosen not to get growth forms, or
+                    # this annotation has no growth form.
+                    bagf = benthic_attribute_id
+                else:
+                    # Include growth form.
+                    # MERMAID API uses :: as the BA-GF separator.
+                    bagf = '::'.join([
+                        benthic_attribute_id, row['growth_form_id']])
+
+                annotation = (
+                    int(row['row']),
+                    int(row['col']),
+                    bagf,
+                )
+                image_annotations.append(annotation)
+
+            feature_loc = DataLocation(
+                storage_type='s3',
+                bucket_name=bucket,
+                key=feature_bucket_path,
+            )
+            labels_data.add_image(feature_loc, image_annotations)
+
+        return preprocess_labels(
+            labels_data,
+            # 10% ref, 10% val, 80% train.
+            split_ratios=(0.1, 0.1),
+            split_mode=SplitMode.POINTS_STRATIFIED,
+        )
 
     @property
     def duck_conn(self):
@@ -1283,6 +1331,7 @@ class TrainingRunner:
     MLflow.
     """
     dataset: TrainingDataset = None
+    profiled_sections: list[dict]
 
     def __init__(
         self,
@@ -1299,11 +1348,15 @@ class TrainingRunner:
 
         self.dataset = TrainingDataset(self.dataset_options)
 
+        # The dataset's profiled sections are done. The runner will add the
+        # remaining profiled sections.
+        self.profiled_sections = self.dataset.profiled_sections.copy()
+
         # Log dataset artifacts now, so they can be inspected during
         # training.
-        self.log_dataset_artifacts()
+        with self.section_profiling("Logging dataset artifacts"):
+            self.log_dataset_artifacts()
 
-        log_memory_usage('Memory usage after creating labels')
         logger.info("Proceeding to train with:")
         logger.info(self.dataset.describe_train_summary_stats())
 
@@ -1324,13 +1377,11 @@ class TrainingRunner:
             feature_cache_dir=TrainClassifierMsg.FeatureCache.AUTO,
         )
 
-        log_memory_usage("Memory usage before training")
-
-        return_msg = train_classifier(train_msg)
+        with self.section_profiling("PySpacer training call"):
+            return_msg = train_classifier(train_msg)
 
         logger.info(
             f"Train time (from return msg): {return_msg.runtime:.1f} s")
-        log_memory_usage("Memory usage after training")
 
         logger.info(
             f"New model's accuracy: {self.format_accuracy(return_msg.acc)}")
@@ -1348,6 +1399,11 @@ class TrainingRunner:
         Subclasses should override as appropriate.
         """
         pass
+
+    @contextmanager
+    def section_profiling(self, section_name: str):
+        with section_profiling(self.profiled_sections, section_name):
+            yield
 
     @staticmethod
     def current_time_str():
@@ -1392,7 +1448,11 @@ class MLflowTrainingRunner(TrainingRunner):
 
             mlflow.log_params(training_options_to_log)
 
+            # Here's the actual training and data prep.
             return_msg, model_loc = super().run(run_name=run_name)
+
+            profiles_df = pd.DataFrame(self.profiled_sections)
+            mlflow.log_table(profiles_df, 'profiled_sections.json')
 
             # Note that log_metric() only takes numeric values.
             accuracy_pct = return_msg.acc * 100
