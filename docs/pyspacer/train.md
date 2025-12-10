@@ -1,14 +1,29 @@
 # Training a PySpacer model
 
 
-## Unfiltered training run
+## Basic training run with or without MLflow
 
-By default, `run_training()` gets all MERMAID annotations and passes them directly into training, without excluding or rolling up any of the labels.
+There are two training runner classes available:
+
+- `TrainingRunner`, which runs training but doesn't save any results.
+- `MLflowTrainingRunner`, which logs the model and associated artifacts to MLflow. Requires an MLflow installation and an MLflow tracking server to be running.
+
+By default, either runner gets all MERMAID annotations and passes them directly into training, without excluding or rolling up any of the labels.
 
 ```python
-from mermaid_classifier.pyspacer.train import run_training
+from mermaid_classifier.pyspacer.train import TrainingRunner
 
-run_training()
+runner = TrainingRunner()
+return_msg, model_loc = runner.run()
+```
+
+```python
+from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
+
+runner = MLflowTrainingRunner()
+# This returns a message and model location too, but the runner already
+# logs most of the message's contents and the model.
+runner.run()
 ```
 
 
@@ -26,11 +41,15 @@ id
 Supposing that the above CSV content is entered into a file located at `sources/sample.csv`, the following code would run training on all MERMAID data plus the data from these three CoralNet sources:
 
 ```python
-from mermaid_classifier.pyspacer.train import run_training
+from mermaid_classifier.pyspacer.train import (
+    DatasetOptions, MLflowTrainingRunner)
 
-run_training(
-    coralnet_sources_csv='sources/sample.csv',
+runner = MLflowTrainingRunner(
+    dataset_options=DatasetOptions(
+        coralnet_sources_csv='sources/sample.csv',
+    ),
 )
+runner.run()
 ```
 
 
@@ -51,11 +70,15 @@ In this example, any annotations labeled as Acropora::Branching will be fed into
 Supposing that the above CSV content is entered into a file located at `labels/coral_rollups.csv`, running training would go like this:
 
 ```python
-from mermaid_classifier.pyspacer.train import run_training
+from mermaid_classifier.pyspacer.train import (
+    DatasetOptions, MLflowTrainingRunner)
 
-run_training(
-    label_rollup_spec_csv='labels/coral_rollups.csv',
+runner = MLflowTrainingRunner(
+    dataset_options=DatasetOptions(
+        label_rollup_spec_csv='labels/coral_rollups.csv',
+    ),
 )
+runner.run()
 ```
 
 
@@ -74,11 +97,15 @@ Only the IDs are read in; the names are purely for human readability in this exa
 Supposing that the above CSV content is entered into a file located at `labels/exclusions.csv`, and we want to exclude these BA+GF combos while including all others, running training would go like this:
 
 ```python
-from mermaid_classifier.pyspacer.train import run_training
+from mermaid_classifier.pyspacer.train import (
+    DatasetOptions, MLflowTrainingRunner)
 
-run_training(
-    excluded_labels_csv='labels/exclusions.csv',
+runner = MLflowTrainingRunner(
+    dataset_options=DatasetOptions(
+        excluded_labels_csv='labels/exclusions.csv',
+    ),
 )
+runner.run()
 ```
 
 As a result, if any annotations are found using either of the above BA+GF combos, those annotations will not go into training.
@@ -86,42 +113,54 @@ As a result, if any annotations are found using either of the above BA+GF combos
 
 ## More available parameters
 
-Here are examples demonstrating other available parameters. For more details, browse [train.py](../../mermaid_classifier/pyspacer/train.py) for the start of the `run_training()` function, where the parameters are listed and explained in comments.
+Here are examples demonstrating other available parameters. For more details, browse [train.py](../../mermaid_classifier/pyspacer/train.py) for the `DatasetOptions`, `MLflowOptions`, and `TrainingOptions` classes.
 
 ```python
-from mermaid_classifier.pyspacer.train import run_training
+from mermaid_classifier.pyspacer.train import (
+    DatasetOptions, MLflowOptions, MLflowTrainingRunner, TrainingOptions)
 
-run_training(
-    model_name='CustomModelNameHere',
+runner = MLflowTrainingRunner(
+    mlflow_options=MLflowOptions(
+        model_name='CustomModelNameHere',
+    ),
 )
+runner.run()
 
-# These parameters can be useful for quick tests.
-run_training(
-    epochs=2,
-    disable_mlflow=True,
-    annotation_limit=2000,
+runner = MLflowTrainingRunner(
+    # These options can be useful for quick tests.
+    dataset_options=DatasetOptions(
+        annotation_limit=2000,
+    ),
+    training_options=TrainingOptions(
+        epochs=2,
+    ),
 )
+runner.run()
 
 # The rest of the parameters available.
-run_training(
-    # Specifying False here means you're only training on CoralNet sources. 
-    include_mermaid=False,
-    coralnet_sources_csv='sources/sample.csv',
-    label_rollup_spec_csv='labels/rollups.csv',
-    included_labels_csv='labels/inclusions.csv',
-    # Specify at most one of included and excluded, not both.
-    # excluded_labels_csv='labels/exclusions.csv',
-    drop_growthforms=True,
-    epochs=5,
-    # This basically helps to group models.
-    experiment_name="My Experiment 1",
-    # This gets date/time appended to the end of it.
-    model_name='my-model',
-    # Logs all input annotations to MLflow. Also possible to just log a subset.
-    annotations_to_log='all',
-    # This is already False by default, but it doesn't make sense to
-    # specify experiment and model names when MLflow usage is disabled.
-    disable_mlflow=False,
-    annotation_limit=5000,
+runner = MLflowTrainingRunner(
+    dataset_options=DatasetOptions(
+        # Specifying False here means you're only training on CoralNet sources.
+        include_mermaid=False,
+        coralnet_sources_csv='sources/sample.csv',
+        label_rollup_spec_csv='labels/rollups.csv',
+        included_labels_csv='labels/inclusions.csv',
+        # Specify at most one of included and excluded, not both.
+        # excluded_labels_csv='labels/exclusions.csv',
+        drop_growthforms=True,
+        annotation_limit=5000,
+    ),
+    training_options=TrainingOptions(
+        epochs=5,
+    ),
+    mlflow_options=MLflowOptions(
+        # This basically helps to group models.
+        experiment_name="My Experiment 1",
+        # This gets date/time appended to the end of it.
+        model_name='my-model',
+        # Logs all input annotations to MLflow. Also possible to just log a subset.
+        annotations_to_log='all',
+    ),
 )
+runner.run()
 ```
