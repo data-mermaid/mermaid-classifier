@@ -148,6 +148,8 @@ runner = MLflowTrainingRunner(
         # Specify at most one of included and excluded, not both.
         # excluded_labels_csv='labels/exclusions.csv',
         drop_growthforms=True,
+        # 7.5% ref, 12.5% val, 80% train.
+        ref_val_ratios=(0.075, 0.125),
         annotation_limit=5000,
     ),
     training_options=TrainingOptions(
