@@ -19,10 +19,12 @@ try:
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
+import numpy as np
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
-from spacer.data_classes import DataLocation, ImageLabels
+import sklearn
+from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
 from spacer.tasks import train_classifier
@@ -46,6 +48,10 @@ from mermaid_classifier.pyspacer.utils import (
 
 
 logger = logging_config_for_script('train')
+
+
+ba_library = BenthicAttributeLibrary()
+gf_library = GrowthFormLibrary()
 
 
 class Sites(enum.Enum):
@@ -1131,8 +1137,6 @@ class TrainingDataset:
 
     def set_train_summary_stats(self):
 
-        ba_library = BenthicAttributeLibrary()
-
         # Counts per BA.
         self.duck_conn.execute(
             "CREATE TABLE ba_counts AS"
@@ -1202,7 +1206,6 @@ class TrainingDataset:
             base_to_new_func=ba_library.id_to_name,
         )
         # Add GF names for readability.
-        gf_library = GrowthFormLibrary()
         duckdb_add_column(
             duck_conn=self.duck_conn,
             duck_table_name='bagf_counts',
@@ -1391,7 +1394,7 @@ class TrainingRunner:
         logger.debug(
             f"Accuracy progression during training epochs: {ref_accs_str}")
 
-        return return_msg, model_loc
+        return return_msg, model_loc, valresult_loc
 
     def log_dataset_artifacts(self):
         """
@@ -1449,7 +1452,8 @@ class MLflowTrainingRunner(TrainingRunner):
             mlflow.log_params(training_options_to_log)
 
             # Here's the actual training and data prep.
-            return_msg, model_loc = super().run(run_name=run_name)
+            return_msg, model_loc, valresult_loc = super().run(
+                run_name=run_name)
 
             profiles_df = pd.DataFrame(self.profiled_sections)
             mlflow.log_table(profiles_df, 'profiled_sections.json')
@@ -1463,6 +1467,18 @@ class MLflowTrainingRunner(TrainingRunner):
             for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
                 ref_accs_dict[epoch_number] = self.format_accuracy(acc)
             mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
+
+            val_results = ValResults.load(valresult_loc)
+            self.log_confusion_matrix(
+                val_results=val_results,
+                normalize=False,
+                filename='confusion_matrix_frequencies.json',
+            )
+            self.log_confusion_matrix(
+                val_results=val_results,
+                normalize=True,
+                filename='confusion_matrix_percents.json',
+            )
 
             # Save and register the trained model.
             signature = mlflow.models.infer_signature(
@@ -1590,3 +1606,62 @@ class MLflowTrainingRunner(TrainingRunner):
             df = self.dataset.get_annotations(log_spec)
 
             mlflow.log_table(df, f'annotations_{log_spec}.json')
+
+    def log_confusion_matrix(
+        self, val_results: ValResults, normalize: bool, filename: str
+    ):
+        """
+        Make a confusion matrix out of the training evaluation results.
+        """
+        matrix = sklearn.metrics.confusion_matrix(
+            y_true=val_results.gt,
+            y_pred=val_results.est,
+            labels=range(len(val_results.classes)),
+            # 'true': values between 0 and 1 for each cell.
+            # None: Each cell has a frequency.
+            normalize='true' if normalize else None,
+        )
+
+        if normalize:
+            # 0-to-1 values -> integer percents.
+            matrix = np.floor(matrix * 100)
+
+        # Sort by frequency.
+        bagf_ids_in_freq_order = []
+        # This artifact already has BA-GF combos sorted by frequency
+        # in the whole dataset (which should be pretty much the same
+        # order as frequency in val, due to stratification); highest
+        # frequency first.
+        for _, row in self.dataset.artifacts.bagf_counts.iterrows():
+            if row['growth_form_id']:
+                bagf_id = (
+                    row['benthic_attribute_id']
+                    + '::' + row['growth_form_id'])
+            else:
+                bagf_id = row['benthic_attribute_id']
+            if bagf_id not in val_results.classes:
+                # This BA-GF combo must have gotten dropped entirely due
+                # to not enough annotations.
+                continue
+            bagf_ids_in_freq_order.append(bagf_id)
+        # For each ID in the frequency order, give it 0 if it appears 1st
+        # in val_results.classes, 1 if it appears 2nd, 2 if 3rd, etc.
+        class_indexes_of_freq_ranking = [
+            val_results.classes.index(bagf_id)
+            for bagf_id in bagf_ids_in_freq_order]
+        # Order columns by frequency.
+        matrix = matrix[:, class_indexes_of_freq_ranking]
+        # Order rows by frequency.
+        matrix = matrix[class_indexes_of_freq_ranking, :]
+
+        bagf_names = [
+            ba_library.bagf_id_to_name(bagf_id, gf_library)
+            for bagf_id in bagf_ids_in_freq_order
+        ]
+
+        # To dataframe, labeling each column with a BA-GF combo.
+        df = pd.DataFrame(data=matrix, columns=bagf_names)
+        # Add column to label each row with a BA-GF combo.
+        df.insert(loc=0, column='-', value=bagf_names)
+        # Log the confusion matrix as a table.
+        mlflow.log_table(df, filename)
