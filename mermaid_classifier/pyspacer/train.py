@@ -19,6 +19,7 @@ try:
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import psutil
@@ -1659,9 +1660,45 @@ class MLflowTrainingRunner(TrainingRunner):
             for bagf_id in bagf_ids_in_freq_order
         ]
 
-        # To dataframe, labeling each column with a BA-GF combo.
-        df = pd.DataFrame(data=matrix, columns=bagf_names)
-        # Add column to label each row with a BA-GF combo.
-        df.insert(loc=0, column='-', value=bagf_names)
-        # Log the confusion matrix as a table.
-        mlflow.log_table(df, filename)
+        # Create figure with size scaled to number of labels
+        num_labels = len(bagf_names)
+        fig_size = max(12, num_labels * 0.6)
+        fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+
+        # Create confusion matrix display
+        display = sklearn.metrics.ConfusionMatrixDisplay(
+            confusion_matrix=matrix,
+            display_labels=bagf_names
+        )
+
+        # Plot with format string to avoid scientific notation
+        # 'd' for integers (frequencies), '.0f' for floats displayed as integers (percents)
+        display.plot(
+            ax=ax,
+            cmap='viridis',
+            values_format='d' if not normalize else '.0f'
+        )
+
+        # Rotate x-axis labels to prevent overlap
+        plt.setp(
+            ax.get_xticklabels(),
+            rotation=45,
+            ha='right',
+            rotation_mode='anchor',
+            fontsize=max(8, min(12, 150 / num_labels))
+        )
+
+        # Adjust y-axis label font size for consistency
+        plt.setp(
+            ax.get_yticklabels(),
+            fontsize=max(8, min(12, 150 / num_labels))
+        )
+
+        # Adjust layout to prevent label cutoff
+        plt.tight_layout()
+
+        # Log as figure
+        mlflow.log_figure(fig, filename.replace('.json', '.png'))
+
+        # Close figure to free memory
+        plt.close(fig)
