@@ -379,6 +379,15 @@ class DatasetOptions:
     redundant with the rollup spec, but this is a very simple-to-specify
     option which can be useful.
 
+    ref_val_ratios
+
+    Determines the ratios of training annotations that will go into
+    the train, ref (reference), and val (validation) sets.
+    This is a tuple of two floats. For example, specifying (0.05, 0.1)
+    means 5% into ref, 10% into val, and the rest (85%) into train.
+    PySpacer has an explanation of the three sets here:
+    https://github.com/coralnet/pyspacer?tab=readme-ov-file#train_classifier
+
     annotation_limit
 
     If specified, only get up to this many annotations for training. This can
@@ -390,6 +399,7 @@ class DatasetOptions:
     included_labels_csv: str = None
     excluded_labels_csv: str = None
     drop_growthforms: bool = False
+    ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     annotation_limit: int | None = None
 
 
@@ -439,6 +449,7 @@ class TrainingDataset:
 
     def __init__(self, options: DatasetOptions):
 
+        self.options = options
         self.artifacts = Artifacts()
         self.profiled_sections = []
 
@@ -959,8 +970,7 @@ class TrainingDataset:
 
         return preprocess_labels(
             labels_data,
-            # 10% ref, 10% val, 80% train.
-            split_ratios=(0.1, 0.1),
+            split_ratios=self.options.ref_val_ratios,
             split_mode=SplitMode.POINTS_STRATIFIED,
         )
 
