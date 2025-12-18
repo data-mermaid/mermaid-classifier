@@ -14,6 +14,7 @@ import time
 import typing
 
 import duckdb
+import matplotlib.pyplot as plt
 try:
     import mlflow
     MLFLOW_IMPORT_ERROR = None
@@ -1472,12 +1473,12 @@ class MLflowTrainingRunner(TrainingRunner):
             self.log_confusion_matrix(
                 val_results=val_results,
                 normalize=False,
-                filename='confusion_matrix_frequencies.json',
+                filestem='confusion_matrix/frequencies',
             )
             self.log_confusion_matrix(
                 val_results=val_results,
                 normalize=True,
-                filename='confusion_matrix_percents.json',
+                filestem='confusion_matrix/percents',
             )
 
             # Save and register the trained model.
@@ -1608,7 +1609,7 @@ class MLflowTrainingRunner(TrainingRunner):
             mlflow.log_table(df, f'annotations_{log_spec}.json')
 
     def log_confusion_matrix(
-        self, val_results: ValResults, normalize: bool, filename: str
+        self, val_results: ValResults, normalize: bool, filestem: str
     ):
         """
         Make a confusion matrix out of the training evaluation results.
@@ -1624,7 +1625,7 @@ class MLflowTrainingRunner(TrainingRunner):
 
         if normalize:
             # 0-to-1 values -> integer percents.
-            matrix = np.floor(matrix * 100)
+            matrix = np.int64(np.floor(matrix * 100))
 
         # Sort by frequency.
         bagf_ids_in_freq_order = []
@@ -1659,9 +1660,56 @@ class MLflowTrainingRunner(TrainingRunner):
             for bagf_id in bagf_ids_in_freq_order
         ]
 
+        # Log the confusion matrix as a table.
+
         # To dataframe, labeling each column with a BA-GF combo.
         df = pd.DataFrame(data=matrix, columns=bagf_names)
         # Add column to label each row with a BA-GF combo.
         df.insert(loc=0, column='-', value=bagf_names)
-        # Log the confusion matrix as a table.
-        mlflow.log_table(df, filename)
+        mlflow.log_table(df, filestem + '.json')
+
+        # Log the confusion matrix as a figure.
+
+        # Create square figure, with size scaled to number of labels
+        num_labels = len(bagf_names)
+        fig_size = max(12, num_labels * 0.6)
+        fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+
+        # Matplotlib visualization of the confusion matrix.
+        display = sklearn.metrics.ConfusionMatrixDisplay(
+            confusion_matrix=matrix, display_labels=bagf_names)
+        display.plot(
+            ax=ax,
+            cmap='Blues',
+            # Prevent "100" displaying as "1e+02".
+            values_format='d',
+            # A color legend feels unnecessary here.
+            colorbar=False,
+        )
+
+        # Move x-axis labels to the top.
+        ax.xaxis.set_label_position('top')
+        ax.xaxis.set_ticks_position('top')
+        # Rotate x-axis tick labels to prevent their texts from overlapping.
+        label_font_size = max(8, min(12, 150 / num_labels))
+        plt.setp(
+            ax.get_xticklabels(),
+            rotation=45,
+            ha='left',
+            rotation_mode='anchor',
+            fontsize=label_font_size,
+        )
+        # Match y-axis labels' font size with the x axis.
+        plt.setp(
+            ax.get_yticklabels(),
+            fontsize=label_font_size,
+        )
+
+        # Adjust layout to prevent label cutoff
+        plt.tight_layout()
+
+        # Log as figure
+        mlflow.log_figure(fig, filestem + '.png')
+
+        # Close figure to free memory
+        plt.close(fig)
