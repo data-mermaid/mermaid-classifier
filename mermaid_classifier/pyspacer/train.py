@@ -32,7 +32,13 @@ from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
 from mermaid_classifier.common.benthic_attributes import (
-    BenthicAttributeLibrary, CoralNetMermaidMapping, GrowthFormLibrary)
+    BAGF_SEP,
+    BenthicAttributeLibrary,
+    combine_ba_gf,
+    CoralNetMermaidMapping,
+    GrowthFormLibrary,
+    split_ba_gf,
+)
 from mermaid_classifier.common.csv_utils import ColumnSpec, CsvSpec
 from mermaid_classifier.common.duckdb_utils import (
     duckdb_add_column,
@@ -103,8 +109,6 @@ class LabelFilter(CsvSpec):
         ColumnSpec(name='ba_id', allow_blank=False),
         ColumnSpec(name='gf_id'),
     ]
-    # MERMAID API uses this as the BA-GF separator.
-    sep = '::'
 
     def __init__(self, csv_file: typing.TextIO, inclusion: bool = True):
         self.bagf_set: set[tuple[str, str]] = set()
@@ -118,11 +122,7 @@ class LabelFilter(CsvSpec):
         self.bagf_set.add((row['ba_id'], row.get('gf_id') or None))
 
     def accepts_bagf(self, bagf_id: str):
-        if self.sep in bagf_id:
-            ba_id, gf_id = bagf_id.split(self.sep)
-        else:
-            ba_id = bagf_id
-            gf_id = None
+        ba_id, gf_id = split_ba_gf(bagf_id)
 
         if self.inclusion:
             return (ba_id, gf_id) in self.bagf_set
@@ -150,7 +150,7 @@ class LabelFilter(CsvSpec):
             f" SELECT"
             f"  *,"
             f"  concat_ws("
-            f"   '{self.sep}', {ba_id_column_name}, {gf_id_column_name})"
+            f"   '{BAGF_SEP}', {ba_id_column_name}, {gf_id_column_name})"
             f"   AS bagf_id"
             f" FROM {duck_table_name}"
         )
@@ -180,8 +180,6 @@ class LabelRollupSpec(CsvSpec):
         ColumnSpec(name='to_ba_id', allow_blank=False),
         ColumnSpec(name='to_gf_id'),
     ]
-    # MERMAID API uses this as the BA-GF separator.
-    sep = '::'
 
     def __init__(self, *args, **kwargs):
         self.lookup = dict()
@@ -195,18 +193,11 @@ class LabelRollupSpec(CsvSpec):
         self.lookup[key] = value
 
     def roll_up(self, bagf_id: str) -> str:
-        if self.sep in bagf_id:
-            ba_id, gf_id = bagf_id.split(self.sep)
-        else:
-            ba_id = bagf_id
-            gf_id = None
+        ba_id, gf_id = split_ba_gf(bagf_id)
 
         if (ba_id, gf_id) in self.lookup:
             new_ba_id, new_gf_id = self.lookup[(ba_id, gf_id)]
-            if new_gf_id:
-                return new_ba_id + self.sep + new_gf_id
-            else:
-                return new_ba_id
+            return combine_ba_gf(new_ba_id, new_gf_id)
         # If this BAGF is not in the rollup spec, then we leave the
         # BAGF as is.
         return bagf_id
@@ -231,7 +222,7 @@ class LabelRollupSpec(CsvSpec):
             f" SELECT"
             f"  *,"
             f"  concat_ws("
-            f"   '{self.sep}', {ba_id_column_name}, {gf_id_column_name})"
+            f"   '{BAGF_SEP}', {ba_id_column_name}, {gf_id_column_name})"
             f"   AS bagf_id"
             f" FROM {duck_table_name}"
         )
@@ -253,9 +244,9 @@ class LabelRollupSpec(CsvSpec):
             f"CREATE OR REPLACE TABLE {duck_table_name} AS"
             f" SELECT"
             f"  *,"
-            f"  bagf_id.split_part('{self.sep}', 1)"
+            f"  bagf_id.split_part('{BAGF_SEP}', 1)"
             f"   AS rollup_{ba_id_column_name},"
-            f"  bagf_id.split_part('{self.sep}', 2)"
+            f"  bagf_id.split_part('{BAGF_SEP}', 2)"
             f"   AS rollup_{gf_id_column_name}"
             f" FROM {duck_table_name}"
         )
@@ -938,17 +929,8 @@ class TrainingDataset:
             # One annotation per row.
             for row in rows:
 
-                benthic_attribute_id = row['benthic_attribute_id']
-
-                if row['growth_form_id'] is None:
-                    # Either we've chosen not to get growth forms, or
-                    # this annotation has no growth form.
-                    bagf = benthic_attribute_id
-                else:
-                    # Include growth form.
-                    # MERMAID API uses :: as the BA-GF separator.
-                    bagf = '::'.join([
-                        benthic_attribute_id, row['growth_form_id']])
+                bagf = combine_ba_gf(
+                    row['benthic_attribute_id'], row['growth_form_id'])
 
                 annotation = (
                     int(row['row']),
@@ -1634,12 +1616,8 @@ class MLflowTrainingRunner(TrainingRunner):
         # order as frequency in val, due to stratification); highest
         # frequency first.
         for _, row in self.dataset.artifacts.bagf_counts.iterrows():
-            if row['growth_form_id']:
-                bagf_id = (
-                    row['benthic_attribute_id']
-                    + '::' + row['growth_form_id'])
-            else:
-                bagf_id = row['benthic_attribute_id']
+            bagf_id = combine_ba_gf(
+                row['benthic_attribute_id'], row['growth_form_id'])
             if bagf_id not in val_results.classes:
                 # This BA-GF combo must have gotten dropped entirely due
                 # to not enough annotations.
