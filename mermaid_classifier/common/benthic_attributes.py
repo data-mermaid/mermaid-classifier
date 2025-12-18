@@ -10,6 +10,60 @@ import urllib.request
 import pandas as pd
 
 
+# MERMAID API uses :: as the BA-GF separator.
+BAGF_SEP = '::'
+
+
+def combine_ba_gf(
+    benthic_attribute: str, growth_form: str | None | pd.api.typing.NAType
+) -> str:
+    """
+    Combine string representations of a benthic attribute and a growth form
+    into a single representation for the BA-GF combo.
+    For MERMAID's purposes, this works with either IDs or readable names.
+    """
+
+    # Use defensive code to detect a lack of growth form, so the caller
+    # doesn't have to. And since these values could never indicate a valid
+    # growth form.
+    # pd.NA is basically a second None.
+    if (
+        growth_form is None
+        or growth_form is pd.NA
+        or growth_form == ''
+    ):
+        # Doesn't have a growth form.
+        return benthic_attribute
+    else:
+        # Has a growth form.
+        return BAGF_SEP.join([benthic_attribute, growth_form])
+
+
+def split_ba_gf(bagf: str) -> tuple[str, str | None]:
+    """
+    Split a string representation of a BA-GF combo into individual strings
+    for benthic attribute and growth form.
+    Note that just a BA is a valid BA-GF combo, which just has no GF.
+    """
+    if BAGF_SEP in bagf:
+        try:
+            benthic_attribute, growth_form = bagf.split(BAGF_SEP)
+        except ValueError:
+            raise ValueError(
+                f"'{bagf}' is not a valid BA-GF combo string."
+                f" The separator {BAGF_SEP} should only appear at most once.")
+
+        if benthic_attribute == '' or growth_form == '':
+            raise ValueError(
+                f"'{bagf}' is not a valid BA-GF combo string."
+                f" There should be characters to the left and right of the"
+                f" separator {BAGF_SEP}.")
+
+        return benthic_attribute, growth_form
+    else:
+        return bagf, None
+
+
 class BenthicAttributeLibrary:
     """
     Information about all MERMAID benthic attributes, organized into
@@ -38,12 +92,12 @@ class BenthicAttributeLibrary:
         return self.by_name[ba_name]['id']
 
     def bagf_id_to_name(self, bagf_id, gf_library):
-        if '::' in bagf_id:
-            ba_id, gf_id = bagf_id.split('::')
-            ba_name = self.by_id[ba_id]['name']
-            return ba_name + '::' + gf_library.by_id[gf_id]
+        ba_id, gf_id = split_ba_gf(bagf_id)
+        ba_name = self.by_id[ba_id]['name']
+        if gf_id is not None:
+            return combine_ba_gf(ba_name, gf_library.by_id[gf_id])
         else:
-            return self.by_id[bagf_id]['name']
+            return ba_name
 
     def get_ancestor_ids(self, ba_id):
         """
