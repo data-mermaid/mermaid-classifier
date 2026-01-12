@@ -620,11 +620,6 @@ class TrainingDataset:
 
     def read_mermaid_data(self):
 
-        mermaid_annotations_s3_uri = (
-            f's3://{settings.mermaid_train_data_bucket}/mermaid/'
-            f'mermaid_confirmed_annotations.parquet'
-        )
-
         if self.duckdb_annotations_table_exists():
             # INSERT INTO ... BY NAME ... means that we don't have to match
             # the column order of the existing table.
@@ -644,7 +639,7 @@ class TrainingDataset:
             f" 'all' AS project_id,"
             f"  concat('mermaid/', image_id, '_featurevector')"
             f"   AS feature_vector"
-            f" FROM read_parquet('{mermaid_annotations_s3_uri}')"
+            f" FROM read_parquet('{settings.mermaid_annotations_parquet_path}')"
         )
 
         # Get project-level stats before applying any further filters.
