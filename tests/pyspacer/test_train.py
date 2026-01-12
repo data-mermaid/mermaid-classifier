@@ -4,7 +4,41 @@ import unittest
 import pandas as pd
 
 from mermaid_classifier.pyspacer.settings import settings
-from mermaid_classifier.pyspacer.train import Sites, TrainingDataset
+from mermaid_classifier.pyspacer.train import Artifacts, Sites, TrainingDataset
+
+
+class SettingsOverride:
+    """
+    Override the specified Pydantic settings from a call of enable()
+    until a call of disable().
+
+    Example usage:
+    override = SettingsOverride(aws_anonymous=True, aws_region='ca-central-1')
+    override.enable()
+    <some code that depends on the above settings>
+    override.disable()
+
+    Some parts are from
+    https://rednafi.com/python/patch-pydantic-settings-in-pytest/
+    """
+    def __init__(self, **kwargs):
+        self.options = kwargs
+        super().__init__()
+
+    def enable(self):
+        # Make a copy of the original settings
+        self.original_settings = settings.model_copy()
+
+        # Patch the settings with kwargs
+        for key, val in self.options.items():
+            # Raise an error if kwargs contains a nonexistent setting
+            if not hasattr(settings, key):
+                raise ValueError(f"Unknown setting: {key}")
+            setattr(settings, key, val)
+
+    def disable(self):
+        # Restore the original settings
+        settings.__dict__.update(self.original_settings.__dict__)
 
 
 @contextmanager
@@ -12,24 +46,11 @@ def override_settings(**kwargs):
     """
     Override the specified Pydantic settings for the duration of the
     context manager.
-
-    Some parts are from
-    https://rednafi.com/python/patch-pydantic-settings-in-pytest/
     """
-    # Make a copy of the original settings
-    original_settings = settings.model_copy()
-
-    # Patch the settings with kwargs
-    for key, val in kwargs.items():
-        # Raise an error if kwargs contains a nonexistent setting
-        if not hasattr(settings, key):
-            raise ValueError(f"Unknown setting: {key}")
-        setattr(settings, key, val)
-
-    yield settings
-
-    # Restore the original settings
-    settings.__dict__.update(original_settings.__dict__)
+    override = SettingsOverride(**kwargs)
+    override.enable()
+    yield
+    override.disable()
 
 
 class NoInitDataset(TrainingDataset):
@@ -40,9 +61,22 @@ class NoInitDataset(TrainingDataset):
     """
     def __init__(self):
         self._duck_conn = None
+        self.artifacts = Artifacts()
 
 
-class HandleMissingFeatureVectorsTest(unittest.TestCase):
+class BaseTrainTest(unittest.TestCase):
+
+    def setUp(self):
+        self.override = SettingsOverride(aws_anonymous='True')
+        self.override.enable()
+        super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+        self.override.disable()
+
+
+class HandleMissingFeatureVectorsTest(BaseTrainTest):
 
     @staticmethod
     def annotations_fvs(dataset):
