@@ -75,6 +75,47 @@ def _duckdb_temp_transform_table(
         yield temp_table_name
 
 
+@contextmanager
+def duckdb_allow_nullable_column_join(
+    duck_conn: duckdb.DuckDBPyConnection,
+    duck_table_names: list[str],
+    column_name: str,
+    null_placeholder: str = 'NULL_PLACEHOLDER',
+):
+    """
+    In the given column of the given tables, temporarily stand in placeholder
+    values instead of NULL for the duration of this context manager.
+    This way, if a JOIN is done on the column within this context manager,
+    the NULL values will be eligible for joining like any other value.
+    Normally, NULL values mean the row will instead get dropped from the
+    join result entirely.
+
+    null_placeholder is the placeholder value, and must not collide with real
+    non-null values in the column.
+    """
+    # Apply placeholder.
+    for table_name in duck_table_names:
+        duckdb_replace_value_in_column(
+            duck_conn,
+            table_name,
+            column_name,
+            None,
+            null_placeholder,
+        )
+
+    yield
+
+    # Un-apply placeholder.
+    for table_name in duck_table_names:
+        duckdb_replace_value_in_column(
+            duck_conn,
+            table_name,
+            column_name,
+            null_placeholder,
+            None,
+        )
+
+
 def duckdb_replace_column(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
@@ -115,14 +156,20 @@ def duckdb_transform_column(
         transform_func,
     ) as transform_table_name:
 
-        # Use JOIN ... USING to apply the transform.
-        duck_conn.execute(
-            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-            f" SELECT *"
-            f" FROM {duck_table_name}"
-            f"  JOIN {transform_table_name}"
-            f"  USING ({column_name})"
-        )
+        with duckdb_allow_nullable_column_join(
+            duck_conn,
+            [duck_table_name, transform_table_name],
+            column_name,
+        ):
+
+            # Use JOIN ... USING to apply the transform.
+            duck_conn.execute(
+                f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+                f" SELECT *"
+                f" FROM {duck_table_name}"
+                f"  JOIN {transform_table_name}"
+                f"  USING ({column_name})"
+            )
 
     # Post-transform column becomes the new column.
     duckdb_replace_column(
@@ -179,15 +226,21 @@ def duckdb_add_column(
         base_to_new_func,
     ) as transform_table_name:
 
-        # Use JOIN ... USING to add the new column.
-        # https://duckdb.org/docs/stable/sql/query_syntax/from#conditional-joins
-        duck_conn.execute(
-            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-            f" SELECT *"
-            f" FROM {duck_table_name}"
-            f"  JOIN {transform_table_name}"
-            f"  USING ({base_column_name})"
-        )
+        with duckdb_allow_nullable_column_join(
+            duck_conn,
+            [duck_table_name, transform_table_name],
+            base_column_name,
+        ):
+
+            # Use JOIN ... USING to add the new column.
+            # https://duckdb.org/docs/stable/sql/query_syntax/from#conditional-joins
+            duck_conn.execute(
+                f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+                f" SELECT *"
+                f" FROM {duck_table_name}"
+                f"  JOIN {transform_table_name}"
+                f"  USING ({base_column_name})"
+            )
 
 
 def duckdb_filter_on_column(
@@ -208,19 +261,25 @@ def duckdb_filter_on_column(
         inclusion_func,
     ) as transform_table_name:
 
-        # Use JOIN to determine which annotations to keep, and
-        # WHERE to filter things down.
-        #
-        # SELECT only from the original table since we don't need
-        # the included column after this.
-        duck_conn.execute(
-            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-            f" SELECT {duck_table_name}.*"
-            f" FROM {duck_table_name}"
-            f"  JOIN {transform_table_name}"
-            f"  USING ({column_name})"
-            f" WHERE included = true"
-        )
+        with duckdb_allow_nullable_column_join(
+            duck_conn,
+            [duck_table_name, transform_table_name],
+            column_name,
+        ):
+
+            # Use JOIN to determine which annotations to keep, and
+            # WHERE to filter things down.
+            #
+            # SELECT only from the original table since we don't need
+            # the included column after this.
+            duck_conn.execute(
+                f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+                f" SELECT {duck_table_name}.*"
+                f" FROM {duck_table_name}"
+                f"  JOIN {transform_table_name}"
+                f"  USING ({column_name})"
+                f" WHERE included = true"
+            )
 
 
 def duckdb_batched_rows(
