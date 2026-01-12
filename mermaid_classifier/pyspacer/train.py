@@ -994,28 +994,32 @@ class TrainingDataset:
             # Beware not to use the deprecated S3 API, which has syntax like
             # `SET s3_region = 'us-east-1'`:
             # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api_legacy_authentication
-            if settings.aws_key_id:
-                # Manual provision of a key.
-                query = (
-                    f"CREATE OR REPLACE SECRET secret ("
-                    f" TYPE s3,"
-                    f" PROVIDER config,"
-                    f" KEY_ID '{settings.aws_key_id}',"
-                    f" SECRET '{settings.aws_secret}',"
-                )
-                if settings.aws_session_token:
-                    query += f" SESSION_TOKEN '{settings.aws_session_token}',"
-            else:
-                # The credential_chain provider allows automatically
-                # fetching AWS credentials, like through the IMDS.
-                query = (
-                    f"CREATE OR REPLACE SECRET secret ("
-                    f" TYPE s3,"
-                    f" PROVIDER credential_chain,"
-                )
-            query += f" REGION '{settings.aws_region}')"
 
-            self._duck_conn.execute(query)
+            if settings.aws_anonymous == 'False':
+                if settings.aws_key_id:
+                    # Manual provision of a key.
+                    query = (
+                        f"CREATE OR REPLACE SECRET secret ("
+                        f" TYPE s3,"
+                        f" PROVIDER config,"
+                        f" KEY_ID '{settings.aws_key_id}',"
+                        f" SECRET '{settings.aws_secret}',"
+                    )
+                    if settings.aws_session_token:
+                        query += (
+                            f" SESSION_TOKEN '{settings.aws_session_token}',"
+                        )
+                else:
+                    # The credential_chain provider allows automatically
+                    # fetching AWS credentials, like through the IMDS.
+                    query = (
+                        f"CREATE OR REPLACE SECRET secret ("
+                        f" TYPE s3,"
+                        f" PROVIDER credential_chain,"
+                    )
+                query += f" REGION '{settings.aws_region}')"
+
+                self._duck_conn.execute(query)
 
         return self._duck_conn
 
