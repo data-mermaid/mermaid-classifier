@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     # ML inputs
     coralnet_train_data_bucket: str = 'coral-reef-training'
     mermaid_train_data_bucket: str = 'coral-reef-training'
+    mermaid_annotations_parquet_path: str = (
+        f's3://{mermaid_train_data_bucket}/mermaid/'
+        f'mermaid_confirmed_annotations.parquet'
+    )
     weights_location: str | None = None
     aws_region: str = 'us-east-1'
     aws_anonymous: Literal['False', 'True'] = 'False'

@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import tempfile
 import unittest
 
 import pandas as pd
@@ -74,6 +75,117 @@ class BaseTrainTest(unittest.TestCase):
     def tearDown(self):
         super().tearDown()
         self.override.disable()
+
+
+def same_char_uuid(char: str):
+    """
+    If you pass in '0', you get '00000000-0000-0000-0000-000000000000'.
+    Passing in 0-9 or a-f should result in a valid uuid4 string.
+    """
+    return '-'.join([
+        ''.join([char]*8),
+        ''.join([char]*4),
+        ''.join([char]*4),
+        ''.join([char]*4),
+        ''.join([char]*12),
+    ])
+
+
+class ReadMermaidDataTest(BaseTrainTest):
+
+    def test_coralnet_null_gfs(self):
+        """
+        CoralNet data which includes NULL growth form IDs was read in prior
+        to read_mermaid_data().
+
+        We've seen that careless DuckDB JOINs can make coralnet rows with
+        NULL GF IDs get erased from the annotations, particularly at the
+        NULL/'None' normalization step. This test checks that the rows
+        are kept.
+        """
+        dataset = NoInitDataset()
+
+        # Write a couple of coralnet annotations to DuckDB.
+        # One with growth form, one without (this is represented as
+        # NULL / Python None).
+        cn_annotations_df = pd.DataFrame(dict(
+            site=['coralnet']*2,
+            bucket=['cn-data']*2,
+            project_id=['12', '34'],
+            image_id=['12345', '67890'],
+            feature_vector=['s12/i12345.fv', 's34/i67890.fv'],
+            row=[2000, 1500],
+            col=[1200, 2800],
+            label_id=['123', '456'],
+            benthic_attribute_id=[same_char_uuid('0'), same_char_uuid('1')],
+            growth_form_id=[same_char_uuid('2'), None],
+        ))
+
+        dataset.duck_conn.execute(
+            f"CREATE TABLE annotations AS SELECT * FROM cn_annotations_df"
+        )
+
+        with tempfile.NamedTemporaryFile(delete_on_close=False) as parquet_f:
+
+            # Write a couple of mermaid annotations to a parquet file.
+            # One with growth form, one without (this is represented in
+            # mermaid parquet as string 'None').
+            mermaid_parquet_df = pd.DataFrame(dict(
+                image_id=[same_char_uuid('3'), same_char_uuid('4')],
+                row=[3000, 500],
+                col=[2200, 1800],
+                benthic_attribute_id=[
+                    same_char_uuid('5'), same_char_uuid('6')],
+                growth_form_id=[same_char_uuid('7'), 'None'],
+            ))
+            dataset.duck_conn.execute(
+                f"CREATE TABLE mermaid_parquet_input AS"
+                f" SELECT * FROM mermaid_parquet_df"
+            )
+
+            # DuckDB will reopen the file, so close it first.
+            parquet_f.close()
+            dataset.duck_conn.execute(
+                f"COPY (SELECT * FROM mermaid_parquet_input)"
+                f" TO '{parquet_f.name}'"
+                f" (FORMAT parquet)"
+            )
+
+            with override_settings(
+                mermaid_annotations_parquet_path=parquet_f.name,
+            ):
+                dataset.read_mermaid_data()
+
+        result_tuples = dataset.duck_conn.execute(
+            "SELECT image_id, row, col, benthic_attribute_id, growth_form_id"
+            " FROM annotations").fetchall()
+        # We don't really care about the result order. So we'll alphabetize
+        # the results to make it easier to assert on them.
+        result_tuples.sort()
+
+        self.assertListEqual(
+            list(result_tuples[0]),
+            ['12345', 2000, 1200,
+             same_char_uuid('0'), same_char_uuid('2')],
+        )
+        self.assertListEqual(
+            list(result_tuples[1]),
+            [same_char_uuid('3'), 3000, 2200,
+             same_char_uuid('5'), same_char_uuid('7')],
+        )
+        # mermaid 'None' growth form should have become actual NULL / None.
+        self.assertListEqual(
+            list(result_tuples[2]),
+            [same_char_uuid('4'), 500, 1800,
+             same_char_uuid('6'), None],
+        )
+        # coralnet row with None growth form should not be accidentally
+        # dropped.
+        self.assertListEqual(
+            list(result_tuples[3]),
+            ['67890', 1500, 2800,
+             same_char_uuid('1'), None],
+        )
 
 
 class HandleMissingFeatureVectorsTest(BaseTrainTest):
