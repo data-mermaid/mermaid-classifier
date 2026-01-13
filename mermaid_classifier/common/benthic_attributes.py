@@ -15,53 +15,38 @@ BAGF_SEP = '::'
 
 
 def combine_ba_gf(
-    benthic_attribute: str, growth_form: str | None | pd.api.typing.NAType
+    benthic_attribute: str, growth_form: str,
 ) -> str:
     """
     Combine string representations of a benthic attribute and a growth form
     into a single representation for the BA-GF combo.
-    For MERMAID's purposes, this works with either IDs or readable names.
+    If there's no GF (empty string), the result has the BA + separator.
+    Not just the BA.
     """
-
-    # Use defensive code to detect a lack of growth form, so the caller
-    # doesn't have to. And since these values could never indicate a valid
-    # growth form.
-    # pd.NA is basically a second None.
-    if (
-        growth_form is None
-        or growth_form is pd.NA
-        or growth_form == ''
-    ):
-        # Doesn't have a growth form.
-        return benthic_attribute
-    else:
-        # Has a growth form.
-        return BAGF_SEP.join([benthic_attribute, growth_form])
+    return BAGF_SEP.join([benthic_attribute, growth_form])
 
 
-def split_ba_gf(bagf: str) -> tuple[str, str | None]:
+def split_ba_gf(bagf: str) -> tuple[str, str]:
     """
     Split a string representation of a BA-GF combo into individual strings
     for benthic attribute and growth form.
-    Note that just a BA is a valid BA-GF combo, which just has no GF.
+    If there's no GF, the input should have the BA + separator. Not just
+    the BA.
     """
-    if BAGF_SEP in bagf:
-        try:
-            benthic_attribute, growth_form = bagf.split(BAGF_SEP)
-        except ValueError:
-            raise ValueError(
-                f"'{bagf}' is not a valid BA-GF combo string."
-                f" The separator {BAGF_SEP} should only appear at most once.")
+    try:
+        benthic_attribute, growth_form = bagf.split(BAGF_SEP)
+    except ValueError:
+        raise ValueError(
+            f"'{bagf}' is not a valid BA-GF combo string."
+            f" The separator {BAGF_SEP} should appear exactly once.")
 
-        if benthic_attribute == '' or growth_form == '':
-            raise ValueError(
-                f"'{bagf}' is not a valid BA-GF combo string."
-                f" There should be characters to the left and right of the"
-                f" separator {BAGF_SEP}.")
+    if benthic_attribute == '':
+        raise ValueError(
+            f"'{bagf}' is not a valid BA-GF combo string."
+            f" There should be characters to the left of the"
+            f" separator {BAGF_SEP}.")
 
-        return benthic_attribute, growth_form
-    else:
-        return bagf, None
+    return benthic_attribute, growth_form
 
 
 class BenthicAttributeLibrary:
@@ -86,18 +71,24 @@ class BenthicAttributeLibrary:
             self.by_parent[result['parent']].append(result)
 
     def id_to_name(self, ba_id):
+        if ba_id == '':
+            return ''
         return self.by_id[ba_id]['name']
 
     def name_to_id(self, ba_name):
+        if ba_name == '':
+            return ''
         return self.by_name[ba_name]['id']
 
     def bagf_id_to_name(self, bagf_id, gf_library):
         ba_id, gf_id = split_ba_gf(bagf_id)
         ba_name = self.by_id[ba_id]['name']
-        if gf_id is not None:
-            return combine_ba_gf(ba_name, gf_library.by_id[gf_id])
-        else:
+        if gf_id == '':
+            # Unlike IDs where we represent BA-only as <BA><separator>,
+            # for readable names BA-only will have no separator.
             return ba_name
+        else:
+            return BAGF_SEP.join([ba_name, gf_library.by_id[gf_id]])
 
     def get_ancestor_ids(self, ba_id):
         """
@@ -143,6 +134,11 @@ class GrowthFormLibrary:
                 break
         self.by_id = {gf['id']: gf['name'] for gf in data}
 
+    def id_to_name(self, gf_id):
+        if gf_id == '':
+            return ''
+        return self.by_id[gf_id]
+
 
 @dataclasses.dataclass
 class LabelMappingEntry:
@@ -157,12 +153,14 @@ class LabelMappingEntry:
     # Note that the order the fields appear here also determines the order
     # they appear in the MLflow artifact, assuming these dataclass instances
     # are passed directly into a pd.DataFrame() which serves as the artifact.
+    #
+    # Lack of a growth form is indicated by an empty string for those fields.
     provider_label: str
     benthic_attribute_name: str
-    growth_form_name: str | None
+    growth_form_name: str
     provider_id: str
     benthic_attribute_id: str
-    growth_form_id: str | None
+    growth_form_id: str
 
 
 class CoralNetMermaidMapping:
@@ -202,6 +200,22 @@ class CoralNetMermaidMapping:
         return self._mapping
 
     def _load_mapping(self):
+        api_mapping = self._download_mapping()
+
+        self._mapping = {
+            entry['provider_id']: LabelMappingEntry(
+                benthic_attribute_id=entry['benthic_attribute_id'],
+                # Use '' as the empty value for GFs, not null/None.
+                growth_form_id=entry['growth_form_id'] or '',
+                benthic_attribute_name=entry['benthic_attribute_name'],
+                growth_form_name=entry['growth_form_name'] or '',
+                provider_id=entry['provider_id'],
+                provider_label=entry['provider_label'],
+            )
+            for entry in api_mapping
+        }
+
+    def _download_mapping(self):
         endpoint_response = urllib.request.urlopen(self._endpoint)
         response_json = json.loads(endpoint_response.read())
         api_mapping = response_json['results']
@@ -211,17 +225,7 @@ class CoralNetMermaidMapping:
             response_json = json.loads(endpoint_response.read())
             api_mapping.extend(response_json['results'])
 
-        self._mapping = {
-            entry['provider_id']: LabelMappingEntry(
-                benthic_attribute_id=entry['benthic_attribute_id'],
-                growth_form_id=entry['growth_form_id'],
-                benthic_attribute_name=entry['benthic_attribute_name'],
-                growth_form_name=entry['growth_form_name'],
-                provider_id=entry['provider_id'],
-                provider_label=entry['provider_label'],
-            )
-            for entry in api_mapping
-        }
+        return api_mapping
 
 
 def output_ba_csvs():
