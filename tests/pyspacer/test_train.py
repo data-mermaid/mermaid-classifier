@@ -1,11 +1,15 @@
 from contextlib import contextmanager
+from io import StringIO
 import tempfile
 import unittest
+from unittest import mock
 
 import pandas as pd
 
+from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
 from mermaid_classifier.pyspacer.settings import settings
-from mermaid_classifier.pyspacer.train import Artifacts, Sites, TrainingDataset
+from mermaid_classifier.pyspacer.train import (
+    Artifacts, CNSourceFilter, Sites, TrainingDataset)
 
 
 class SettingsOverride:
@@ -91,23 +95,119 @@ def same_char_uuid(char: str):
     ])
 
 
-class ReadMermaidDataTest(BaseTrainTest):
+class ReadCoralNetDataTest(BaseTrainTest):
+    """
+    Test read_coralnet_data().
+    """
 
-    def test_coralnet_null_gfs(self):
+    def test_gfs_present_and_empty(self):
         """
-        CoralNet data which includes NULL growth form IDs was read in prior
-        to read_mermaid_data().
+        When CoralNet annotations have their labels mapped to MERMAID BAs
+        and GFs, the case with no GF has the GF read in as null (from JSON).
+        However, NULL GFs in DuckDB can be problematic with later data
+        manipulations; for example, JOINing on a column with NULLs in it
+        can result in rows getting accidentally lost.
 
-        We've seen that careless DuckDB JOINs can make coralnet rows with
-        NULL GF IDs get erased from the annotations, particularly at the
-        NULL/'None' normalization step. This test checks that the rows
-        are kept.
+        So we check that null GFs become empty strings rather than NULL
+        in DuckDB.
+        And test alongside with-GF annotations.
+        """
+        dataset = NoInitDataset()
+
+        source_id = 23
+        dataset.cn_source_filter = CNSourceFilter(StringIO(
+            'id\n'
+            f'{source_id}\n'
+        ))
+
+        # CoralNet annotations are read in as CSV.
+        cn_annotations_csv_content = (
+            'Image ID,Row,Column,Label ID\n'
+            '12345,2000,1200,123\n'
+            '67890,1500,2800,456\n'
+        )
+
+        # Mock CN-MM mapping to use.
+        mapping = [
+            dict(
+                benthic_attribute_id=same_char_uuid('0'),
+                growth_form_id=same_char_uuid('1'),
+                benthic_attribute_name='BA1',
+                growth_form_name='GF1',
+                provider_id='123',
+                provider_label='Label123',
+            ),
+            dict(
+                benthic_attribute_id=same_char_uuid('2'),
+                # We expect the API's mapping to have null/None
+                # for blank growth forms.
+                growth_form_id=None,
+                benthic_attribute_name='BA2',
+                growth_form_name=None,
+                provider_id='456',
+                provider_label='Label456',
+            ),
+        ]
+
+        prefix_pattern = 's{source_id}_'
+        prefix = prefix_pattern.format(source_id=source_id)
+
+        with tempfile.NamedTemporaryFile(
+            prefix=prefix, mode='w', delete_on_close=False,
+        ) as csv_f:
+
+            csv_f.write(cn_annotations_csv_content)
+            csv_f.close()
+
+            with (
+                override_settings(
+                    coralnet_annotations_csv_pattern=csv_f.name,
+                ),
+                mock.patch.object(
+                    CoralNetMermaidMapping, '_download_mapping',
+                ) as mock_download_mapping,
+            ):
+                mock_download_mapping.return_value = mapping
+
+                dataset.read_coralnet_data()
+
+        result_tuples = dataset.duck_conn.execute(
+            "SELECT image_id, row, col, benthic_attribute_id, growth_form_id"
+            " FROM annotations").fetchall()
+        result_tuples.sort()
+
+        self.assertListEqual(
+            list(result_tuples[0]),
+            ['12345', 2000, 1200,
+             same_char_uuid('0'), same_char_uuid('1')],
+        )
+        # Empty GF should show as ''.
+        self.assertListEqual(
+            list(result_tuples[1]),
+            ['67890', 1500, 2800,
+             same_char_uuid('2'), ''],
+        )
+
+
+class ReadMermaidDataTest(BaseTrainTest):
+    """
+    Test read_mermaid_data().
+    """
+
+    def test_gfs_present_and_empty(self):
+        """
+        Test the following regarding no-GF annotations:
+        1. CoralNet annotations with no GF don't get dropped during the
+        empty-value normalization step. (This was a problem before.)
+        2. MERMAID annotations with no GF end up with a GF of '', empty string.
+
+        And test alongside with-GF annotations.
         """
         dataset = NoInitDataset()
 
         # Write a couple of coralnet annotations to DuckDB.
-        # One with growth form, one without (this is represented as
-        # NULL / Python None).
+        # One with growth form, one without (this is represented as the
+        # empty string '').
         cn_annotations_df = pd.DataFrame(dict(
             site=['coralnet']*2,
             bucket=['cn-data']*2,
@@ -118,7 +218,7 @@ class ReadMermaidDataTest(BaseTrainTest):
             col=[1200, 2800],
             label_id=['123', '456'],
             benthic_attribute_id=[same_char_uuid('0'), same_char_uuid('1')],
-            growth_form_id=[same_char_uuid('2'), None],
+            growth_form_id=[same_char_uuid('2'), ''],
         ))
 
         dataset.duck_conn.execute(
@@ -152,7 +252,7 @@ class ReadMermaidDataTest(BaseTrainTest):
             )
 
             with override_settings(
-                mermaid_annotations_parquet_path=parquet_f.name,
+                mermaid_annotations_parquet_pattern=parquet_f.name,
             ):
                 dataset.read_mermaid_data()
 
@@ -173,18 +273,18 @@ class ReadMermaidDataTest(BaseTrainTest):
             [same_char_uuid('3'), 3000, 2200,
              same_char_uuid('5'), same_char_uuid('7')],
         )
-        # mermaid 'None' growth form should have become actual NULL / None.
+        # mermaid 'None' growth form should have become ''.
         self.assertListEqual(
             list(result_tuples[2]),
             [same_char_uuid('4'), 500, 1800,
-             same_char_uuid('6'), None],
+             same_char_uuid('6'), ''],
         )
-        # coralnet row with None growth form should not be accidentally
+        # coralnet row with '' growth form should not be accidentally
         # dropped.
         self.assertListEqual(
             list(result_tuples[3]),
             ['67890', 1500, 2800,
-             same_char_uuid('1'), None],
+             same_char_uuid('1'), ''],
         )
 
 
