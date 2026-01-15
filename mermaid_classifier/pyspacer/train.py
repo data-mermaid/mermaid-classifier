@@ -45,7 +45,6 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_filter_on_column,
     duckdb_grouped_rows,
     duckdb_replace_column,
-    duckdb_replace_value_in_column,
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
@@ -118,8 +117,8 @@ class LabelFilter(CsvSpec):
         self.inclusion = inclusion
 
     def per_row_init_action(self, row):
-        # Ensure absent values are just None, not '' or None.
-        self.bagf_set.add((row['ba_id'], row.get('gf_id') or None))
+        # Ensure absent values are just '', not '' or None.
+        self.bagf_set.add((row['ba_id'], row.get('gf_id') or ''))
 
     def accepts_bagf(self, bagf_id: str):
         ba_id, gf_id = split_ba_gf(bagf_id)
@@ -144,7 +143,6 @@ class LabelFilter(CsvSpec):
         # Concatenate BA+GF so that we can define the filter as a
         # single-column operation.
         # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
-        # "NULL inputs are skipped." So a NULL GF results in just the BA.
         duck_conn.execute(
             f"CREATE OR REPLACE TABLE {duck_table_name} AS"
             f" SELECT"
@@ -187,9 +185,9 @@ class LabelRollupSpec(CsvSpec):
         super().__init__(*args, **kwargs)
 
     def per_row_init_action(self, row):
-        # Ensure absent values are just None, not '' or None.
-        key = (row['from_ba_id'], row.get('from_gf_id') or None)
-        value = (row['to_ba_id'], row.get('to_gf_id') or None)
+        # Ensure absent values are just '', not '' or None.
+        key = (row['from_ba_id'], row.get('from_gf_id') or '')
+        value = (row['to_ba_id'], row.get('to_gf_id') or '')
         self.lookup[key] = value
 
     def roll_up(self, bagf_id: str) -> str:
@@ -216,7 +214,7 @@ class LabelRollupSpec(CsvSpec):
         # Concatenate BA+GF so that we can define the rollup as a
         # single-column transform.
         # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
-        # "NULL inputs are skipped." So a NULL GF results in just the BA.
+        # If there's no GF, then the result is the BA plus separator.
         duck_conn.execute(
             f"CREATE OR REPLACE TABLE {duck_table_name} AS"
             f" SELECT"
@@ -237,9 +235,6 @@ class LabelRollupSpec(CsvSpec):
 
         # Propagate rolled-up BAGF back to the split BA-GF fields.
         # https://duckdb.org/docs/stable/sql/functions/text#split_partstring-separator-index
-        # "If the index is outside the bounds of the list, return an
-        # empty string (to match PostgreSQL's behavior)." So if there's no
-        # growth form, then that gets an empty string.
         duck_conn.execute(
             f"CREATE OR REPLACE TABLE {duck_table_name} AS"
             f" SELECT"
@@ -261,16 +256,6 @@ class LabelRollupSpec(CsvSpec):
             duck_table_name=duck_table_name,
             column_name=gf_id_column_name,
             new_values_column_name=f"rollup_{gf_id_column_name}",
-        )
-
-        # The string manipulation would have given '' instead of NULL
-        # for empty growth forms. Convert back to NULL.
-        duckdb_replace_value_in_column(
-            duck_conn=duck_conn,
-            duck_table_name=duck_table_name,
-            column_name=gf_id_column_name,
-            old_value='',
-            new_value=None,
         )
 
         # Don't need the combined BAGF column anymore.
@@ -522,12 +507,12 @@ class TrainingDataset:
             )
 
             if options.drop_growthforms:
-                # Null out all annotations' growth forms.
+                # Clear all annotations' growth forms.
                 duckdb_transform_column(
                     duck_conn=self.duck_conn,
                     duck_table_name='annotations',
                     column_name='growth_form_id',
-                    transform_func=lambda x: None,
+                    transform_func=lambda x: '',
                 )
 
             # Filter out BAGFs we don't want.
@@ -620,9 +605,8 @@ class TrainingDataset:
 
     def read_mermaid_data(self):
 
-        mermaid_annotations_s3_uri = (
-            f's3://{settings.mermaid_train_data_bucket}/mermaid/'
-            f'mermaid_confirmed_annotations.parquet'
+        parquet_path = settings.mermaid_annotations_parquet_pattern.format(
+            mermaid_train_data_bucket=settings.mermaid_train_data_bucket,
         )
 
         if self.duckdb_annotations_table_exists():
@@ -644,20 +628,20 @@ class TrainingDataset:
             f" 'all' AS project_id,"
             f"  concat('mermaid/', image_id, '_featurevector')"
             f"   AS feature_vector"
-            f" FROM read_parquet('{mermaid_annotations_s3_uri}')"
+            f" FROM read_parquet('{parquet_path}')"
         )
 
         # Get project-level stats before applying any further filters.
         self.artifacts.mermaid_project_stats = self.compute_project_stats(
             site=Sites.MERMAID.value, has_training_sets=False)
 
-        # For growth forms, we get NULL/None from the CoralNet-MERMAID
+        # For growth forms, we get '' from the CoralNet-MERMAID
         # mapping, but the string 'None' from the MERMAID annotations
         # parquet.
-        # Normalize the latter to NULL/None.
+        # Normalize the latter to ''.
         def transform_func(gf_id):
-            if gf_id is None or gf_id == 'None':
-                return None
+            if gf_id == 'None':
+                return ''
             return gf_id
         duckdb_transform_column(
             duck_conn=self.duck_conn,
@@ -671,13 +655,12 @@ class TrainingDataset:
 
         for source_id in self.cn_source_filter.source_id_list:
 
-            source_folder_uri = (
-                f's3://{settings.coralnet_train_data_bucket}/s{source_id}'
-            )
-
             # One row per point annotation,
             # with columns including Image ID, Row, Column, Label ID
-            annotations_uri = f'{source_folder_uri}/annotations.csv'
+            annotations_uri = settings.coralnet_annotations_csv_pattern.format(
+                coralnet_train_data_bucket=settings.coralnet_train_data_bucket,
+                source_id=source_id,
+            )
             annotations_uri_list.append(annotations_uri)
 
         if self.duckdb_annotations_table_exists():
@@ -994,28 +977,32 @@ class TrainingDataset:
             # Beware not to use the deprecated S3 API, which has syntax like
             # `SET s3_region = 'us-east-1'`:
             # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api_legacy_authentication
-            if settings.aws_key_id:
-                # Manual provision of a key.
-                query = (
-                    f"CREATE OR REPLACE SECRET secret ("
-                    f" TYPE s3,"
-                    f" PROVIDER config,"
-                    f" KEY_ID '{settings.aws_key_id}',"
-                    f" SECRET '{settings.aws_secret}',"
-                )
-                if settings.aws_session_token:
-                    query += f" SESSION_TOKEN '{settings.aws_session_token}',"
-            else:
-                # The credential_chain provider allows automatically
-                # fetching AWS credentials, like through the IMDS.
-                query = (
-                    f"CREATE OR REPLACE SECRET secret ("
-                    f" TYPE s3,"
-                    f" PROVIDER credential_chain,"
-                )
-            query += f" REGION '{settings.aws_region}')"
 
-            self._duck_conn.execute(query)
+            if settings.aws_anonymous == 'False':
+                if settings.aws_key_id:
+                    # Manual provision of a key.
+                    query = (
+                        f"CREATE OR REPLACE SECRET secret ("
+                        f" TYPE s3,"
+                        f" PROVIDER config,"
+                        f" KEY_ID '{settings.aws_key_id}',"
+                        f" SECRET '{settings.aws_secret}',"
+                    )
+                    if settings.aws_session_token:
+                        query += (
+                            f" SESSION_TOKEN '{settings.aws_session_token}',"
+                        )
+                else:
+                    # The credential_chain provider allows automatically
+                    # fetching AWS credentials, like through the IMDS.
+                    query = (
+                        f"CREATE OR REPLACE SECRET secret ("
+                        f" TYPE s3,"
+                        f" PROVIDER credential_chain,"
+                    )
+                query += f" REGION '{settings.aws_region}')"
+
+                self._duck_conn.execute(query)
 
         return self._duck_conn
 
@@ -1168,19 +1155,11 @@ class TrainingDataset:
         ).fetch_df()
 
         # Counts per BAGF.
-        # We have to watch out for NULL growth form IDs since:
-        # - NULL values are ignored in most aggregate functions, like count().
-        #   https://duckdb.org/docs/stable/sql/data_types/nulls#null-and-aggregate-functions
-        # - Joining on a column with NULL values could result in those rows
-        #   being lost.
-        # So we use coalesce() to temporarily use '0' as placeholders for
-        # NULL.
-        # https://duckdb.org/docs/stable/sql/data_types/nulls#null-and-functions
         self.duck_conn.execute(
             "CREATE TABLE bagf_counts AS"
             " SELECT"
             " benthic_attribute_id,"
-            " coalesce(growth_form_id, '0') as growth_form_id,"
+            " growth_form_id,"
             " count(DISTINCT project_id) AS num_projects,"
             " count(*) AS num_annotations,"
             " countif(training_set = 'train') AS train,"
@@ -1204,16 +1183,7 @@ class TrainingDataset:
             duck_table_name='bagf_counts',
             base_column_name='growth_form_id',
             new_column_name='growth_form_name',
-            base_to_new_func=gf_library.by_id.get,
-        )
-        # Transform '0' back to NULL, now that we're done with ops that
-        # would trip on NULL.
-        duckdb_replace_value_in_column(
-            duck_conn=self.duck_conn,
-            duck_table_name='bagf_counts',
-            column_name='growth_form_id',
-            old_value='0',
-            new_value=None,
+            base_to_new_func=gf_library.id_to_name,
         )
         # Sort by annotation count, and reorder columns
         # while we're at it.
