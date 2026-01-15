@@ -144,15 +144,19 @@ def duckdb_replace_value_in_column(
     Replace old_value with new_value in the column_name column.
     """
     if old_value is None:
-        transform_func = lambda x: new_value if x is None else x
+        where_predicate = "IS NULL"
     else:
-        transform_func = lambda x: new_value if x == old_value else x
+        where_predicate = f"= '{old_value}'"
 
-    duckdb_transform_column(
-        duck_conn=duck_conn,
-        duck_table_name=duck_table_name,
-        column_name=column_name,
-        transform_func=transform_func,
+    if new_value is None:
+        new_value_sql = "NULL"
+    else:
+        new_value_sql = f"'{new_value}'"
+
+    duck_conn.execute(
+        f"UPDATE {duck_table_name}"
+        f" SET {column_name} = {new_value_sql}"
+        f" WHERE {column_name} {where_predicate}"
     )
 
 
