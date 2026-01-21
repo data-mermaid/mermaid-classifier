@@ -10,6 +10,7 @@ from io import StringIO
 import math
 from pathlib import Path
 import re
+import tempfile
 import time
 import typing
 
@@ -1419,7 +1420,7 @@ class MLflowTrainingRunner(TrainingRunner):
                 run_name=run_name)
 
             profiles_df = pd.DataFrame(self.profiled_sections)
-            mlflow.log_table(profiles_df, 'profiled_sections.json')
+            self.log_dataframe(profiles_df, 'profiled_sections')
 
             # Note that log_metric() only takes numeric values.
             accuracy_pct = return_msg.acc * 100
@@ -1512,49 +1513,49 @@ class MLflowTrainingRunner(TrainingRunner):
 
         artifacts = self.dataset.artifacts
 
-        mlflow.log_table(
-            self.dataset.cn_source_filter.csv_dataframe,
-            'coralnet_sources_included.json')
+        mlflow.log_text(
+            self.dataset.cn_source_filter.csv_text,
+            'coralnet_sources_included.csv')
 
         if self.dataset.label_filter.inclusion:
-            table_filename = 'labels_included.json'
+            csv_filename = 'labels_included.csv'
         else:
-            table_filename = 'labels_excluded.json'
-        mlflow.log_table(
-            self.dataset.label_filter.csv_dataframe, table_filename)
+            csv_filename = 'labels_excluded.csv'
+        mlflow.log_text(
+            self.dataset.label_filter.csv_text, csv_filename)
 
-        mlflow.log_table(
-            self.dataset.rollup_spec.csv_dataframe, 'rollup_spec.json')
+        mlflow.log_text(
+            self.dataset.rollup_spec.csv_text, 'rollup_spec.csv')
 
         # Number of images and annotations from each CN source and from
         # MERMAID.
         # First, before filtering (this is what's present in S3).
         # https://pandas.pydata.org/docs/reference/api/pandas.concat.html
-        mlflow.log_table(
+        self.log_dataframe(
             pd.concat([
                 artifacts.mermaid_project_stats,
                 artifacts.coralnet_project_stats,
             ]),
-            'project_stats_raw.json')
+            'project_stats_raw')
         # And here, after filtering (this is what training actually gets).
-        mlflow.log_table(
+        self.log_dataframe(
             self.dataset.compute_project_stats(has_training_sets=True),
-            'project_stats_train_data.json')
+            'project_stats_train_data')
 
         mlflow.log_dict(
             artifacts.train_summary_stats, 'train_summary.yaml')
 
-        mlflow.log_table(artifacts.ba_counts, 'ba_counts.json')
-        mlflow.log_table(artifacts.bagf_counts, 'bagf_counts.json')
+        self.log_dataframe(artifacts.ba_counts, 'ba_counts')
+        self.log_dataframe(artifacts.bagf_counts, 'bagf_counts')
 
         if not self.dataset.cn_source_filter.is_empty():
             # These only apply if CoralNet data is included.
-            mlflow.log_table(
+            self.log_dataframe(
                 artifacts.coralnet_label_mapping,
-                'coralnet_label_mapping.json')
-            mlflow.log_table(
+                'coralnet_label_mapping')
+            self.log_dataframe(
                 artifacts.unmapped_labels,
-                'unmapped_labels.json')
+                'unmapped_labels')
 
         # Log other options given to the training process.
         other_options = dict(
@@ -1568,7 +1569,35 @@ class MLflowTrainingRunner(TrainingRunner):
             log_spec = self.mlflow_options.annotations_to_log.lower()
             df = self.dataset.get_annotations(log_spec)
 
-            mlflow.log_table(df, f'annotations_{log_spec}.json')
+            self.log_dataframe(df, f'annotations_{log_spec}')
+
+    def log_dataframe(self, df, filestem):
+        """
+        MLflow's log_table() saves a .json instead of .csv, which means
+        the resulting artifact file cannot be inspected readily with an
+        external program such as Excel / LibreOffice Calc.
+        To save a .csv, we use log_text() instead, with this helper function.
+        """
+        duck_conn = self.dataset.duck_conn
+
+        with duckdb_temp_table_name(duck_conn) as table_name:
+            duck_conn.execute(
+                f"CREATE TABLE {table_name} AS SELECT * FROM df"
+            )
+
+            with tempfile.NamedTemporaryFile(
+                mode='w+t', suffix='.csv', delete_on_close=False,
+            ) as f:
+                # DuckDB will reopen the file, so close first.
+                f.close()
+                duck_conn.execute(f"COPY {table_name} TO '{f.name}'")
+
+                # Need to open yet again to get the DuckDB-written contents.
+                with open(f.name) as f_new:
+                    mlflow.log_text(f_new.read(), filestem + '.csv')
+
+                # As this context manager finishes, the temp file will be
+                # deleted.
 
     def log_confusion_matrix(
         self, val_results: ValResults, normalize: bool, filestem: str
@@ -1624,7 +1653,7 @@ class MLflowTrainingRunner(TrainingRunner):
         df = pd.DataFrame(data=matrix, columns=bagf_names)
         # Add column to label each row with a BA-GF combo.
         df.insert(loc=0, column='-', value=bagf_names)
-        mlflow.log_table(df, filestem + '.json')
+        self.log_dataframe(df, filestem)
 
         # Log the confusion matrix as a figure.
 
