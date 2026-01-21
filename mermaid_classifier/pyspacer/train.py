@@ -444,8 +444,8 @@ class TrainingDataset:
             self.cn_source_filter = CNSourceFilter(StringIO(''))
 
         if options.label_rollup_spec_csv:
-            self.rollup_spec = LabelRollupSpec(
-                options.label_rollup_spec_csv)
+            with open(options.label_rollup_spec_csv) as csv_f:
+                self.rollup_spec = LabelRollupSpec(csv_f)
         else:
             # Empty rollup-targets set, meaning nothing gets rolled up.
             self.rollup_spec = LabelRollupSpec(StringIO(''))
