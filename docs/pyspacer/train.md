@@ -143,11 +143,11 @@ runner = MLflowTrainingRunner(
         # Specifying False here means you're only training on CoralNet sources.
         include_mermaid=False,
         coralnet_sources_csv='sources/sample.csv',
+        drop_growthforms=True,
         label_rollup_spec_csv='labels/rollups.csv',
         included_labels_csv='labels/inclusions.csv',
         # Specify at most one of included and excluded, not both.
         # excluded_labels_csv='labels/exclusions.csv',
-        drop_growthforms=True,
         # 7.5% ref, 12.5% val, 80% train.
         ref_val_ratios=(0.075, 0.125),
         annotation_limit=5000,
