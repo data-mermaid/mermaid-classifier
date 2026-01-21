@@ -43,6 +43,10 @@ class CsvSpec(abc.ABC):
 
     def __init__(self, csv_file: typing.TextIO):
 
+        self.csv_text = csv_file.read()
+        # Set up for re-reading with pandas.
+        csv_file.seek(0)
+
         try:
             self.csv_dataframe = csv_to_dataframe(csv_file)
         except pd.errors.EmptyDataError:
