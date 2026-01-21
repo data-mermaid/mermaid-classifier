@@ -322,6 +322,14 @@ class DatasetOptions:
     If not specified, no CoralNet sources are included (so only MERMAID
     projects go into training).
 
+    drop_growthforms
+
+    If True, discard all growth forms from the training data.
+    This is applied *before* rollups.
+    This can make it easier to define certain large rollup operations,
+    such as rolling everything up to top level categories, since your
+    CSV spec would only need row per BA instead of one row per BA+GF combo.
+
     label_rollup_spec_csv
 
     Local filepath of a CSV file, specifying what MERMAID BA+GF combos to
@@ -356,12 +364,7 @@ class DatasetOptions:
       ba_id -- A MERMAID benthic attribute ID (a UUID).
       gf_id -- A MERMAID growth form ID (a UUID).
       Other informational columns can also be present and will be ignored.
-
-    drop_growthforms
-
-    If True, discard all growth forms from the training data. Technically
-    redundant with the rollup spec, but this is a very simple-to-specify
-    option which can be useful.
+    - This is applied *after* rollups.
 
     ref_val_ratios
 
@@ -379,10 +382,10 @@ class DatasetOptions:
     """
     include_mermaid: bool = True
     coralnet_sources_csv: str = None
+    drop_growthforms: bool = False
     label_rollup_spec_csv: str = None
     included_labels_csv: str = None
     excluded_labels_csv: str = None
-    drop_growthforms: bool = False
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     annotation_limit: int | None = None
 
@@ -501,12 +504,6 @@ class TrainingDataset:
 
         with self.section_profiling("Rollups and filtering"):
 
-            # Roll up BAGFs.
-            self.rollup_spec.roll_up_in_duckdb(
-                duck_conn=self.duck_conn,
-                duck_table_name='annotations',
-            )
-
             if options.drop_growthforms:
                 # Clear all annotations' growth forms.
                 duckdb_transform_column(
@@ -515,6 +512,12 @@ class TrainingDataset:
                     column_name='growth_form_id',
                     transform_func=lambda x: '',
                 )
+
+            # Roll up BAGFs.
+            self.rollup_spec.roll_up_in_duckdb(
+                duck_conn=self.duck_conn,
+                duck_table_name='annotations',
+            )
 
             # Filter out BAGFs we don't want.
             self.label_filter.filter_in_duckdb(
