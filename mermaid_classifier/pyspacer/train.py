@@ -1418,6 +1418,8 @@ class MLflowTrainingRunner(TrainingRunner):
 
             mlflow.log_params(training_options_to_log)
 
+            self.log_system_specs()
+
             # Here's the actual training and data prep.
             return_msg, model_loc, valresult_loc = super().run(
                 run_name=run_name)
@@ -1507,6 +1509,18 @@ class MLflowTrainingRunner(TrainingRunner):
         Return a version of s which has the non-alphanumeric chars removed.
         """
         return ''.join([char for char in s if char.isalnum()])
+
+    def log_system_specs(self):
+        mlflow.log_dict(
+            dict(
+                total_ram_gb=psutil.virtual_memory().total / 10**9,
+                # We're not specifying our own feature cache dir, which means
+                # it's an OS-created temp dir, so we care about the free space
+                # on the OS partition.
+                free_storage_gb=psutil.disk_usage('/').free / 10**9,
+            ),
+            'system_specs.yaml',
+        )
 
     def log_dataset_artifacts(self):
         """
