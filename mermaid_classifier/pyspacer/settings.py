@@ -17,7 +17,7 @@ def automatic_ref_max_size() -> int:
     rough_available_ram_bytes = total_ram_bytes - 2e9
     # Testing showed that on 8GB (6GB + 2GB) RAM, ref set size of 100000
     # worked, but 200000 crashed.
-    ref_size = rough_available_ram_bytes * (100000 / (6e9))
+    ref_size = int(rough_available_ram_bytes * (100000 / (6e9)))
 
     if ref_size < 5000:
         # Don't go lower than the pyspacer default.
