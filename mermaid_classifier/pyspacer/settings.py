@@ -1,7 +1,29 @@
 import os
 from typing import Literal
 
+import psutil
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def automatic_ref_max_size() -> int:
+    """
+    Calculate a rough maximum reference-set size to use for training, based on
+    the amount of memory on the system.
+    This calculation is based on training test-runs that used pyspacer's
+    EfficientNetExtractor.
+    """
+    total_ram_bytes = psutil.virtual_memory().total
+    # Presume 2GB are needed for other stuff on the system besides training.
+    rough_available_ram_bytes = total_ram_bytes - 2e9
+    # Testing showed that on 8GB (6GB + 2GB) RAM, ref set size of 100000
+    # worked, but 200000 crashed.
+    ref_size = int(rough_available_ram_bytes * (100000 / (6e9)))
+
+    if ref_size < 5000:
+        # Don't go lower than the pyspacer default.
+        ref_size = 5000
+
+    return ref_size
 
 
 class Settings(BaseSettings):
@@ -47,6 +69,9 @@ class Settings(BaseSettings):
     mlflow_tracking_server: str | None = None
     training_inputs_percent_missing_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
+    # Yes, this is str. After it gets through the settings machinery,
+    # pyspacer will convert to int.
+    spacer_ref_set_max_size: str | None = str(automatic_ref_max_size())
     mlflow_http_request_max_retries: str | None = None
     mlflow_default_experiment_name: str | None = None
 
@@ -68,6 +93,17 @@ def set_env_vars_for_packages():
         # were downloaded from S3 or from a URL.
         # This is required if loading weights from such a source.
         spacer_extractors_cache_dir='SPACER_EXTRACTORS_CACHE_DIR',
+        # This pyspacer training setting is:
+        # - A cap on the reference set size, as a number of point-features
+        # - The size of batches used during training
+        # Raising this can better accommodate rare classes in large training
+        # runs, and can improve the trainer's ability to calibrate between
+        # epochs.
+        # However, this setting is also tied to training's memory usage,
+        # so monitor memory usage when increasing this setting. If the system
+        # becomes unresponsive during pyspacer training, definitely try
+        # lowering this.
+        spacer_ref_set_max_size='SPACER_TRAINING_BATCH_LABEL_COUNT',
         aws_region='SPACER_AWS_REGION',
         # If True, AWS is accessed without any credentials, which can
         # simplify setup while still allowing access to public S3 files.
