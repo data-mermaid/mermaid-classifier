@@ -100,7 +100,9 @@ def set_env_vars_for_packages():
         # runs, and can improve the trainer's ability to calibrate between
         # epochs.
         # However, this setting is also tied to training's memory usage,
-        # so monitor memory usage when increasing this setting.
+        # so monitor memory usage when increasing this setting. If the system
+        # becomes unresponsive during pyspacer training, definitely try
+        # lowering this.
         spacer_ref_set_max_size='SPACER_TRAINING_BATCH_LABEL_COUNT',
         aws_region='SPACER_AWS_REGION',
         # If True, AWS is accessed without any credentials, which can
