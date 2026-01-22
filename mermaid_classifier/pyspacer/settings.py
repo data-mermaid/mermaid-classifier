@@ -1,7 +1,29 @@
 import os
 from typing import Literal
 
+import psutil
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def automatic_ref_max_size() -> int:
+    """
+    Calculate a rough maximum reference-set size to use for training, based on
+    the amount of memory on the system.
+    This calculation is based on training test-runs that used pyspacer's
+    EfficientNetExtractor.
+    """
+    total_ram_bytes = psutil.virtual_memory().total
+    # Presume 2GB are needed for other stuff on the system besides training.
+    rough_available_ram_bytes = total_ram_bytes - 2e9
+    # Testing showed that on 8GB (6GB + 2GB) RAM, ref set size of 100000
+    # worked, but 200000 crashed.
+    ref_size = rough_available_ram_bytes * (100000 / (6e9))
+
+    if ref_size < 5000:
+        # Don't go lower than the pyspacer default.
+        ref_size = 5000
+
+    return ref_size
 
 
 class Settings(BaseSettings):
@@ -49,7 +71,7 @@ class Settings(BaseSettings):
     spacer_extractors_cache_dir: str | None = None
     # Yes, this is str. After it gets through the settings machinery,
     # pyspacer will convert to int.
-    spacer_ref_set_max_size: str | None = None
+    spacer_ref_set_max_size: str | None = str(automatic_ref_max_size())
     mlflow_http_request_max_retries: str | None = None
     mlflow_default_experiment_name: str | None = None
 
