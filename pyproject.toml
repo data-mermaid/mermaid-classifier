@@ -41,6 +41,8 @@ pyspacer = [
     # are in an installed package, which is our intended usage.
     "pydantic-settings",
     "s3fs",
+    # pyspacer uses scikit-learn, but we also use it directly for metrics.
+    "scikit-learn",
 ]
 jupyterlab = [
     # For interactive matplotlib in JupyterLab. After installation, the
