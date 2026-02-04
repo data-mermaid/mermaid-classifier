@@ -1354,10 +1354,10 @@ class TrainingRunner:
             f"Train time (from return msg): {return_msg.runtime:.1f} s")
 
         logger.info(
-            f"New model's accuracy: {self.format_accuracy(return_msg.acc)}")
+            f"New model's accuracy: {self.format_metric(return_msg.acc)}")
 
         ref_accs_str = ", ".join(
-            [self.format_accuracy(acc) for acc in return_msg.ref_accs])
+            [str(self.format_metric(acc)) for acc in return_msg.ref_accs])
         logger.debug(
             f"Accuracy progression during training epochs: {ref_accs_str}")
 
@@ -1381,8 +1381,10 @@ class TrainingRunner:
         return current_time.strftime('%Y%m%dT%H%M%S')
 
     @staticmethod
-    def format_accuracy(accuracy):
-        return f'{100*accuracy:.1f}%'
+    def format_metric(metric: float):
+        # The input may be a numpy float, which may not serialize well
+        # in artifacts. So, convert to a regular float, using float().
+        return round(float(metric), 3)
 
 
 class MLflowTrainingRunner(TrainingRunner):
@@ -1427,17 +1429,8 @@ class MLflowTrainingRunner(TrainingRunner):
             profiles_df = pd.DataFrame(self.profiled_sections)
             self.log_dataframe(profiles_df, 'profiled_sections')
 
-            # Note that log_metric() only takes numeric values.
-            accuracy_pct = return_msg.acc * 100
-            mlflow.log_metric("accuracy", accuracy_pct)
-
-            # ref_accs is probably the only other part of return_msg to save.
-            ref_accs_dict = dict()
-            for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
-                ref_accs_dict[epoch_number] = self.format_accuracy(acc)
-            mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
-
             val_results = ValResults.load(valresult_loc)
+
             self.log_confusion_matrix(
                 val_results=val_results,
                 normalize=False,
@@ -1448,6 +1441,26 @@ class MLflowTrainingRunner(TrainingRunner):
                 normalize=True,
                 filestem='confusion_matrix/percents',
             )
+
+            per_label_prf, overall_metrics = precision_recall_f1(
+                val_results, self.format_metric)
+            overall_metrics['accuracy'] = self.format_metric(return_msg.acc)
+
+            # Log overall metrics with log_metric(). Note that this method
+            # only takes numeric values.
+            for metric_name, metric_value in overall_metrics.items():
+                mlflow.log_metric(metric_name, metric_value)
+            # Log overall metrics as an artifact.
+            mlflow.log_dict(overall_metrics, 'metrics_overall.yaml')
+            # Log per-label metrics as an artifact.
+            self.log_dataframe(
+                pd.DataFrame(per_label_prf), 'metrics_per_label')
+
+            # ref_accs is probably the only other part of return_msg to save.
+            ref_accs_dict = dict()
+            for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
+                ref_accs_dict[epoch_number] = self.format_metric(acc)
+            mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
 
             # Save and register the trained model.
             signature = mlflow.models.infer_signature(
@@ -1717,3 +1730,99 @@ class MLflowTrainingRunner(TrainingRunner):
 
         # Close figure to free memory
         plt.close(fig)
+
+
+def precision_recall_f1(
+    val_results: ValResults,
+    format_func: typing.Callable[[float], typing.Any],
+) -> tuple[list[dict], dict]:
+    """
+    Given pyspacer ValResults and a metric-formatting function, return
+    per-label and overall precision, recall, and f1 metrics.
+    """
+
+    # Convert the valresults to a pandas dataframe.
+
+    actual_annotations = pd.Categorical(
+        [val_results.classes[i] for i in val_results.gt])
+    predicted_annotations = pd.Categorical(
+        [val_results.classes[i] for i in val_results.est])
+    annotations_df = pd.DataFrame({
+        'actual': actual_annotations,
+        'predicted': predicted_annotations,
+    })
+
+    # Precision, recall, F1: per label
+
+    per_label_metrics = []
+
+    for label in val_results.classes:
+
+        precision = sklearn.metrics.precision_score(
+            annotations_df['actual'],
+            annotations_df['predicted'],
+            # This makes it produce single-label metrics.
+            labels=[label],
+            # For single-label, micro and macro are the same, so it doesn't
+            # matter which we pass in for `average`.
+            average='micro',
+            # If any label is lacking true positives and false positives,
+            # or true positives and false negatives, either precision or
+            # recall may have zero in the denominator of the calculation.
+            # So we define what value we use in that situation.
+            zero_division=0.0,
+        )
+        recall = sklearn.metrics.recall_score(
+            annotations_df['actual'],
+            annotations_df['predicted'],
+            labels=[label],
+            average='micro',
+            zero_division=0.0,
+        )
+
+        if precision + recall == 0.0:
+            # Avoid division by zero.
+            f1_score = 0.0
+        else:
+            f1_score = 2 * (precision * recall) / (precision + recall)
+
+        per_label_metrics.append(dict(
+            bagf_name=ba_library.bagf_id_to_name(label, gf_library),
+            precision=format_func(precision),
+            recall=format_func(recall),
+            f1_score=format_func(f1_score),
+            bagf_id=label,
+        ))
+
+    # Precision, recall, F1: overall
+
+    overall_metrics = dict()
+
+    # average='macro' calculates precision for each class and then averages
+    # them, treating all classes equally irrespective of their frequency
+    # in the dataset.
+    # average='micro' does calculations globally without separating by class,
+    # but in this case precision, recall, f1 score, and accuracy are all the
+    # same result. And we already get accuracy from pyspacer. So, focus on
+    # macro here.
+    precision = sklearn.metrics.precision_score(
+        actual_annotations,
+        predicted_annotations,
+        average='macro',
+        zero_division=0.0,
+    )
+    recall = sklearn.metrics.recall_score(
+        actual_annotations,
+        predicted_annotations,
+        average='macro',
+        zero_division=0.0,
+    )
+    f1_score = 2 * (precision * recall) / (precision + recall)
+
+    overall_metrics |= dict(
+        precision_macro=format_func(precision),
+        recall_macro=format_func(recall),
+        f1_macro=format_func(f1_score),
+    )
+
+    return per_label_metrics, overall_metrics
