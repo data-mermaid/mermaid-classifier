@@ -15,17 +15,14 @@ import time
 import typing
 
 import duckdb
-import matplotlib.pyplot as plt
 try:
     import mlflow
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
-import numpy as np
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
-import sklearn
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
@@ -49,6 +46,8 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
+from mermaid_classifier.pyspacer.metrics import (
+    make_confusion_matrix, precision_recall_f1)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -1354,10 +1353,10 @@ class TrainingRunner:
             f"Train time (from return msg): {return_msg.runtime:.1f} s")
 
         logger.info(
-            f"New model's accuracy: {self.format_accuracy(return_msg.acc)}")
+            f"New model's accuracy: {self.format_metric(return_msg.acc)}")
 
         ref_accs_str = ", ".join(
-            [self.format_accuracy(acc) for acc in return_msg.ref_accs])
+            [str(self.format_metric(acc)) for acc in return_msg.ref_accs])
         logger.debug(
             f"Accuracy progression during training epochs: {ref_accs_str}")
 
@@ -1381,8 +1380,10 @@ class TrainingRunner:
         return current_time.strftime('%Y%m%dT%H%M%S')
 
     @staticmethod
-    def format_accuracy(accuracy):
-        return f'{100*accuracy:.1f}%'
+    def format_metric(metric: float):
+        # The input may be a numpy float, which may not serialize well
+        # in artifacts. So, convert to a regular float, using float().
+        return round(float(metric), 3)
 
 
 class MLflowTrainingRunner(TrainingRunner):
@@ -1427,17 +1428,8 @@ class MLflowTrainingRunner(TrainingRunner):
             profiles_df = pd.DataFrame(self.profiled_sections)
             self.log_dataframe(profiles_df, 'profiled_sections')
 
-            # Note that log_metric() only takes numeric values.
-            accuracy_pct = return_msg.acc * 100
-            mlflow.log_metric("accuracy", accuracy_pct)
-
-            # ref_accs is probably the only other part of return_msg to save.
-            ref_accs_dict = dict()
-            for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
-                ref_accs_dict[epoch_number] = self.format_accuracy(acc)
-            mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
-
             val_results = ValResults.load(valresult_loc)
+
             self.log_confusion_matrix(
                 val_results=val_results,
                 normalize=False,
@@ -1448,6 +1440,26 @@ class MLflowTrainingRunner(TrainingRunner):
                 normalize=True,
                 filestem='confusion_matrix/percents',
             )
+
+            per_label_prf, overall_metrics = precision_recall_f1(
+                val_results, self.format_metric, ba_library, gf_library)
+            overall_metrics['accuracy'] = self.format_metric(return_msg.acc)
+
+            # Log overall metrics with log_metric(). Note that this method
+            # only takes numeric values.
+            for metric_name, metric_value in overall_metrics.items():
+                mlflow.log_metric(metric_name, metric_value)
+            # Log overall metrics as an artifact.
+            mlflow.log_dict(overall_metrics, 'metrics_overall.yaml')
+            # Log per-label metrics as an artifact.
+            self.log_dataframe(
+                pd.DataFrame(per_label_prf), 'metrics_per_label')
+
+            # ref_accs is probably the only other part of return_msg to save.
+            ref_accs_dict = dict()
+            for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
+                ref_accs_dict[epoch_number] = self.format_metric(acc)
+            mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
 
             # Save and register the trained model.
             signature = mlflow.models.infer_signature(
@@ -1619,101 +1631,9 @@ class MLflowTrainingRunner(TrainingRunner):
     def log_confusion_matrix(
         self, val_results: ValResults, normalize: bool, filestem: str
     ):
-        """
-        Make a confusion matrix out of the training evaluation results.
-        """
-        matrix = sklearn.metrics.confusion_matrix(
-            y_true=val_results.gt,
-            y_pred=val_results.est,
-            labels=range(len(val_results.classes)),
-            # 'true': values between 0 and 1 for each cell.
-            # None: Each cell has a frequency.
-            normalize='true' if normalize else None,
-        )
+        with make_confusion_matrix(
+            val_results, normalize, ba_library, gf_library,
+        ) as (df, fig):
 
-        if normalize:
-            # 0-to-1 values -> integer percents.
-            matrix = np.int64(np.floor(matrix * 100))
-
-        # Sort by frequency.
-        bagf_ids_in_freq_order = []
-        # This artifact already has BA-GF combos sorted by frequency
-        # in the whole dataset (which should be pretty much the same
-        # order as frequency in val, due to stratification); highest
-        # frequency first.
-        for _, row in self.dataset.artifacts.bagf_counts.iterrows():
-            bagf_id = combine_ba_gf(
-                row['benthic_attribute_id'], row['growth_form_id'])
-            if bagf_id not in val_results.classes:
-                # This BA-GF combo must have gotten dropped entirely due
-                # to not enough annotations.
-                continue
-            bagf_ids_in_freq_order.append(bagf_id)
-        # For each ID in the frequency order, give it 0 if it appears 1st
-        # in val_results.classes, 1 if it appears 2nd, 2 if 3rd, etc.
-        class_indexes_of_freq_ranking = [
-            val_results.classes.index(bagf_id)
-            for bagf_id in bagf_ids_in_freq_order]
-        # Order columns by frequency.
-        matrix = matrix[:, class_indexes_of_freq_ranking]
-        # Order rows by frequency.
-        matrix = matrix[class_indexes_of_freq_ranking, :]
-
-        bagf_names = [
-            ba_library.bagf_id_to_name(bagf_id, gf_library)
-            for bagf_id in bagf_ids_in_freq_order
-        ]
-
-        # Log the confusion matrix as a table.
-
-        # To dataframe, labeling each column with a BA-GF combo.
-        df = pd.DataFrame(data=matrix, columns=bagf_names)
-        # Add column to label each row with a BA-GF combo.
-        df.insert(loc=0, column='-', value=bagf_names)
-        self.log_dataframe(df, filestem)
-
-        # Log the confusion matrix as a figure.
-
-        # Create square figure, with size scaled to number of labels
-        num_labels = len(bagf_names)
-        fig_size = max(12, num_labels * 0.6)
-        fig, ax = plt.subplots(figsize=(fig_size, fig_size))
-
-        # Matplotlib visualization of the confusion matrix.
-        display = sklearn.metrics.ConfusionMatrixDisplay(
-            confusion_matrix=matrix, display_labels=bagf_names)
-        display.plot(
-            ax=ax,
-            cmap='Blues',
-            # Prevent "100" displaying as "1e+02".
-            values_format='d',
-            # A color legend feels unnecessary here.
-            colorbar=False,
-        )
-
-        # Move x-axis labels to the top.
-        ax.xaxis.set_label_position('top')
-        ax.xaxis.set_ticks_position('top')
-        # Rotate x-axis tick labels to prevent their texts from overlapping.
-        label_font_size = max(8, min(12, 150 / num_labels))
-        plt.setp(
-            ax.get_xticklabels(),
-            rotation=45,
-            ha='left',
-            rotation_mode='anchor',
-            fontsize=label_font_size,
-        )
-        # Match y-axis labels' font size with the x axis.
-        plt.setp(
-            ax.get_yticklabels(),
-            fontsize=label_font_size,
-        )
-
-        # Adjust layout to prevent label cutoff
-        plt.tight_layout()
-
-        # Log as figure
-        mlflow.log_figure(fig, filestem + '.png')
-
-        # Close figure to free memory
-        plt.close(fig)
+            self.log_dataframe(df, filestem)
+            mlflow.log_figure(fig, filestem + '.png')
