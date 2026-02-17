@@ -11,13 +11,38 @@ def automatic_ref_max_size() -> int:
     the amount of memory on the system.
     This calculation is based on training test-runs that used pyspacer's
     EfficientNetExtractor.
+
+    This value serves a dual role via SPACER_TRAINING_BATCH_LABEL_COUNT:
+      1. Cap on the reference set size (held in memory for all epochs)
+      2. Training batch size (loaded per partial_fit call)
+
+    Peak memory during PySpacer training includes:
+      - Reference set features (ref_size x 1280 float64 = ref_size x 10KB)
+      - One training batch (same size as ref set)
+      - sklearn MLP internal buffers (~60% of batch size)
+
+    The base overhead (OS, Python, DuckDB with annotation tables, data prep
+    intermediates, memory fragmentation) can reach 4GB+ for large datasets
+    (1M+ annotations). Previous estimate of 2GB was insufficient and caused
+    swap thrashing on 8GB instances with 1.1M annotations.
+
+    Reference points from empirical testing:
+      - 8GB RAM, ref_size=100K: worked for <600K annotations, swap-thrashed
+        at 1.1M annotations (ran for 9 days without completing)
+      - 16GB RAM, ref_size=233K: worked for 1.1M-1.8M, swap-thrashed at 3M+
     """
     total_ram_bytes = psutil.virtual_memory().total
-    # Presume 2GB are needed for other stuff on the system besides training.
-    rough_available_ram_bytes = total_ram_bytes - 2e9
-    # Testing showed that on 8GB (6GB + 2GB) RAM, ref set size of 100000
-    # worked, but 200000 crashed.
-    ref_size = int(rough_available_ram_bytes * (100000 / (6e9)))
+
+    # Reserve 4GB for OS, Python runtime, DuckDB tables, data prep
+    # intermediates (ImageLabels, train_test_split copies), and heap
+    # fragmentation. Previous value of 2GB was too low for large datasets.
+    base_overhead_bytes = 4e9
+    rough_available_ram_bytes = max(total_ram_bytes - base_overhead_bytes, 0)
+
+    # Empirical reference point: on 8GB RAM (4GB available after overhead),
+    # ref_size of 50K provides a safe margin for datasets up to ~3M
+    # annotations. This accounts for the dual role (ref + batch + sklearn).
+    ref_size = int(rough_available_ram_bytes * (50000 / 4e9))
 
     if ref_size < 5000:
         # Don't go lower than the pyspacer default.
