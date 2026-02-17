@@ -26,8 +26,9 @@ from s3fs.core import S3FileSystem
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
-from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
+
+from mermaid_classifier.pyspacer.train_loop import train_classifier_with_callbacks
 
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
@@ -1370,7 +1371,8 @@ class TrainingRunner:
         log_memory("Before train_classifier call")
 
         with self.section_profiling("PySpacer training call"):
-            return_msg = train_classifier(train_msg)
+            return_msg = train_classifier_with_callbacks(
+                train_msg, on_epoch_end=self._epoch_callback())
 
         logger.info(
             f"Train time (from return msg): {return_msg.runtime:.1f} s")
@@ -1384,6 +1386,15 @@ class TrainingRunner:
             f"Accuracy progression during training epochs: {ref_accs_str}")
 
         return return_msg, model_loc, valresult_loc
+
+    def _epoch_callback(self):
+        """
+        Return an on_epoch_end callback for training, or None.
+
+        The base runner has no tracking, so returns None (no-op).
+        Subclasses can override to provide real-time metric logging.
+        """
+        return None
 
     def log_dataset_artifacts(self):
         """
@@ -1496,6 +1507,25 @@ class MLflowTrainingRunner(TrainingRunner):
         logger.info(f"Model ID: {model_info.model_id}")
 
         return return_msg, model_loc
+
+    def _epoch_callback(self):
+        """
+        Return a callback that logs per-epoch metrics to MLflow.
+
+        Logs step-based metrics that appear as live charts in the MLflow UI
+        during training.
+        """
+        def _log_epoch_metrics(metrics: dict):
+            step = metrics["epoch"]
+            mlflow.log_metric(
+                "epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
+            if metrics["training_loss"] is not None:
+                mlflow.log_metric(
+                    "epoch/training_loss", metrics["training_loss"], step=step)
+            mlflow.log_metric(
+                "epoch/cumulative_seconds",
+                metrics["cumulative_seconds"], step=step)
+        return _log_epoch_metrics
 
     def _get_model_name(self):
         """
