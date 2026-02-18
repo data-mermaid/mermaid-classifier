@@ -21,7 +21,6 @@ from spacer.data_classes import ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg, TrainClassifierReturnMsg
 from spacer.storage import load_classifier, store_classifier
 from spacer.train_utils import calc_acc, evaluate_classifier
-from spacer.tasks import 
 
 logger = getLogger(__name__)
 
