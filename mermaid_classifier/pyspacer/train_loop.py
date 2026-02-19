@@ -12,7 +12,8 @@ import time
 from collections.abc import Callable
 from logging import getLogger
 
-from sklearn.calibration import CalibratedClassifierCV
+import numpy as np
+from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
 from sklearn.neural_network import MLPClassifier
 from sklearn.linear_model import SGDClassifier
 
@@ -25,11 +26,83 @@ from spacer.train_utils import calc_acc, evaluate_classifier
 logger = getLogger(__name__)
 
 
+def _calc_acc_batched(clf, labels: ImageLabels, batch_size: int) -> float:
+    """Compute accuracy by streaming features from disk in batches,
+    avoiding loading the full dataset into memory.
+
+    Only predictions and ground-truth labels (tiny lists of strings)
+    accumulate — not feature vectors. Memory use is O(batch_size)
+    instead of O(dataset_size).
+    """
+    gt, pred = [], []
+    for x, y in labels.load_data_in_batches(batch_size=batch_size):
+        pred.extend(clf.predict(x))
+        gt.extend(y)
+    return calc_acc(gt, pred)
+
+
+def _calibrate_in_batches(
+    clf,
+    ref_labels: ImageLabels,
+    batch_size: int,
+) -> CalibratedClassifierCV:
+    """
+    Platt calibration without loading full feature vectors into memory.
+
+    Streams ref data in batches, collecting only scalar prediction scores
+    (N x K) rather than feature vectors (N x 4096). Fits sigmoid
+    calibrators identically to CalibratedClassifierCV(cv='prefit').fit().
+
+    Returns a valid CalibratedClassifierCV instance compatible with
+    spacer.storage.store_classifier() and ClassifierUnpickler.load().
+    """
+    all_preds, all_y = [], []
+
+    for x_batch, y_batch in ref_labels.load_data_in_batches(
+            batch_size=batch_size):
+        x_arr = np.array(x_batch)
+        y_arr = np.array(y_batch)
+
+        # Use the same response method sklearn uses internally:
+        # decision_function (preferred) or predict_proba (fallback).
+        # See CalibratedClassifierCV.fit() which calls
+        # _get_response_values with ["decision_function", "predict_proba"].
+        if hasattr(clf, 'decision_function'):
+            preds = clf.decision_function(x_arr)
+        else:
+            preds = clf.predict_proba(x_arr)
+        if preds.ndim == 1:
+            preds = preds.reshape(-1, 1)
+
+        all_preds.append(preds)
+        all_y.append(y_arr)
+
+    predictions = np.vstack(all_preds)  # (N, K) or (N, 1)
+    y = np.concatenate(all_y)           # (N,)
+
+    calibrated_inner = _fit_calibrator(
+        clf, predictions, y, clf.classes_, method="sigmoid"
+    )
+
+    # Construct CalibratedClassifierCV without calling .fit().
+    # Sets all attributes that spacer/storage.py validates:
+    # - isinstance check: real CalibratedClassifierCV instance
+    # - clf.cv == 'prefit'
+    # - hasattr(clf, 'calibrated_classifiers_')
+    # - clf.estimator, clf.ensemble, clf.n_jobs (set by __init__)
+    wrapper = CalibratedClassifierCV(clf, cv="prefit")
+    wrapper.calibrated_classifiers_ = [calibrated_inner]
+    wrapper.classes_ = clf.classes_
+
+    return wrapper
+
+
 def train_with_callbacks(
     train_labels: ImageLabels,
     ref_labels: ImageLabels,
     nbr_epochs: int,
     clf_type: str,
+    batch_size: int,
     on_epoch_end: Callable[[dict], None] | None = None,
 ) -> tuple[CalibratedClassifierCV, list[float]]:
     """
@@ -38,6 +111,12 @@ def train_with_callbacks(
     Mirrors spacer.train_utils.train() with the addition of an
     on_epoch_end callback that receives a dict of metrics after
     each epoch completes.
+
+    Reference data and training data are never held in memory
+    simultaneously: ref accuracy is computed by streaming features
+    from disk in batches after each epoch's training batches are
+    released, and calibration streams ref data in batches too
+    (accumulating only scalar prediction scores, not feature vectors).
     """
     logger.debug(
         f"Data sets:"
@@ -46,13 +125,9 @@ def train_with_callbacks(
         f" Ref = {len(ref_labels)} images,"
         f" {ref_labels.label_count} labels")
     logger.debug(
-        f"Mini-batch size: {config.TRAINING_BATCH_LABEL_COUNT} labels")
+        f"Batch size: {batch_size} labels")
 
     classes_list = list(ref_labels.classes_set)
-
-    # Load reference data (must hold in memory for calibration)
-    with config.log_entry_and_exit("loading of reference data"):
-        refx, refy = ref_labels.load_all_data()
 
     # Initialize classifier
     with config.log_entry_and_exit("training using " + clf_type):
@@ -69,13 +144,19 @@ def train_with_callbacks(
         t0 = time.time()
 
         for epoch in range(nbr_epochs):
+            # Training: load batches from disk, partial_fit, then
+            # x and y go out of scope at end of loop body.
             for x, y in train_labels.load_data_in_batches(
-                batch_size=config.TRAINING_BATCH_LABEL_COUNT,
+                batch_size=batch_size,
                 random_seed=epoch,
             ):
                 clf.partial_fit(x, y, classes=classes_list)
 
-            ref_acc.append(calc_acc(refy, clf.predict(refx)))
+            # Ref accuracy: stream ref features from disk in batches.
+            # Only predictions (tiny) accumulate, not feature arrays.
+            # Training batch data is no longer in memory at this point.
+            ref_acc.append(
+                _calc_acc_batched(clf, ref_labels, batch_size=batch_size))
             logger.debug(f"Epoch {epoch}, acc: {ref_acc[-1]}")
 
             if on_epoch_end is not None:
@@ -87,15 +168,18 @@ def train_with_callbacks(
                     "cumulative_seconds": time.time() - t0,
                 })
 
+    # Calibration: stream ref data in batches — avoids loading full feature
+    # vectors into memory. Only scalar prediction scores accumulate
+    # (O(N * K) instead of O(N * 4096)).
     with config.log_entry_and_exit("calibration"):
-        clf_calibrated = CalibratedClassifierCV(clf, cv="prefit")
-        clf_calibrated.fit(refx, refy)
+        clf_calibrated = _calibrate_in_batches(clf, ref_labels, batch_size)
 
     return clf_calibrated, ref_acc
 
 
 def train_classifier_with_callbacks(
     msg: TrainClassifierMsg,
+    batch_size: int,
     on_epoch_end: Callable[[dict], None] | None = None,
 ) -> TrainClassifierReturnMsg:
     """
@@ -144,6 +228,7 @@ def train_classifier_with_callbacks(
         t0 = time.time()
         clf, ref_accs = train_with_callbacks(
             labels.train, labels.ref, msg.nbr_epochs, msg.clf_type,
+            batch_size=batch_size,
             on_epoch_end=on_epoch_end,
         )
         classes = clf.classes_.tolist()

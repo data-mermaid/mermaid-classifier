@@ -1372,7 +1372,10 @@ class TrainingRunner:
 
         with self.section_profiling("PySpacer training call"):
             return_msg = train_classifier_with_callbacks(
-                train_msg, on_epoch_end=self._epoch_callback())
+                train_msg,
+                batch_size=int(settings.spacer_batch_size),
+                on_epoch_end=self._epoch_callback(),
+            )
 
         logger.info(
             f"Train time (from return msg): {return_msg.runtime:.1f} s")
