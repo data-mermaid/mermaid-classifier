@@ -1368,12 +1368,15 @@ class TrainingRunner:
             feature_cache_dir=TrainClassifierMsg.FeatureCache.AUTO,
         )
 
+        batch_size = int(settings.spacer_batch_size)
+        logger.info(f"Batch size: {batch_size}")
+
         log_memory("Before train_classifier call")
 
         with self.section_profiling("PySpacer training call"):
             return_msg = train_classifier_with_callbacks(
                 train_msg,
-                batch_size=int(settings.spacer_batch_size),
+                batch_size=batch_size,
                 on_epoch_end=self._epoch_callback(),
             )
 
