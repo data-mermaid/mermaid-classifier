@@ -18,28 +18,16 @@ def automatic_batch_size() -> int:
 
     Peak memory during training is dominated by one batch of feature
     vectors + sklearn internal buffers (~60% of batch).
-
-    The base overhead (OS, Python, DuckDB with annotation tables, data prep
-    intermediates, memory fragmentation) can reach 4GB+ for large datasets
-    (1M+ annotations). Previous estimate of 2GB was insufficient and caused
-    swap thrashing on 8GB instances with 1.1M annotations.
-
-    Reference points from empirical testing:
-      - 8GB RAM, batch_size=50K: worked for <600K annotations
-      - 16GB RAM, batch_size=50K: worked for 1.1M-1.8M annotations
     """
     total_ram_bytes = psutil.virtual_memory().total
 
-    # Reserve 4GB for OS, Python runtime, DuckDB tables, data prep
+    # Reserve 2GB for OS, Python runtime, DuckDB tables, data prep
     # intermediates (ImageLabels, train_test_split copies), and heap
-    # fragmentation. Previous value of 2GB was too low for large datasets.
-    base_overhead_bytes = 4e9
+    # fragmentation. 
+    base_overhead_bytes = 2e9
     rough_available_ram_bytes = max(total_ram_bytes - base_overhead_bytes, 0)
 
-    # Empirical reference point: on 8GB RAM (4GB available after overhead),
-    # ref_size of 50K provides a safe margin for datasets up to ~3M
-    # annotations. This accounts for the dual role (ref + batch + sklearn).
-    ref_size = int(rough_available_ram_bytes * (50000 / 4e9))
+    ref_size = int(rough_available_ram_bytes * (50000 / 2e9))
 
     if ref_size < 5000:
         # Don't go lower than the pyspacer default.
