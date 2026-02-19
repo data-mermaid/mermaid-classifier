@@ -21,13 +21,13 @@ def automatic_batch_size() -> int:
     """
     total_ram_bytes = psutil.virtual_memory().total
 
-    # Reserve 2GB for OS, Python runtime, DuckDB tables, data prep
+    # Reserve 3GB for OS, Python runtime, DuckDB tables, data prep
     # intermediates (ImageLabels, train_test_split copies), and heap
     # fragmentation. 
-    base_overhead_bytes = 2e9
+    base_overhead_bytes = 3e9
     rough_available_ram_bytes = max(total_ram_bytes - base_overhead_bytes, 0)
 
-    ref_size = int(rough_available_ram_bytes * (50000 / 2e9))
+    ref_size = int(rough_available_ram_bytes * (50000 / 3e9))
 
     if ref_size < 5000:
         # Don't go lower than the pyspacer default.
