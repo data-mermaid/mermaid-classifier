@@ -23,6 +23,8 @@ except ImportError as err:
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
+from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
+from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
@@ -1444,6 +1446,11 @@ class MLflowTrainingRunner(TrainingRunner):
         mlflow.set_experiment(self.mlflow_options.experiment_name)
 
         with mlflow.start_run(run_name=run_name):
+
+            # Add swap monitoring to MLflow's system metrics polling loop.
+            run_id = mlflow.active_run().info.run_id
+            if run_id in run_id_to_system_metrics_monitor:
+                run_id_to_system_metrics_monitor[run_id].monitors.append(SwapMonitor())
 
             training_options_to_log = dict(epochs=self.training_options.epochs)
 
