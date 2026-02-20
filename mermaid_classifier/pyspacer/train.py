@@ -1451,6 +1451,7 @@ class MLflowTrainingRunner(TrainingRunner):
             run_name = f'{model_name}-{self.current_time_str()}'
 
         logger.info(f"Experiment: {self.mlflow_options.experiment_name}")
+        mlflow.enable_system_metrics_logging()
         mlflow.set_experiment(self.mlflow_options.experiment_name)
 
         with mlflow.start_run(run_name=run_name):
