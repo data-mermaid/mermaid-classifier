@@ -57,17 +57,6 @@ from mermaid_classifier.pyspacer.utils import (
 logger = logging_config_for_script('train')
 
 
-def log_memory(label: str):
-    """Log current process memory usage for diagnosing memory-related training failures."""
-    process = psutil.Process()
-    rss_gb = process.memory_info().rss / (1024**3)
-    vm = psutil.virtual_memory()
-    logger.info(
-        f"[MEMORY] {label}: "
-        f"RSS = {rss_gb:.2f} GB, "
-        f"System = {vm.percent}% used "
-        f"({vm.available / (1024**3):.1f} GB available)"
-    )
 
 
 ba_library = BenthicAttributeLibrary()
@@ -453,7 +442,7 @@ class TrainingDataset:
         self.artifacts = Artifacts()
         self.profiled_sections = []
 
-        log_memory("TrainingDataset.__init__ start")
+
 
         if options.coralnet_sources_csv:
             with open(options.coralnet_sources_csv) as csv_f:
@@ -511,7 +500,7 @@ class TrainingDataset:
         else:
             self.artifacts.mermaid_project_stats = pd.DataFrame()
 
-        log_memory("After data loading (CoralNet + MERMAID)")
+
 
         # Now this should have annotations populated.
         if not self.duckdb_annotations_table_exists():
@@ -613,7 +602,7 @@ class TrainingDataset:
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
-        log_memory("Before prep_annotations_for_pyspacer")
+
 
         with self.section_profiling("Prep annotations for PySpacer"):
             self.labels = self.prep_annotations_for_pyspacer()
@@ -621,7 +610,7 @@ class TrainingDataset:
 
         self.set_train_summary_stats()
 
-        log_memory("After prep and train/ref/val split")
+
 
     @contextmanager
     def section_profiling(self, section_name: str):
@@ -1371,7 +1360,7 @@ class TrainingRunner:
         batch_size = int(settings.spacer_batch_size)
         logger.info(f"Batch size: {batch_size}")
 
-        log_memory("Before train_classifier call")
+
 
         with self.section_profiling("PySpacer training call"):
             return_msg = train_classifier_with_callbacks(
