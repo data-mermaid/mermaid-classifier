@@ -8,6 +8,8 @@ import pandas as pd
 import sklearn
 from spacer.data_classes import ValResults
 
+from mermaid_classifier.common.benthic_attributes import split_ba_gf
+
 
 @contextmanager
 def make_confusion_matrix(
@@ -199,3 +201,106 @@ def precision_recall_f1(
     )
 
     return per_label_metrics, overall_metrics
+
+
+def cohens_kappa(val_results: ValResults) -> float:
+    """Cohen's kappa: chance-corrected agreement between gt and est."""
+    return sklearn.metrics.cohen_kappa_score(val_results.gt, val_results.est)
+
+
+def matthews_corrcoef(val_results: ValResults) -> float:
+    """Matthews Correlation Coefficient: robust multi-class metric."""
+    return sklearn.metrics.matthews_corrcoef(val_results.gt, val_results.est)
+
+
+def ba_level_accuracy(val_results: ValResults) -> float:
+    """
+    Accuracy after collapsing BA+GF classes to just BA (benthic attribute).
+    Answers: ignoring growth form, how often is the benthic attribute correct?
+    """
+    # Map each class index to its BA-only string.
+    ba_for_class = {}
+    for idx, class_id in enumerate(val_results.classes):
+        ba, _gf = split_ba_gf(str(class_id))
+        ba_for_class[idx] = ba
+
+    gt_ba = [ba_for_class[i] for i in val_results.gt]
+    est_ba = [ba_for_class[i] for i in val_results.est]
+
+    correct = sum(1 for g, e in zip(gt_ba, est_ba) if g == e)
+    return correct / len(gt_ba)
+
+
+def cover_bias(
+    val_results: ValResults,
+) -> tuple[dict[int, float], float]:
+    """
+    Per-class cover bias and mean absolute cover bias.
+
+    For each class: (predicted_proportion - true_proportion).
+    Returns (per_class_bias_dict, mean_abs_bias).
+    per_class_bias_dict is keyed by class index.
+    """
+    n = len(val_results.gt)
+    gt_counts = Counter(val_results.gt)
+    est_counts = Counter(val_results.est)
+
+    all_classes = set(gt_counts.keys()) | set(est_counts.keys())
+    per_class_bias = {}
+    for cls_idx in all_classes:
+        true_prop = gt_counts.get(cls_idx, 0) / n
+        pred_prop = est_counts.get(cls_idx, 0) / n
+        per_class_bias[cls_idx] = pred_prop - true_prop
+
+    mean_abs_bias = np.mean(np.abs(list(per_class_bias.values())))
+    return per_class_bias, float(mean_abs_bias)
+
+
+def expected_calibration_error(
+    val_results: ValResults, n_bins: int = 10,
+) -> float:
+    """
+    Expected Calibration Error (ECE).
+
+    Bins predictions by confidence (val_results.scores), then computes the
+    weighted average of |accuracy - confidence| per bin.
+    """
+    scores = np.array(val_results.scores)
+    correct = np.array(val_results.gt) == np.array(val_results.est)
+    n = len(scores)
+
+    bin_boundaries = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        lo, hi = bin_boundaries[i], bin_boundaries[i + 1]
+        if i == n_bins - 1:
+            # Include right boundary for the last bin.
+            mask = (scores >= lo) & (scores <= hi)
+        else:
+            mask = (scores >= lo) & (scores < hi)
+        bin_count = mask.sum()
+        if bin_count == 0:
+            continue
+        bin_acc = correct[mask].mean()
+        bin_conf = scores[mask].mean()
+        ece += (bin_count / n) * abs(bin_acc - bin_conf)
+
+    return float(ece)
+
+
+def top_k_accuracy(
+    val_results: ValResults, val_proba: np.ndarray, k: int = 3,
+) -> float:
+    """
+    Top-k accuracy: fraction of samples where the true label is among
+    the top k predicted classes.
+
+    val_proba: shape (n_samples, n_classes), probability matrix aligned
+               with val_results.classes ordering.
+    """
+    gt = np.array(val_results.gt)
+    # For each sample, get the indices of the top-k classes.
+    top_k_preds = np.argsort(val_proba, axis=1)[:, -k:]
+    # Check if ground truth is in top-k for each sample.
+    correct = np.array([gt[i] in top_k_preds[i] for i in range(len(gt))])
+    return float(correct.mean())

@@ -20,6 +20,7 @@ try:
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
+import numpy as np
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
@@ -47,7 +48,15 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_transform_column,
 )
 from mermaid_classifier.pyspacer.metrics import (
-    make_confusion_matrix, precision_recall_f1)
+    ba_level_accuracy,
+    cohens_kappa,
+    cover_bias,
+    expected_calibration_error,
+    make_confusion_matrix,
+    matthews_corrcoef,
+    precision_recall_f1,
+    top_k_accuracy,
+)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -1386,6 +1395,23 @@ class TrainingRunner:
         return round(float(metric), 3)
 
 
+def _compute_val_proba(clf, val_labels):
+    """
+    Re-evaluate the validation set to get the full probability matrix.
+
+    Returns an (n_samples, n_classes) numpy array where each row is the
+    predicted class probability distribution for one validation sample.
+    """
+    all_proba = []
+    for batch in val_labels.load_data_in_batches():
+        batch_x, _batch_y = batch
+        batch_x = list(batch_x)
+        # Stack feature vectors into a 2D array for predict_proba.
+        x_array = np.array([fv.data for fv in batch_x])
+        all_proba.append(clf.predict_proba(x_array))
+    return np.vstack(all_proba)
+
+
 class MLflowTrainingRunner(TrainingRunner):
 
     def __init__(
@@ -1445,6 +1471,38 @@ class MLflowTrainingRunner(TrainingRunner):
                 val_results, self.format_metric, ba_library, gf_library)
             overall_metrics['accuracy'] = self.format_metric(return_msg.acc)
 
+            # Load the trained classifier (used for proba and model logging).
+            clf = load_classifier(model_loc)
+
+            # Compute headline summary metrics.
+            overall_metrics['cohens_kappa'] = self.format_metric(
+                cohens_kappa(val_results))
+            overall_metrics['mcc'] = self.format_metric(
+                matthews_corrcoef(val_results))
+            overall_metrics['ba_level_accuracy'] = self.format_metric(
+                ba_level_accuracy(val_results))
+            overall_metrics['ece'] = self.format_metric(
+                expected_calibration_error(val_results))
+
+            per_class_bias, mean_abs_bias = cover_bias(val_results)
+            overall_metrics['mean_abs_cover_bias'] = self.format_metric(
+                mean_abs_bias)
+
+            # Add cover_bias column to per-label metrics.
+            class_index_by_id = {
+                class_id: idx
+                for idx, class_id in enumerate(val_results.classes)
+            }
+            for label_row in per_label_prf:
+                cls_idx = class_index_by_id[label_row['bagf_id']]
+                label_row['cover_bias'] = self.format_metric(
+                    per_class_bias.get(cls_idx, 0.0))
+
+            # Top-k accuracy requires the full probability matrix.
+            val_proba = _compute_val_proba(clf, self.dataset.labels.val)
+            overall_metrics['top_3_accuracy'] = self.format_metric(
+                top_k_accuracy(val_results, val_proba, k=3))
+
             # Log overall metrics with log_metric(). Note that this method
             # only takes numeric values.
             for metric_name, metric_value in overall_metrics.items():
@@ -1465,7 +1523,7 @@ class MLflowTrainingRunner(TrainingRunner):
             signature = mlflow.models.infer_signature(
                 params=training_options_to_log)
             model_info = mlflow.sklearn.log_model(
-                sk_model=load_classifier(model_loc),
+                sk_model=clf,
                 registered_model_name=model_name,
                 signature=signature,
             )
