@@ -193,6 +193,11 @@ class MermaidTrainer(ClassifierTrainer):
         predictions = np.vstack(all_preds)  # (N, K) or (N, 1)
         y = np.concatenate(all_y)           # (N,)
 
+        # _fit_calibrator is a private sklearn API used here for memory
+        # efficiency — it calibrates from pre-computed predictions instead of
+        # re-running predict_proba on the full dataset at once. If an sklearn
+        # upgrade breaks this, it will fail at training time (not inference).
+        # The serialized model format is identical to the public .fit() API.
         calibrated_inner = _fit_calibrator(
             clf, predictions, y, clf.classes_, method="sigmoid"
         )
