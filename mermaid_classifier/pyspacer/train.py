@@ -30,7 +30,9 @@ from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
-from mermaid_classifier.pyspacer.train_loop import train_classifier_with_callbacks
+from spacer.tasks import train_classifier as spacer_train_classifier
+
+from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
@@ -1347,9 +1349,17 @@ class TrainingRunner:
         model_loc = DataLocation('memory', key='classifier.pkl')
         valresult_loc = DataLocation('memory', key='valresult.json')
 
+        batch_size = int(settings.spacer_batch_size)
+        logger.info(f"Batch size: {batch_size}")
+
+        trainer = MermaidTrainer(
+            batch_size=batch_size,
+            on_epoch_end=self._epoch_callback(),
+        )
+
         train_msg = TrainClassifierMsg(
             job_token=f'experiment_run_{run_name}',
-            trainer_name='minibatch',
+            trainer=trainer,
             nbr_epochs=self.training_options.epochs,
             clf_type='MLP',
             labels=self.dataset.labels,
@@ -1359,17 +1369,8 @@ class TrainingRunner:
             feature_cache_dir=TrainClassifierMsg.FeatureCache.AUTO,
         )
 
-        batch_size = int(settings.spacer_batch_size)
-        logger.info(f"Batch size: {batch_size}")
-
-
-
         with self.section_profiling("PySpacer training call"):
-            return_msg = train_classifier_with_callbacks(
-                train_msg,
-                batch_size=batch_size,
-                on_epoch_end=self._epoch_callback(),
-            )
+            return_msg = spacer_train_classifier(train_msg)
 
         logger.info(
             f"Train time (from return msg): {return_msg.runtime:.1f} s")
