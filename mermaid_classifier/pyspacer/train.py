@@ -1354,7 +1354,7 @@ class TrainingRunner:
 
         trainer = MermaidTrainer(
             batch_size=batch_size,
-            on_epoch_end=self._epoch_callback(),
+            on_epoch_end=self._on_epoch_end,
         )
 
         train_msg = TrainClassifierMsg(
@@ -1385,14 +1385,9 @@ class TrainingRunner:
 
         return return_msg, model_loc, valresult_loc
 
-    def _epoch_callback(self):
-        """
-        Return an on_epoch_end callback for training, or None.
-
-        The base runner has no tracking, so returns None (no-op).
-        Subclasses can override to provide real-time metric logging.
-        """
-        return None
+    def _on_epoch_end(self, metrics: dict):
+        """Called after each training epoch. Override for logging."""
+        pass
 
     def log_dataset_artifacts(self):
         """
@@ -1512,24 +1507,21 @@ class MLflowTrainingRunner(TrainingRunner):
 
         return return_msg, model_loc
 
-    def _epoch_callback(self):
-        """
-        Return a callback that logs per-epoch metrics to MLflow.
+    def _on_epoch_end(self, metrics: dict):
+        """Log per-epoch metrics to MLflow.
 
         Logs step-based metrics that appear as live charts in the MLflow UI
         during training.
         """
-        def _log_epoch_metrics(metrics: dict):
-            step = metrics["epoch"]
+        step = metrics["epoch"]
+        mlflow.log_metric(
+            "epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
+        if metrics["training_loss"] is not None:
             mlflow.log_metric(
-                "epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
-            if metrics["training_loss"] is not None:
-                mlflow.log_metric(
-                    "epoch/training_loss", metrics["training_loss"], step=step)
-            mlflow.log_metric(
-                "epoch/cumulative_seconds",
-                metrics["cumulative_seconds"], step=step)
-        return _log_epoch_metrics
+                "epoch/training_loss", metrics["training_loss"], step=step)
+        mlflow.log_metric(
+            "epoch/cumulative_seconds",
+            metrics["cumulative_seconds"], step=step)
 
     def _get_model_name(self):
         """
