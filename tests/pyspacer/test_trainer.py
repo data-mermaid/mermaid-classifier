@@ -1,8 +1,9 @@
 """
-Tests for mermaid_classifier.pyspacer.train_loop.
+Tests for mermaid_classifier.pyspacer.trainer.
 
-Verifies that _calibrate_in_batches() produces mathematically identical
-results to the standard CalibratedClassifierCV(cv='prefit').fit() approach.
+Verifies that MermaidTrainer._calibrate_in_batches() produces mathematically
+identical results to the standard CalibratedClassifierCV(cv='prefit').fit()
+approach.
 """
 
 import unittest
@@ -13,7 +14,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import SGDClassifier
 from sklearn.neural_network import MLPClassifier
 
-from mermaid_classifier.pyspacer.train_loop import _calibrate_in_batches
+from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
 
 def _make_mock_labels(X, y, batch_size):
@@ -35,8 +36,8 @@ def _make_mock_labels(X, y, batch_size):
 
 class CalibrateInBatchesTest(unittest.TestCase):
     """
-    Verify that _calibrate_in_batches produces identical calibration
-    to CalibratedClassifierCV(cv='prefit').fit().
+    Verify that MermaidTrainer._calibrate_in_batches produces identical
+    calibration to CalibratedClassifierCV(cv='prefit').fit().
     """
 
     def _train_and_calibrate_both_ways(self, clf_type, n_classes):
@@ -71,7 +72,8 @@ class CalibrateInBatchesTest(unittest.TestCase):
 
         # Batched calibration (new approach) via mock ImageLabels
         mock_labels = _make_mock_labels(X_ref, y_ref, batch_size=100)
-        clf_batched = _calibrate_in_batches(clf, mock_labels, batch_size=100)
+        trainer = MermaidTrainer(batch_size=100)
+        clf_batched = trainer._calibrate_in_batches(clf, mock_labels)
 
         return clf_standard, clf_batched, X_ref
 
