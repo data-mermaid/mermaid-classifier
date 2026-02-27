@@ -32,7 +32,7 @@ pyspacer = [
     # - allows anonymous AWS access
     # - allows train data to come from multiple buckets
     # These improvements will be in a stable pyspacer version later.
-    "pyspacer@git+https://github.com/coralnet/pyspacer.git@train-data-source-flexibility",
+    "pyspacer@git+https://github.com/gnieuwenhuis/pyspacer.git@training_abstraction",
     # python-dotenv by itself isn't explicit about what variable
     # names it accepts.
     # python-decouple and pydantic-settings are more explicit.
