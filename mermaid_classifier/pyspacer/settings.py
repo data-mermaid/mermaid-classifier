@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     # Yes, this is str. After it gets through the settings machinery,
     # pyspacer will convert to int.
     spacer_batch_size: str | None = str(automatic_batch_size())
+    download_max_workers: int = 50
     mlflow_http_request_max_retries: str | None = None
     mlflow_default_experiment_name: str | None = None
 
