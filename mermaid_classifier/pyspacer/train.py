@@ -27,6 +27,7 @@ import psutil
 from s3fs.core import S3FileSystem
 from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
+from spacer.aws import get_s3_resource
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
@@ -111,7 +112,7 @@ def section_profiling(profiled_sections: list[dict], section_name: str):
 def download_features_parallel(
     s3_keys: dict[tuple[str, str], str],
     max_workers: int = 50,
-) -> tuple[int, list[str]]:
+) -> set[tuple[str, str]]:
     """
     Download feature vectors from S3 in parallel.
 
@@ -121,26 +122,29 @@ def download_features_parallel(
         max_workers: Number of concurrent download threads.
 
     Returns:
-        (success_count, list_of_failed_keys)
+        Set of (bucket, key) tuples that failed to download.
     """
-    import boto3
-
     total = len(s3_keys)
     if total == 0:
-        return 0, []
+        return set()
 
     logger.info(
         f"Downloading {total} feature vectors"
         f" with {max_workers} workers...")
 
-    failed = []
+    # Pre-create all unique parent directories.
+    unique_dirs = {os.path.dirname(local_path)
+                   for local_path in s3_keys.values()}
+    for d in unique_dirs:
+        os.makedirs(d, exist_ok=True)
+
+    failed: set[tuple[str, str]] = set()
     succeeded = 0
 
     def _download(item):
         (bucket, key), local_path = item
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        s3_client = boto3.client('s3')
-        s3_client.download_file(bucket, key, local_path)
+        s3 = get_s3_resource()
+        s3.Object(bucket, key).download_file(local_path)
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=max_workers
@@ -157,7 +161,7 @@ def download_features_parallel(
                 future.result()
                 succeeded += 1
             except Exception as e:
-                failed.append(f"{bucket}/{key}")
+                failed.add((bucket, key))
                 logger.warning(
                     f"Failed to download s3://{bucket}/{key}: {e}")
             if i % 1000 == 0 or i == total:
@@ -165,7 +169,7 @@ def download_features_parallel(
                     f"Download progress: {i}/{total}"
                     f" ({succeeded} ok, {len(failed)} failed)")
 
-    return succeeded, failed
+    return failed
 
 
 class LabelFilter(CsvSpec):
@@ -1033,21 +1037,21 @@ class TrainingDataset:
 
         # Parallel download of all feature vectors from S3.
         with self.section_profiling("Downloading feature vectors"):
-            succeeded, failed = download_features_parallel(s3_keys, max_workers=settings.download_max_workers)
+            failed_keys = download_features_parallel(s3_keys, max_workers=settings.download_max_workers)
 
-        if failed:
+        if failed_keys:
             logger.warning(
-                f"{len(failed)} feature vector download(s) failed.")
+                f"{len(failed_keys)} feature vector download(s) failed.")
 
         # Build ImageLabels with filesystem DataLocations.
         labels_data = ImageLabels()
 
         for bucket, feature_bucket_path, image_annotations in image_data:
-            local_path = s3_keys[(bucket, feature_bucket_path)]
-
             # Skip images whose feature file failed to download.
-            if not os.path.exists(local_path):
+            if (bucket, feature_bucket_path) in failed_keys:
                 continue
+
+            local_path = s3_keys[(bucket, feature_bucket_path)]
 
             feature_loc = DataLocation(
                 storage_type='filesystem',
@@ -1427,9 +1431,9 @@ class TrainingRunner:
             run_name = self.current_time_str()
         logger.info(f"Run: {run_name}")
 
-        self.dataset = TrainingDataset(self.dataset_options)
-
         try:
+            self.dataset = TrainingDataset(self.dataset_options)
+
             # The dataset's profiled sections are done. The runner will
             # add the remaining profiled sections.
             self.profiled_sections = self.dataset.profiled_sections.copy()
@@ -1487,7 +1491,8 @@ class TrainingRunner:
 
             return return_msg, model_loc, valresult_loc
         finally:
-            self.dataset.cleanup()
+            if self.dataset is not None:
+                self.dataset.cleanup()
 
     def _on_epoch_end(self, metrics: dict):
         """Called after each training epoch. Override for logging."""
