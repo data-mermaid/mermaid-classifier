@@ -1033,7 +1033,7 @@ class TrainingDataset:
 
         # Parallel download of all feature vectors from S3.
         with self.section_profiling("Downloading feature vectors"):
-            succeeded, failed = download_features_parallel(s3_keys)
+            succeeded, failed = download_features_parallel(s3_keys, max_workers=settings.download_max_workers)
 
         if failed:
             logger.warning(
