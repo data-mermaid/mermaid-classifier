@@ -2,12 +2,14 @@
 Train a classifier using feature vectors and annotations
 provided on S3.
 """
+import concurrent.futures
 from contextlib import contextmanager
 import dataclasses
 from datetime import datetime, timedelta
 import enum
 from io import StringIO
 import math
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -104,6 +106,66 @@ def section_profiling(profiled_sections: list[dict], section_name: str):
         f" Elapsed time = {section_profile['hms']},"
         f" Memory usage at end = {section_profile['memory_usage_at_end']}"
     )
+
+
+def download_features_parallel(
+    s3_keys: dict[tuple[str, str], str],
+    max_workers: int = 50,
+) -> tuple[int, list[str]]:
+    """
+    Download feature vectors from S3 in parallel.
+
+    Args:
+        s3_keys: Mapping of (bucket, key) → local_path for each file
+            to download.
+        max_workers: Number of concurrent download threads.
+
+    Returns:
+        (success_count, list_of_failed_keys)
+    """
+    import boto3
+
+    total = len(s3_keys)
+    if total == 0:
+        return 0, []
+
+    logger.info(
+        f"Downloading {total} feature vectors"
+        f" with {max_workers} workers...")
+
+    failed = []
+    succeeded = 0
+
+    def _download(item):
+        (bucket, key), local_path = item
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        s3_client = boto3.client('s3')
+        s3_client.download_file(bucket, key, local_path)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_workers
+    ) as executor:
+        futures = {
+            executor.submit(_download, item): item
+            for item in s3_keys.items()
+        }
+        for i, future in enumerate(
+            concurrent.futures.as_completed(futures), 1
+        ):
+            (bucket, key), local_path = futures[future]
+            try:
+                future.result()
+                succeeded += 1
+            except Exception as e:
+                failed.append(f"{bucket}/{key}")
+                logger.warning(
+                    f"Failed to download s3://{bucket}/{key}: {e}")
+            if i % 1000 == 0 or i == total:
+                logger.info(
+                    f"Download progress: {i}/{total}"
+                    f" ({succeeded} ok, {len(failed)} failed)")
+
+    return succeeded, failed
 
 
 class LabelFilter(CsvSpec):
@@ -445,6 +507,8 @@ class TrainingDataset:
         self.options = options
         self.artifacts = Artifacts()
         self.profiled_sections = []
+        self._feature_temp_dir = tempfile.TemporaryDirectory(
+            prefix='mermaid_features_')
 
 
 
@@ -615,6 +679,10 @@ class TrainingDataset:
         self.set_train_summary_stats()
 
 
+
+    def cleanup(self):
+        """Clean up temporary feature vector files."""
+        self._feature_temp_dir.cleanup()
 
     @contextmanager
     def section_profiling(self, section_name: str):
@@ -926,7 +994,11 @@ class TrainingDataset:
             grouping_column_names=['bucket', 'feature_vector'],
         )
 
-        labels_data = ImageLabels()
+        # First pass: collect annotations and unique S3 keys.
+        s3_keys: dict[tuple[str, str], str] = {}
+        tmp_root = self._feature_temp_dir.name
+        # image_data: list of (bucket, key, annotations)
+        image_data = []
 
         for rows in annotations_by_image:
 
@@ -951,10 +1023,35 @@ class TrainingDataset:
                 )
                 image_annotations.append(annotation)
 
+            s3_key = (bucket, feature_bucket_path)
+            if s3_key not in s3_keys:
+                local_path = os.path.join(
+                    tmp_root, bucket, feature_bucket_path)
+                s3_keys[s3_key] = local_path
+
+            image_data.append((bucket, feature_bucket_path, image_annotations))
+
+        # Parallel download of all feature vectors from S3.
+        with self.section_profiling("Downloading feature vectors"):
+            succeeded, failed = download_features_parallel(s3_keys)
+
+        if failed:
+            logger.warning(
+                f"{len(failed)} feature vector download(s) failed.")
+
+        # Build ImageLabels with filesystem DataLocations.
+        labels_data = ImageLabels()
+
+        for bucket, feature_bucket_path, image_annotations in image_data:
+            local_path = s3_keys[(bucket, feature_bucket_path)]
+
+            # Skip images whose feature file failed to download.
+            if not os.path.exists(local_path):
+                continue
+
             feature_loc = DataLocation(
-                storage_type='s3',
-                bucket_name=bucket,
-                key=feature_bucket_path,
+                storage_type='filesystem',
+                key=local_path,
             )
             labels_data.add_image(feature_loc, image_annotations)
 
@@ -1332,58 +1429,65 @@ class TrainingRunner:
 
         self.dataset = TrainingDataset(self.dataset_options)
 
-        # The dataset's profiled sections are done. The runner will add the
-        # remaining profiled sections.
-        self.profiled_sections = self.dataset.profiled_sections.copy()
+        try:
+            # The dataset's profiled sections are done. The runner will
+            # add the remaining profiled sections.
+            self.profiled_sections = self.dataset.profiled_sections.copy()
 
-        # Log dataset artifacts now, so they can be inspected during
-        # training.
-        with self.section_profiling("Logging dataset artifacts"):
-            self.log_dataset_artifacts()
+            # Log dataset artifacts now, so they can be inspected during
+            # training.
+            with self.section_profiling("Logging dataset artifacts"):
+                self.log_dataset_artifacts()
 
-        logger.info("Proceeding to train with:")
-        logger.info(self.dataset.describe_train_summary_stats())
+            logger.info("Proceeding to train with:")
+            logger.info(self.dataset.describe_train_summary_stats())
 
-        # Not sure about saving these anywhere other than memory
-        # for now.
-        model_loc = DataLocation('memory', key='classifier.pkl')
-        valresult_loc = DataLocation('memory', key='valresult.json')
+            # Not sure about saving these anywhere other than memory
+            # for now.
+            model_loc = DataLocation('memory', key='classifier.pkl')
+            valresult_loc = DataLocation('memory', key='valresult.json')
 
-        batch_size = int(settings.spacer_batch_size)
-        logger.info(f"Batch size: {batch_size}")
+            batch_size = int(settings.spacer_batch_size)
+            logger.info(f"Batch size: {batch_size}")
 
-        trainer = MermaidTrainer(
-            batch_size=batch_size,
-            on_epoch_end=self._on_epoch_end,
-        )
+            trainer = MermaidTrainer(
+                batch_size=batch_size,
+                on_epoch_end=self._on_epoch_end,
+            )
 
-        train_msg = TrainClassifierMsg(
-            job_token=f'experiment_run_{run_name}',
-            trainer=trainer,
-            nbr_epochs=self.training_options.epochs,
-            clf_type='MLP',
-            labels=self.dataset.labels,
-            previous_model_locs=[],
-            model_loc=model_loc,
-            valresult_loc=valresult_loc,
-            feature_cache_dir=TrainClassifierMsg.FeatureCache.AUTO,
-        )
+            train_msg = TrainClassifierMsg(
+                job_token=f'experiment_run_{run_name}',
+                trainer=trainer,
+                nbr_epochs=self.training_options.epochs,
+                clf_type='MLP',
+                labels=self.dataset.labels,
+                previous_model_locs=[],
+                model_loc=model_loc,
+                valresult_loc=valresult_loc,
+                feature_cache_dir=TrainClassifierMsg.FeatureCache.DISABLED,
+            )
 
-        with self.section_profiling("PySpacer training call"):
-            return_msg = spacer_train_classifier(train_msg)
+            with self.section_profiling("PySpacer training call"):
+                return_msg = spacer_train_classifier(train_msg)
 
-        logger.info(
-            f"Train time (from return msg): {return_msg.runtime:.1f} s")
+            logger.info(
+                f"Train time (from return msg):"
+                f" {return_msg.runtime:.1f} s")
 
-        logger.info(
-            f"New model's accuracy: {self.format_metric(return_msg.acc)}")
+            logger.info(
+                f"New model's accuracy:"
+                f" {self.format_metric(return_msg.acc)}")
 
-        ref_accs_str = ", ".join(
-            [str(self.format_metric(acc)) for acc in return_msg.ref_accs])
-        logger.debug(
-            f"Accuracy progression during training epochs: {ref_accs_str}")
+            ref_accs_str = ", ".join(
+                [str(self.format_metric(acc))
+                 for acc in return_msg.ref_accs])
+            logger.debug(
+                f"Accuracy progression during training epochs:"
+                f" {ref_accs_str}")
 
-        return return_msg, model_loc, valresult_loc
+            return return_msg, model_loc, valresult_loc
+        finally:
+            self.dataset.cleanup()
 
     def _on_epoch_end(self, metrics: dict):
         """Called after each training epoch. Override for logging."""
