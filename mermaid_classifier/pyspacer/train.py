@@ -55,7 +55,11 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_transform_column,
 )
 from mermaid_classifier.pyspacer.metrics import (
-    make_confusion_matrix, precision_recall_f1)
+    MetricsContext, MetricsCoordinator,
+)
+from mermaid_classifier.pyspacer.metrics._logging import (
+    log_dataframe as _log_dataframe,
+)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -1572,42 +1576,36 @@ class MLflowTrainingRunner(TrainingRunner):
 
             val_results = ValResults.load(valresult_loc)
 
-            self.log_confusion_matrix(
+            clf = load_classifier(model_loc)
+
+            ctx = MetricsContext(
                 val_results=val_results,
-                normalize=False,
-                filestem='confusion_matrix/frequencies',
-            )
-            self.log_confusion_matrix(
-                val_results=val_results,
-                normalize=True,
-                filestem='confusion_matrix/percents',
+                ba_library=ba_library,
+                gf_library=gf_library,
+                format_func=self.format_metric,
+                dataset=self.dataset,
+                clf=clf,
             )
 
-            per_label_prf, overall_metrics = precision_recall_f1(
-                val_results, self.format_metric, ba_library, gf_library)
-            overall_metrics['accuracy'] = self.format_metric(return_msg.acc)
+            coordinator = MetricsCoordinator(
+                ctx, duck_conn=self.dataset.duck_conn)
+            coordinator.compute_and_log_all()
 
-            # Log overall metrics with log_metric(). Note that this method
-            # only takes numeric values.
-            for metric_name, metric_value in overall_metrics.items():
-                mlflow.log_metric(metric_name, metric_value)
-            # Log overall metrics as an artifact.
-            mlflow.log_dict(overall_metrics, 'metrics_overall.yaml')
-            # Log per-label metrics as an artifact.
-            self.log_dataframe(
-                pd.DataFrame(per_label_prf), 'metrics_per_label')
-
-            # ref_accs is probably the only other part of return_msg to save.
-            ref_accs_dict = dict()
-            for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
-                ref_accs_dict[epoch_number] = self.format_metric(acc)
+            # Accuracy and ref_accs come from pyspacer's return_msg,
+            # not our metrics module.
+            mlflow.log_metric(
+                'accuracy', self.format_metric(return_msg.acc))
+            ref_accs_dict = {
+                epoch: self.format_metric(acc)
+                for epoch, acc in enumerate(return_msg.ref_accs, 1)
+            }
             mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
 
             # Save and register the trained model.
             signature = mlflow.models.infer_signature(
                 params=training_options_to_log)
             model_info = mlflow.sklearn.log_model(
-                sk_model=load_classifier(model_loc),
+                sk_model=clf,
                 registered_model_name=model_name,
                 signature=signature,
             )
@@ -1765,33 +1763,4 @@ class MLflowTrainingRunner(TrainingRunner):
         external program such as Excel / LibreOffice Calc.
         To save a .csv, we use log_text() instead, with this helper function.
         """
-        duck_conn = self.dataset.duck_conn
-
-        with duckdb_temp_table_name(duck_conn) as table_name:
-            duck_conn.execute(
-                f"CREATE TABLE {table_name} AS SELECT * FROM df"
-            )
-
-            with tempfile.NamedTemporaryFile(
-                mode='w+t', suffix='.csv', delete_on_close=False,
-            ) as f:
-                # DuckDB will reopen the file, so close first.
-                f.close()
-                duck_conn.execute(f"COPY {table_name} TO '{f.name}'")
-
-                # Need to open yet again to get the DuckDB-written contents.
-                with open(f.name) as f_new:
-                    mlflow.log_text(f_new.read(), filestem + '.csv')
-
-                # As this context manager finishes, the temp file will be
-                # deleted.
-
-    def log_confusion_matrix(
-        self, val_results: ValResults, normalize: bool, filestem: str
-    ):
-        with make_confusion_matrix(
-            val_results, normalize, ba_library, gf_library,
-        ) as (df, fig):
-
-            self.log_dataframe(df, filestem)
-            mlflow.log_figure(fig, filestem + '.png')
+        _log_dataframe(self.dataset.duck_conn, df, filestem)
