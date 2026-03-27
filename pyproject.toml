@@ -8,6 +8,8 @@ version = "0.1a1"
 requires-python = ">=3.10"
 dependencies = [
     "boto3",
+    "jinja2",
+    "jupyterlab>=4.5.5",
 ]
 
 [tool.hatch.build.targets.wheel]

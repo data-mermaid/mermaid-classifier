@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Classifier Report — {{ metadata.experiment_name }} / {{ metadata.run_name }}</title>
+<style>
+  :root {
+    --blue-900: #1a365d;
+    --blue-700: #2b6cb0;
+    --blue-100: #ebf8ff;
+    --gray-50: #f7fafc;
+    --gray-100: #edf2f7;
+    --gray-200: #e2e8f0;
+    --gray-600: #718096;
+    --gray-800: #2d3748;
+    --green-600: #38a169;
+    --red-600: #c53030;
+    --amber: #d69e2e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+    color: var(--gray-800);
+    line-height: 1.5;
+    background: #fff;
+  }
+  h1 {
+    color: var(--blue-900);
+    border-bottom: 3px solid var(--blue-700);
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.5rem;
+    font-size: 1.6rem;
+  }
+  h2 {
+    color: var(--blue-900);
+    border-left: 4px solid var(--blue-700);
+    padding-left: 0.75rem;
+    margin-top: 2.5rem;
+    margin-bottom: 1rem;
+    font-size: 1.3rem;
+  }
+  h3 {
+    color: var(--gray-800);
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+    font-size: 1.05rem;
+  }
+  .subtitle {
+    color: var(--gray-600);
+    font-size: 0.9rem;
+    margin-bottom: 2rem;
+  }
+
+  /* Table of Contents */
+  .toc {
+    background: var(--gray-50);
+    border: 1px solid var(--gray-200);
+    border-radius: 6px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .toc h3 { margin-top: 0; color: var(--gray-600); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .toc ul { list-style: none; padding: 0; margin: 0; }
+  .toc li { padding: 0.15rem 0; }
+  .toc a { color: var(--blue-700); text-decoration: none; font-size: 0.9rem; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* Metadata table */
+  .metadata-table { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; font-size: 0.9rem; }
+  .metadata-table td { padding: 0.35rem 0.75rem; border-bottom: 1px solid var(--gray-100); }
+  .metadata-table td:first-child { font-weight: 600; color: var(--gray-600); width: 180px; }
+
+  /* Parameters nested table */
+  .params-table { border-collapse: collapse; font-size: 0.85rem; width: 100%; }
+  .params-table td { padding: 0.2rem 0.5rem; vertical-align: top; }
+  .params-table td:first-child { font-weight: 600; white-space: nowrap; color: var(--gray-600); padding-right: 1rem; }
+  .params-table td:last-child { word-break: break-all; }
+
+  /* Metric cards */
+  .metric-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+  }
+  .metric-card {
+    background: var(--gray-50);
+    border: 1px solid var(--gray-200);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    text-align: center;
+  }
+  .metric-card--primary {
+    border: 2px solid var(--blue-700);
+    background: var(--blue-100);
+  }
+  .metric-card--primary .value { font-size: 1.7rem; }
+  .metric-card .label { font-size: 0.75rem; color: var(--gray-600); text-transform: uppercase; letter-spacing: 0.03em; }
+  .metric-card .value { font-size: 1.4rem; font-weight: 700; color: var(--blue-900); margin-top: 0.2rem; }
+  .metric-card .value.good { color: var(--green-600); }
+  .metric-card .value.warn { color: var(--amber); }
+  .metric-card .value.bad  { color: var(--red-600); }
+
+  /* Data tables (from pandas to_html) */
+  .dataframe { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.5rem 0 1rem 0; }
+  .dataframe th {
+    background: var(--blue-900);
+    color: #fff;
+    padding: 0.5rem 0.6rem;
+    text-align: left;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+  }
+  .dataframe td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--gray-200); }
+  .dataframe tr:nth-child(even) { background: var(--gray-50); }
+  .dataframe tr:hover { background: var(--blue-100); }
+
+  /* YAML key-value display */
+  .yaml-table { border-collapse: collapse; font-size: 0.85rem; margin: 0.5rem 0 1rem 0; }
+  .yaml-table td { padding: 0.3rem 0.75rem; border-bottom: 1px solid var(--gray-100); }
+  .yaml-table td:first-child { font-weight: 600; color: var(--gray-600); white-space: nowrap; }
+
+  /* Scrollable table container */
+  .table-scroll { max-height: 500px; overflow-y: auto; border: 1px solid var(--gray-200); border-radius: 4px; margin: 0.5rem 0 1rem 0; }
+  .table-scroll .dataframe { margin: 0; }
+
+  /* Figures */
+  figure { margin: 1rem 0; text-align: center; }
+  figure img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  }
+  figcaption { color: var(--gray-600); font-size: 0.8rem; margin-top: 0.4rem; }
+
+  /* Constrained confusion matrix figures */
+  .figure--matrix img { max-height: 450px; width: auto; max-width: 100%; cursor: zoom-in; }
+  .figure--matrix img.expanded { max-height: none; cursor: zoom-out; }
+
+  /* Metric group panels */
+  .metric-group {
+    background: var(--gray-50);
+    border: 1px solid var(--gray-200);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.25rem;
+  }
+  .metric-group h3 { margin-top: 0; font-size: 0.95rem; }
+
+  /* Section containers */
+  section { margin-bottom: 2rem; }
+
+  /* Status badge */
+  .status-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .status-FINISHED { background: #c6f6d5; color: var(--green-600); }
+  .status-FAILED { background: #fed7d7; color: var(--red-600); }
+  .status-RUNNING { background: var(--blue-100); color: var(--blue-700); }
+
+  /* Collapsible details */
+  details { margin: 0.5rem 0; }
+  details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--blue-700);
+    font-size: 0.9rem;
+    padding: 0.3rem 0;
+  }
+  details summary:hover { text-decoration: underline; }
+
+  /* Back to top link */
+  .back-to-top {
+    display: block;
+    text-align: right;
+    font-size: 0.78rem;
+    color: var(--gray-600);
+    text-decoration: none;
+    margin-top: 1rem;
+  }
+  .back-to-top:hover { color: var(--blue-700); text-decoration: underline; }
+
+  /* Footer */
+  .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--gray-200); color: var(--gray-600); font-size: 0.8rem; text-align: center; }
+
+  /* Print styles */
+  @media print {
+    body { max-width: 100%; padding: 0.5rem; }
+    h2 { page-break-before: always; }
+    h2:first-of-type { page-break-before: avoid; }
+    .toc { page-break-after: always; }
+    figure img { box-shadow: none; }
+    .table-scroll { max-height: none; overflow: visible; }
+    .metric-card { border: 1px solid #ccc; }
+  }
+</style>
+</head>
+<body>
+
+{# -- Helper macros -- #}
+
+{# Determine threshold CSS class for a metric value #}
+{% macro metric_value_class(label, value) %}
+  {%- set no_threshold = ['Cross-Branch Error Rate', 'Within-Branch Error Rate'] -%}
+  {%- set lower_is_better_labels = [
+    'ECE', 'Log Loss',
+    'Mean Abs Bias %', 'Mean RMSE %', 'Mean MAE %'
+  ] -%}
+  {%- if label in no_threshold -%}
+  {%- elif label in lower_is_better_labels -%}
+    {%- if value <= 0.05 -%}good{%- elif value <= 0.15 -%}warn{%- else -%}bad{%- endif -%}
+  {%- else -%}
+    {%- if value >= 0.8 -%}good{%- elif value >= 0.6 -%}warn{%- else -%}bad{%- endif -%}
+  {%- endif -%}
+{% endmacro %}
+
+{# Format metric values: percentages as "82.2%", MCC as 3 dp, others as 4 dp #}
+{% macro format_metric_value(label, value) -%}
+  {%- set percent_labels = [
+    'Accuracy', 'Balanced Accuracy', 'F1 (Macro)', 'Precision (Macro)', 'Recall (Macro)',
+    'Top-1', 'Top-3', 'Top-5', 'Top-10',
+    'GF Accuracy (GF-relevant)', 'Within-BA GF Accuracy'
+  ] -%}
+  {%- if label in percent_labels -%}
+    {{ "%.1f" | format(value * 100) }}%
+  {%- elif label == 'MCC' -%}
+    {{ "%.3f" | format(value) }}
+  {%- else -%}
+    {{ "%.4f" | format(value) }}
+  {%- endif -%}
+{%- endmacro %}
+
+{# Human-friendly labels for CSV <details> summaries #}
+{% set csv_labels = {
+  'frequencies_csv':           'Raw Prediction Counts (CSV)',
+  'percents_csv':              'Row-Normalised Recall Rates (CSV)',
+  'per_bin_details_csv':       'Calibration Bin Details (CSV)',
+  'per_category_ece_csv':      'Per-Category ECE (CSV)',
+  'error_attribution_csv':     'Error Attribution by Category (CSV)',
+  'top_level_confusions_csv':  'Top-Level Confusion Matrix (CSV)',
+  'gf_precision_recall_f1_csv':'Growth Form Precision / Recall / F1 (CSV)',
+  'per_class_cover_metrics_csv':'Per-Class Cover Metrics (CSV)',
+  'per_category_log_loss_csv': 'Per-Category Log Loss (CSV)',
+  'per_category_topk_csv':     'Per-Category Top-K Accuracy (CSV)',
+  'hierarchical_topk_csv':     'Hierarchical Top-K Results (CSV)'
+} %}
+
+{# -- Extract ECE value for calibration caption -- #}
+{% set ece_value = namespace(val=None) %}
+{% if metrics.executive %}
+  {% for label, value in metrics.executive %}
+    {% if label == 'ECE' %}{% set ece_value.val = value %}{% endif %}
+  {% endfor %}
+{% endif %}
+
+{# -- Header -- #}
+<h1 id="top">Classifier Report</h1>
+<p class="subtitle">
+  <strong>{{ metadata.experiment_name }}</strong> &mdash; {{ metadata.run_name }}
+  &nbsp;&middot;&nbsp; Generated {{ generated_at }}
+</p>
+
+<table class="metadata-table">
+  <tr><td>Run ID</td><td><code>{{ metadata.run_id }}</code></td></tr>
+  <tr><td>Run Name</td><td>{{ metadata.run_name }}</td></tr>
+  <tr><td>Experiment</td><td>{{ metadata.experiment_name }}</td></tr>
+  <tr><td>Status</td><td><span class="status-badge status-{{ metadata.status }}">{{ metadata.status }}</span></td></tr>
+  <tr><td>Started</td><td>{{ metadata.start_time }}</td></tr>
+  <tr><td>Ended</td><td>{{ metadata.end_time }}</td></tr>
+  <tr><td>Duration</td><td>{{ metadata.duration }}</td></tr>
+  {% if metadata.params %}
+  <tr>
+    <td>Parameters</td>
+    <td>
+      <table class="params-table">
+        {% for k, v in metadata.params.items() %}
+        <tr>
+          <td>{{ k }}</td>
+          <td>{{ v }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+</table>
+
+{# -- Table of Contents -- #}
+<nav class="toc">
+  <h3>Contents</h3>
+  <ul>
+    <li><a href="#executive-summary">Executive Summary</a></li>
+    {% if has_training %}
+    <li><a href="#run-configuration">Run Configuration</a></li>
+    {% endif %}
+    {% for section_id in section_order %}
+      {% if section_id in sections %}
+      <li><a href="#{{ section_id }}">{{ sections[section_id].title }}</a></li>
+      {% endif %}
+    {% endfor %}
+    {% if root_eval.metrics_per_label_csv %}
+    <li><a href="#per-label-detail">Per-Label Detail</a></li>
+    {% endif %}
+  </ul>
+</nav>
+
+{# -- Executive Summary -- #}
+<section id="executive-summary">
+  <h2>Executive Summary</h2>
+
+  {% if metrics.executive %}
+  <div class="metric-group">
+    <div class="metric-cards">
+      {% for label, value in metrics.executive %}
+      <div class="metric-card{% if loop.first %} metric-card--primary{% endif %}">
+        <div class="label">{{ label }}</div>
+        <div class="value {{ metric_value_class(label, value) | trim }}">{{ format_metric_value(label, value) | trim }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if metrics.topk %}
+  <div class="metric-group">
+    <h3>Top-K Accuracy</h3>
+    <div class="metric-cards">
+      {% for label, value in metrics.topk %}
+      <div class="metric-card">
+        <div class="label">{{ label }}</div>
+        <div class="value {{ metric_value_class(label, value) | trim }}">{{ format_metric_value(label, value) | trim }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if metrics.cover %}
+  <div class="metric-group">
+    <h3>Cover Metrics</h3>
+    <div class="metric-cards">
+      {% for label, value in metrics.cover %}
+      <div class="metric-card">
+        <div class="label">{{ label }}</div>
+        <div class="value {{ metric_value_class(label, value) | trim }}">{{ format_metric_value(label, value) | trim }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if metrics.taxonomic %}
+  <div class="metric-group">
+    <h3>Taxonomic Metrics</h3>
+    <div class="metric-cards">
+      {% for label, value in metrics.taxonomic %}
+      <div class="metric-card">
+        <div class="label">{{ label }}</div>
+        <div class="value {{ metric_value_class(label, value) | trim }}">{{ format_metric_value(label, value) | trim }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if root_eval.metrics_overall_yaml %}
+  <details>
+    <summary>All metrics (full list)</summary>
+    <table class="yaml-table">
+      {% for key, value in root_eval.metrics_overall_yaml.items() %}
+      <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+      {% endfor %}
+    </table>
+  </details>
+  {% endif %}
+
+  <a href="#top" class="back-to-top">Back to top</a>
+</section>
+
+{# -- Run Configuration -- #}
+{% if has_training %}
+<section id="run-configuration">
+  <h2>Run Configuration</h2>
+
+  {% if training.other_options_yaml %}
+  <h3>Training Options</h3>
+  <table class="yaml-table">
+    {% for key, value in training.other_options_yaml.items() %}
+    <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if training.train_summary_yaml %}
+  <h3>Training Data Summary</h3>
+  <table class="yaml-table">
+    {% for key, value in training.train_summary_yaml.items() %}
+    <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if training.system_specs_yaml %}
+  <h3>System Specifications</h3>
+  <table class="yaml-table">
+    {% for key, value in training.system_specs_yaml.items() %}
+    <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if training.coralnet_sources_included_csv %}
+  <details>
+    <summary>CoralNet Sources Included</summary>
+    <div class="table-scroll">{{ training.coralnet_sources_included_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.labels_included_csv %}
+  <details>
+    <summary>Labels Included</summary>
+    <div class="table-scroll">{{ training.labels_included_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.labels_excluded_csv %}
+  <details>
+    <summary>Labels Excluded</summary>
+    <div class="table-scroll">{{ training.labels_excluded_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.rollup_spec_csv %}
+  <details>
+    <summary>Rollup Specification</summary>
+    <div class="table-scroll">{{ training.rollup_spec_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.project_stats_train_data_csv %}
+  <details>
+    <summary>Training Data Stats by Project</summary>
+    <div class="table-scroll">{{ training.project_stats_train_data_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.project_stats_raw_csv %}
+  <details>
+    <summary>Raw Data Stats by Project</summary>
+    <div class="table-scroll">{{ training.project_stats_raw_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.ba_counts_csv %}
+  <details>
+    <summary>Benthic Attribute Counts</summary>
+    <div class="table-scroll">{{ training.ba_counts_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.bagf_counts_csv %}
+  <details>
+    <summary>BA + Growth Form Counts</summary>
+    <div class="table-scroll">{{ training.bagf_counts_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.coralnet_label_mapping_csv %}
+  <details>
+    <summary>CoralNet Label Mapping</summary>
+    <div class="table-scroll">{{ training.coralnet_label_mapping_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.unmapped_labels_csv %}
+  <details>
+    <summary>Unmapped Labels</summary>
+    <div class="table-scroll">{{ training.unmapped_labels_csv | safe }}</div>
+  </details>
+  {% endif %}
+
+  {% if training.epoch_ref_accuracies_yaml %}
+  <details>
+    <summary>Epoch Reference Accuracies</summary>
+    <table class="yaml-table">
+      {% for key, value in training.epoch_ref_accuracies_yaml.items() %}
+      <tr><td>Epoch {{ key }}</td><td>{{ "%.4f" | format(value) }}</td></tr>
+      {% endfor %}
+    </table>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
+{# -- Figure captions lookup -- #}
+{% set figure_captions = {
+  'frequencies_png':          'Confusion matrix — raw prediction counts per true/predicted class pair.',
+  'percents_png':             'Confusion matrix — row-normalised recall rates (%) per true class.',
+  'reliability_diagram_png':  'Reliability diagram: predicted confidence vs. actual accuracy. Well-calibrated models follow the diagonal.',
+  'error_attribution_png':    'Classification errors by taxonomic category: cross-branch, within-branch, and growth form errors.',
+  'top_level_confusion_png':  'Confusion matrix aggregated to top-level taxonomic categories.',
+  'gf_confusion_png':         'Growth form confusion: predicted vs. true growth form.',
+  'per_class_bias_png':       'Per-class cover bias — predicted minus true cover (%).',
+  'per_category_log_loss_png':'Per-category log loss. Higher values = model is confidently wrong.',
+  'per_category_topk_png':    'Per-category Top-K accuracy curves.'
+} %}
+{# Set of figure keys that are confusion matrix images — constrained to max-height #}
+{% set matrix_figure_keys = ['frequencies_png', 'percents_png', 'top_level_confusion_png', 'gf_confusion_png'] %}
+
+{# -- Section artifact rendering order -- #}
+{% set section_artifact_order = {
+  'confusion_matrix': [
+    'frequencies_png', 'frequencies_csv',
+    'percents_png', 'percents_csv'
+  ],
+  'calibration': [
+    'reliability_diagram_png', 'per_bin_details_csv', 'per_category_ece_csv'
+  ],
+  'taxonomic': [
+    'error_attribution_png', 'error_attribution_csv',
+    'top_level_confusion_png', 'top_level_confusions_csv',
+    'gf_confusion_png', 'gf_precision_recall_f1_csv'
+  ],
+  'cover': [
+    'per_class_bias_png', 'per_class_cover_metrics_csv'
+  ],
+  'probability': [
+    'per_category_log_loss_png', 'per_category_log_loss_csv'
+  ],
+  'ranking': [
+    'per_category_topk_png', 'per_category_topk_csv', 'hierarchical_topk_csv'
+  ]
+} %}
+
+{# -- Evaluation Sections (dynamic) -- #}
+{% for section_id in section_order %}
+  {% if section_id in sections %}
+  {% set section = sections[section_id] %}
+  <section id="{{ section_id }}">
+    <h2>{{ section.title }}</h2>
+
+    {# Render artifacts in defined order if the section has an order spec;
+       fall back to all PNGs then all CSVs for unknown sections. #}
+    {% if section_id in section_artifact_order %}
+      {% for key in section_artifact_order[section_id] %}
+        {% if key in section and section[key] %}
+          {% if key.endswith('_png') %}
+          {% set caption = figure_captions[key] if key in figure_captions else (key | replace('_png', '') | replace('_', ' ') | title) %}
+          {% if key == 'reliability_diagram_png' and ece_value.val is not none %}{% set caption = caption ~ ' ECE = ' ~ '%.4f' | format(ece_value.val) ~ '.' %}{% endif %}
+          <figure{% if key in matrix_figure_keys %} class="figure--matrix"{% endif %}>
+            <img src="{{ section[key] }}" alt="{{ key | replace('_png', '') | replace('_', ' ') | title }}">
+            <figcaption>{{ caption }}</figcaption>
+          </figure>
+          {% elif key.endswith('_csv') %}
+          <details>
+            <summary>{{ csv_labels[key] if key in csv_labels else (key | replace('_csv', '') | replace('_', ' ') | title) }}</summary>
+            <div class="table-scroll">{{ section[key] | safe }}</div>
+          </details>
+          {% endif %}
+        {% endif %}
+      {% endfor %}
+      {# Render any keys not covered by the order spec so nothing is lost #}
+      {% for key, value in section.items() %}
+        {% if key not in section_artifact_order[section_id] and key != 'title' and value %}
+          {% if key.endswith('_png') %}
+          {% set caption = figure_captions[key] if key in figure_captions else (key | replace('_png', '') | replace('_', ' ') | title) %}
+          {% if key == 'reliability_diagram_png' and ece_value.val is not none %}{% set caption = caption ~ ' ECE = ' ~ '%.4f' | format(ece_value.val) ~ '.' %}{% endif %}
+          <figure{% if key in matrix_figure_keys %} class="figure--matrix"{% endif %}>
+            <img src="{{ value }}" alt="{{ key | replace('_png', '') | replace('_', ' ') | title }}">
+            <figcaption>{{ caption }}</figcaption>
+          </figure>
+          {% elif key.endswith('_csv') %}
+          <details>
+            <summary>{{ csv_labels[key] if key in csv_labels else (key | replace('_csv', '') | replace('_', ' ') | title) }}</summary>
+            <div class="table-scroll">{{ value | safe }}</div>
+          </details>
+          {% endif %}
+        {% endif %}
+      {% endfor %}
+    {% else %}
+      {# Generic fallback: PNGs first, then CSVs collapsed #}
+      {% for key, value in section.items() %}
+        {% if key.endswith('_png') and value and key != 'title' %}
+        {% set caption = figure_captions[key] if key in figure_captions else (key | replace('_png', '') | replace('_', ' ') | title) %}
+        {% if key == 'reliability_diagram_png' and ece_value.val is not none %}{% set caption = caption ~ ' ECE = ' ~ '%.4f' | format(ece_value.val) ~ '.' %}{% endif %}
+        <figure{% if key in matrix_figure_keys %} class="figure--matrix"{% endif %}>
+          <img src="{{ value }}" alt="{{ key | replace('_png', '') | replace('_', ' ') | title }}">
+          <figcaption>{{ caption }}</figcaption>
+        </figure>
+        {% endif %}
+      {% endfor %}
+      {% for key, value in section.items() %}
+        {% if key.endswith('_csv') and value and key != 'title' %}
+        <details>
+          <summary>{{ csv_labels[key] if key in csv_labels else (key | replace('_csv', '') | replace('_', ' ') | title) }}</summary>
+          <div class="table-scroll">{{ value | safe }}</div>
+        </details>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+
+    <a href="#top" class="back-to-top">Back to top</a>
+  </section>
+  {% endif %}
+{% endfor %}
+
+{# -- Per-Label Detail -- #}
+{% if root_eval.metrics_per_label_csv %}
+<section id="per-label-detail">
+  <h2>Per-Label Detail</h2>
+  <p>Precision, recall, and F1 for each class label, sorted by F1 score (worst performers first).</p>
+  <div class="table-scroll" id="per-label-table">{{ root_eval.metrics_per_label_csv | safe }}</div>
+
+  <a href="#top" class="back-to-top">Back to top</a>
+</section>
+<script>
+(function () {
+  var container = document.getElementById('per-label-table');
+  if (!container) return;
+  var table = container.querySelector('table');
+  if (!table) return;
+  var headers = Array.prototype.slice.call(table.querySelectorAll('th'));
+
+  // Rename column headers to human-friendly labels.
+  var colRenames = {
+    'bagf_name': 'Label',
+    'precision': 'Precision',
+    'recall':    'Recall',
+    'f1_score':  'F1'
+  };
+  headers.forEach(function (th) {
+    var raw = th.textContent.trim();
+    if (colRenames[raw] !== undefined) {
+      th.textContent = colRenames[raw];
+      th.dataset.baseText = colRenames[raw];
+    }
+  });
+
+  // Hide bagf_id column.
+  var bagfIndex = -1;
+  headers.forEach(function (th, i) {
+    if (th.textContent.trim() === 'bagf_id') { bagfIndex = i; }
+  });
+  if (bagfIndex !== -1) {
+    headers[bagfIndex].style.display = 'none';
+    var allRows = table.querySelectorAll('tr');
+    allRows.forEach(function (row) {
+      var cells = row.querySelectorAll('td, th');
+      if (cells[bagfIndex]) { cells[bagfIndex].style.display = 'none'; }
+    });
+  }
+
+  // Color Precision, Recall, F1 cells (using renamed headers).
+  var colorCols = { 'Precision': true, 'Recall': true, 'F1': true };
+  var colorColIndices = [];
+  headers.forEach(function (th, i) {
+    if (colorCols[th.textContent.trim()]) { colorColIndices.push(i); }
+  });
+  var bodyRows = Array.prototype.slice.call(table.querySelectorAll('tbody tr'));
+  bodyRows.forEach(function (row) {
+    var cells = row.querySelectorAll('td');
+    colorColIndices.forEach(function (ci) {
+      var cell = cells[ci];
+      if (!cell) return;
+      var val = parseFloat(cell.textContent);
+      if (isNaN(val)) return;
+      if (val >= 0.8) {
+        cell.style.color = '#38a169';
+        cell.style.fontWeight = '600';
+      } else if (val >= 0.6) {
+        cell.style.color = '#d69e2e';
+        cell.style.fontWeight = '600';
+      } else {
+        cell.style.color = '#c53030';
+        cell.style.fontWeight = '700';
+      }
+    });
+  });
+
+  // Column sort: make numeric column headers clickable.
+  var sortState = { col: -1, asc: true };
+  var tbody = table.querySelector('tbody');
+
+  function getSortRows() {
+    return Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+  }
+
+  function updateArrows(activeIndex) {
+    headers.forEach(function (th, i) {
+      var base = th.dataset.baseText;
+      if (!base) return;
+      if (i === activeIndex) {
+        th.textContent = base + (sortState.asc ? ' \u25b2' : ' \u25bc');
+      } else {
+        th.textContent = base;
+      }
+    });
+  }
+
+  function isNumericCol(colIndex) {
+    var rows = getSortRows();
+    for (var r = 0; r < Math.min(rows.length, 5); r++) {
+      var cells = rows[r].querySelectorAll('td');
+      if (!cells[colIndex]) return false;
+      var v = cells[colIndex].textContent.trim();
+      if (v !== '' && isNaN(parseFloat(v))) return false;
+    }
+    return true;
+  }
+
+  headers.forEach(function (th, i) {
+    if (i === bagfIndex) return;
+    if (!isNumericCol(i)) return;
+    if (!th.dataset.baseText) { th.dataset.baseText = th.textContent.trim(); }
+    th.style.cursor = 'pointer';
+    th.title = 'Click to sort';
+    th.addEventListener('click', function () {
+      if (sortState.col === i) {
+        sortState.asc = !sortState.asc;
+      } else {
+        sortState.col = i;
+        sortState.asc = true;
+      }
+      var rows = getSortRows();
+      rows.sort(function (a, b) {
+        var ca = a.querySelectorAll('td')[i];
+        var cb = b.querySelectorAll('td')[i];
+        var va = ca ? parseFloat(ca.textContent) : NaN;
+        var vb = cb ? parseFloat(cb.textContent) : NaN;
+        if (isNaN(va) && isNaN(vb)) return 0;
+        if (isNaN(va)) return 1;
+        if (isNaN(vb)) return -1;
+        return sortState.asc ? va - vb : vb - va;
+      });
+      rows.forEach(function (row) { tbody.appendChild(row); });
+      updateArrows(i);
+    });
+  });
+})();
+</script>
+{% endif %}
+
+{# -- Footer -- #}
+<div class="footer">
+  Report generated {{ generated_at }} from MLflow run <code>{{ metadata.run_id }}</code>{% if n_classes %} &middot; {{ n_classes }} classes{% endif %}{% if n_predictions %} &middot; {{ "{:,}".format(n_predictions | int) }} predictions{% endif %}
+</div>
+
+<script>
+(function () {
+  document.querySelectorAll('.figure--matrix img').forEach(function (img) {
+    img.addEventListener('click', function () {
+      img.classList.toggle('expanded');
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
