@@ -1565,6 +1565,22 @@ class MLflowTrainingRunner(TrainingRunner):
 
             mlflow.log_params(training_options_to_log)
 
+            dataset_options_to_log = dict(
+                include_mermaid=self.dataset_options.include_mermaid,
+                coralnet_sources_csv=os.path.basename(
+                    self.dataset_options.coralnet_sources_csv or ''),
+                drop_growthforms=self.dataset_options.drop_growthforms,
+                label_rollup_spec_csv=os.path.basename(
+                    self.dataset_options.label_rollup_spec_csv or ''),
+                excluded_labels_csv=os.path.basename(
+                    self.dataset_options.excluded_labels_csv or ''),
+                included_labels_csv=os.path.basename(
+                    self.dataset_options.included_labels_csv or ''),
+                ref_val_ratios=str(self.dataset_options.ref_val_ratios),
+                annotation_limit=self.dataset_options.annotation_limit or '',
+            )
+            mlflow.log_params(dataset_options_to_log)
+
             self.log_system_specs()
 
             # Here's the actual training and data prep.
@@ -1575,6 +1591,7 @@ class MLflowTrainingRunner(TrainingRunner):
             self.log_dataframe(profiles_df, 'profiled_sections')
 
             val_results = ValResults.load(valresult_loc)
+            mlflow.log_dict(val_results.serialize(), 'valresult.json')
 
             clf = load_classifier(model_loc)
 
@@ -1742,19 +1759,19 @@ class MLflowTrainingRunner(TrainingRunner):
                 artifacts.unmapped_labels,
                 'unmapped_labels')
 
-        # Log other options given to the training process.
-        other_options = dict(
-            drop_growthforms=self.dataset_options.drop_growthforms,
-            annotation_limit=self.dataset_options.annotation_limit,
-        )
-        mlflow.log_dict(other_options, 'other_options.yaml')
-
         # Log annotations, if specified.
         if self.mlflow_options.annotations_to_log is not None:
             log_spec = self.mlflow_options.annotations_to_log.lower()
             df = self.dataset.get_annotations(log_spec)
 
             self.log_dataframe(df, f'annotations_{log_spec}')
+
+        # Always log the validation split annotations so others can
+        # independently re-evaluate the model.
+        val_annotations_df = self.dataset.duck_conn.execute(
+            "SELECT * FROM annotations WHERE training_set = 'val'"
+        ).fetch_df()
+        self.log_dataframe(val_annotations_df, 'annotations_val')
 
     def log_dataframe(self, df, filestem):
         """

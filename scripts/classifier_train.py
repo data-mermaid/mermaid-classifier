@@ -21,15 +21,15 @@ if __name__ == "__main__":
     runner = MLflowTrainingRunner(
         dataset_options=DatasetOptions(
             # Specifying False here means you're only training on CoralNet sources.
-            include_mermaid=True,
-            coralnet_sources_csv='../sagemaker/sources/CoralNetSourcesFirst5.csv',
+            include_mermaid=False,
+            coralnet_sources_csv='../sagemaker/sources/OldCoralNetSourcesToKeep.csv',
             # label_rollup_spec_csv='../sagemaker/labels/ba_rollup_top_level.csv',
             excluded_labels_csv='../sagemaker/labels/inspecific-top-level.csv',
             drop_growthforms=False,
             #annotation_limit=200000,
         ),
         mlflow_options=MLflowOptions(
-            experiment_name="Greg Test Exp",
+            experiment_name="pyspacer-beta-test",
             model_name='GregTest',
             # Logs all input annotations to MLflow. Also possible to just log a subset.
             #annotations_to_log='all',
