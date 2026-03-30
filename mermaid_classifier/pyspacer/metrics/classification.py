@@ -1,6 +1,8 @@
 """Classification metrics: confusion matrices, precision/recall/F1,
 balanced accuracy, and Matthews Correlation Coefficient."""
 
+from collections import Counter
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -66,8 +68,6 @@ def _build_confusion_matrix(
         y_true=val_results.gt,
         y_pred=val_results.est,
         labels=range(len(val_results.classes)),
-        # 'true': values between 0 and 1 for each cell.
-        # None: Each cell has a frequency.
         normalize='true' if normalize else None,
     )
 
@@ -84,16 +84,9 @@ def _build_confusion_matrix(
         for class_index in class_order
     ]
 
-    # Confusion matrix as a table.
-
-    # To dataframe, labeling each column with a BA-GF combo.
     df = pd.DataFrame(data=matrix, columns=bagf_names)
-    # Add column to label each row with a BA-GF combo.
     df.insert(loc=0, column='-', value=bagf_names)
 
-    # Confusion matrix as a figure.
-
-    # Create square figure, with size scaled to number of labels
     num_labels = len(bagf_names)
     fig_size = max(12, num_labels * 0.6)
     fig, ax = plt.subplots(figsize=(fig_size, fig_size))
@@ -182,6 +175,7 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
     # Precision, recall, F1: per label
 
     per_label_metrics = []
+    label_counts = Counter(val_results.classes[i] for i in val_results.gt)
 
     for label in val_results.classes:
 
@@ -218,6 +212,7 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
             precision=ctx.format_func(precision),
             recall=ctx.format_func(recall),
             f1_score=ctx.format_func(f1_score),
+            n_samples=int(label_counts.get(label, 0)),
             bagf_id=label,
         ))
 

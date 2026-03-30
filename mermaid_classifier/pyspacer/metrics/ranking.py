@@ -33,7 +33,8 @@ def _compute_topk_mrr(proba, gt_labels, classes, ks=(1, 3, 5, 10)):
     """Compute top-K accuracy and MRR from a probability matrix.
 
     Returns dict with 'topk' (dict k->accuracy), 'mrr' (float),
-    and 'ranks' (1-indexed rank of true class per sample).
+    'ranks' (1-indexed rank of true class per sample), and
+    'sorted_indices' (argsort of -proba, reusable for hierarchical ranking).
     """
     class_to_idx = {c: i for i, c in enumerate(classes)}
     sorted_indices = np.argsort(-proba, axis=1)
@@ -46,7 +47,8 @@ def _compute_topk_mrr(proba, gt_labels, classes, ks=(1, 3, 5, 10)):
 
     topk = {k: float(np.mean(ranks <= k)) for k in ks}
     mrr = float(np.mean(1.0 / ranks))
-    return {'topk': topk, 'mrr': mrr, 'ranks': ranks}
+    return {'topk': topk, 'mrr': mrr, 'ranks': ranks,
+            'sorted_indices': sorted_indices}
 
 
 def compute_ranking(ctx: MetricsContext) -> MetricGroupResult:
@@ -131,7 +133,7 @@ def compute_ranking(ctx: MetricsContext) -> MetricGroupResult:
 
     # Hierarchical top-K with taxonomic similarity.
     ba_paths = ctx.ba_paths or build_ba_paths(classes, ba_library)
-    sorted_indices = np.argsort(-val_proba, axis=1)
+    sorted_indices = ranking['sorted_indices']
     class_ba_ids = [split_ba_gf(c)[0] for c in classes]
     gt_ba_ids = [split_ba_gf(g)[0] for g in val_gt_labels]
 
