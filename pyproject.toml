@@ -13,10 +13,6 @@ dependencies = [
 [tool.hatch.build.targets.wheel]
 packages = ["mermaid_classifier"]
 
-# This allows getting pyspacer from an explicit repo URL.
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [project.optional-dependencies]
 pyspacer = [
     "beautifulsoup4",
@@ -28,11 +24,9 @@ pyspacer = [
     "pandas",
     "psutil",
     "pyarrow",
-    # This branch:
-    # - allows anonymous AWS access
-    # - allows train data to come from multiple buckets
-    # These improvements will be in a stable pyspacer version later.
-    "pyspacer@git+https://github.com/coralnet/pyspacer.git@train-data-source-flexibility",
+    # The core API of pyspacer is still ever-changing, and classifier
+    # compatibility can be tricky too, so specifying version is important.
+    "pyspacer==0.13.0",
     # python-dotenv by itself isn't explicit about what variable
     # names it accepts.
     # python-decouple and pydantic-settings are more explicit.
