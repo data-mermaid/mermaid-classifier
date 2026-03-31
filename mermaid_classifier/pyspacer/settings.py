@@ -5,35 +5,60 @@ import psutil
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def automatic_batch_size() -> int:
+# EfficientNet feature vector dimensionality (4096 floats).
+_FEATURE_DIM = 4096
+# Bytes per float64 element (numpy / sklearn default).
+_BYTES_PER_FLOAT = 8
+_FEATURE_BYTES = _FEATURE_DIM * _BYTES_PER_FLOAT
+
+# Minimum batch size — don't go lower than pyspacer's default.
+_MIN_BATCH_SIZE = 5000
+
+
+def training_batch_size(
+    clf_type: str = 'MLP',
+    num_classes: int = 300,
+) -> tuple[int, float]:
     """
-    Calculate a rough batch size for training, based on the amount of
-    memory on the system.
-    This calculation is based on training test-runs that used pyspacer's
-    EfficientNetExtractor.
+    Calculate batch size based on *currently available* memory.
 
-    This value is the default for SPACER_BATCH_SIZE: the batch size for
-    training partial_fit calls and calibration. Controls memory usage
-    during every training epoch and during calibration score computation.
+    Call after data-prep is complete so that
+    psutil.virtual_memory().available reflects what the OS actually
+    has free — including DuckDB tables, ImageLabels structures, and
+    everything else already allocated.
 
-    Peak memory during training is dominated by one batch of feature
-    vectors + sklearn internal buffers (~60% of batch).
+    Accounts for sklearn copy overhead and MLP activation buffers.
+
+    Returns (batch_size, available_gb) so callers can log the memory
+    snapshot that was actually used in the calculation.
     """
-    total_ram_bytes = psutil.virtual_memory().total
+    available_bytes = psutil.virtual_memory().available
+    available_gb = available_bytes / 1e9
 
-    # Reserve 3GB for OS, Python runtime, DuckDB tables, data prep
-    # intermediates (ImageLabels, train_test_split copies), and heap
-    # fragmentation. 
-    base_overhead_bytes = 3e9
-    rough_available_ram_bytes = max(total_ram_bytes - base_overhead_bytes, 0)
+    # Per-point peak memory during partial_fit:
+    #   1. Feature vector loaded from disk:  4096 × 8 bytes
+    #   2. sklearn copies to C-contiguous float64: 4096 × 8 bytes
+    #   3. MLP forward/backward activation buffers per layer
+    sklearn_copy_bytes = _FEATURE_BYTES  # worst-case full copy
 
-    ref_size = int(rough_available_ram_bytes * (50000 / 3e9))
+    if clf_type == 'MLP':
+        # MLP hidden_layer_sizes is (200, 100) for large datasets or
+        # (100,) for small ones; num_classes is the output layer.
+        # Use the larger architecture as a conservative estimate.
+        activation_units = 200 + 100 + num_classes
+        activation_bytes = activation_units * _BYTES_PER_FLOAT
+    else:
+        # SGDClassifier has negligible internal buffers.
+        activation_bytes = 0
 
-    if ref_size < 5000:
-        # Don't go lower than the pyspacer default.
-        ref_size = 5000
+    bytes_per_point = _FEATURE_BYTES + sklearn_copy_bytes + activation_bytes
 
-    return ref_size
+    # Reserve 20% headroom for heap fragmentation, Python GC peaks, and
+    # any other transient allocations.
+    usable_bytes = available_bytes * 0.80
+
+    batch_size = int(usable_bytes / bytes_per_point)
+    return max(batch_size, _MIN_BATCH_SIZE), available_gb
 
 
 class Settings(BaseSettings):
@@ -79,9 +104,9 @@ class Settings(BaseSettings):
     mlflow_tracking_server: str | None = None
     training_inputs_percent_missing_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
-    # Yes, this is str. After it gets through the settings machinery,
-    # pyspacer will convert to int.
-    spacer_batch_size: str | None = str(automatic_batch_size())
+    # Override for training batch size. If None (default),
+    # training_batch_size() auto-calculates at runtime.
+    spacer_batch_size: str | None = None
     feature_cache_dir: str | None = None
     download_max_workers: int = 50
     mlflow_http_request_max_retries: str | None = None

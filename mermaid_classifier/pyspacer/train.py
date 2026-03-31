@@ -35,6 +35,7 @@ from spacer.task_utils import preprocess_labels, SplitMode
 
 from spacer.tasks import train_classifier as spacer_train_classifier
 
+from mermaid_classifier.pyspacer.settings import training_batch_size
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
 from mermaid_classifier.common.benthic_attributes import (
@@ -1462,8 +1463,21 @@ class TrainingRunner:
             model_loc = DataLocation('memory', key='classifier.pkl')
             valresult_loc = DataLocation('memory', key='valresult.json')
 
-            batch_size = int(settings.spacer_batch_size)
-            logger.info(f"Batch size: {batch_size}")
+            clf_type = 'MLP'
+            num_classes = len(self.dataset.labels.ref.classes_set)
+
+            if settings.spacer_batch_size is not None:
+                batch_size = int(settings.spacer_batch_size)
+                logger.info(
+                    f"Batch size: {batch_size} (from SPACER_BATCH_SIZE)")
+            else:
+                batch_size, available_gb = training_batch_size(
+                    clf_type=clf_type, num_classes=num_classes)
+                logger.info(
+                    f"Batch size: {batch_size}"
+                    f" (auto, based on {available_gb:.1f} GB"
+                    f" available memory, {num_classes} classes,"
+                    f" clf_type={clf_type})")
 
             trainer = MermaidTrainer(
                 batch_size=batch_size,
@@ -1474,7 +1488,7 @@ class TrainingRunner:
                 job_token=f'experiment_run_{run_name}',
                 trainer=trainer,
                 nbr_epochs=self.training_options.epochs,
-                clf_type='MLP',
+                clf_type=clf_type,
                 labels=self.dataset.labels,
                 previous_model_locs=[],
                 model_loc=model_loc,
