@@ -515,8 +515,14 @@ class TrainingDataset:
         self.options = options
         self.artifacts = Artifacts()
         self.profiled_sections = []
-        self._feature_temp_dir = tempfile.TemporaryDirectory(
-            prefix='mermaid_features_')
+        if settings.feature_cache_dir:
+            os.makedirs(settings.feature_cache_dir, exist_ok=True)
+            self._feature_dir = settings.feature_cache_dir
+            self._feature_temp_dir = None
+        else:
+            self._feature_temp_dir = tempfile.TemporaryDirectory(
+                prefix='mermaid_features_')
+            self._feature_dir = self._feature_temp_dir.name
 
 
 
@@ -690,7 +696,8 @@ class TrainingDataset:
 
     def cleanup(self):
         """Clean up temporary feature vector files."""
-        self._feature_temp_dir.cleanup()
+        if self._feature_temp_dir is not None:
+            self._feature_temp_dir.cleanup()
 
     @contextmanager
     def section_profiling(self, section_name: str):
@@ -1004,7 +1011,7 @@ class TrainingDataset:
 
         # First pass: collect annotations and unique S3 keys.
         s3_keys: dict[tuple[str, str], str] = {}
-        tmp_root = self._feature_temp_dir.name
+        tmp_root = self._feature_dir
         # image_data: list of (bucket, key, annotations)
         image_data = []
 
@@ -1699,10 +1706,9 @@ class MLflowTrainingRunner(TrainingRunner):
         mlflow.log_dict(
             dict(
                 total_ram_gb=psutil.virtual_memory().total / 10**9,
-                # We're not specifying our own feature cache dir, which means
-                # it's an OS-created temp dir, so we care about the free space
-                # on the OS partition.
-                free_storage_gb=psutil.disk_usage('/').free / 10**9,
+                free_storage_gb=psutil.disk_usage(
+                    settings.feature_cache_dir or '/'
+                ).free / 10**9,
             ),
             'system_specs.yaml',
         )
