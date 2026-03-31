@@ -1702,12 +1702,24 @@ class MLflowTrainingRunner(TrainingRunner):
         """
         return ''.join([char for char in s if char.isalnum()])
 
+    @staticmethod
+    def _existing_ancestor(path: str) -> str:
+        """Walk up from path until an existing directory is found."""
+        p = path
+        while not os.path.exists(p):
+            parent = os.path.dirname(p)
+            if parent == p:
+                return '/'
+            p = parent
+        return p
+
     def log_system_specs(self):
         mlflow.log_dict(
             dict(
                 total_ram_gb=psutil.virtual_memory().total / 10**9,
                 free_storage_gb=psutil.disk_usage(
-                    settings.feature_cache_dir or '/'
+                    self._existing_ancestor(
+                        settings.feature_cache_dir or '/')
                 ).free / 10**9,
             ),
             'system_specs.yaml',
