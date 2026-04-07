@@ -1594,7 +1594,10 @@ class MLflowTrainingRunner(TrainingRunner):
             if run_id in run_id_to_system_metrics_monitor:
                 run_id_to_system_metrics_monitor[run_id].monitors.append(SwapMonitor())
 
-            training_options_to_log = dict(epochs=self.training_options.epochs)
+            training_options_to_log = dict(
+                epochs=self.training_options.epochs,
+                class_balancing=self.training_options.class_balancing,
+            )
 
             mlflow.log_params(training_options_to_log)
 

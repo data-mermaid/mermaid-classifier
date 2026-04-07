@@ -14,7 +14,7 @@ if credentials:
         os.environ['SPACER_AWS_SESSION_TOKEN'] = creds.token
 
 from mermaid_classifier.pyspacer.train import (
-        DatasetOptions, MLflowOptions, MLflowTrainingRunner)
+        DatasetOptions, MLflowOptions, MLflowTrainingRunner, TrainingOptions)
 
 
 if __name__ == "__main__":
@@ -33,6 +33,10 @@ if __name__ == "__main__":
             model_name='GregTest',
             # Logs all input annotations to MLflow. Also possible to just log a subset.
             #annotations_to_log='all',
+        ),
+        training_options=TrainingOptions(
+            class_balancing=True, 
+            epochs=10
         ),
     )
     runner.run()
