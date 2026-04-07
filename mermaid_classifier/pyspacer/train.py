@@ -473,8 +473,19 @@ class TrainingOptions:
     epochs
 
     Number of pyspacer training epochs to run.
+
+    class_balancing
+
+    If True, apply inverse-frequency class weighting to counteract label
+    imbalance during training. Weights are computed globally from the full
+    training set distribution using sklearn's 'balanced' formula:
+    weight = total / (n_classes * count_per_class).
+    For MLP (PyTorch), this is applied via CrossEntropyLoss(weight=...).
+    For SGD (sklearn), this sets class_weight at init and passes
+    per-sample weights to each partial_fit call.
     """
     epochs: int = 10
+    class_balancing: bool = False
 
 
 @dataclasses.dataclass
@@ -1482,6 +1493,7 @@ class TrainingRunner:
             trainer = MermaidTrainer(
                 batch_size=batch_size,
                 on_epoch_end=self._on_epoch_end,
+                class_balancing=self.training_options.class_balancing,
             )
 
             train_msg = TrainClassifierMsg(
