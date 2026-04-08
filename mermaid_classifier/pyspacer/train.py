@@ -470,22 +470,24 @@ class DatasetOptions:
 @dataclasses.dataclass
 class TrainingOptions:
     """
-    epochs
-
-    Number of pyspacer training epochs to run.
-
-    class_balancing
-
-    If True, apply inverse-frequency class weighting to counteract label
-    imbalance during training. Weights are computed globally from the full
-    training set distribution using sklearn's 'balanced' formula:
-    weight = total / (n_classes * count_per_class).
-    For MLP (PyTorch), this is applied via CrossEntropyLoss(weight=...).
-    For SGD (sklearn), this sets class_weight at init and passes
-    per-sample weights to each partial_fit call.
+    epochs: Number of training epochs.
+    class_balancing: Inverse-frequency class weighting via
+        CrossEntropyLoss(weight=...).
+    device: 'auto' (CUDA if available, else CPU), 'cpu', 'cuda', 'cuda:0', etc.
+    num_workers: DataLoader worker processes (0 = main process).
+    optimizer: 'adam', 'adamw', or 'sgd'.
+    learning_rate: None = auto-select by dataset size (1e-4 for >=50K, else 1e-3).
+    weight_decay: L2 regularization strength.
+    hidden_layer_sizes: None = auto-select by dataset size.
     """
     epochs: int = 10
     class_balancing: bool = False
+    device: str = 'auto'
+    num_workers: int = 0
+    optimizer: str = 'adam'
+    learning_rate: float | None = None
+    weight_decay: float = 1e-4
+    hidden_layer_sizes: tuple[int, ...] | None = None
 
 
 @dataclasses.dataclass
@@ -1494,6 +1496,12 @@ class TrainingRunner:
                 batch_size=batch_size,
                 on_epoch_end=self._on_epoch_end,
                 class_balancing=self.training_options.class_balancing,
+                device=self.training_options.device,
+                num_workers=self.training_options.num_workers,
+                optimizer=self.training_options.optimizer,
+                learning_rate=self.training_options.learning_rate,
+                weight_decay=self.training_options.weight_decay,
+                hidden_layer_sizes=self.training_options.hidden_layer_sizes,
             )
 
             train_msg = TrainClassifierMsg(
@@ -1559,6 +1567,25 @@ class TrainingRunner:
         return round(float(metric), 3)
 
 
+def _flatten_dataclass_for_logging(instance, prefix=''):
+    """Convert a dataclass to a flat dict for mlflow.log_params().
+    Path-like fields (name contains 'csv' or 'path') log as basename only.
+    Tuples become strings, None becomes empty string."""
+    result = {}
+    for field in dataclasses.fields(instance):
+        key = f"{prefix}{field.name}" if prefix else field.name
+        value = getattr(instance, field.name)
+        if value is None:
+            value = ''
+        elif isinstance(value, (tuple, list)):
+            value = str(value)
+        elif isinstance(value, str) and (
+                'csv' in field.name or 'path' in field.name):
+            value = os.path.basename(value) if value else ''
+        result[key] = value
+    return result
+
+
 class MLflowTrainingRunner(TrainingRunner):
 
     def __init__(
@@ -1594,28 +1621,13 @@ class MLflowTrainingRunner(TrainingRunner):
             if run_id in run_id_to_system_metrics_monitor:
                 run_id_to_system_metrics_monitor[run_id].monitors.append(SwapMonitor())
 
-            training_options_to_log = dict(
-                epochs=self.training_options.epochs,
-                class_balancing=self.training_options.class_balancing,
-            )
+            training_params = _flatten_dataclass_for_logging(
+                self.training_options, prefix='training.')
+            mlflow.log_params(training_params)
 
-            mlflow.log_params(training_options_to_log)
-
-            dataset_options_to_log = dict(
-                include_mermaid=self.dataset_options.include_mermaid,
-                coralnet_sources_csv=os.path.basename(
-                    self.dataset_options.coralnet_sources_csv or ''),
-                drop_growthforms=self.dataset_options.drop_growthforms,
-                label_rollup_spec_csv=os.path.basename(
-                    self.dataset_options.label_rollup_spec_csv or ''),
-                excluded_labels_csv=os.path.basename(
-                    self.dataset_options.excluded_labels_csv or ''),
-                included_labels_csv=os.path.basename(
-                    self.dataset_options.included_labels_csv or ''),
-                ref_val_ratios=str(self.dataset_options.ref_val_ratios),
-                annotation_limit=self.dataset_options.annotation_limit or '',
-            )
-            mlflow.log_params(dataset_options_to_log)
+            dataset_params = _flatten_dataclass_for_logging(
+                self.dataset_options, prefix='dataset.')
+            mlflow.log_params(dataset_params)
 
             self.log_system_specs()
 
@@ -1656,7 +1668,7 @@ class MLflowTrainingRunner(TrainingRunner):
 
             # Save and register the trained model.
             signature = mlflow.models.infer_signature(
-                params=training_options_to_log)
+                params=training_params)
             model_info = mlflow.sklearn.log_model(
                 sk_model=clf,
                 registered_model_name=model_name,

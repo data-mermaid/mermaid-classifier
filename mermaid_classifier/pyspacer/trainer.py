@@ -70,6 +70,20 @@ class _MLPModule(nn.Module):
         return self.net(x)
 
 
+OPTIMIZERS = {
+    'adam': torch.optim.Adam,
+    'adamw': torch.optim.AdamW,
+    'sgd': torch.optim.SGD,
+}
+
+
+def resolve_device(device: str) -> torch.device:
+    """Resolve device string: 'auto' picks CUDA if available."""
+    if device == 'auto':
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    return torch.device(device)
+
+
 class TorchMLPClassifier:
     """PyTorch MLP classifier with class_weight support via
     CrossEntropyLoss(weight=...).
@@ -92,10 +106,16 @@ class TorchMLPClassifier:
         hidden_layer_sizes=(100,),
         learning_rate_init=1e-3,
         class_weight=None,
+        optimizer='adam',
+        weight_decay=1e-4,
+        device='cpu',
     ):
         self.hidden_layer_sizes = hidden_layer_sizes
         self.learning_rate_init = learning_rate_init
         self.class_weight = class_weight
+        self.optimizer = optimizer
+        self.weight_decay = weight_decay
+        self.device = resolve_device(device)
 
         self.classes_ = None
         self.loss_curve_ = []
@@ -117,6 +137,9 @@ class TorchMLPClassifier:
             'hidden_layer_sizes': self.hidden_layer_sizes,
             'learning_rate_init': self.learning_rate_init,
             'class_weight': self.class_weight,
+            'optimizer': self.optimizer,
+            'weight_decay': self.weight_decay,
+            'device': str(self.device),
         }
 
     def set_params(self, **params):
@@ -128,6 +151,8 @@ class TorchMLPClassifier:
     def train_step(self, x: torch.Tensor, y: torch.Tensor) -> float:
         """Run one forward/backward/step on pre-indexed tensors.
         Returns the loss scalar."""
+        x = x.to(self.device)
+        y = y.to(self.device)
         self._model.train()
         self._optimizer.zero_grad()
         logits = self._model(x)
@@ -149,12 +174,13 @@ class TorchMLPClassifier:
 
         self._model = _MLPModule(
             input_dim, self.hidden_layer_sizes, n_classes)
+        self._model.to(self.device)
 
-        # Match sklearn MLPClassifier's L2 regularization (alpha=0.0001)
-        self._optimizer = torch.optim.Adam(
+        opt_cls = OPTIMIZERS[self.optimizer]
+        self._optimizer = opt_cls(
             self._model.parameters(),
             lr=self.learning_rate_init,
-            weight_decay=0.0001,
+            weight_decay=self.weight_decay,
         )
 
         self._loss_fn = self._build_loss_fn(n_classes)
@@ -164,27 +190,28 @@ class TorchMLPClassifier:
             weight_tensor = torch.zeros(n_classes, dtype=torch.float32)
             for label, idx in self._label_to_idx.items():
                 weight_tensor[idx] = self.class_weight.get(label, 1.0)
-            return nn.CrossEntropyLoss(weight=weight_tensor)
+            return nn.CrossEntropyLoss(
+                weight=weight_tensor.to(self.device))
         return nn.CrossEntropyLoss()
 
     def predict(self, X):
         x_arr = np.asarray(X, dtype=np.float32)
-        x_tensor = torch.from_numpy(x_arr)
+        x_tensor = torch.from_numpy(x_arr).to(self.device)
 
         self._model.eval()
         with torch.no_grad():
             logits = self._model(x_tensor)
-            indices = logits.argmax(dim=1).numpy()
+            indices = logits.argmax(dim=1).cpu().numpy()
         return self.classes_[indices]
 
     def predict_proba(self, X):
         x_arr = np.asarray(X, dtype=np.float32)
-        x_tensor = torch.from_numpy(x_arr)
+        x_tensor = torch.from_numpy(x_arr).to(self.device)
 
         self._model.eval()
         with torch.no_grad():
             logits = self._model(x_tensor)
-            probs = torch.softmax(logits, dim=1).numpy()
+            probs = torch.softmax(logits, dim=1).cpu().numpy()
         return probs.astype(np.float64)
 
     def __getstate__(self):
@@ -192,15 +219,17 @@ class TorchMLPClassifier:
             'hidden_layer_sizes': self.hidden_layer_sizes,
             'learning_rate_init': self.learning_rate_init,
             'class_weight': self.class_weight,
+            'optimizer': self.optimizer,
+            'weight_decay': self.weight_decay,
             'classes_': self.classes_,
             'loss_curve_': self.loss_curve_,
             '_label_to_idx': self._label_to_idx,
         }
         if self._model is not None:
-            # Convert torch tensors to numpy for pickle protocol=2 compat
+            # Move to CPU before converting to numpy for pickle protocol=2
             model_sd = self._model.state_dict()
             state['model_state'] = {
-                k: v.numpy() for k, v in model_sd.items()}
+                k: v.cpu().numpy() for k, v in model_sd.items()}
 
             opt_sd = self._optimizer.state_dict()
             state['optimizer_state'] = _optimizer_state_to_numpy(opt_sd)
@@ -213,6 +242,11 @@ class TorchMLPClassifier:
         self.hidden_layer_sizes = state['hidden_layer_sizes']
         self.learning_rate_init = state['learning_rate_init']
         self.class_weight = state['class_weight']
+        # Backward compat: older pickles may lack these fields
+        self.optimizer = state.get('optimizer', 'adam')
+        self.weight_decay = state.get('weight_decay', 1e-4)
+        # Always restore on CPU — device is a runtime concern
+        self.device = torch.device('cpu')
         self.classes_ = state['classes_']
         self.loss_curve_ = state['loss_curve_']
         self._label_to_idx = state['_label_to_idx']
@@ -245,13 +279,13 @@ def _optimizer_state_to_numpy(opt_state_dict):
     result = {}
     for key, value in opt_state_dict.items():
         if isinstance(value, torch.Tensor):
-            result[key] = value.numpy()
+            result[key] = value.cpu().numpy()
         elif isinstance(value, dict):
             result[key] = _optimizer_state_to_numpy(value)
         elif isinstance(value, list):
             result[key] = [
                 _optimizer_state_to_numpy(v) if isinstance(v, dict)
-                else v.numpy() if isinstance(v, torch.Tensor)
+                else v.cpu().numpy() if isinstance(v, torch.Tensor)
                 else v
                 for v in value
             ]
@@ -297,10 +331,22 @@ class MermaidTrainer(ClassifierTrainer):
         batch_size: int,
         on_epoch_end: Callable[[dict], None] | None = None,
         class_balancing: bool = False,
+        device: str = 'cpu',
+        num_workers: int = 0,
+        optimizer: str = 'adam',
+        learning_rate: float | None = None,
+        weight_decay: float = 1e-4,
+        hidden_layer_sizes: tuple[int, ...] | None = None,
     ):
         self.batch_size = batch_size
         self.on_epoch_end = on_epoch_end
         self.class_balancing = class_balancing
+        self.device = device
+        self.num_workers = num_workers
+        self.optimizer = optimizer
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.hidden_layer_sizes = hidden_layer_sizes
 
     def __call__(self, labels, nbr_epochs, pc_models, clf_type):
         logger.debug(
@@ -347,14 +393,20 @@ class MermaidTrainer(ClassifierTrainer):
 
         # Initialize classifier and train
         with config.log_entry_and_exit("training using MLP"):
-            if labels.train.label_count >= 50000:
-                hls, lr = (200, 100), 1e-4
-            else:
-                hls, lr = (100,), 1e-3
+            # Larger networks + lower LR for datasets >= 50K labels
+            large_dataset = labels.train.label_count >= 50000
+            hls = self.hidden_layer_sizes or (
+                (200, 100) if large_dataset else (100,))
+            lr = self.learning_rate or (
+                1e-4 if large_dataset else 1e-3)
+
             clf = TorchMLPClassifier(
                 hidden_layer_sizes=hls,
                 learning_rate_init=lr,
-                class_weight=class_weight)
+                class_weight=class_weight,
+                optimizer=self.optimizer,
+                weight_decay=self.weight_decay,
+                device=self.device)
 
             # Materialize training data into a Dataset for DataLoader
             label_to_idx = {
@@ -363,8 +415,11 @@ class MermaidTrainer(ClassifierTrainer):
                 labels.train, label_to_idx, self.batch_size)
             clf.init_model(dataset.X.shape[1], classes_list)
 
+            use_cuda = clf.device.type != 'cpu'
             dataloader = DataLoader(
                 dataset, batch_size=self.batch_size, shuffle=True,
+                num_workers=self.num_workers,
+                pin_memory=use_cuda,
                 generator=torch.Generator().manual_seed(0))
 
             ref_accs = []
@@ -493,5 +548,13 @@ class MermaidTrainer(ClassifierTrainer):
         data['batch_size'] = self.batch_size
         if self.class_balancing:
             data['class_balancing'] = self.class_balancing
+        data['device'] = self.device
+        data['num_workers'] = self.num_workers
+        data['optimizer'] = self.optimizer
+        if self.learning_rate is not None:
+            data['learning_rate'] = self.learning_rate
+        data['weight_decay'] = self.weight_decay
+        if self.hidden_layer_sizes is not None:
+            data['hidden_layer_sizes'] = self.hidden_layer_sizes
         # on_epoch_end is not JSON-serializable; excluded
         return data

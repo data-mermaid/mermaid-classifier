@@ -35,8 +35,14 @@ if __name__ == "__main__":
             #annotations_to_log='all',
         ),
         training_options=TrainingOptions(
-            class_balancing=True, 
-            epochs=10
+            class_balancing=True,
+            epochs=10,
+            device='auto',
+            # num_workers=4,
+            # optimizer='adamw',
+            # learning_rate=1e-4,
+            # weight_decay=1e-4,
+            # hidden_layer_sizes=(200, 100),
         ),
     )
     runner.run()

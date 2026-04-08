@@ -6,6 +6,7 @@ identical results to the standard CalibratedClassifierCV(cv='prefit').fit()
 approach, tests TorchMLPClassifier, and tests FeatureDataset.
 """
 
+import dataclasses
 import pickle
 import unittest
 from collections import Counter
@@ -17,6 +18,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.neural_network import MLPClassifier
 
 from mermaid_classifier.pyspacer.trainer import (
+    OPTIMIZERS,
     FeatureDataset,
     MermaidTrainer,
     TorchMLPClassifier,
@@ -435,3 +437,107 @@ class MermaidTrainerIntegrationTest(unittest.TestCase):
         trainer = MermaidTrainer(batch_size=5000)
         data = trainer.serialize()
         self.assertNotIn('class_balancing', data)
+
+    def test_adamw_optimizer(self):
+        """MermaidTrainer with optimizer='adamw' trains successfully."""
+        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
+        labels = _make_mock_training_labels(
+            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
+
+        trainer = MermaidTrainer(batch_size=75, optimizer='adamw')
+        clf_cal, val_results, ret_msg = trainer(
+            labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
+
+        self.assertIsInstance(clf_cal, CalibratedClassifierCV)
+
+    def test_explicit_lr_and_hidden_layers(self):
+        """Explicit learning_rate and hidden_layer_sizes override heuristic."""
+        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
+        labels = _make_mock_training_labels(
+            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
+
+        trainer = MermaidTrainer(
+            batch_size=75, learning_rate=5e-4,
+            hidden_layer_sizes=(50, 25))
+        clf_cal, _, _ = trainer(
+            labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
+
+        self.assertEqual(
+            clf_cal.estimator.hidden_layer_sizes, (50, 25))
+        self.assertEqual(clf_cal.estimator.learning_rate_init, 5e-4)
+
+
+class TorchMLPClassifierDeviceTest(unittest.TestCase):
+    """Tests for device and optimizer selection in TorchMLPClassifier."""
+
+    def test_explicit_cpu_device(self):
+        clf = TorchMLPClassifier(
+            hidden_layer_sizes=(20,), device='cpu')
+        self.assertEqual(clf.device, torch.device('cpu'))
+
+    def test_optimizer_selection(self):
+        """Each optimizer string maps to the correct torch class."""
+        for name, opt_cls in OPTIMIZERS.items():
+            clf = TorchMLPClassifier(
+                hidden_layer_sizes=(20,), optimizer=name)
+            clf.init_model(10, ['a', 'b'])
+            self.assertIsInstance(clf._optimizer, opt_cls)
+
+    def test_weight_decay_passed_through(self):
+        clf = TorchMLPClassifier(
+            hidden_layer_sizes=(20,), weight_decay=0.01)
+        clf.init_model(10, ['a', 'b'])
+        # Adam stores weight_decay in param_groups
+        self.assertEqual(
+            clf._optimizer.param_groups[0]['weight_decay'], 0.01)
+
+    def test_pickle_roundtrip_preserves_optimizer_type(self):
+        clf = TorchMLPClassifier(
+            hidden_layer_sizes=(20,), optimizer='adamw',
+            weight_decay=0.05)
+        clf.init_model(10, ['a', 'b', 'c'])
+        x_t = torch.randn(5, 10)
+        y_t = torch.tensor([0, 1, 2, 0, 1])
+        clf.train_step(x_t, y_t)
+
+        data = pickle.dumps(clf, protocol=2)
+        clf2 = pickle.loads(data)
+
+        self.assertEqual(clf2.optimizer, 'adamw')
+        self.assertEqual(clf2.weight_decay, 0.05)
+        # Unpickled model restores on CPU
+        self.assertEqual(clf2.device, torch.device('cpu'))
+
+
+class FlattenDataclassTest(unittest.TestCase):
+    """Tests for _flatten_dataclass_for_logging."""
+
+    def test_basic_flattening(self):
+        from mermaid_classifier.pyspacer.train import (
+            _flatten_dataclass_for_logging,
+        )
+
+        @dataclasses.dataclass
+        class Opts:
+            name: str = 'test'
+            count: int = 5
+            path: str = '/some/dir/file.csv'
+            ratio: tuple = (0.1, 0.2)
+            missing: str | None = None
+
+        result = _flatten_dataclass_for_logging(Opts(), prefix='p.')
+        self.assertEqual(result['p.name'], 'test')
+        self.assertEqual(result['p.count'], 5)
+        self.assertEqual(result['p.path'], 'file.csv')  # basename
+        self.assertEqual(result['p.ratio'], '(0.1, 0.2)')  # tuple→str
+        self.assertEqual(result['p.missing'], '')  # None→''
+
+    def test_training_options_all_fields_logged(self):
+        from mermaid_classifier.pyspacer.train import (
+            TrainingOptions, _flatten_dataclass_for_logging,
+        )
+        opts = TrainingOptions(epochs=5, optimizer='adamw')
+        result = _flatten_dataclass_for_logging(opts, prefix='training.')
+        # Every field in TrainingOptions should appear
+        for field in dataclasses.fields(opts):
+            self.assertIn(f'training.{field.name}', result)
