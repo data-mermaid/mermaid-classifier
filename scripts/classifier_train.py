@@ -13,8 +13,9 @@ if credentials:
     if creds.token:
         os.environ['SPACER_AWS_SESSION_TOKEN'] = creds.token
 
-from mermaid_classifier.pyspacer.train import (
-        DatasetOptions, MLflowOptions, MLflowTrainingRunner, TrainingOptions)
+from mermaid_classifier.pyspacer.config import (
+    DatasetOptions, MLflowOptions, TrainingOptions)
+from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
 
 
 if __name__ == "__main__":

@@ -8,8 +8,9 @@ import pandas as pd
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
 from mermaid_classifier.pyspacer.settings import settings
-from mermaid_classifier.pyspacer.train import (
-    Artifacts, CNSourceFilter, Sites, TrainingDataset)
+from mermaid_classifier.pyspacer.config import Artifacts, Sites
+from mermaid_classifier.pyspacer.dataset import TrainingDataset
+from mermaid_classifier.pyspacer.label_specs import CNSourceFilter
 
 
 class SettingsOverride:
@@ -343,7 +344,7 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
             "CREATE TABLE annotations AS SELECT * FROM annotations_df"
         )
         with (
-            self.assertLogs(logger='train', level='WARN') as warn_cm,
+            self.assertLogs(logger='mermaid_classifier.pyspacer.dataset', level='WARN') as warn_cm,
             override_settings(training_inputs_percent_missing_allowed=50),
         ):
             dataset.handle_missing_feature_vectors(s3_paths)
@@ -356,7 +357,7 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
 
         self.assertEqual(
             warn_cm.output[0],
-            "WARNING:train:Skipping 1 feature vector(s) because the files"
+            "WARNING:mermaid_classifier.pyspacer.dataset:Skipping 1 feature vector(s) because the files"
             " aren't in S3. Example(s):"
             "\nmy-bucket/02.fv"
         )
@@ -378,7 +379,7 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
             "CREATE TABLE annotations AS SELECT * FROM annotations_df"
         )
         with (
-            self.assertLogs(logger='train', level='WARN') as warn_cm,
+            self.assertLogs(logger='mermaid_classifier.pyspacer.dataset', level='WARN') as warn_cm,
             override_settings(training_inputs_percent_missing_allowed=90),
         ):
             dataset.handle_missing_feature_vectors(s3_paths)
@@ -392,7 +393,7 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
         # Should list 3 examples out of the 4.
         message = warn_cm.output[0]
         self.assertIn(
-            "WARNING:train:Skipping 4 feature vector(s) because the files"
+            "WARNING:mermaid_classifier.pyspacer.dataset:Skipping 4 feature vector(s) because the files"
             " aren't in S3. Example(s):",
             message,
         )

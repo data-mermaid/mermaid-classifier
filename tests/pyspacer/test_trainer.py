@@ -17,12 +17,12 @@ import torch
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.neural_network import MLPClassifier
 
-from mermaid_classifier.pyspacer.trainer import (
+from mermaid_classifier.pyspacer.torch_classifier import (
     OPTIMIZERS,
     FeatureDataset,
-    MermaidTrainer,
     TorchMLPClassifier,
 )
+from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
 
 def _make_mock_labels(X, y, batch_size):
@@ -549,8 +549,9 @@ class FlattenDataclassTest(unittest.TestCase):
         self.assertEqual(result['p.missing'], '')  # None→''
 
     def test_training_options_all_fields_logged(self):
+        from mermaid_classifier.pyspacer.config import TrainingOptions
         from mermaid_classifier.pyspacer.train import (
-            TrainingOptions, _flatten_dataclass_for_logging,
+            _flatten_dataclass_for_logging,
         )
         opts = TrainingOptions(epochs=5, optimizer='adamw')
         result = _flatten_dataclass_for_logging(opts, prefix='training.')

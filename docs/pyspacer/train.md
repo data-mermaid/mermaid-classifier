@@ -41,8 +41,8 @@ id
 Supposing that the above CSV content is entered into a file located at `sources/sample.csv`, the following code would run training on all MERMAID data plus the data from these three CoralNet sources:
 
 ```python
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions, MLflowTrainingRunner)
+from mermaid_classifier.pyspacer.config import DatasetOptions
+from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
 
 runner = MLflowTrainingRunner(
     dataset_options=DatasetOptions(
@@ -70,8 +70,8 @@ In this example, any annotations labeled as Acropora::Branching will be fed into
 Supposing that the above CSV content is entered into a file located at `labels/coral_rollups.csv`, running training would go like this:
 
 ```python
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions, MLflowTrainingRunner)
+from mermaid_classifier.pyspacer.config import DatasetOptions
+from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
 
 runner = MLflowTrainingRunner(
     dataset_options=DatasetOptions(
@@ -97,8 +97,8 @@ Only the IDs are read in; the names are purely for human readability in this exa
 Supposing that the above CSV content is entered into a file located at `labels/exclusions.csv`, and we want to exclude these BA+GF combos while including all others, running training would go like this:
 
 ```python
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions, MLflowTrainingRunner)
+from mermaid_classifier.pyspacer.config import DatasetOptions
+from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
 
 runner = MLflowTrainingRunner(
     dataset_options=DatasetOptions(
@@ -113,11 +113,12 @@ As a result, if any annotations are found using either of the above BA+GF combos
 
 ## More available parameters
 
-Here are examples demonstrating other available parameters. For more details, browse [train.py](../../mermaid_classifier/pyspacer/train.py) for the `DatasetOptions`, `MLflowOptions`, and `TrainingOptions` classes.
+Here are examples demonstrating other available parameters. For more details, browse [config.py](../../mermaid_classifier/pyspacer/config.py) for the `DatasetOptions`, `MLflowOptions`, and `TrainingOptions` classes.
 
 ```python
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions, MLflowOptions, MLflowTrainingRunner, TrainingOptions)
+from mermaid_classifier.pyspacer.config import (
+    DatasetOptions, MLflowOptions, TrainingOptions)
+from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
 
 runner = MLflowTrainingRunner(
     mlflow_options=MLflowOptions(

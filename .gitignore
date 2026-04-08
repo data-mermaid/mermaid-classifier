@@ -169,3 +169,4 @@ mlflow.db
 # AI
 CLAUDE.md
 .omc/
+.claude/
