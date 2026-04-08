@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
-from sklearn.linear_model import SGDClassifier
+from torch.utils.data import DataLoader, Dataset
 
 from spacer import config
 from spacer.data_classes import ImageLabels, ValResults
@@ -20,6 +20,35 @@ from spacer.train_classifier import ClassifierTrainer
 from spacer.train_utils import calc_acc, evaluate_classifier
 
 logger = getLogger(__name__)
+
+
+class FeatureDataset(Dataset):
+    """PyTorch Dataset that materializes all feature/label pairs from
+    ImageLabels.load_data_in_batches() into tensors for random-access
+    iteration via DataLoader.
+
+    Feature vectors are float32 x D (~16 KB each at D=4096). Even 500K
+    samples is ~8 GB, fitting the same memory budget already allocated
+    by training_batch_size(). Materializing once avoids re-reading from
+    disk every epoch.
+    """
+
+    def __init__(self, labels: ImageLabels, label_to_idx: dict,
+                 batch_size: int):
+        xs, ys = [], []
+        for x_batch, y_batch in labels.load_data_in_batches(
+                batch_size=batch_size):
+            xs.append(torch.tensor(np.array(x_batch), dtype=torch.float32))
+            ys.append(torch.tensor(
+                [label_to_idx[l] for l in y_batch], dtype=torch.long))
+        self.X = torch.cat(xs)
+        self.y = torch.cat(ys)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
 
 
 class _MLPModule(nn.Module):
@@ -42,15 +71,16 @@ class _MLPModule(nn.Module):
 
 
 class TorchMLPClassifier:
-    """Drop-in replacement for sklearn MLPClassifier that adds
-    class_weight support via PyTorch's CrossEntropyLoss(weight=...).
+    """PyTorch MLP classifier with class_weight support via
+    CrossEntropyLoss(weight=...).
 
-    Implements the sklearn estimator interface used by MermaidTrainer:
-    partial_fit, predict, predict_proba, classes_, loss_curve_.
-    Compatible with CalibratedClassifierCV(cv='prefit') and pickle.
+    Training API: init_model() then train_step() per batch.
+    Implements the sklearn estimator interface needed by
+    CalibratedClassifierCV: predict, predict_proba, classes_, fit.
+    Compatible with pickle protocol 2 for pyspacer storage.
 
-    Intentionally omits decision_function to match sklearn
-    MLPClassifier behavior (calibration uses predict_proba).
+    Intentionally omits decision_function so calibration
+    uses predict_proba (matching sklearn MLPClassifier).
     """
 
     # Tell sklearn this is a classifier (required by CalibratedClassifierCV
@@ -77,7 +107,7 @@ class TorchMLPClassifier:
 
     def fit(self, X, y):
         """No-op fit to satisfy sklearn's estimator interface check.
-        Training is done via partial_fit. This method exists so that
+        Training is done via train_step. This method exists so that
         CalibratedClassifierCV recognizes this as a valid estimator."""
         return self
 
@@ -95,31 +125,21 @@ class TorchMLPClassifier:
             setattr(self, key, value)
         return self
 
-    def partial_fit(self, X, y, classes=None):
-        x_arr = np.asarray(X, dtype=np.float32)
-        x_tensor = torch.from_numpy(x_arr)
-
-        if self._model is None:
-            if classes is None:
-                raise ValueError(
-                    "classes must be provided on the first call"
-                    " to partial_fit.")
-            self._init_model(x_arr.shape[1], classes)
-
-        y_indices = np.array(
-            [self._label_to_idx[label] for label in y], dtype=np.int64)
-        y_tensor = torch.from_numpy(y_indices)
-
+    def train_step(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        """Run one forward/backward/step on pre-indexed tensors.
+        Returns the loss scalar."""
         self._model.train()
         self._optimizer.zero_grad()
-        logits = self._model(x_tensor)
-        loss = self._loss_fn(logits, y_tensor)
+        logits = self._model(x)
+        loss = self._loss_fn(logits, y)
         loss.backward()
         self._optimizer.step()
 
-        self.loss_curve_.append(loss.item())
+        loss_val = loss.item()
+        self.loss_curve_.append(loss_val)
+        return loss_val
 
-    def _init_model(self, input_dim, classes):
+    def init_model(self, input_dim, classes):
         torch.manual_seed(0)
 
         self.classes_ = np.array(classes)
@@ -203,8 +223,8 @@ class TorchMLPClassifier:
                 k for k in state['model_state'] if k.endswith('.weight'))
             input_dim = state['model_state'][first_weight_key].shape[1]
 
-            # Rebuild model, optimizer, and loss fn via _init_model
-            self._init_model(input_dim, self.classes_)
+            # Rebuild model, optimizer, and loss fn via init_model
+            self.init_model(input_dim, self.classes_)
 
             # Restore learned weights and optimizer state
             torch_sd = {
@@ -326,48 +346,42 @@ class MermaidTrainer(ClassifierTrainer):
             class_weight = None
 
         # Initialize classifier and train
-        with config.log_entry_and_exit("training using " + clf_type):
-            if clf_type == 'MLP':
-                if labels.train.label_count >= 50000:
-                    hls, lr = (200, 100), 1e-4
-                else:
-                    hls, lr = (100,), 1e-3
-                clf = TorchMLPClassifier(
-                    hidden_layer_sizes=hls,
-                    learning_rate_init=lr,
-                    class_weight=class_weight)
+        with config.log_entry_and_exit("training using MLP"):
+            if labels.train.label_count >= 50000:
+                hls, lr = (200, 100), 1e-4
             else:
-                # class_weight is applied via sample_weight in partial_fit,
-                # not at init — passing both would double-apply weights.
-                clf = SGDClassifier(
-                    loss='log_loss', average=True, random_state=0)
+                hls, lr = (100,), 1e-3
+            clf = TorchMLPClassifier(
+                hidden_layer_sizes=hls,
+                learning_rate_init=lr,
+                class_weight=class_weight)
+
+            # Materialize training data into a Dataset for DataLoader
+            label_to_idx = {
+                label: idx for idx, label in enumerate(classes_list)}
+            dataset = FeatureDataset(
+                labels.train, label_to_idx, self.batch_size)
+            clf.init_model(dataset.X.shape[1], classes_list)
+
+            dataloader = DataLoader(
+                dataset, batch_size=self.batch_size, shuffle=True,
+                generator=torch.Generator().manual_seed(0))
 
             ref_accs = []
             t0 = time.time()
 
             for epoch in range(nbr_epochs):
-                for x, y in labels.train.load_data_in_batches(
-                    batch_size=self.batch_size,
-                    random_seed=epoch,
-                ):
-                    if class_weight is not None and clf_type != 'MLP':
-                        sw = np.array(
-                            [class_weight[label] for label in y])
-                        clf.partial_fit(
-                            x, y, classes=classes_list,
-                            sample_weight=sw)
-                    else:
-                        clf.partial_fit(x, y, classes=classes_list)
+                for x_batch, y_batch in dataloader:
+                    clf.train_step(x_batch, y_batch)
 
                 # Ref accuracy: stream ref features from disk in batches.
                 # Only predictions (tiny) accumulate, not feature arrays.
-                # Training batch data is no longer in memory at this point.
                 ref_accs.append(
                     self._calc_acc_batched(clf, labels.ref))
                 logger.debug(f"Epoch {epoch}, acc: {ref_accs[-1]}")
 
                 if self.on_epoch_end is not None:
-                    loss_curve = getattr(clf, 'loss_curve_', [None])
+                    loss_curve = clf.loss_curve_
                     self.on_epoch_end({
                         "epoch": epoch,
                         "ref_accuracy": ref_accs[-1],
@@ -445,21 +459,12 @@ class MermaidTrainer(ClassifierTrainer):
             x_arr = np.array(x_batch)
             y_arr = np.array(y_batch)
 
-            # Use the same response method sklearn uses internally:
-            # decision_function (preferred) or predict_proba (fallback).
-            # See CalibratedClassifierCV.fit() which calls
-            # _get_response_values with ["decision_function", "predict_proba"].
-            if hasattr(clf, 'decision_function'):
-                preds = clf.decision_function(x_arr)
-            else:
-                preds = clf.predict_proba(x_arr)
-            if preds.ndim == 1:
-                preds = preds.reshape(-1, 1)
+            preds = clf.predict_proba(x_arr)
 
             all_preds.append(preds)
             all_y.append(y_arr)
 
-        predictions = np.vstack(all_preds)  # (N, K) or (N, 1)
+        predictions = np.vstack(all_preds)  # (N, K)
         y = np.concatenate(all_y)           # (N,)
 
         # _fit_calibrator is a private sklearn API used here for memory

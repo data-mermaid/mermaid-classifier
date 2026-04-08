@@ -3,7 +3,7 @@ Tests for mermaid_classifier.pyspacer.trainer.
 
 Verifies that MermaidTrainer._calibrate_in_batches() produces mathematically
 identical results to the standard CalibratedClassifierCV(cv='prefit').fit()
-approach, and tests TorchMLPClassifier as a drop-in replacement.
+approach, tests TorchMLPClassifier, and tests FeatureDataset.
 """
 
 import pickle
@@ -12,11 +12,12 @@ from collections import Counter
 from unittest import mock
 
 import numpy as np
+import torch
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import SGDClassifier
 from sklearn.neural_network import MLPClassifier
 
 from mermaid_classifier.pyspacer.trainer import (
+    FeatureDataset,
     MermaidTrainer,
     TorchMLPClassifier,
 )
@@ -45,7 +46,7 @@ class CalibrateInBatchesTest(unittest.TestCase):
     calibration to CalibratedClassifierCV(cv='prefit').fit().
     """
 
-    def _train_and_calibrate_both_ways(self, clf_type, n_classes):
+    def _train_and_calibrate_both_ways(self, n_classes):
         """
         Helper: create synthetic data, train a classifier, calibrate
         with both the old (standard) and new (batched) approaches,
@@ -62,13 +63,9 @@ class CalibrateInBatchesTest(unittest.TestCase):
         X_train, X_ref = X[:split], X[split:]
         y_train, y_ref = y[:split], y[split:]
 
-        # Train base classifier using partial_fit (same as production)
-        if clf_type == 'MLP':
-            clf = MLPClassifier(
-                hidden_layer_sizes=(20,), learning_rate_init=1e-3)
-        else:
-            clf = SGDClassifier(
-                loss='log_loss', average=True, random_state=0)
+        # Train base classifier using sklearn MLPClassifier
+        clf = MLPClassifier(
+            hidden_layer_sizes=(20,), learning_rate_init=1e-3)
         clf.partial_fit(X_train, y_train, classes=classes)
 
         # Standard calibration (current approach)
@@ -82,19 +79,9 @@ class CalibrateInBatchesTest(unittest.TestCase):
 
         return clf_standard, clf_batched, X_ref
 
-    def test_sgd_multiclass_calibration_equivalence(self):
-        """SGDClassifier with 5 classes: batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('SGD', 5)
-        self._assert_calibration_equivalent(std, batched, X)
-
     def test_mlp_multiclass_calibration_equivalence(self):
         """MLPClassifier with 5 classes: batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('MLP', 5)
-        self._assert_calibration_equivalent(std, batched, X)
-
-    def test_sgd_binary_calibration_equivalence(self):
-        """SGDClassifier with 2 classes (binary edge case): batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('SGD', 2)
+        std, batched, X = self._train_and_calibrate_both_ways(5)
         self._assert_calibration_equivalent(std, batched, X)
 
     def _assert_calibration_equivalent(self, clf_std, clf_batched, X_test):
@@ -151,10 +138,12 @@ class CalibrateInBatchesTest(unittest.TestCase):
 
         clf = TorchMLPClassifier(
             hidden_layer_sizes=(20,), learning_rate_init=1e-3)
-        clf.partial_fit(
-            [X_train[i] for i in range(len(X_train))],
-            y_train.tolist(),
-            classes=classes)
+        clf.init_model(X_train.shape[1], classes)
+        label_to_idx = {label: idx for idx, label in enumerate(classes)}
+        x_t = torch.tensor(X_train, dtype=torch.float32)
+        y_t = torch.tensor(
+            [label_to_idx[l] for l in y_train], dtype=torch.long)
+        clf.train_step(x_t, y_t)
 
         # Standard calibration
         clf_standard = CalibratedClassifierCV(clf, cv="prefit")
@@ -168,8 +157,35 @@ class CalibrateInBatchesTest(unittest.TestCase):
         self._assert_calibration_equivalent(clf_standard, clf_batched, X_ref)
 
 
+class FeatureDatasetTest(unittest.TestCase):
+    """Tests for FeatureDataset."""
+
+    def test_shapes_and_indexing(self):
+        """Verify tensor shapes and label indexing from mock data."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 20).astype(np.float32)
+        classes = ['a', 'b', 'c']
+        y = rng.choice(classes, size=100).tolist()
+        label_to_idx = {label: idx for idx, label in enumerate(classes)}
+
+        mock_labels = _make_mock_labels(X, y, batch_size=30)
+        dataset = FeatureDataset(mock_labels, label_to_idx, batch_size=30)
+
+        self.assertEqual(len(dataset), 100)
+        self.assertEqual(dataset.X.shape, (100, 20))
+        self.assertEqual(dataset.y.shape, (100,))
+        self.assertEqual(dataset.X.dtype, torch.float32)
+        self.assertEqual(dataset.y.dtype, torch.long)
+
+        # Verify label mapping is correct
+        for i in range(100):
+            x_i, y_i = dataset[i]
+            self.assertEqual(x_i.shape, (20,))
+            self.assertEqual(y_i.item(), label_to_idx[y[i]])
+
+
 class TorchMLPClassifierTest(unittest.TestCase):
-    """Tests for TorchMLPClassifier drop-in replacement."""
+    """Tests for TorchMLPClassifier."""
 
     def _make_data(self, n_samples=200, n_features=20, n_classes=5):
         rng = np.random.RandomState(42)
@@ -178,13 +194,20 @@ class TorchMLPClassifierTest(unittest.TestCase):
         y = rng.choice(classes, size=n_samples).tolist()
         return X, y, classes
 
-    def test_partial_fit_sets_classes(self):
+    def _make_tensors(self, X, y, classes):
+        """Convert numpy data to tensors suitable for train_step."""
+        label_to_idx = {label: idx for idx, label in enumerate(classes)}
+        x_tensor = torch.tensor(X, dtype=torch.float32)
+        y_tensor = torch.tensor(
+            [label_to_idx[l] for l in y], dtype=torch.long)
+        return x_tensor, y_tensor
+
+    def test_init_model_sets_classes(self):
         X, y, classes = self._make_data()
         clf = TorchMLPClassifier(hidden_layer_sizes=(20,))
         self.assertIsNone(clf.classes_)
 
-        clf.partial_fit(
-            [X[i] for i in range(len(X))], y, classes=classes)
+        clf.init_model(X.shape[1], classes)
         self.assertIsNotNone(clf.classes_)
         self.assertEqual(len(clf.classes_), 5)
         self.assertEqual(set(clf.classes_), set(classes))
@@ -192,18 +215,22 @@ class TorchMLPClassifierTest(unittest.TestCase):
     def test_predict_returns_valid_labels(self):
         X, y, classes = self._make_data()
         clf = TorchMLPClassifier(hidden_layer_sizes=(20,))
-        clf.partial_fit([X[i] for i in range(len(X))], y, classes=classes)
+        clf.init_model(X.shape[1], classes)
+        x_t, y_t = self._make_tensors(X, y, classes)
+        clf.train_step(x_t, y_t)
 
-        preds = clf.predict([X[i] for i in range(10)])
+        preds = clf.predict(X[:10])
         for p in preds:
             self.assertIn(p, classes)
 
     def test_predict_proba_shape_and_sum(self):
         X, y, classes = self._make_data()
         clf = TorchMLPClassifier(hidden_layer_sizes=(20,))
-        clf.partial_fit([X[i] for i in range(len(X))], y, classes=classes)
+        clf.init_model(X.shape[1], classes)
+        x_t, y_t = self._make_tensors(X, y, classes)
+        clf.train_step(x_t, y_t)
 
-        probs = clf.predict_proba([X[i] for i in range(10)])
+        probs = clf.predict_proba(X[:10])
         self.assertEqual(probs.shape, (10, 5))
         np.testing.assert_allclose(
             probs.sum(axis=1), np.ones(10), atol=1e-6)
@@ -212,26 +239,30 @@ class TorchMLPClassifierTest(unittest.TestCase):
     def test_loss_curve_populated(self):
         X, y, classes = self._make_data()
         clf = TorchMLPClassifier(hidden_layer_sizes=(20,))
+        clf.init_model(X.shape[1], classes)
         self.assertEqual(len(clf.loss_curve_), 0)
 
-        clf.partial_fit([X[i] for i in range(100)], y[:100], classes=classes)
+        x_t, y_t = self._make_tensors(X, y, classes)
+        clf.train_step(x_t[:100], y_t[:100])
         self.assertEqual(len(clf.loss_curve_), 1)
 
-        clf.partial_fit([X[i] for i in range(100, 200)], y[100:])
+        clf.train_step(x_t[100:], y_t[100:])
         self.assertEqual(len(clf.loss_curve_), 2)
 
     def test_pickle_roundtrip(self):
         X, y, classes = self._make_data()
         clf = TorchMLPClassifier(hidden_layer_sizes=(20,))
-        clf.partial_fit([X[i] for i in range(len(X))], y, classes=classes)
+        clf.init_model(X.shape[1], classes)
+        x_t, y_t = self._make_tensors(X, y, classes)
+        clf.train_step(x_t, y_t)
 
-        preds_before = clf.predict([X[i] for i in range(10)])
+        preds_before = clf.predict(X[:10])
 
         # Round-trip through pickle protocol=2 (matching PySpacer)
         data = pickle.dumps(clf, protocol=2)
         clf2 = pickle.loads(data)
 
-        preds_after = clf2.predict([X[i] for i in range(10)])
+        preds_after = clf2.predict(X[:10])
         np.testing.assert_array_equal(preds_before, preds_after)
         self.assertEqual(len(clf2.loss_curve_), len(clf.loss_curve_))
         np.testing.assert_array_equal(clf2.classes_, clf.classes_)
@@ -239,8 +270,9 @@ class TorchMLPClassifierTest(unittest.TestCase):
     def test_calibration_compatibility(self):
         X, y, classes = self._make_data(n_samples=300)
         clf = TorchMLPClassifier(hidden_layer_sizes=(20,))
-        clf.partial_fit(
-            [X[i] for i in range(200)], y[:200], classes=classes)
+        clf.init_model(X.shape[1], classes)
+        x_t, y_t = self._make_tensors(X[:200], y[:200], classes)
+        clf.train_step(x_t, y_t)
 
         # Wrap in CalibratedClassifierCV — the production path
         cal_clf = CalibratedClassifierCV(clf, cv='prefit')
@@ -279,14 +311,21 @@ class TorchMLPClassifierTest(unittest.TestCase):
         clf_unweighted = TorchMLPClassifier(
             hidden_layer_sizes=(20,), learning_rate_init=1e-3)
 
-        x_list = [X[i] for i in range(len(X))]
+        clf_weighted.init_model(n_features, classes)
+        clf_unweighted.init_model(n_features, classes)
+
+        label_to_idx = {label: idx for idx, label in enumerate(classes)}
+        x_t = torch.tensor(X, dtype=torch.float32)
+        y_t = torch.tensor(
+            [label_to_idx[l] for l in y], dtype=torch.long)
+
         for _ in range(5):
-            clf_weighted.partial_fit(x_list, y, classes=classes)
-            clf_unweighted.partial_fit(x_list, y, classes=classes)
+            clf_weighted.train_step(x_t, y_t)
+            clf_unweighted.train_step(x_t, y_t)
 
         # Evaluate on minority class 'b' samples
         b_indices = [i for i, label in enumerate(y) if label == 'b']
-        b_X = [X[i] for i in b_indices]
+        b_X = X[b_indices]
 
         preds_w = clf_weighted.predict(b_X)
         preds_u = clf_unweighted.predict(b_X)
@@ -309,9 +348,10 @@ class TorchMLPClassifierTest(unittest.TestCase):
 
         clf = TorchMLPClassifier(
             hidden_layer_sizes=(20,), class_weight=weights)
-        # Should not raise
-        clf.partial_fit([X[i] for i in range(len(X))], y, classes=classes)
-        preds = clf.predict([X[i] for i in range(10)])
+        clf.init_model(X.shape[1], classes)
+        x_t, y_t = self._make_tensors(X, y, classes)
+        clf.train_step(x_t, y_t)
+        preds = clf.predict(X[:10])
         self.assertEqual(len(preds), 10)
 
 
@@ -384,46 +424,6 @@ class MermaidTrainerIntegrationTest(unittest.TestCase):
 
         self.assertIsInstance(clf_cal, CalibratedClassifierCV)
         self.assertIsInstance(clf_cal.estimator, TorchMLPClassifier)
-        self.assertIsNone(clf_cal.estimator.class_weight)
-
-    def test_sgd_with_class_balancing(self):
-        """MermaidTrainer with class_balancing=True uses sample_weight for SGD."""
-        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
-        labels = _make_mock_training_labels(
-            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
-
-        # Train with and without balancing and verify they differ
-        trainer_bal = MermaidTrainer(batch_size=75, class_balancing=True)
-        clf_bal, _, _ = trainer_bal(
-            labels, nbr_epochs=2, pc_models=[], clf_type='LR')
-
-        labels2 = _make_mock_training_labels(
-            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
-        trainer_unbal = MermaidTrainer(batch_size=75, class_balancing=False)
-        clf_unbal, _, _ = trainer_unbal(
-            labels2, nbr_epochs=2, pc_models=[], clf_type='LR')
-
-        self.assertIsInstance(clf_bal, CalibratedClassifierCV)
-        # SGD class_weight is None (weights applied via sample_weight)
-        self.assertIsNone(clf_bal.estimator.class_weight)
-        # But the models should differ due to sample_weight
-        coef_bal = clf_bal.estimator.coef_
-        coef_unbal = clf_unbal.estimator.coef_
-        self.assertFalse(
-            np.allclose(coef_bal, coef_unbal),
-            "Balanced and unbalanced SGD should produce different weights")
-
-    def test_sgd_without_class_balancing(self):
-        """MermaidTrainer default SGD has no class_weight."""
-        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
-        labels = _make_mock_training_labels(
-            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
-
-        trainer = MermaidTrainer(batch_size=75)
-        clf_cal, val_results, ret_msg = trainer(
-            labels, nbr_epochs=1, pc_models=[], clf_type='LR')
-
-        self.assertIsInstance(clf_cal, CalibratedClassifierCV)
         self.assertIsNone(clf_cal.estimator.class_weight)
 
     def test_serialize_with_class_balancing(self):
