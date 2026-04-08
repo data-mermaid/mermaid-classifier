@@ -44,6 +44,12 @@ def _prefetch_to_cache(labels, cache_dir, max_workers=50):
     if not to_fetch:
         return
 
+    # Pre-create cache directories to avoid a race condition in
+    # pyspacer's FileSystemStorage.store (os.makedirs without exist_ok).
+    dirs = {Path(cache_dir, loc.key).parent for loc in to_fetch}
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
     logger.info(
         f"Prefetching {len(to_fetch)} feature vectors"
         f" ({len(all_locs) - len(to_fetch)} already cached)"
