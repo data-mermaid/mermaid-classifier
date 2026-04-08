@@ -76,7 +76,7 @@ class CalibrateInBatchesTest(unittest.TestCase):
 
         # Batched calibration (new approach) via mock ImageLabels
         mock_labels = _make_mock_labels(X_ref, y_ref, batch_size=100)
-        trainer = MermaidTrainer(batch_size=100)
+        trainer = MermaidTrainer(io_batch_size=100)
         clf_batched = trainer._calibrate_in_batches(clf, mock_labels)
 
         return clf_standard, clf_batched, X_ref
@@ -153,7 +153,7 @@ class CalibrateInBatchesTest(unittest.TestCase):
 
         # Batched calibration
         mock_labels = _make_mock_labels(X_ref, y_ref, batch_size=100)
-        trainer = MermaidTrainer(batch_size=100)
+        trainer = MermaidTrainer(io_batch_size=100)
         clf_batched = trainer._calibrate_in_batches(clf, mock_labels)
 
         self._assert_calibration_equivalent(clf_standard, clf_batched, X_ref)
@@ -171,7 +171,7 @@ class FeatureDatasetTest(unittest.TestCase):
         label_to_idx = {label: idx for idx, label in enumerate(classes)}
 
         mock_labels = _make_mock_labels(X, y, batch_size=30)
-        dataset = FeatureDataset(mock_labels, label_to_idx, batch_size=30)
+        dataset = FeatureDataset(mock_labels, label_to_idx, io_batch_size=30)
 
         self.assertEqual(len(dataset), 100)
         self.assertEqual(dataset.X.shape, (100, 20))
@@ -406,7 +406,7 @@ class MermaidTrainerIntegrationTest(unittest.TestCase):
         labels = _make_mock_training_labels(
             X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
 
-        trainer = MermaidTrainer(batch_size=75, class_balancing=True)
+        trainer = MermaidTrainer(io_batch_size=75, class_balancing=True)
         clf_cal, val_results, ret_msg = trainer(
             labels, nbr_epochs=2, pc_models=[], clf_type='MLP')
 
@@ -420,7 +420,7 @@ class MermaidTrainerIntegrationTest(unittest.TestCase):
         labels = _make_mock_training_labels(
             X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
 
-        trainer = MermaidTrainer(batch_size=75)
+        trainer = MermaidTrainer(io_batch_size=75)
         clf_cal, val_results, ret_msg = trainer(
             labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
 
@@ -429,12 +429,12 @@ class MermaidTrainerIntegrationTest(unittest.TestCase):
         self.assertIsNone(clf_cal.estimator.class_weight)
 
     def test_serialize_with_class_balancing(self):
-        trainer = MermaidTrainer(batch_size=5000, class_balancing=True)
+        trainer = MermaidTrainer(io_batch_size=5000, class_balancing=True)
         data = trainer.serialize()
         self.assertTrue(data['class_balancing'])
 
     def test_serialize_without_class_balancing(self):
-        trainer = MermaidTrainer(batch_size=5000)
+        trainer = MermaidTrainer(io_batch_size=5000)
         data = trainer.serialize()
         self.assertNotIn('class_balancing', data)
 
@@ -444,7 +444,7 @@ class MermaidTrainerIntegrationTest(unittest.TestCase):
         labels = _make_mock_training_labels(
             X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
 
-        trainer = MermaidTrainer(batch_size=75, optimizer='adamw')
+        trainer = MermaidTrainer(io_batch_size=75, optimizer='adamw')
         clf_cal, val_results, ret_msg = trainer(
             labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
 
@@ -457,7 +457,7 @@ class MermaidTrainerIntegrationTest(unittest.TestCase):
             X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
 
         trainer = MermaidTrainer(
-            batch_size=75, learning_rate=5e-4,
+            io_batch_size=75, learning_rate=5e-4,
             hidden_layer_sizes=(50, 25))
         clf_cal, _, _ = trainer(
             labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
@@ -465,6 +465,22 @@ class MermaidTrainerIntegrationTest(unittest.TestCase):
         self.assertEqual(
             clf_cal.estimator.hidden_layer_sizes, (50, 25))
         self.assertEqual(clf_cal.estimator.learning_rate_init, 5e-4)
+
+    def test_minibatch_size_controls_dataloader(self):
+        """minibatch_size controls gradient update size, not IO batch."""
+        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
+        labels = _make_mock_training_labels(
+            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
+
+        # io_batch_size=75 for disk streaming, minibatch_size=25 for training
+        trainer = MermaidTrainer(
+            io_batch_size=75, minibatch_size=25)
+        clf_cal, _, ret_msg = trainer(
+            labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
+
+        # With 150 training samples and minibatch_size=25,
+        # expect 6 gradient steps per epoch (150/25)
+        self.assertEqual(len(clf_cal.estimator.loss_curve_), 6)
 
 
 class TorchMLPClassifierDeviceTest(unittest.TestCase):

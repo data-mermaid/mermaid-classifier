@@ -38,6 +38,7 @@ if __name__ == "__main__":
             class_balancing=True,
             epochs=10,
             device='auto',
+            # minibatch_size=512,
             # num_workers=4,
             # optimizer='adamw',
             # learning_rate=1e-4,

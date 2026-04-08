@@ -488,6 +488,7 @@ class TrainingOptions:
     learning_rate: float | None = None
     weight_decay: float = 1e-4
     hidden_layer_sizes: tuple[int, ...] | None = None
+    minibatch_size: int = 512
 
 
 @dataclasses.dataclass
@@ -1480,20 +1481,22 @@ class TrainingRunner:
             num_classes = len(self.dataset.labels.ref.classes_set)
 
             if settings.spacer_batch_size is not None:
-                batch_size = int(settings.spacer_batch_size)
+                io_batch_size = int(settings.spacer_batch_size)
                 logger.info(
-                    f"Batch size: {batch_size} (from SPACER_BATCH_SIZE)")
+                    f"IO batch size: {io_batch_size}"
+                    f" (from SPACER_BATCH_SIZE)")
             else:
-                batch_size, available_gb = training_batch_size(
+                io_batch_size, available_gb = training_batch_size(
                     clf_type=clf_type, num_classes=num_classes)
                 logger.info(
-                    f"Batch size: {batch_size}"
+                    f"IO batch size: {io_batch_size}"
                     f" (auto, based on {available_gb:.1f} GB"
                     f" available memory, {num_classes} classes,"
                     f" clf_type={clf_type})")
 
             trainer = MermaidTrainer(
-                batch_size=batch_size,
+                io_batch_size=io_batch_size,
+                minibatch_size=self.training_options.minibatch_size,
                 on_epoch_end=self._on_epoch_end,
                 class_balancing=self.training_options.class_balancing,
                 device=self.training_options.device,
