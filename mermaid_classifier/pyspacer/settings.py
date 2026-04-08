@@ -7,16 +7,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # EfficientNet feature vector dimensionality (4096 floats).
 _FEATURE_DIM = 4096
-# Bytes per float64 element (numpy / sklearn default).
-_BYTES_PER_FLOAT = 8
+# Bytes per float32 element (PyTorch default for feature tensors).
+_BYTES_PER_FLOAT = 4
 _FEATURE_BYTES = _FEATURE_DIM * _BYTES_PER_FLOAT
+# Bytes per int64 label element (PyTorch long tensor).
+_LABEL_BYTES = 8
 
 # Minimum batch size — don't go lower than pyspacer's default.
 _MIN_BATCH_SIZE = 5000
 
 
 def training_batch_size(
-    clf_type: str = 'MLP',
     num_classes: int = 300,
 ) -> tuple[int, float]:
     """
@@ -27,7 +28,10 @@ def training_batch_size(
     has free — including DuckDB tables, ImageLabels structures, and
     everything else already allocated.
 
-    Accounts for sklearn copy overhead and MLP activation buffers.
+    The IO batch determines how many samples are materialized into
+    FeatureDataset (float32 feature tensors + int64 label tensors).
+    Autograd activation memory scales with minibatch_size, not the
+    IO batch, so it is not included here.
 
     Returns (batch_size, available_gb) so callers can log the memory
     snapshot that was actually used in the calculation.
@@ -35,23 +39,10 @@ def training_batch_size(
     available_bytes = psutil.virtual_memory().available
     available_gb = available_bytes / 1e9
 
-    # Per-point peak memory during partial_fit:
-    #   1. Feature vector loaded from disk:  4096 × 8 bytes
-    #   2. sklearn copies to C-contiguous float64: 4096 × 8 bytes
-    #   3. MLP forward/backward activation buffers per layer
-    sklearn_copy_bytes = _FEATURE_BYTES  # worst-case full copy
-
-    if clf_type == 'MLP':
-        # MLP hidden_layer_sizes is (200, 100) for large datasets or
-        # (100,) for small ones; num_classes is the output layer.
-        # Use the larger architecture as a conservative estimate.
-        activation_units = 200 + 100 + num_classes
-        activation_bytes = activation_units * _BYTES_PER_FLOAT
-    else:
-        # SGDClassifier has negligible internal buffers.
-        activation_bytes = 0
-
-    bytes_per_point = _FEATURE_BYTES + sklearn_copy_bytes + activation_bytes
+    # Per-sample memory in FeatureDataset:
+    #   1. Feature tensor (float32): 4096 × 4 bytes
+    #   2. Label tensor (int64):     1 × 8 bytes
+    bytes_per_point = _FEATURE_BYTES + _LABEL_BYTES
 
     # Reserve 20% headroom for heap fragmentation, Python GC peaks, and
     # any other transient allocations.

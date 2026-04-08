@@ -15,7 +15,7 @@ Both sources are loaded into a shared DuckDB `annotations` table using SQL (not 
 
 **Memory-efficient streaming in trainer**: `MermaidTrainer` in `trainer.py` uses a streaming design -- reference accuracy and calibration both load features in batches from disk, accumulating only scalar predictions. Reference and training data are never held in memory simultaneously. This prevents OOM on large datasets.
 
-**Automatic batch size**: `training_batch_size()` in `settings.py` computes batch size from currently available memory at training time, after data-prep is complete. It accounts for EfficientNet feature vectors, sklearn copy overhead, and MLP activation buffers, with 20% headroom. Override via `SPACER_BATCH_SIZE` env var or `.env`.
+**Automatic batch size**: `training_batch_size()` in `settings.py` computes batch size from currently available memory at training time, after data-prep is complete. It accounts for the float32 feature tensors and int64 label tensors materialized in `FeatureDataset`, with 20% headroom. Override via `SPACER_BATCH_SIZE` env var or `.env`.
 
 **Settings case convention**: Setting names are lowercase in Python code but UPPERCASE in `.env` files. The `.env` file is loaded from the current working directory (via pydantic-settings), not from the package location. This is intentional for installed-package usage.
 
