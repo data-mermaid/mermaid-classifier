@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from mermaid_classifier.pyspacer.metrics._context import MetricsContext
 from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
-from metrics_test_helpers import MockBALibrary, MockGFLibrary, make_val_results, format_metric
+from pyspacer.metrics_test_helpers import MockBALibrary, MockGFLibrary, make_val_results, format_metric
 
 
 def _make_ctx(gt_indices, est_indices, classes, gf_library=None):

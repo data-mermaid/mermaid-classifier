@@ -242,6 +242,7 @@ class TestBuildTemplateContext(unittest.TestCase):
             'run_id': 'abc123',
             'run_name': 'test',
             'experiment_name': 'exp1',
+            'params': {},
         }
         metrics = {'executive': [('Accuracy', 0.85)], 'topk': None,
                    'cover': None, 'taxonomic': None}
@@ -261,7 +262,7 @@ class TestBuildTemplateContext(unittest.TestCase):
 
     def test_custom_title(self):
         metadata = {'run_id': 'x', 'run_name': 'y',
-                    'experiment_name': 'z'}
+                    'experiment_name': 'z', 'params': {}}
         metrics = {'executive': None, 'topk': None,
                    'cover': None, 'taxonomic': None}
         artifacts = {'sections': {}, 'root_eval': {}, 'training': {},
@@ -312,8 +313,8 @@ class TestRenderReport(unittest.TestCase):
             self.assertTrue(output_path.exists())
             html = output_path.read_text()
             self.assertIn('<!DOCTYPE html>', html)
-            self.assertIn('Test Report', html)
-            self.assertIn('0.8500', html)  # F1 macro formatted
+            self.assertIn('Classifier Report', html)
+            self.assertIn('85.0%', html)  # accuracy formatted
             self.assertIn('abc123def456', html)
 
     def test_conditional_sections_absent(self):
