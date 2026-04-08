@@ -75,7 +75,6 @@ class MermaidTrainer(ClassifierTrainer):
         on_epoch_end: Callable[[dict], None] | None = None,
         class_balancing: bool = False,
         device: str = 'cpu',
-        num_workers: int = 0,
         optimizer: str = 'adam',
         learning_rate: float | None = None,
         weight_decay: float = 1e-4,
@@ -88,7 +87,6 @@ class MermaidTrainer(ClassifierTrainer):
         self.on_epoch_end = on_epoch_end
         self.class_balancing = class_balancing
         self.device = device
-        self.num_workers = num_workers
         self.optimizer = optimizer
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
@@ -176,7 +174,7 @@ class MermaidTrainer(ClassifierTrainer):
             use_cuda = clf.device.type != 'cpu'
             dataloader = DataLoader(
                 dataset, batch_size=self.minibatch_size, shuffle=True,
-                num_workers=self.num_workers,
+                num_workers=0,
                 pin_memory=use_cuda,
                 generator=torch.Generator().manual_seed(0))
 
@@ -311,7 +309,6 @@ class MermaidTrainer(ClassifierTrainer):
         if self.class_balancing:
             data['class_balancing'] = self.class_balancing
         data['device'] = self.device
-        data['num_workers'] = self.num_workers
         data['optimizer'] = self.optimizer
         if self.learning_rate is not None:
             data['learning_rate'] = self.learning_rate

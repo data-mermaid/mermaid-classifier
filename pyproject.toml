@@ -10,6 +10,7 @@ dependencies = [
     "boto3",
     "jinja2",
     "jupyterlab>=4.5.5",
+    "pynvml>=13.0.1",
 ]
 
 [tool.hatch.build.targets.wheel]

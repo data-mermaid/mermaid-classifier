@@ -40,7 +40,6 @@ if __name__ == "__main__":
             epochs=10,
             device='auto',
             # minibatch_size=512,
-            # num_workers=4,
             # optimizer='adamw',
             # learning_rate=1e-4,
             # weight_decay=1e-4,

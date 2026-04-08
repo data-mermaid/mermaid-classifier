@@ -120,7 +120,6 @@ class TrainingRunner:
                 on_epoch_end=self._on_epoch_end,
                 class_balancing=self.training_options.class_balancing,
                 device=self.training_options.device,
-                num_workers=self.training_options.num_workers,
                 optimizer=self.training_options.optimizer,
                 learning_rate=self.training_options.learning_rate,
                 weight_decay=self.training_options.weight_decay,

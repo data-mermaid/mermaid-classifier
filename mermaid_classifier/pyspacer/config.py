@@ -122,7 +122,6 @@ class TrainingOptions:
     class_balancing: Inverse-frequency class weighting via
         CrossEntropyLoss(weight=...).
     device: 'auto' (CUDA if available, else CPU), 'cpu', 'cuda', 'cuda:0', etc.
-    num_workers: DataLoader worker processes (0 = main process).
     optimizer: 'adam', 'adamw', or 'sgd'.
     learning_rate: None = auto-select by dataset size (1e-4 for >=50K, else 1e-3).
     weight_decay: L2 regularization strength.
@@ -131,7 +130,6 @@ class TrainingOptions:
     epochs: int = 10
     class_balancing: bool = False
     device: str = 'auto'
-    num_workers: int = 0
     optimizer: str = 'adam'
     learning_rate: float | None = None
     weight_decay: float = 1e-4
