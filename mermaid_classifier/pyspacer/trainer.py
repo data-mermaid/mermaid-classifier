@@ -22,7 +22,7 @@ from spacer.train_classifier import ClassifierTrainer
 from spacer.train_utils import calc_acc, evaluate_classifier
 
 from mermaid_classifier.pyspacer.torch_classifier import (
-    FeatureDataset,
+    StreamingFeatureDataset,
     TorchMLPClassifier,
 )
 
@@ -77,7 +77,6 @@ class MermaidTrainer(ClassifierTrainer):
 
     def __init__(
         self,
-        io_batch_size: int,
         on_epoch_end: Callable[[dict], None] | None = None,
         class_balancing: bool = False,
         device: str = 'cpu',
@@ -88,7 +87,6 @@ class MermaidTrainer(ClassifierTrainer):
         minibatch_size: int = 512,
         feature_cache_dir: str | None = None,
     ):
-        self.io_batch_size = io_batch_size
         self.minibatch_size = minibatch_size
         self.on_epoch_end = on_epoch_end
         self.class_balancing = class_balancing
@@ -125,8 +123,6 @@ class MermaidTrainer(ClassifierTrainer):
             f" {labels.train.label_count} labels;"
             f" Ref = {len(labels.ref)} images,"
             f" {labels.ref.label_count} labels")
-        logger.debug(
-            f"IO batch size: {self.io_batch_size} labels")
         logger.debug(
             f"Minibatch size: {self.minibatch_size} labels")
 
@@ -170,26 +166,27 @@ class MermaidTrainer(ClassifierTrainer):
                 weight_decay=self.weight_decay,
                 device=self.device)
 
-            # Materialize training data into a Dataset for DataLoader
             label_to_idx = {
                 label: idx for idx, label in enumerate(classes_list)}
-            dataset = FeatureDataset(
-                labels.train, label_to_idx, self.io_batch_size)
-            clf.init_model(dataset.X.shape[1], classes_list)
 
             use_cuda = clf.device.type != 'cpu'
-            dataloader = DataLoader(
-                dataset, batch_size=self.minibatch_size, shuffle=True,
-                num_workers=0,
-                pin_memory=use_cuda,
-                generator=torch.Generator().manual_seed(0))
-
             ref_accs = []
             t0 = time.time()
 
             for epoch in range(nbr_epochs):
                 epoch_loss_start = len(clf.loss_curve_)
+
+                dataset = StreamingFeatureDataset(
+                    labels.train, label_to_idx,
+                    batch_size=self.minibatch_size,
+                    random_seed=epoch)
+                dataloader = DataLoader(
+                    dataset, batch_size=None,
+                    num_workers=0, pin_memory=use_cuda)
+
                 for x_batch, y_batch in dataloader:
+                    if clf._model is None:
+                        clf.init_model(x_batch.shape[1], classes_list)
                     clf.train_step(x_batch, y_batch)
 
                 # Ref accuracy: stream ref features from disk in batches.
@@ -248,11 +245,11 @@ class MermaidTrainer(ClassifierTrainer):
         avoiding loading the full dataset into memory.
 
         Only predictions and ground-truth labels (tiny lists of strings)
-        accumulate — not feature vectors. Memory use is O(io_batch_size)
+        accumulate — not feature vectors. Memory use is O(minibatch_size)
         instead of O(dataset_size).
         """
         gt, pred = [], []
-        for x, y in labels.load_data_in_batches(batch_size=self.io_batch_size):
+        for x, y in labels.load_data_in_batches(batch_size=self.minibatch_size):
             pred.extend(clf.predict(x))
             gt.extend(y)
         return calc_acc(gt, pred)
@@ -275,7 +272,7 @@ class MermaidTrainer(ClassifierTrainer):
         all_preds, all_y = [], []
 
         for x_batch, y_batch in ref_labels.load_data_in_batches(
-                batch_size=self.io_batch_size):
+                batch_size=self.minibatch_size):
             x_arr = np.array(x_batch)
             y_arr = np.array(y_batch)
 
@@ -310,7 +307,6 @@ class MermaidTrainer(ClassifierTrainer):
 
     def serialize(self) -> dict:
         data = super().serialize()
-        data['io_batch_size'] = self.io_batch_size
         data['minibatch_size'] = self.minibatch_size
         if self.class_balancing:
             data['class_balancing'] = self.class_balancing

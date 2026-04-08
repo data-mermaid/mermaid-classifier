@@ -1,55 +1,11 @@
 import os
 from typing import Literal
 
-import psutil
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 # EfficientNet feature vector dimensionality (4096 floats).
 _FEATURE_DIM = 4096
-# Bytes per float32 element (PyTorch default for feature tensors).
-_BYTES_PER_FLOAT = 4
-_FEATURE_BYTES = _FEATURE_DIM * _BYTES_PER_FLOAT
-# Bytes per int64 label element (PyTorch long tensor).
-_LABEL_BYTES = 8
-
-# Minimum batch size — don't go lower than pyspacer's default.
-_MIN_BATCH_SIZE = 5000
-
-
-def training_batch_size(
-    num_classes: int = 300,
-) -> tuple[int, float]:
-    """
-    Calculate batch size based on *currently available* memory.
-
-    Call after data-prep is complete so that
-    psutil.virtual_memory().available reflects what the OS actually
-    has free — including DuckDB tables, ImageLabels structures, and
-    everything else already allocated.
-
-    The IO batch determines how many samples are materialized into
-    FeatureDataset (float32 feature tensors + int64 label tensors).
-    Autograd activation memory scales with minibatch_size, not the
-    IO batch, so it is not included here.
-
-    Returns (batch_size, available_gb) so callers can log the memory
-    snapshot that was actually used in the calculation.
-    """
-    available_bytes = psutil.virtual_memory().available
-    available_gb = available_bytes / 1e9
-
-    # Per-sample memory in FeatureDataset:
-    #   1. Feature tensor (float32): 4096 × 4 bytes
-    #   2. Label tensor (int64):     1 × 8 bytes
-    bytes_per_point = _FEATURE_BYTES + _LABEL_BYTES
-
-    # Reserve 20% headroom for heap fragmentation, Python GC peaks, and
-    # any other transient allocations.
-    usable_bytes = available_bytes * 0.80
-
-    batch_size = int(usable_bytes / bytes_per_point)
-    return max(batch_size, _MIN_BATCH_SIZE), available_gb
 
 
 class Settings(BaseSettings):
@@ -95,9 +51,6 @@ class Settings(BaseSettings):
     mlflow_tracking_server: str | None = None
     training_inputs_percent_missing_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
-    # Override for training batch size. If None (default),
-    # training_batch_size() auto-calculates at runtime.
-    spacer_batch_size: str | None = None
     feature_cache_dir: str | None = None
     download_max_workers: int = 50
     mlflow_http_request_max_retries: str | None = None

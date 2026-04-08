@@ -5,38 +5,49 @@ PyTorch MLP classifier with sklearn-compatible interface for PySpacer storage.
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset
+from torch.utils.data import IterableDataset
 
 from spacer.data_classes import ImageLabels
 
 
-class FeatureDataset(Dataset):
-    """PyTorch Dataset that materializes all feature/label pairs from
-    ImageLabels.load_data_in_batches() into tensors for random-access
-    iteration via DataLoader.
+class StreamingFeatureDataset(IterableDataset):
+    """PyTorch IterableDataset that streams feature/label pairs from
+    ImageLabels.load_data_in_batches() in fixed-size minibatches.
 
-    Feature vectors are float32 x D (~16 KB each at D=4096). Even 500K
-    samples is ~8 GB, fitting the same memory budget already allocated
-    by training_batch_size(). Materializing once avoids re-reading from
-    disk every epoch.
+    Each iteration re-reads features from disk, avoiding full
+    materialization. Memory usage is O(batch_size) instead of
+    O(dataset_size). Shuffling is done at the image level via
+    load_data_in_batches(random_seed=...).
     """
 
     def __init__(self, labels: ImageLabels, label_to_idx: dict,
-                 io_batch_size: int):
-        xs, ys = [], []
-        for x_batch, y_batch in labels.load_data_in_batches(
-                batch_size=io_batch_size):
-            xs.append(torch.tensor(np.array(x_batch), dtype=torch.float32))
-            ys.append(torch.tensor(
-                [label_to_idx[l] for l in y_batch], dtype=torch.long))
-        self.X = torch.cat(xs)
-        self.y = torch.cat(ys)
+                 batch_size: int, random_seed: int | None = None):
+        self.labels = labels
+        self.label_to_idx = label_to_idx
+        self.batch_size = batch_size
+        self.random_seed = random_seed
 
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+    def __iter__(self):
+        buffer_x, buffer_y = [], []
+        for x_batch, y_batch in self.labels.load_data_in_batches(
+                batch_size=self.batch_size,
+                random_seed=self.random_seed):
+            for feat, label in zip(x_batch, y_batch):
+                buffer_x.append(feat)
+                buffer_y.append(self.label_to_idx[label])
+                if len(buffer_x) == self.batch_size:
+                    yield (
+                        torch.tensor(np.array(buffer_x),
+                                     dtype=torch.float32),
+                        torch.tensor(buffer_y, dtype=torch.long),
+                    )
+                    buffer_x, buffer_y = [], []
+        # Yield remainder
+        if buffer_x:
+            yield (
+                torch.tensor(np.array(buffer_x), dtype=torch.float32),
+                torch.tensor(buffer_y, dtype=torch.long),
+            )
 
 
 class _MLPModule(nn.Module):

@@ -34,7 +34,6 @@ from mermaid_classifier.pyspacer.dataset import (
     gf_library,
     section_profiling,
 )
-from mermaid_classifier.pyspacer.settings import training_batch_size
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 from mermaid_classifier.pyspacer.metrics import (
     MetricsContext, MetricsCoordinator,
@@ -97,23 +96,7 @@ class TrainingRunner:
             model_loc = DataLocation('memory', key='classifier.pkl')
             valresult_loc = DataLocation('memory', key='valresult.json')
 
-            num_classes = len(self.dataset.labels.ref.classes_set)
-
-            if settings.spacer_batch_size is not None:
-                io_batch_size = int(settings.spacer_batch_size)
-                logger.info(
-                    f"IO batch size: {io_batch_size}"
-                    f" (from SPACER_BATCH_SIZE)")
-            else:
-                io_batch_size, available_gb = training_batch_size(
-                    num_classes=num_classes)
-                logger.info(
-                    f"IO batch size: {io_batch_size}"
-                    f" (auto, based on {available_gb:.1f} GB"
-                    f" available memory, {num_classes} classes)")
-
             trainer = MermaidTrainer(
-                io_batch_size=io_batch_size,
                 minibatch_size=self.training_options.minibatch_size,
                 on_epoch_end=self._on_epoch_end,
                 class_balancing=self.training_options.class_balancing,
