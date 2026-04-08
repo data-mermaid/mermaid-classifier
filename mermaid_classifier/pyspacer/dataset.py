@@ -1,7 +1,6 @@
 """
 TrainingDataset: S3 data loading and DuckDB ETL for classifier training.
 """
-import concurrent.futures
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from io import StringIO
@@ -16,7 +15,6 @@ import duckdb
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
-from spacer.aws import get_s3_resource
 from spacer.data_classes import DataLocation, ImageLabels
 from spacer.task_utils import preprocess_labels, SplitMode
 
@@ -80,69 +78,6 @@ def section_profiling(profiled_sections: list[dict], section_name: str):
         f" Elapsed time = {section_profile['hms']},"
         f" Memory usage at end = {section_profile['memory_usage_at_end']}"
     )
-
-
-def download_features_parallel(
-    s3_keys: dict[tuple[str, str], str],
-    max_workers: int = 50,
-) -> set[tuple[str, str]]:
-    """
-    Download feature vectors from S3 in parallel.
-
-    Args:
-        s3_keys: Mapping of (bucket, key) → local_path for each file
-            to download.
-        max_workers: Number of concurrent download threads.
-
-    Returns:
-        Set of (bucket, key) tuples that failed to download.
-    """
-    total = len(s3_keys)
-    if total == 0:
-        return set()
-
-    logger.info(
-        f"Downloading {total} feature vectors"
-        f" with {max_workers} workers...")
-
-    # Pre-create all unique parent directories.
-    unique_dirs = {os.path.dirname(local_path)
-                   for local_path in s3_keys.values()}
-    for d in unique_dirs:
-        os.makedirs(d, exist_ok=True)
-
-    failed: set[tuple[str, str]] = set()
-    succeeded = 0
-
-    def _download(item):
-        (bucket, key), local_path = item
-        s3 = get_s3_resource()
-        s3.Object(bucket, key).download_file(local_path)
-
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=max_workers
-    ) as executor:
-        futures = {
-            executor.submit(_download, item): item
-            for item in s3_keys.items()
-        }
-        for i, future in enumerate(
-            concurrent.futures.as_completed(futures), 1
-        ):
-            (bucket, key), local_path = futures[future]
-            try:
-                future.result()
-                succeeded += 1
-            except Exception as e:
-                failed.add((bucket, key))
-                logger.warning(
-                    f"Failed to download s3://{bucket}/{key}: {e}")
-            if i % 1000 == 0 or i == total:
-                logger.info(
-                    f"Download progress: {i}/{total}"
-                    f" ({succeeded} ok, {len(failed)} failed)")
-
-    return failed
 
 
 class TrainingDataset:
@@ -646,11 +581,7 @@ class TrainingDataset:
             grouping_column_names=['bucket', 'feature_vector'],
         )
 
-        # First pass: collect annotations and unique S3 keys.
-        s3_keys: dict[tuple[str, str], str] = {}
-        tmp_root = self._feature_dir
-        # image_data: list of (bucket, key, annotations)
-        image_data = []
+        labels_data = ImageLabels()
 
         for rows in annotations_by_image:
 
@@ -675,35 +606,10 @@ class TrainingDataset:
                 )
                 image_annotations.append(annotation)
 
-            s3_key = (bucket, feature_bucket_path)
-            if s3_key not in s3_keys:
-                local_path = os.path.join(
-                    tmp_root, bucket, feature_bucket_path)
-                s3_keys[s3_key] = local_path
-
-            image_data.append((bucket, feature_bucket_path, image_annotations))
-
-        # Parallel download of all feature vectors from S3.
-        with self.section_profiling("Downloading feature vectors"):
-            failed_keys = download_features_parallel(s3_keys, max_workers=settings.download_max_workers)
-
-        if failed_keys:
-            logger.warning(
-                f"{len(failed_keys)} feature vector download(s) failed.")
-
-        # Build ImageLabels with filesystem DataLocations.
-        labels_data = ImageLabels()
-
-        for bucket, feature_bucket_path, image_annotations in image_data:
-            # Skip images whose feature file failed to download.
-            if (bucket, feature_bucket_path) in failed_keys:
-                continue
-
-            local_path = s3_keys[(bucket, feature_bucket_path)]
-
             feature_loc = DataLocation(
-                storage_type='filesystem',
-                key=local_path,
+                storage_type='s3',
+                bucket_name=bucket,
+                key=feature_bucket_path,
             )
             labels_data.add_image(feature_loc, image_annotations)
 

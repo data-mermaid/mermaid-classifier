@@ -5,7 +5,9 @@ and per-epoch MLflow callbacks.
 
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -15,6 +17,7 @@ from torch.utils.data import DataLoader
 from spacer import config
 from spacer.data_classes import ImageLabels, ValResults
 from spacer.messages import TrainClassifierReturnMsg
+from spacer.storage import storage_factory
 from spacer.train_classifier import ClassifierTrainer
 from spacer.train_utils import calc_acc, evaluate_classifier
 
@@ -24,6 +27,34 @@ from mermaid_classifier.pyspacer.torch_classifier import (
 )
 
 logger = getLogger(__name__)
+
+
+def _prefetch_to_cache(labels, cache_dir, max_workers=50):
+    """Download remote feature vectors into filesystem cache in parallel."""
+    all_locs = set()
+    for split in [labels.train, labels.ref, labels.val]:
+        for loc in split.keys():
+            if loc.is_remote:
+                all_locs.add(loc)
+
+    to_fetch = [
+        loc for loc in all_locs
+        if not Path(cache_dir, loc.key).exists()
+    ]
+    if not to_fetch:
+        return
+
+    logger.info(
+        f"Prefetching {len(to_fetch)} feature vectors"
+        f" ({len(all_locs) - len(to_fetch)} already cached)"
+        f" with {max_workers} workers...")
+
+    def _fetch_one(loc):
+        storage = storage_factory(loc.storage_type, loc.bucket_name)
+        storage.load(loc.key, filesystem_cache=cache_dir)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        list(pool.map(_fetch_one, to_fetch))
 
 
 class MermaidTrainer(ClassifierTrainer):
@@ -50,6 +81,7 @@ class MermaidTrainer(ClassifierTrainer):
         weight_decay: float = 1e-4,
         hidden_layer_sizes: tuple[int, ...] | None = None,
         minibatch_size: int = 512,
+        feature_cache_dir: str | None = None,
     ):
         self.io_batch_size = io_batch_size
         self.minibatch_size = minibatch_size
@@ -61,8 +93,18 @@ class MermaidTrainer(ClassifierTrainer):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.hidden_layer_sizes = hidden_layer_sizes
+        self.feature_cache_dir = feature_cache_dir
 
     def __call__(self, labels, nbr_epochs, pc_models, clf_type):
+        # Set filesystem cache and prefetch feature vectors from S3.
+        # This must happen after preprocess_labels (called by
+        # spacer_train_classifier before invoking this trainer), because
+        # preprocess_labels may create new ImageLabels instances that
+        # lose any previously set filesystem_cache.
+        if self.feature_cache_dir:
+            labels.set_filesystem_cache(self.feature_cache_dir)
+            _prefetch_to_cache(labels, self.feature_cache_dir)
+
         logger.debug(
             f"Unique classes:"
             f" Train + Ref = {len(labels.ref.classes_set)},"
@@ -276,5 +318,5 @@ class MermaidTrainer(ClassifierTrainer):
         data['weight_decay'] = self.weight_decay
         if self.hidden_layer_sizes is not None:
             data['hidden_layer_sizes'] = self.hidden_layer_sizes
-        # on_epoch_end is not JSON-serializable; excluded
+        # on_epoch_end and feature_cache_dir are runtime concerns; excluded
         return data

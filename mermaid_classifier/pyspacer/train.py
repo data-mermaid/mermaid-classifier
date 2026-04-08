@@ -125,6 +125,7 @@ class TrainingRunner:
                 learning_rate=self.training_options.learning_rate,
                 weight_decay=self.training_options.weight_decay,
                 hidden_layer_sizes=self.training_options.hidden_layer_sizes,
+                feature_cache_dir=self.dataset._feature_dir,
             )
 
             train_msg = TrainClassifierMsg(
