@@ -126,6 +126,13 @@ class TrainingOptions:
     learning_rate: None = auto-select by dataset size (1e-4 for >=50K, else 1e-3).
     weight_decay: L2 regularization strength.
     hidden_layer_sizes: None = auto-select by dataset size.
+    minibatch_size: Effective gradient-update batch size. With gradient
+        accumulation, multiple smaller IO batches are accumulated to reach
+        this size before an optimizer step.
+    io_batch_size: Number of annotations loaded from disk per IO read.
+        None = auto-calculate from available memory at runtime.
+        Decoupled from minibatch_size to allow background prefetching of
+        small chunks while the GPU trains.
     """
     epochs: int = 10
     class_balancing: bool = False
@@ -135,6 +142,7 @@ class TrainingOptions:
     weight_decay: float = 1e-4
     hidden_layer_sizes: tuple[int, ...] | None = None
     minibatch_size: int = 512
+    io_batch_size: int | None = None
 
 
 @dataclasses.dataclass

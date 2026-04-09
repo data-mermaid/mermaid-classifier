@@ -22,6 +22,7 @@ from spacer.train_classifier import ClassifierTrainer
 from spacer.train_utils import calc_acc, evaluate_classifier
 
 from mermaid_classifier.pyspacer.torch_classifier import (
+    PrefetchDataLoader,
     StreamingFeatureDataset,
     TorchMLPClassifier,
 )
@@ -85,9 +86,11 @@ class MermaidTrainer(ClassifierTrainer):
         weight_decay: float = 1e-4,
         hidden_layer_sizes: tuple[int, ...] | None = None,
         minibatch_size: int = 512,
+        io_batch_size: int = 10_000,
         feature_cache_dir: str | None = None,
     ):
         self.minibatch_size = minibatch_size
+        self.io_batch_size = io_batch_size
         self.on_epoch_end = on_epoch_end
         self.class_balancing = class_balancing
         self.device = device
@@ -125,6 +128,8 @@ class MermaidTrainer(ClassifierTrainer):
             f" {labels.ref.label_count} labels")
         logger.debug(
             f"Minibatch size: {self.minibatch_size} labels")
+        logger.debug(
+            f"IO batch size: {self.io_batch_size} labels")
 
         assert clf_type in config.CLASSIFIER_TYPES
 
@@ -173,21 +178,46 @@ class MermaidTrainer(ClassifierTrainer):
             ref_accs = []
             t0 = time.time()
 
+            effective_io = min(self.io_batch_size, self.minibatch_size)
+            accum_steps = max(1, self.minibatch_size // effective_io)
+
             for epoch in range(nbr_epochs):
                 epoch_loss_start = len(clf.loss_curve_)
 
                 dataset = StreamingFeatureDataset(
                     labels.train, label_to_idx,
-                    batch_size=self.minibatch_size,
+                    batch_size=effective_io,
                     random_seed=epoch)
                 dataloader = DataLoader(
                     dataset, batch_size=None,
                     num_workers=0, pin_memory=use_cuda)
+                prefetched = PrefetchDataLoader(dataloader)
 
-                for x_batch, y_batch in dataloader:
+                accumulated = 0
+                accumulated_loss = 0.0
+
+                for x_batch, y_batch in prefetched:
                     if clf._model is None:
                         clf.init_model(x_batch.shape[1], classes_list)
-                    clf.train_step(x_batch, y_batch)
+                        clf._optimizer.zero_grad()
+
+                    loss_val = clf.forward_backward(
+                        x_batch, y_batch,
+                        loss_scale=1.0 / accum_steps)
+                    accumulated_loss += loss_val
+                    accumulated += 1
+
+                    if accumulated == accum_steps:
+                        clf.optimizer_step()
+                        clf.loss_curve_.append(
+                            accumulated_loss / accumulated)
+                        accumulated = 0
+                        accumulated_loss = 0.0
+
+                if accumulated > 0:
+                    clf.optimizer_step()
+                    clf.loss_curve_.append(
+                        accumulated_loss / accumulated)
 
                 # Ref accuracy: stream ref features from disk in batches.
                 # Only predictions (tiny) accumulate, not feature arrays.
@@ -308,6 +338,7 @@ class MermaidTrainer(ClassifierTrainer):
     def serialize(self) -> dict:
         data = super().serialize()
         data['minibatch_size'] = self.minibatch_size
+        data['io_batch_size'] = self.io_batch_size
         if self.class_balancing:
             data['class_balancing'] = self.class_balancing
         data['device'] = self.device

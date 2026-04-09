@@ -2,6 +2,9 @@
 PyTorch MLP classifier with sklearn-compatible interface for PySpacer storage.
 """
 
+import queue
+import threading
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -48,6 +51,45 @@ class StreamingFeatureDataset(IterableDataset):
                 torch.tensor(np.array(buffer_x), dtype=torch.float32),
                 torch.tensor(buffer_y, dtype=torch.long),
             )
+
+
+class PrefetchDataLoader:
+    """Wraps a DataLoader to prefetch the next batch in a background thread.
+
+    Uses a bounded queue of size 1, so at most 2 IO batches are resident
+    in memory (the one being trained on + the one being prefetched).
+    """
+
+    _SENTINEL = object()
+
+    def __init__(self, dataloader):
+        self.dataloader = dataloader
+
+    def __iter__(self):
+        q = queue.Queue(maxsize=1)
+        error = [None]
+
+        def producer():
+            try:
+                for batch in self.dataloader:
+                    q.put(batch)
+            except BaseException as e:
+                error[0] = e
+            finally:
+                q.put(self._SENTINEL)
+
+        thread = threading.Thread(target=producer, daemon=True)
+        thread.start()
+        try:
+            while True:
+                item = q.get()
+                if item is self._SENTINEL:
+                    if error[0] is not None:
+                        raise error[0]
+                    break
+                yield item
+        finally:
+            thread.join()
 
 
 class _MLPModule(nn.Module):
@@ -162,6 +204,27 @@ class TorchMLPClassifier:
         loss_val = loss.item()
         self.loss_curve_.append(loss_val)
         return loss_val
+
+    def forward_backward(self, x: torch.Tensor, y: torch.Tensor,
+                         loss_scale: float = 1.0) -> float:
+        """Forward + scaled backward WITHOUT optimizer step.
+
+        Used for gradient accumulation: call this multiple times with
+        loss_scale=1/N, then call optimizer_step() once.
+        Returns the unscaled loss scalar (for logging).
+        """
+        x = x.to(self.device)
+        y = y.to(self.device)
+        self._model.train()
+        logits = self._model(x)
+        loss = self._loss_fn(logits, y)
+        (loss * loss_scale).backward()
+        return loss.item()
+
+    def optimizer_step(self):
+        """Run optimizer.step() and zero_grad(). Pair with forward_backward()."""
+        self._optimizer.step()
+        self._optimizer.zero_grad()
 
     def init_model(self, input_dim, classes):
         torch.manual_seed(0)

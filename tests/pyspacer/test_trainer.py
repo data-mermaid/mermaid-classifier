@@ -19,6 +19,7 @@ from sklearn.neural_network import MLPClassifier
 
 from mermaid_classifier.pyspacer.torch_classifier import (
     OPTIMIZERS,
+    PrefetchDataLoader,
     StreamingFeatureDataset,
     TorchMLPClassifier,
 )
@@ -561,6 +562,124 @@ class TorchMLPClassifierDeviceTest(unittest.TestCase):
         self.assertEqual(clf2.weight_decay, 0.05)
         # Unpickled model restores on CPU
         self.assertEqual(clf2.device, torch.device('cpu'))
+
+
+class GradientAccumulationTest(unittest.TestCase):
+    """Tests for IO batch / minibatch decoupling and gradient accumulation."""
+
+    def _make_imbalanced_data(self):
+        rng = np.random.RandomState(42)
+        n_features = 20
+        X = rng.randn(300, n_features).astype(np.float32)
+        y = np.array(['a'] * 200 + ['b'] * 60 + ['c'] * 40)
+        perm = rng.permutation(300)
+        X, y = X[perm], y[perm]
+        return (X[:150], y[:150].tolist(),
+                X[150:225], y[150:225].tolist(),
+                X[225:], y[225:].tolist())
+
+    def test_gradient_accumulation(self):
+        """io_batch_size < minibatch_size triggers gradient accumulation."""
+        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
+        labels = _make_mock_training_labels(
+            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
+
+        # minibatch_size=75, io_batch_size=25 → 3 accumulation steps
+        # 150 samples / 75 effective minibatch = 2 gradient steps
+        trainer = MermaidTrainer(minibatch_size=75, io_batch_size=25)
+        clf_cal, _, ret_msg = trainer(
+            labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
+
+        self.assertEqual(len(clf_cal.estimator.loss_curve_), 2)
+
+    def test_gradient_accumulation_remainder(self):
+        """Remainder sub-batches still produce an optimizer step."""
+        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
+        labels = _make_mock_training_labels(
+            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
+
+        # minibatch_size=100, io_batch_size=50 → accum_steps=2
+        # Batches from dataset: 50,50,50 → step after batch 2 (100),
+        # remainder of 50 → 1 more step. Total: 2 gradient steps.
+        trainer = MermaidTrainer(minibatch_size=100, io_batch_size=50)
+        clf_cal, _, _ = trainer(
+            labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
+
+        self.assertEqual(len(clf_cal.estimator.loss_curve_), 2)
+
+    def test_no_accumulation_when_io_exceeds_minibatch(self):
+        """When io_batch_size >= minibatch_size, no accumulation occurs."""
+        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
+        labels = _make_mock_training_labels(
+            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
+
+        # io_batch_size=10000 > minibatch_size=50 → effective_io=50,
+        # accum_steps=1 → 150/50 = 3 steps
+        trainer = MermaidTrainer(minibatch_size=50, io_batch_size=10_000)
+        clf_cal, _, _ = trainer(
+            labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
+
+        self.assertEqual(len(clf_cal.estimator.loss_curve_), 3)
+
+    def test_forward_backward_no_step(self):
+        """forward_backward() accumulates gradients without stepping."""
+        X, y, classes = (
+            np.random.RandomState(42).randn(50, 10).astype(np.float32),
+            ['a', 'b'] * 25,
+            ['a', 'b'],
+        )
+        clf = TorchMLPClassifier(hidden_layer_sizes=(10,))
+        clf.init_model(X.shape[1], classes)
+
+        label_to_idx = {l: i for i, l in enumerate(classes)}
+        x_t = torch.tensor(X, dtype=torch.float32)
+        y_t = torch.tensor(
+            [label_to_idx[l] for l in y], dtype=torch.long)
+
+        # Save initial params
+        params_before = {
+            k: v.clone() for k, v in clf._model.named_parameters()}
+
+        clf._optimizer.zero_grad()
+        clf.forward_backward(x_t, y_t, loss_scale=0.5)
+
+        # Gradients should exist but params unchanged (no step yet)
+        for name, param in clf._model.named_parameters():
+            self.assertIsNotNone(param.grad)
+            torch.testing.assert_close(param.data, params_before[name])
+
+        # After step, params should change
+        clf.optimizer_step()
+        any_changed = any(
+            not torch.equal(param.data, params_before[name])
+            for name, param in clf._model.named_parameters())
+        self.assertTrue(any_changed)
+
+    def test_serialize_io_batch_size(self):
+        trainer = MermaidTrainer(io_batch_size=5000)
+        data = trainer.serialize()
+        self.assertEqual(data['io_batch_size'], 5000)
+
+
+class PrefetchDataLoaderTest(unittest.TestCase):
+    """Tests for PrefetchDataLoader."""
+
+    def test_basic_iteration(self):
+        data = list(range(10))
+        result = list(PrefetchDataLoader(data))
+        self.assertEqual(result, data)
+
+    def test_exception_propagation(self):
+        def bad_generator():
+            yield 1
+            raise ValueError("boom")
+
+        with self.assertRaises(ValueError):
+            list(PrefetchDataLoader(bad_generator()))
+
+    def test_empty_iterable(self):
+        result = list(PrefetchDataLoader([]))
+        self.assertEqual(result, [])
 
 
 class FlattenDataclassTest(unittest.TestCase):
