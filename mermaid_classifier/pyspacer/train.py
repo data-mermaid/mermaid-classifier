@@ -116,7 +116,7 @@ class TrainingRunner:
                     f" (auto, based on {available_gb:.1f} GB"
                     f" available memory, {num_classes} classes)")
 
-            trainer = MermaidTrainer(
+            self._trainer = MermaidTrainer(
                 io_batch_size=io_batch_size,
                 io_workers=self.training_options.io_workers,
                 minibatch_size=self.training_options.minibatch_size,
@@ -128,11 +128,12 @@ class TrainingRunner:
                 weight_decay=self.training_options.weight_decay,
                 hidden_layer_sizes=self.training_options.hidden_layer_sizes,
                 feature_cache_dir=self.dataset._feature_dir,
+                materialize_data=self.training_options.materialize_data,
             )
 
             train_msg = TrainClassifierMsg(
                 job_token=f'experiment_run_{run_name}',
-                trainer=trainer,
+                trainer=self._trainer,
                 nbr_epochs=self.training_options.epochs,
                 clf_type='MLP',
                 labels=self.dataset.labels,
@@ -282,6 +283,12 @@ class MLflowTrainingRunner(TrainingRunner):
                 ctx, duck_conn=self.dataset.duck_conn)
             coordinator.compute_and_log_all()
 
+            # Log materialization time if it was used
+            if self._trainer._materialization_seconds is not None:
+                mlflow.log_metric(
+                    'materialization_seconds',
+                    self._trainer._materialization_seconds)
+
             # Accuracy and ref_accs come from pyspacer's return_msg,
             # not our metrics module.
             mlflow.log_metric(
@@ -305,6 +312,16 @@ class MLflowTrainingRunner(TrainingRunner):
 
         return return_msg, model_loc
 
+    _EPOCH_METRIC_KEYS = [
+        "ref_accuracy",
+        "training_loss",
+        "cumulative_seconds",
+        "epoch_seconds",
+        "data_load_seconds",
+        "gpu_compute_seconds",
+        "ref_accuracy_seconds",
+    ]
+
     def _on_epoch_end(self, metrics: dict):
         """Log per-epoch metrics to MLflow.
 
@@ -312,14 +329,10 @@ class MLflowTrainingRunner(TrainingRunner):
         during training.
         """
         step = metrics["epoch"]
-        mlflow.log_metric(
-            "epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
-        if metrics["training_loss"] is not None:
-            mlflow.log_metric(
-                "epoch/training_loss", metrics["training_loss"], step=step)
-        mlflow.log_metric(
-            "epoch/cumulative_seconds",
-            metrics["cumulative_seconds"], step=step)
+        for key in self._EPOCH_METRIC_KEYS:
+            value = metrics.get(key)
+            if value is not None:
+                mlflow.log_metric(f"epoch/{key}", value, step=step)
 
     def _get_model_name(self):
         """

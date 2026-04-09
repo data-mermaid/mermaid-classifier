@@ -25,6 +25,7 @@ from mermaid_classifier.pyspacer.torch_classifier import (
     TorchMLPClassifier,
 )
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
+from pyspacer.npz_test_helpers import make_npz
 
 # ---------------------------------------------------------------------------
 # Mock infrastructure for ImageLabels
@@ -32,7 +33,7 @@ from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 # StreamingFeatureDataset uses two different data paths:
 #   1. _load_image() — accesses labels.keys(), labels._data, labels.filesystem_cache,
 #      and ImageFeatures.load(). Used by the training loop.
-#   2. load_data_in_batches() — used by _calc_acc_batched and _calibrate_in_batches.
+#   2. load_data_in_batches() — used by _calc_acc and _calibrate.
 #
 # The mock helpers below support both paths from the same data.
 # _feature_store is a module-level dict mapping DataLocation → _MockImageFeatures,
@@ -129,7 +130,8 @@ class CalibrateInBatchesTest(unittest.TestCase):
         # Batched calibration (new approach) via mock ImageLabels
         mock_labels = _make_mock_labels(X_ref, y_ref, batch_size=100)
         trainer = MermaidTrainer(minibatch_size=100)
-        clf_batched = trainer._calibrate_in_batches(clf, mock_labels)
+        batch_iter = mock_labels.load_data_in_batches(batch_size=100)
+        clf_batched = trainer._calibrate(clf, batch_iter)
 
         return clf_standard, clf_batched, X_ref
 
@@ -206,7 +208,8 @@ class CalibrateInBatchesTest(unittest.TestCase):
         # Batched calibration
         mock_labels = _make_mock_labels(X_ref, y_ref, batch_size=100)
         trainer = MermaidTrainer(minibatch_size=100)
-        clf_batched = trainer._calibrate_in_batches(clf, mock_labels)
+        batch_iter = mock_labels.load_data_in_batches(batch_size=100)
+        clf_batched = trainer._calibrate(clf, batch_iter)
 
         self._assert_calibration_equivalent(clf_standard, clf_batched, X_ref)
 
@@ -800,6 +803,120 @@ class PrefetchDataLoaderTest(unittest.TestCase):
     def test_empty_iterable(self):
         result = list(PrefetchDataLoader([]))
         self.assertEqual(result, [])
+
+
+def _make_npz_backed_labels(cache_dir, X_data, y_data, batch_size):
+    """Create mock ImageLabels backed by real .npz files on disk."""
+    data = {}
+    n_features = X_data.shape[1]
+
+    for img_start in range(0, len(X_data), _ANNOS_PER_IMAGE):
+        img_end = min(img_start + _ANNOS_PER_IMAGE, len(X_data))
+        key = f'features/img_{id(X_data)}_{img_start}.npz'
+        loc = DataLocation('filesystem', key=key)
+
+        n_points = img_end - img_start
+        # Use local row indices (0..n_points-1) matching the .npz file
+        rows = list(range(n_points))
+        cols = [0] * n_points
+        feat = X_data[img_start:img_end]
+
+        make_npz(cache_dir, key, rows, cols, feat)
+
+        annotations = [
+            (rows[j], 0, y_data[img_start + j])
+            for j in range(n_points)
+        ]
+        data[loc] = annotations
+
+    m = mock.Mock()
+    m._data = data
+    m.keys = lambda: data.keys()
+    m.label_count = len(y_data)
+    m.classes_set = set(y_data)
+    m.label_count_per_class = Counter(y_data)
+    m.__len__ = lambda self_: len(data)
+
+    def batch_gen(batch_size=batch_size, random_seed=None):
+        for i in range(0, len(X_data), batch_size):
+            end = min(i + batch_size, len(X_data))
+            x_batch = [X_data[j] for j in range(i, end)]
+            y_batch = [y_data[j] for j in range(i, end)]
+            yield x_batch, y_batch
+
+    m.load_data_in_batches = batch_gen
+    return m
+
+
+class MaterializedTrainingPathTest(unittest.TestCase):
+    """Test MermaidTrainer with materialize_data=True using real .npz files."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir)
+
+    def test_materialized_training_produces_valid_model(self):
+        """Full training with materialization produces a calibrated model."""
+        rng = np.random.RandomState(42)
+        n_features = 20
+        X = rng.randn(300, n_features).astype(np.float32)
+        y = np.array(['a'] * 200 + ['b'] * 60 + ['c'] * 40)
+        perm = rng.permutation(300)
+        X, y = X[perm], y[perm]
+
+        X_tr, y_tr = X[:150], y[:150].tolist()
+        X_ref, y_ref = X[150:225], y[150:225].tolist()
+        X_val, y_val = X[225:], y[225:].tolist()
+
+        labels = mock.Mock()
+        labels.train = _make_npz_backed_labels(
+            self.tmp_dir, X[:150], y_tr, batch_size=75)
+        labels.ref = _make_npz_backed_labels(
+            self.tmp_dir, X[150:225], y_ref, batch_size=75)
+        labels.val = _make_npz_backed_labels(
+            self.tmp_dir, X[225:], y_val, batch_size=75)
+        labels.label_count = 300
+        labels.set_filesystem_cache = mock.Mock()
+
+        epoch_metrics = []
+
+        trainer = MermaidTrainer(
+            materialize_data=True,
+            feature_cache_dir=self.tmp_dir,
+            on_epoch_end=lambda m: epoch_metrics.append(m),
+        )
+        clf_cal, val_results, ret_msg = trainer(
+            labels, nbr_epochs=2, pc_models=[], clf_type='MLP')
+
+        self.assertIsInstance(clf_cal, CalibratedClassifierCV)
+        self.assertIsNotNone(trainer._materialization_seconds)
+        self.assertGreater(trainer._materialization_seconds, 0)
+
+        # Verify timing metrics are in epoch callbacks
+        self.assertEqual(len(epoch_metrics), 2)
+        for m in epoch_metrics:
+            self.assertIn('epoch_seconds', m)
+            self.assertIn('data_load_seconds', m)
+            self.assertIn('gpu_compute_seconds', m)
+            self.assertIn('ref_accuracy_seconds', m)
+
+        # Verify materialized dir is cleaned up
+        from pathlib import Path
+        self.assertFalse(
+            Path(self.tmp_dir, '_materialized').exists())
+
+    def test_serialize_includes_materialize_data(self):
+        trainer = MermaidTrainer(materialize_data=True)
+        data = trainer.serialize()
+        self.assertTrue(data['materialize_data'])
+
+        trainer2 = MermaidTrainer(materialize_data=False)
+        data2 = trainer2.serialize()
+        self.assertFalse(data2['materialize_data'])
 
 
 class FlattenDataclassTest(unittest.TestCase):

@@ -146,6 +146,7 @@ class TrainingOptions:
     minibatch_size: int = 512
     io_batch_size: int | None = None
     io_workers: int = 4
+    materialize_data: bool = True
 
 
 @dataclasses.dataclass
