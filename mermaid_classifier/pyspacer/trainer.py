@@ -87,10 +87,12 @@ class MermaidTrainer(ClassifierTrainer):
         hidden_layer_sizes: tuple[int, ...] | None = None,
         minibatch_size: int = 512,
         io_batch_size: int = 10_000,
+        io_workers: int = 4,
         feature_cache_dir: str | None = None,
     ):
         self.minibatch_size = minibatch_size
         self.io_batch_size = io_batch_size
+        self.io_workers = io_workers
         self.on_epoch_end = on_epoch_end
         self.class_balancing = class_balancing
         self.device = device
@@ -130,6 +132,8 @@ class MermaidTrainer(ClassifierTrainer):
             f"Minibatch size: {self.minibatch_size} labels")
         logger.debug(
             f"IO batch size: {self.io_batch_size} labels")
+        logger.debug(
+            f"IO workers: {self.io_workers}")
 
         assert clf_type in config.CLASSIFIER_TYPES
 
@@ -187,7 +191,8 @@ class MermaidTrainer(ClassifierTrainer):
                 dataset = StreamingFeatureDataset(
                     labels.train, label_to_idx,
                     batch_size=effective_io,
-                    random_seed=epoch)
+                    random_seed=epoch,
+                    num_workers=self.io_workers)
                 dataloader = DataLoader(
                     dataset, batch_size=None,
                     num_workers=0, pin_memory=use_cuda)
@@ -339,6 +344,7 @@ class MermaidTrainer(ClassifierTrainer):
         data = super().serialize()
         data['minibatch_size'] = self.minibatch_size
         data['io_batch_size'] = self.io_batch_size
+        data['io_workers'] = self.io_workers
         if self.class_balancing:
             data['class_balancing'] = self.class_balancing
         data['device'] = self.device

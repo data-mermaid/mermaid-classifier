@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.neural_network import MLPClassifier
+from spacer.data_classes import DataLocation, ImageFeatures
 
 from mermaid_classifier.pyspacer.torch_classifier import (
     OPTIMIZERS,
@@ -25,11 +26,60 @@ from mermaid_classifier.pyspacer.torch_classifier import (
 )
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
+# ---------------------------------------------------------------------------
+# Mock infrastructure for ImageLabels
+#
+# StreamingFeatureDataset uses two different data paths:
+#   1. _load_image() — accesses labels.keys(), labels._data, labels.filesystem_cache,
+#      and ImageFeatures.load(). Used by the training loop.
+#   2. load_data_in_batches() — used by _calc_acc_batched and _calibrate_in_batches.
+#
+# The mock helpers below support both paths from the same data.
+# _feature_store is a module-level dict mapping DataLocation → _MockImageFeatures,
+# used by _mock_load_features to stand in for ImageFeatures.load().
+# ---------------------------------------------------------------------------
+
+_feature_store: dict[DataLocation, '_MockImageFeatures'] = {}
+
+_ANNOS_PER_IMAGE = 10
+
+
+class _MockImageFeatures:
+    """Fake ImageFeatures whose match_with_annotations yields (feat, label)."""
+
+    def __init__(self, features_by_rowcol):
+        self._features = features_by_rowcol
+        self.valid_rowcol = True
+
+    def match_with_annotations(self, annotations):
+        for row, col, label in annotations:
+            yield self._features[(row, col)], label
+
+
+def _mock_load_features(loc, filesystem_cache=None):
+    """Drop-in replacement for ImageFeatures.load in tests."""
+    return _feature_store[loc]
+
+
+def _add_parallel_loading_attrs(mock_labels, X, y):
+    """Add keys(), _data, filesystem_cache to a mock ImageLabels so
+    StreamingFeatureDataset._load_image works."""
+    data = {}
+    for img_start in range(0, len(X), _ANNOS_PER_IMAGE):
+        img_end = min(img_start + _ANNOS_PER_IMAGE, len(X))
+        loc = DataLocation(
+            'memory', key=f'mock_{id(mock_labels)}_{img_start}')
+        data[loc] = [(j, 0, y[j]) for j in range(img_start, img_end)]
+        _feature_store[loc] = _MockImageFeatures(
+            {(j, 0): X[j] for j in range(img_start, img_end)})
+    mock_labels._data = data
+    mock_labels.filesystem_cache = None
+    mock_labels.keys = lambda: data.keys()
+
 
 def _make_mock_labels(X, y, batch_size):
-    """Create a mock ImageLabels whose load_data_in_batches yields
-    chunks of the given arrays, matching the real method's return type:
-    yields (list[np.ndarray], list[label]) per batch."""
+    """Create a mock ImageLabels with both load_data_in_batches and
+    parallel-loading support."""
     mock_labels = mock.Mock()
 
     def batch_generator(batch_size=batch_size, random_seed=None):
@@ -40,6 +90,7 @@ def _make_mock_labels(X, y, batch_size):
             yield x_batch, y_batch
 
     mock_labels.load_data_in_batches = batch_generator
+    _add_parallel_loading_attrs(mock_labels, X, y)
     return mock_labels
 
 
@@ -163,6 +214,16 @@ class CalibrateInBatchesTest(unittest.TestCase):
 class StreamingFeatureDatasetTest(unittest.TestCase):
     """Tests for StreamingFeatureDataset."""
 
+    def setUp(self):
+        _feature_store.clear()
+        self._patcher = mock.patch.object(
+            ImageFeatures, 'load', side_effect=_mock_load_features)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        _feature_store.clear()
+
     def test_batch_count_and_shapes(self):
         """Verify correct number of batches and tensor shapes."""
         rng = np.random.RandomState(42)
@@ -225,6 +286,26 @@ class StreamingFeatureDatasetTest(unittest.TestCase):
         self.assertEqual(len(batches), 3)
         for x_batch, _ in batches:
             self.assertEqual(x_batch.shape[0], 20)
+
+    def test_parallel_loading_same_total_samples(self):
+        """num_workers>1 produces the same total samples as sequential."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 20).astype(np.float32)
+        classes = ['a', 'b', 'c']
+        y = rng.choice(classes, size=100).tolist()
+        label_to_idx = {label: idx for idx, label in enumerate(classes)}
+
+        mock_labels = _make_mock_labels(X, y, batch_size=30)
+
+        seq = StreamingFeatureDataset(
+            mock_labels, label_to_idx, batch_size=30, num_workers=1)
+        par = StreamingFeatureDataset(
+            mock_labels, label_to_idx, batch_size=30, num_workers=2)
+
+        seq_total = sum(x.shape[0] for x, _ in seq)
+        par_total = sum(x.shape[0] for x, _ in par)
+        self.assertEqual(seq_total, 100)
+        self.assertEqual(par_total, 100)
 
 
 class TorchMLPClassifierTest(unittest.TestCase):
@@ -418,6 +499,7 @@ def _make_mock_training_labels(X_train, y_train, X_ref, y_ref,
 
         m.load_data_in_batches = batch_gen
         m.__len__ = lambda self_: 1
+        _add_parallel_loading_attrs(m, X, y)
         return m
 
     mock_labels.train = _make_image_labels_mock(X_train, y_train)
@@ -429,6 +511,16 @@ def _make_mock_training_labels(X_train, y_train, X_ref, y_ref,
 
 class MermaidTrainerIntegrationTest(unittest.TestCase):
     """Test MermaidTrainer with TorchMLPClassifier end-to-end."""
+
+    def setUp(self):
+        _feature_store.clear()
+        self._patcher = mock.patch.object(
+            ImageFeatures, 'load', side_effect=_mock_load_features)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        _feature_store.clear()
 
     def _make_imbalanced_data(self):
         rng = np.random.RandomState(42)
@@ -567,6 +659,16 @@ class TorchMLPClassifierDeviceTest(unittest.TestCase):
 class GradientAccumulationTest(unittest.TestCase):
     """Tests for IO batch / minibatch decoupling and gradient accumulation."""
 
+    def setUp(self):
+        _feature_store.clear()
+        self._patcher = mock.patch.object(
+            ImageFeatures, 'load', side_effect=_mock_load_features)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        _feature_store.clear()
+
     def _make_imbalanced_data(self):
         rng = np.random.RandomState(42)
         n_features = 20
@@ -659,6 +761,24 @@ class GradientAccumulationTest(unittest.TestCase):
         trainer = MermaidTrainer(io_batch_size=5000)
         data = trainer.serialize()
         self.assertEqual(data['io_batch_size'], 5000)
+
+    def test_serialize_io_workers(self):
+        trainer = MermaidTrainer(io_workers=8)
+        data = trainer.serialize()
+        self.assertEqual(data['io_workers'], 8)
+
+    def test_gradient_accumulation_with_parallel_workers(self):
+        """Gradient accumulation works with io_workers > 1."""
+        X_tr, y_tr, X_ref, y_ref, X_val, y_val = self._make_imbalanced_data()
+        labels = _make_mock_training_labels(
+            X_tr, y_tr, X_ref, y_ref, X_val, y_val, batch_size=75)
+
+        trainer = MermaidTrainer(
+            minibatch_size=75, io_batch_size=25, io_workers=2)
+        clf_cal, _, _ = trainer(
+            labels, nbr_epochs=1, pc_models=[], clf_type='MLP')
+
+        self.assertEqual(len(clf_cal.estimator.loss_curve_), 2)
 
 
 class PrefetchDataLoaderTest(unittest.TestCase):

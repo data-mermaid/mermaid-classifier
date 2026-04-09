@@ -118,6 +118,7 @@ class TrainingRunner:
 
             trainer = MermaidTrainer(
                 io_batch_size=io_batch_size,
+                io_workers=self.training_options.io_workers,
                 minibatch_size=self.training_options.minibatch_size,
                 on_epoch_end=self._on_epoch_end,
                 class_balancing=self.training_options.class_balancing,

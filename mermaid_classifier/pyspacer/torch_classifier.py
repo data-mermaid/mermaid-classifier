@@ -2,55 +2,113 @@
 PyTorch MLP classifier with sklearn-compatible interface for PySpacer storage.
 """
 
+import itertools
 import queue
 import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import IterableDataset
 
-from spacer.data_classes import ImageLabels
+from spacer.data_classes import ImageFeatures, ImageLabels
+from spacer.exceptions import RowColumnMissingError, RowColumnMismatchError
 
 
 class StreamingFeatureDataset(IterableDataset):
     """PyTorch IterableDataset that streams feature/label pairs from
-    ImageLabels.load_data_in_batches() in fixed-size minibatches.
+    ImageLabels in fixed-size batches.
 
     Each iteration re-reads features from disk, avoiding full
     materialization. Memory usage is O(batch_size) instead of
-    O(dataset_size). Shuffling is done at the image level via
-    load_data_in_batches(random_seed=...).
+    O(dataset_size). Shuffling is done at the image level.
+
+    With num_workers > 1, image features are loaded in parallel via a
+    thread pool, keeping I/O throughput high. A sliding window of
+    futures ensures num_workers threads are always busy loading while
+    the main thread assembles batches.
     """
 
     def __init__(self, labels: ImageLabels, label_to_idx: dict,
-                 batch_size: int, random_seed: int | None = None):
+                 batch_size: int, random_seed: int | None = None,
+                 num_workers: int = 1):
         self.labels = labels
         self.label_to_idx = label_to_idx
         self.batch_size = batch_size
         self.random_seed = random_seed
+        self.num_workers = num_workers
+
+    def _load_image(self, feature_loc):
+        """Load one image's features and pair with its annotations."""
+        features = ImageFeatures.load(
+            feature_loc, self.labels.filesystem_cache)
+        annotations = self.labels._data[feature_loc]
+        try:
+            return list(features.match_with_annotations(annotations))
+        except RowColumnMissingError:
+            raise RowColumnMissingError(
+                f"{feature_loc.key}: Features without rowcols are no"
+                f" longer supported for training.")
+        except RowColumnMismatchError as e:
+            raise RowColumnMismatchError(f"{feature_loc.key}: {e}")
 
     def __iter__(self):
+        keys = list(self.labels.keys())
+        if self.random_seed is not None:
+            np.random.seed(self.random_seed)
+            np.random.shuffle(keys)
+
         buffer_x, buffer_y = [], []
-        for x_batch, y_batch in self.labels.load_data_in_batches(
-                batch_size=self.batch_size,
-                random_seed=self.random_seed):
-            for feat, label in zip(x_batch, y_batch):
-                buffer_x.append(feat)
-                buffer_y.append(self.label_to_idx[label])
-                if len(buffer_x) == self.batch_size:
-                    yield (
-                        torch.tensor(np.array(buffer_x),
-                                     dtype=torch.float32),
-                        torch.tensor(buffer_y, dtype=torch.long),
-                    )
-                    buffer_x, buffer_y = [], []
-        # Yield remainder
+
+        if self.num_workers <= 1:
+            for key in keys:
+                pairs = self._load_image(key)
+                yield from self._buffer_pairs(
+                    pairs, buffer_x, buffer_y)
+        else:
+            with ThreadPoolExecutor(
+                    max_workers=self.num_workers) as pool:
+                prefetch_depth = self.num_workers * 2
+                futures = deque()
+                key_iter = iter(keys)
+
+                for key in itertools.islice(key_iter, prefetch_depth):
+                    futures.append(
+                        pool.submit(self._load_image, key))
+
+                for key in key_iter:
+                    pairs = futures.popleft().result()
+                    futures.append(
+                        pool.submit(self._load_image, key))
+                    yield from self._buffer_pairs(
+                        pairs, buffer_x, buffer_y)
+
+                while futures:
+                    pairs = futures.popleft().result()
+                    yield from self._buffer_pairs(
+                        pairs, buffer_x, buffer_y)
+
         if buffer_x:
             yield (
                 torch.tensor(np.array(buffer_x), dtype=torch.float32),
                 torch.tensor(buffer_y, dtype=torch.long),
             )
+
+    def _buffer_pairs(self, pairs, buffer_x, buffer_y):
+        """Add feature/label pairs to buffer, yield full batches."""
+        for feat, label in pairs:
+            buffer_x.append(feat)
+            buffer_y.append(self.label_to_idx[label])
+            if len(buffer_x) == self.batch_size:
+                yield (
+                    torch.tensor(np.array(buffer_x),
+                                 dtype=torch.float32),
+                    torch.tensor(buffer_y, dtype=torch.long),
+                )
+                buffer_x.clear()
+                buffer_y.clear()
 
 
 class PrefetchDataLoader:

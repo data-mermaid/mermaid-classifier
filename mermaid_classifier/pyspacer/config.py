@@ -133,6 +133,8 @@ class TrainingOptions:
         None = auto-calculate from available memory at runtime.
         Decoupled from minibatch_size to allow background prefetching of
         small chunks while the GPU trains.
+    io_workers: Number of threads for parallel image loading within each
+        IO batch. Higher values improve I/O throughput on NVMe/S3.
     """
     epochs: int = 10
     class_balancing: bool = False
@@ -143,6 +145,7 @@ class TrainingOptions:
     hidden_layer_sizes: tuple[int, ...] | None = None
     minibatch_size: int = 512
     io_batch_size: int | None = None
+    io_workers: int = 4
 
 
 @dataclasses.dataclass
