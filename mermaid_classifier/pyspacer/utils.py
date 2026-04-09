@@ -37,7 +37,11 @@ def logging_config_for_script(name):
             name: {
                 'handlers': ['console', 'file'],
                 'level': 'DEBUG',
-            }
+            },
+            'mermaid_classifier': {
+                'handlers': ['console', 'file'],
+                'level': 'DEBUG',
+            },
         },
     })
     return logging.getLogger(name)
