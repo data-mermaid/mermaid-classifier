@@ -22,7 +22,7 @@ if __name__ == "__main__":
         dataset_options=DatasetOptions(
             # Specifying False here means you're only training on CoralNet sources.
             include_mermaid=False,
-            coralnet_sources_csv='../sagemaker/sources/OldCoralNetSourcesToKeep.csv',
+            coralnet_sources_csv='../sagemaker/sources/CoralNetSourcesFirst10.csv',
             # label_rollup_spec_csv='../sagemaker/labels/ba_rollup_top_level.csv',
             excluded_labels_csv='../sagemaker/labels/inspecific-top-level.csv',
             drop_growthforms=False,

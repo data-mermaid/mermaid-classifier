@@ -10,13 +10,14 @@ from logging import getLogger
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
 from sklearn.linear_model import SGDClassifier
-from sklearn.neural_network import MLPClassifier
 
 from spacer import config
 from spacer.data_classes import ImageLabels, ValResults
 from spacer.messages import TrainClassifierReturnMsg
 from spacer.train_classifier import ClassifierTrainer
 from spacer.train_utils import calc_acc, evaluate_classifier
+
+from mermaid_classifier.pyspacer.torch_classifier import TorchMLPClassifier
 
 logger = getLogger(__name__)
 
@@ -72,7 +73,7 @@ class MermaidTrainer(ClassifierTrainer):
                     hls, lr = (200, 100), 1e-4
                 else:
                     hls, lr = (100,), 1e-3
-                clf = MLPClassifier(
+                clf = TorchMLPClassifier(
                     hidden_layer_sizes=hls, learning_rate_init=lr)
             else:
                 clf = SGDClassifier(
