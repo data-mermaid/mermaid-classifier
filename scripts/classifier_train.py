@@ -15,6 +15,8 @@ if credentials:
 
 from mermaid_classifier.pyspacer.train import (
         DatasetOptions, MLflowOptions, MLflowTrainingRunner)
+from mermaid_classifier.training.sample_weighting import (
+        SampleWeightingOptions)
 
 
 if __name__ == "__main__":
@@ -27,6 +29,17 @@ if __name__ == "__main__":
             excluded_labels_csv='../sagemaker/labels/inspecific-top-level.csv',
             drop_growthforms=False,
             #annotation_limit=200000,
+            # Optional sample weighting. Default tree_balanced_ba_flat_gf
+            # uses the BA hierarchy for sibling balancing and a flat
+            # per-GF inverse-frequency factor. Other registered
+            # strategies: leaf_inverse, decomposed, effective_number.
+            # Pass None (or omit) to disable weighting entirely.
+            weighting=SampleWeightingOptions(
+                strategy='tree_balanced_ba_flat_gf',
+                alpha=0.1,
+                min_count=50,
+                rare_policy='drop',
+            ),
         ),
         mlflow_options=MLflowOptions(
             experiment_name="pyspacer-beta-test",

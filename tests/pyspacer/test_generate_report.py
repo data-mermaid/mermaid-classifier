@@ -313,7 +313,7 @@ class TestRenderReport(unittest.TestCase):
             html = output_path.read_text()
             self.assertIn('<!DOCTYPE html>', html)
             self.assertIn('Test Report', html)
-            self.assertIn('0.8500', html)  # F1 macro formatted
+            self.assertIn('80.0%', html)  # F1 (Macro) formatted as percentage
             self.assertIn('abc123def456', html)
 
     def test_conditional_sections_absent(self):

@@ -38,9 +38,15 @@ class MermaidTrainer(ClassifierTrainer):
         self,
         batch_size: int,
         on_epoch_end: Callable[[dict], None] | None = None,
+        class_weight: dict | None = None,
     ):
         self.batch_size = batch_size
         self.on_epoch_end = on_epoch_end
+        # Optional per-class loss weighting passed through to the
+        # underlying TorchMLPClassifier. Only used for clf_type='MLP'.
+        # The SGDClassifier branch ignores this (sklearn SGD has its own
+        # class_weight kwarg, but plumbing it would expand scope).
+        self.class_weight = class_weight
 
     def __call__(self, labels, nbr_epochs, pc_models, clf_type):
         logger.debug(
@@ -74,7 +80,10 @@ class MermaidTrainer(ClassifierTrainer):
                 else:
                     hls, lr = (100,), 1e-3
                 clf = TorchMLPClassifier(
-                    hidden_layer_sizes=hls, learning_rate_init=lr)
+                    hidden_layer_sizes=hls,
+                    learning_rate_init=lr,
+                    class_weight=self.class_weight,
+                )
             else:
                 clf = SGDClassifier(
                     loss='log_loss', average=True, random_state=0)

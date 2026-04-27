@@ -64,6 +64,11 @@ from mermaid_classifier.pyspacer.metrics._logging import (
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
+from mermaid_classifier.training.sample_weighting import (
+    SampleWeightingOptions,
+    compute_class_weights,
+    rare_action_for_class,
+)
 
 
 logger = logging_config_for_script('train')
@@ -465,6 +470,11 @@ class DatasetOptions:
     excluded_labels_csv: str = None
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     annotation_limit: int | None = None
+    # Optional sample-weighting layer applied to TorchMLP cross-entropy
+    # loss. None means no weighting (vanilla CE). See
+    # mermaid_classifier.training.sample_weighting for available
+    # strategies.
+    weighting: SampleWeightingOptions | None = None
 
 
 @dataclasses.dataclass
@@ -1479,9 +1489,15 @@ class TrainingRunner:
                     f" available memory, {num_classes} classes,"
                     f" clf_type={clf_type})")
 
+            class_weight, weighting_log = self._compute_class_weights(
+                self.dataset.labels,
+            )
+            self._weighting_log = weighting_log
+
             trainer = MermaidTrainer(
                 batch_size=batch_size,
                 on_epoch_end=self._on_epoch_end,
+                class_weight=class_weight,
             )
 
             train_msg = TrainClassifierMsg(
@@ -1522,6 +1538,77 @@ class TrainingRunner:
     def _on_epoch_end(self, metrics: dict):
         """Called after each training epoch. Override for logging."""
         pass
+
+    def _compute_class_weights(
+        self,
+        labels,
+    ) -> tuple[dict | None, dict]:
+        """Compute per-class loss weights from training-set class counts,
+        using the configured ``DatasetOptions.weighting`` strategy.
+
+        Returns ``(class_weight_or_none, weighting_log)``. ``class_weight``
+        is a dict mapping class label -> weight, or None if weighting is
+        disabled. ``weighting_log`` is a dict capturing per-class actions
+        and summary stats for MLflow (consumed by MLflowTrainingRunner;
+        the base TrainingRunner discards it).
+        """
+        opts = self.dataset_options.weighting
+        if opts is None or not opts.enabled:
+            return None, {"enabled": False}
+
+        # Per-class training counts come straight from the ImageLabels
+        # Counter — no extra disk/network IO.
+        class_counts = dict(labels.train.label_count_per_class)
+
+        weights = compute_class_weights(
+            class_counts=class_counts,
+            ba_library=ba_library,
+            gf_library=gf_library,
+            options=opts,
+        )
+
+        # Build the per-class log table (action + count + weight).
+        rows = []
+        for cls, count in class_counts.items():
+            rows.append(dict(
+                bagf_id=cls,
+                count=int(count),
+                weight=float(weights.get(cls, 0.0)),
+                rare_action=rare_action_for_class(cls),
+            ))
+        per_class_df = pd.DataFrame(rows)
+
+        # Summary stats over non-zero weights (zero-weighted classes are
+        # treated as "dropped" and excluded from spread calculations).
+        nonzero = per_class_df[per_class_df["weight"] > 0]["weight"]
+        if len(nonzero) > 0:
+            summary = dict(
+                weight_mean=float(nonzero.mean()),
+                weight_median=float(nonzero.median()),
+                weight_p5=float(nonzero.quantile(0.05)),
+                weight_p95=float(nonzero.quantile(0.95)),
+                weight_max_min_ratio=float(
+                    nonzero.max() / max(nonzero.min(), 1e-12)),
+                n_classes_kept=int(len(nonzero)),
+                n_classes_zeroed=int(len(per_class_df) - len(nonzero)),
+            )
+        else:
+            summary = dict(
+                weight_mean=0.0,
+                weight_median=0.0,
+                weight_p5=0.0,
+                weight_p95=0.0,
+                weight_max_min_ratio=0.0,
+                n_classes_kept=0,
+                n_classes_zeroed=int(len(per_class_df)),
+            )
+
+        return weights, dict(
+            enabled=True,
+            options=opts,
+            per_class_df=per_class_df,
+            summary=summary,
+        )
 
     def log_dataset_artifacts(self):
         """
@@ -1602,11 +1689,25 @@ class MLflowTrainingRunner(TrainingRunner):
             )
             mlflow.log_params(dataset_options_to_log)
 
+            # Sample-weighting params: logged before training so they
+            # show up alongside dataset/training params even if the
+            # training run later fails.
+            if self.dataset_options.weighting is not None:
+                mlflow.log_params(
+                    self.dataset_options.weighting.to_log_dict()
+                )
+            else:
+                mlflow.log_params({"weighting/enabled": False})
+
             self.log_system_specs()
 
             # Here's the actual training and data prep.
             return_msg, model_loc, valresult_loc = super().run(
                 run_name=run_name)
+
+            # Weighting artifacts/metrics are stashed by the base run()
+            # via _compute_class_weights. Log them now.
+            self._log_weighting_artifacts()
 
             profiles_df = pd.DataFrame(self.profiled_sections)
             self.log_dataframe(profiles_df, 'profiled_sections')
@@ -1715,6 +1816,47 @@ class MLflowTrainingRunner(TrainingRunner):
         Return a version of s which has the non-alphanumeric chars removed.
         """
         return ''.join([char for char in s if char.isalnum()])
+
+    def _log_weighting_artifacts(self) -> None:
+        """Log per-class weight artifacts and summary metrics gathered by
+        the base ``TrainingRunner._compute_class_weights`` call.
+
+        Logs nothing if weighting was disabled. Decorates the per-class
+        DataFrame with human-readable BA and GF names from the same
+        libraries the rest of the runner uses for taxonomy resolution.
+        """
+        weighting_log = getattr(self, '_weighting_log', None)
+        if not weighting_log or not weighting_log.get('enabled'):
+            return
+
+        df = weighting_log['per_class_df'].copy()
+
+        # Decorate with BA/GF names. Defensive: if any label fails to
+        # parse, leave the name columns blank rather than failing the run.
+        def _decorate(row):
+            try:
+                ba_id, gf_id = split_ba_gf(row['bagf_id'])
+                ba_name = ba_library.id_to_name(ba_id) if ba_id else ''
+                gf_name = gf_library.id_to_name(gf_id) if gf_id else ''
+            except Exception:
+                ba_id, gf_id, ba_name, gf_name = '', '', '', ''
+            return pd.Series(dict(
+                ba_id=ba_id, gf_id=gf_id,
+                ba_name=ba_name, gf_name=gf_name,
+            ))
+
+        decorated = df.apply(_decorate, axis=1)
+        df = pd.concat([df, decorated], axis=1)
+        df = df[[
+            'bagf_id', 'ba_id', 'ba_name', 'gf_id', 'gf_name',
+            'count', 'weight', 'rare_action',
+        ]].sort_values('weight', ascending=False)
+
+        self.log_dataframe(df, 'weighting/per_class_weights')
+
+        summary = weighting_log['summary']
+        for k, v in summary.items():
+            mlflow.log_metric(f'weighting/{k}', float(v), step=0)
 
     @staticmethod
     def _existing_ancestor(path: str) -> str:

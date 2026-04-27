@@ -2,7 +2,7 @@
 
 import unittest
 
-from metrics_test_helpers import MockBALibrary
+from .metrics_test_helpers import MockBALibrary
 
 from mermaid_classifier.pyspacer.metrics._taxonomy_helpers import (
     build_ba_paths,

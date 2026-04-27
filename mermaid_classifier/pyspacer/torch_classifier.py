@@ -97,6 +97,7 @@ class TorchMLPClassifier:
         beta_1: float = 0.9,
         beta_2: float = 0.999,
         epsilon: float = 1e-8,
+        class_weight: dict | None = None,
     ):
         if activation != "relu":
             raise ValueError(
@@ -122,6 +123,11 @@ class TorchMLPClassifier:
         self.beta_1 = beta_1
         self.beta_2 = beta_2
         self.epsilon = epsilon
+        # Per-class loss weighting. dict maps class label (must match a
+        # value in classes_) -> non-negative float. Built into a tensor
+        # on first partial_fit, once classes_ ordering is known. None
+        # disables weighting (loss reverts to unweighted CE).
+        self.class_weight = class_weight
 
     def _resolve_batch_size(self, n_samples: int) -> int:
         if self.batch_size == "auto":
@@ -173,6 +179,32 @@ class TorchMLPClassifier:
             eps=self.epsilon,
         )
 
+    def _build_class_weight_tensor(self) -> torch.Tensor | None:
+        """Materialize ``self.class_weight`` (a dict label->float) into a
+        tensor in classes_ order. Returns None if no weighting was
+        requested. Raises ValueError if any class in ``classes_`` is
+        missing from the weight dict (defensive — class_weight should
+        always cover every class the classifier will see)."""
+        if self.class_weight is None:
+            return None
+        weights: list[float] = []
+        for cls in self.classes_:
+            if cls not in self.class_weight:
+                bad = sorted(set(self.classes_.tolist())
+                             - set(self.class_weight))
+                raise ValueError(
+                    f"class_weight is missing weights for {bad!r}."
+                    f" Pass weights for every class in classes_."
+                )
+            w = float(self.class_weight[cls])
+            if w < 0:
+                raise ValueError(
+                    f"class_weight for {cls!r} is negative ({w!r});"
+                    f" weights must be >= 0."
+                )
+            weights.append(w)
+        return torch.tensor(weights, dtype=torch.float32)
+
     def _l2_penalty(self) -> torch.Tensor:
         # sklearn's MLP applies 0.5 * alpha / n_samples * sum(W^2) to loss,
         # over weights (not biases). We compute sum(W^2) here; the caller
@@ -203,6 +235,9 @@ class TorchMLPClassifier:
             self.loss_curve_ = []
             self._init_module()
             self._init_optimizer()
+            # Build the class_weight tensor once classes_ is finalized.
+            # Stored as None when no weighting requested (faster CE path).
+            self._class_weight_tensor = self._build_class_weight_tensor()
         else:
             if X_arr.shape[1] != self.n_features_in_:
                 raise ValueError(
@@ -234,7 +269,14 @@ class TorchMLPClassifier:
 
             self._optimizer.zero_grad()
             logits = self._module(xb)
-            data_loss = F.cross_entropy(logits, yb)
+            # When class_weight is provided, F.cross_entropy uses
+            # weight[y_i] / sum_j weight[y_j] as the per-sample weight
+            # in the mean reduction. Classes assigned weight=0 contribute
+            # zero direct gradient via their own CE term, but their
+            # logits still participate in the softmax denominator for
+            # other classes — for full exclusion, filter the dataset.
+            data_loss = F.cross_entropy(
+                logits, yb, weight=self._class_weight_tensor)
             # Match sklearn's MLP: L2 penalty per mini-batch is
             # (0.5 * alpha / mb_size) * sum(W^2) — scaled by the size of
             # this specific mini-batch, not the full partial_fit input.
@@ -311,6 +353,10 @@ class TorchMLPClassifier:
             "beta_1": self.beta_1,
             "beta_2": self.beta_2,
             "epsilon": self.epsilon,
+            # ``getattr`` defends against pickles produced before the
+            # class_weight attribute existed; old artifacts unpickle
+            # cleanly into a no-weighting classifier.
+            "class_weight": getattr(self, "class_weight", None),
         }
 
     def set_params(self, **params: Any) -> "TorchMLPClassifier":
@@ -340,6 +386,10 @@ class TorchMLPClassifier:
         module_state = state.pop("_module_state", None)
         optimizer_state = state.pop("_optimizer_state", None)
         self.__dict__.update(state)
+        # Backfill attributes added after the original release so old
+        # pickles unpickle cleanly. Add new defaults here as the class
+        # grows, rather than mutating __getstate__ to inject them.
+        self.__dict__.setdefault("class_weight", None)
         if module_state is not None:
             # Rebuild module using stored metadata; weights replaced below.
             self._module = _MLPModule(
