@@ -69,7 +69,6 @@ def compute_class_weights(
     cls = STRATEGY_REGISTRY[options.strategy]
     strategy = cls(
         alpha=options.alpha,
-        min_count=options.min_count,
-        rare_policy=options.rare_policy,
+        weight_ratio_cap=options.weight_ratio_cap,
     )
     return strategy.compute(class_counts, ba_library, gf_library)

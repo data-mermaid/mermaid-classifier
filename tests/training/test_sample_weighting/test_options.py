@@ -14,8 +14,7 @@ class OptionsValidationTest(unittest.TestCase):
         self.assertTrue(opts.enabled)
         self.assertEqual(opts.strategy, "tree_balanced_ba_flat_gf")
         self.assertEqual(opts.alpha, 0.5)
-        self.assertEqual(opts.min_count, 10)
-        self.assertEqual(opts.rare_policy, "drop")
+        self.assertIsNone(opts.weight_ratio_cap)
 
     def test_alpha_below_zero_rejected(self):
         with self.assertRaisesRegex(ValueError, "alpha"):
@@ -25,28 +24,33 @@ class OptionsValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "alpha"):
             SampleWeightingOptions(alpha=1.5)
 
-    def test_min_count_below_one_rejected(self):
-        with self.assertRaisesRegex(ValueError, "min_count"):
-            SampleWeightingOptions(min_count=0)
+    def test_weight_ratio_cap_default_none(self):
+        opts = SampleWeightingOptions()
+        self.assertIsNone(opts.weight_ratio_cap)
 
-    def test_unknown_rare_policy_rejected(self):
-        with self.assertRaisesRegex(ValueError, "rare_policy"):
-            SampleWeightingOptions(rare_policy="bogus")
+    def test_weight_ratio_cap_one_accepted(self):
+        opts = SampleWeightingOptions(weight_ratio_cap=1.0)
+        self.assertEqual(opts.weight_ratio_cap, 1.0)
+
+    def test_weight_ratio_cap_below_one_rejected(self):
+        with self.assertRaisesRegex(ValueError, "weight_ratio_cap"):
+            SampleWeightingOptions(weight_ratio_cap=0.5)
 
     def test_to_log_dict_flat(self):
         opts = SampleWeightingOptions(
             enabled=True,
             strategy="leaf_inverse",
             alpha=0.3,
-            min_count=5,
-            rare_policy="keep",
         )
         d = opts.to_log_dict()
         self.assertEqual(d["weighting/strategy"], "leaf_inverse")
         self.assertEqual(d["weighting/alpha"], 0.3)
-        self.assertEqual(d["weighting/min_count"], 5)
-        self.assertEqual(d["weighting/rare_policy"], "keep")
         self.assertTrue(d["weighting/enabled"])
+        self.assertIsNone(d["weighting/weight_ratio_cap"])
+
+    def test_to_log_dict_includes_weight_ratio_cap_when_set(self):
+        opts = SampleWeightingOptions(weight_ratio_cap=10.0)
+        self.assertEqual(opts.to_log_dict()["weighting/weight_ratio_cap"], 10.0)
 
 
 if __name__ == "__main__":

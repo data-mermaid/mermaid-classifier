@@ -22,7 +22,6 @@ class LeafInverseTest(unittest.TestCase):
     def _run(self, counts, **kw):
         opts = SampleWeightingOptions(
             strategy="leaf_inverse",
-            rare_policy=kw.pop("rare_policy", "keep"),
             **kw,
         )
         return compute_class_weights(

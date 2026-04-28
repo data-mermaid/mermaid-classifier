@@ -64,10 +64,14 @@ from mermaid_classifier.pyspacer.metrics._logging import (
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
+from mermaid_classifier.training.label_transforms import (
+    LabelTransformsOptions,
+    TransformPlan,
+    apply_label_transforms,
+)
 from mermaid_classifier.training.sample_weighting import (
     SampleWeightingOptions,
     compute_class_weights,
-    rare_action_for_class,
 )
 
 
@@ -153,8 +157,12 @@ def download_features_parallel(
 
     def _download(item):
         (bucket, key), local_path = item
+        if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+            return
         s3 = get_s3_resource()
-        s3.Object(bucket, key).download_file(local_path)
+        part_path = local_path + '.part'
+        s3.Object(bucket, key).download_file(part_path)
+        os.rename(part_path, local_path)
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=max_workers
@@ -475,6 +483,13 @@ class DatasetOptions:
     # mermaid_classifier.training.sample_weighting for available
     # strategies.
     weighting: SampleWeightingOptions | None = None
+    # Optional label-transforms pipeline applied to ImageLabels
+    # (train/ref/val) before training. Drops or remaps rare classes so
+    # the validation set, classifier classes_, and downstream metrics
+    # all share one consistent label space. See
+    # mermaid_classifier.training.label_transforms for available
+    # transforms.
+    label_transforms: LabelTransformsOptions | None = None
 
 
 @dataclasses.dataclass
@@ -699,6 +714,26 @@ class TrainingDataset:
 
         with self.section_profiling("Prep annotations for PySpacer"):
             self.labels = self.prep_annotations_for_pyspacer()
+
+        # Apply the label-transforms pipeline (drop/merge rare classes
+        # etc.) before any downstream consumer — sample weighting,
+        # PySpacer training, and the metrics layer — sees self.labels.
+        # Train, ref, and val are all rewritten through the same plan,
+        # so the validation set is consistent with training. The
+        # transformed label set also becomes the trained classifier's
+        # classes_ array, so predictions naturally produce only valid
+        # post-transform labels.
+        self.label_transform_plans: list[TransformPlan] = []
+        if options.label_transforms is not None and options.label_transforms.enabled:
+            with self.section_profiling("Label transforms"):
+                self.labels, self.label_transform_plans = apply_label_transforms(
+                    labels=self.labels,
+                    options=options.label_transforms,
+                    ba_library=ba_library,
+                    gf_library=gf_library,
+                )
+
+        with self.section_profiling("Tag DuckDB rows with training set"):
             self.add_training_set_names()
 
         self.set_train_summary_stats()
@@ -1567,30 +1602,30 @@ class TrainingRunner:
             options=opts,
         )
 
-        # Build the per-class log table (action + count + weight).
+        # Build the per-class log table (count + weight). The per-class
+        # rare/keep decision now lives in the label-transforms plan
+        # artifact, not here — this table only reports loss-weight
+        # spread for the kept (post-transform) class set.
         rows = []
         for cls, count in class_counts.items():
             rows.append(dict(
                 bagf_id=cls,
                 count=int(count),
                 weight=float(weights.get(cls, 0.0)),
-                rare_action=rare_action_for_class(cls),
             ))
         per_class_df = pd.DataFrame(rows)
 
-        # Summary stats over non-zero weights (zero-weighted classes are
-        # treated as "dropped" and excluded from spread calculations).
-        nonzero = per_class_df[per_class_df["weight"] > 0]["weight"]
-        if len(nonzero) > 0:
+        # Summary stats over the weights produced for the kept class set.
+        weight_series = per_class_df["weight"]
+        if len(weight_series) > 0 and weight_series.max() > 0:
             summary = dict(
-                weight_mean=float(nonzero.mean()),
-                weight_median=float(nonzero.median()),
-                weight_p5=float(nonzero.quantile(0.05)),
-                weight_p95=float(nonzero.quantile(0.95)),
+                weight_mean=float(weight_series.mean()),
+                weight_median=float(weight_series.median()),
+                weight_p5=float(weight_series.quantile(0.05)),
+                weight_p95=float(weight_series.quantile(0.95)),
                 weight_max_min_ratio=float(
-                    nonzero.max() / max(nonzero.min(), 1e-12)),
-                n_classes_kept=int(len(nonzero)),
-                n_classes_zeroed=int(len(per_class_df) - len(nonzero)),
+                    weight_series.max() / max(weight_series.min(), 1e-12)),
+                n_classes=int(len(per_class_df)),
             )
         else:
             summary = dict(
@@ -1599,8 +1634,7 @@ class TrainingRunner:
                 weight_p5=0.0,
                 weight_p95=0.0,
                 weight_max_min_ratio=0.0,
-                n_classes_kept=0,
-                n_classes_zeroed=int(len(per_class_df)),
+                n_classes=int(len(per_class_df)),
             )
 
         return weights, dict(
@@ -1699,6 +1733,17 @@ class MLflowTrainingRunner(TrainingRunner):
             else:
                 mlflow.log_params({"weighting/enabled": False})
 
+            # Label-transforms params: logged before training for the
+            # same reason. The per-stage TransformPlan artifacts are
+            # logged later (after dataset prep) since the plans aren't
+            # known until training counts are computed.
+            if self.dataset_options.label_transforms is not None:
+                mlflow.log_params(
+                    self.dataset_options.label_transforms.to_log_dict()
+                )
+            else:
+                mlflow.log_params({"label_transforms/enabled": False})
+
             self.log_system_specs()
 
             # Here's the actual training and data prep.
@@ -1708,6 +1753,7 @@ class MLflowTrainingRunner(TrainingRunner):
             # Weighting artifacts/metrics are stashed by the base run()
             # via _compute_class_weights. Log them now.
             self._log_weighting_artifacts()
+            self._log_label_transforms_artifacts()
 
             profiles_df = pd.DataFrame(self.profiled_sections)
             self.log_dataframe(profiles_df, 'profiled_sections')
@@ -1849,7 +1895,7 @@ class MLflowTrainingRunner(TrainingRunner):
         df = pd.concat([df, decorated], axis=1)
         df = df[[
             'bagf_id', 'ba_id', 'ba_name', 'gf_id', 'gf_name',
-            'count', 'weight', 'rare_action',
+            'count', 'weight',
         ]].sort_values('weight', ascending=False)
 
         self.log_dataframe(df, 'weighting/per_class_weights')
@@ -1857,6 +1903,73 @@ class MLflowTrainingRunner(TrainingRunner):
         summary = weighting_log['summary']
         for k, v in summary.items():
             mlflow.log_metric(f'weighting/{k}', float(v), step=0)
+
+    def _log_label_transforms_artifacts(self) -> None:
+        """Log per-stage TransformPlan records and summary metrics for
+        the label-transforms pipeline.
+
+        Logs nothing if no transforms were applied. Decorates each
+        per-class row with human-readable BA and GF names so the
+        artifact is readable without joining against the taxonomy.
+        """
+        plans = getattr(self.dataset, 'label_transform_plans', None) or []
+        if not plans:
+            return
+
+        # One combined dataframe across all stages (small artifact;
+        # easier to inspect than one CSV per stage).
+        all_rows: list[dict] = []
+        n_dropped_total = 0
+        n_remapped_total = 0
+        for stage_idx, plan in enumerate(plans):
+            for record in plan.to_log_records():
+                record["stage"] = stage_idx
+                all_rows.append(record)
+                if record["action"] == "drop":
+                    n_dropped_total += 1
+                elif record["action"] == "remap":
+                    n_remapped_total += 1
+
+        if not all_rows:
+            return
+
+        df = pd.DataFrame(all_rows)
+
+        def _decorate(row):
+            try:
+                ba_id, gf_id = split_ba_gf(row['bagf_id'])
+                ba_name = ba_library.id_to_name(ba_id) if ba_id else ''
+                gf_name = gf_library.id_to_name(gf_id) if gf_id else ''
+            except Exception:
+                ba_id, gf_id, ba_name, gf_name = '', '', '', ''
+            target = row['target_bagf_id']
+            try:
+                if target:
+                    tba_id, tgf_id = split_ba_gf(target)
+                    tba_name = ba_library.id_to_name(tba_id) if tba_id else ''
+                    tgf_name = gf_library.id_to_name(tgf_id) if tgf_id else ''
+                else:
+                    tba_name = tgf_name = ''
+            except Exception:
+                tba_name = tgf_name = ''
+            return pd.Series(dict(
+                ba_name=ba_name, gf_name=gf_name,
+                target_ba_name=tba_name, target_gf_name=tgf_name,
+            ))
+
+        decorated = df.apply(_decorate, axis=1)
+        df = pd.concat([df, decorated], axis=1)
+        df = df[[
+            'stage', 'transform', 'bagf_id', 'ba_name', 'gf_name',
+            'count', 'action', 'target_bagf_id',
+            'target_ba_name', 'target_gf_name',
+        ]]
+
+        self.log_dataframe(df, 'label_transforms/applied')
+
+        mlflow.log_metric('label_transforms/n_stages', float(len(plans)), step=0)
+        mlflow.log_metric('label_transforms/n_dropped', float(n_dropped_total), step=0)
+        mlflow.log_metric('label_transforms/n_remapped', float(n_remapped_total), step=0)
 
     @staticmethod
     def _existing_ancestor(path: str) -> str:

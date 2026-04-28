@@ -64,11 +64,11 @@ class EffectiveNumberOfSamplesStrategy(Strategy):
     def __init__(
         self,
         alpha: float = 0.5,
-        min_count: int = 10,
-        rare_policy: str = "drop",
+        weight_ratio_cap: float | None = None,
     ):
         super().__init__(
-            alpha=alpha, min_count=min_count, rare_policy=rare_policy,
+            alpha=alpha,
+            weight_ratio_cap=weight_ratio_cap,
         )
         # Warn for any alpha other than the default (0.5) since this
         # strategy ignores alpha and uses BETA instead. Suppressing only

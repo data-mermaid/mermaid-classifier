@@ -30,7 +30,6 @@ class TreeBalancedTest(unittest.TestCase):
     def _run(self, counts, **opt_kwargs):
         opts = SampleWeightingOptions(
             strategy="tree_balanced_ba_flat_gf",
-            rare_policy=opt_kwargs.pop("rare_policy", "keep"),
             **opt_kwargs,
         )
         return compute_class_weights(
@@ -115,6 +114,67 @@ class TreeBalancedTest(unittest.TestCase):
         w = self._run(counts, alpha=1.0)
         ratio = w[_bagf("A1", "g2")] / w[_bagf("A1", "g1")]
         self.assertTrue(math.isclose(ratio, 10.0, rel_tol=1e-6))
+
+    def test_weight_ratio_cap_is_noop_when_under_cap(self):
+        # A loose cap (well above the natural max/min) should leave
+        # the weights unchanged.
+        counts = {
+            _bagf("A1", "g1"): 1000,
+            _bagf("A2", "g1"): 10,
+            _bagf("B1", "g1"): 100,
+        }
+        baseline = self._run(counts, alpha=0.5)
+        capped = self._run(counts, alpha=0.5, weight_ratio_cap=1e6)
+        for k in baseline:
+            self.assertTrue(
+                math.isclose(baseline[k], capped[k], rel_tol=1e-9),
+                f"weight for {k!r} drifted under no-op cap",
+            )
+
+    def test_weight_ratio_cap_one_collapses_kept_weights(self):
+        # cap=1.0 forces max == min, so every kept class ends up at the
+        # same value (= the original min_kept).
+        counts = {
+            _bagf("A1", "g1"): 1000,
+            _bagf("A2", "g1"): 10,
+            _bagf("B1", "g1"): 100,
+        }
+        baseline = self._run(counts, alpha=1.0)
+        capped = self._run(counts, alpha=1.0, weight_ratio_cap=1.0)
+        baseline_min = min(baseline.values())
+        for v in capped.values():
+            self.assertTrue(
+                math.isclose(v, baseline_min, rel_tol=1e-9),
+                f"capped weight {v!r} != baseline min {baseline_min!r}",
+            )
+
+    def test_weight_ratio_cap_only_clips_above_ceiling(self):
+        # With alpha=1 and these counts B1's mass dominates: A and B
+        # get root shares ~0.090 / 0.910, then within A both leaves
+        # split as ~0.0099/0.9901. Apply cap=2.0; weights below
+        # min_kept * cap stay untouched.
+        counts = {
+            _bagf("A1", "g1"): 1000,
+            _bagf("A2", "g1"): 10,
+            _bagf("B1", "g1"): 100,
+        }
+        baseline = self._run(counts, alpha=1.0)
+        cap = 2.0
+        capped = self._run(counts, alpha=1.0, weight_ratio_cap=cap)
+        kept = [w for w in capped.values() if w > 0]
+        self.assertLessEqual(max(kept) / min(kept), cap + 1e-9)
+        ceiling = min(baseline.values()) * cap
+        for k, raw_w in baseline.items():
+            if raw_w <= ceiling:
+                self.assertTrue(
+                    math.isclose(capped[k], raw_w, rel_tol=1e-9),
+                    f"sub-ceiling weight for {k!r} should be untouched",
+                )
+            else:
+                self.assertTrue(
+                    math.isclose(capped[k], ceiling, rel_tol=1e-9),
+                    f"super-ceiling weight for {k!r} should equal ceiling",
+                )
 
     def test_collapses_single_child_chain(self):
         # C -> C1 -> C1a is a single-child chain. With alpha=0 and

@@ -2,11 +2,6 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Literal
-
-
-RarePolicy = Literal["drop", "keep", "merge"]
-_VALID_POLICIES: tuple[str, ...] = ("drop", "keep", "merge")
 
 
 @dataclasses.dataclass
@@ -19,46 +14,42 @@ class SampleWeightingOptions:
                          passing weighting=None).
         strategy      -- registry key, e.g. ``"tree_balanced_ba_flat_gf"``.
                          The corresponding Strategy class is instantiated
-                         with ``alpha`` and the rare-class settings.
+                         with ``alpha`` and the weighting settings.
         alpha         -- smoothing exponent in [0, 1].
                          alpha=0 uniform, alpha=1 inverse-frequency.
                          Each strategy's docstring documents how alpha is
                          applied for that specific algorithm.
-        min_count     -- minimum sample count for a class to be kept
-                         (subject to rare_policy). A class with fewer
-                         training samples is treated as "rare".
-        rare_policy   -- "drop"  zero out weights for classes below
-                                  min_count (their loss contribution is
-                                  zero, equivalent to dropping them
-                                  from the gradient signal).
-                          "keep" leave rare classes in the weighting,
-                                  computed normally.
-                          "merge" not implemented: merging would require
-                                  relabelling samples up the BA tree
-                                  inside the data pipeline, which is a
-                                  larger change. Selecting "merge" raises
-                                  NotImplementedError at strategy time.
+        weight_ratio_cap
+                      -- optional cap on the max:min ratio of the
+                         per-class weights produced by the strategy.
+                         When set, any weight above
+                         ``min_weight * weight_ratio_cap`` is clamped
+                         down to that ceiling, which bounds how much a
+                         single class can dominate the loss. ``None``
+                         (default) disables capping. Must be ``>= 1.0``;
+                         a cap of 1.0 forces all weights equal.
+
+    Note: rare-class drop/merge handling lives in
+    ``mermaid_classifier.training.label_transforms`` and is configured
+    via ``DatasetOptions.label_transforms_options``. This module is
+    purely about loss-weight computation over whatever class set the
+    label-transforms pipeline produces.
     """
 
     enabled: bool = True
     strategy: str = "tree_balanced_ba_flat_gf"
     alpha: float = 0.5
-    min_count: int = 10
-    rare_policy: RarePolicy = "drop"
+    weight_ratio_cap: float | None = None
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.alpha <= 1.0):
             raise ValueError(
                 f"alpha must be in [0, 1], got {self.alpha!r}"
             )
-        if self.min_count < 1:
+        if self.weight_ratio_cap is not None and self.weight_ratio_cap < 1.0:
             raise ValueError(
-                f"min_count must be >= 1, got {self.min_count!r}"
-            )
-        if self.rare_policy not in _VALID_POLICIES:
-            raise ValueError(
-                f"rare_policy must be one of {_VALID_POLICIES},"
-                f" got {self.rare_policy!r}"
+                f"weight_ratio_cap must be None or >= 1.0,"
+                f" got {self.weight_ratio_cap!r}"
             )
         # Strategy name is validated by the registry on lookup; we don't
         # import the registry here to avoid a circular import at module
@@ -70,6 +61,5 @@ class SampleWeightingOptions:
             "weighting/enabled": self.enabled,
             "weighting/strategy": self.strategy,
             "weighting/alpha": self.alpha,
-            "weighting/min_count": self.min_count,
-            "weighting/rare_policy": self.rare_policy,
+            "weighting/weight_ratio_cap": self.weight_ratio_cap,
         }

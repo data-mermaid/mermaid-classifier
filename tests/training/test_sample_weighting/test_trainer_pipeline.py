@@ -5,6 +5,10 @@ through to the strategy registry. We bypass the real
 BenthicAttributeLibrary/GrowthFormLibrary by monkeypatching the module
 globals in train.py with fakes — those real classes hit the MERMAID
 API on construction, which is unsuitable for unit tests.
+
+Rare-class drop/merge now lives in the label-transforms data pipeline
+(see ``mermaid_classifier.training.label_transforms``), so this layer
+just receives whichever class set the pipeline produced.
 """
 from __future__ import annotations
 
@@ -93,8 +97,7 @@ class TrainerPipelineTest(unittest.TestCase):
         self.assertEqual(log, {"enabled": False})
 
     def test_default_strategy_produces_weights_for_every_class(self):
-        runner = self._make_runner(
-            weighting=SampleWeightingOptions(rare_policy="keep"))
+        runner = self._make_runner(weighting=SampleWeightingOptions())
         counts = {
             combine_ba_gf("A1", "g1"): 100,
             combine_ba_gf("A2", "g1"): 50,
@@ -111,8 +114,7 @@ class TrainerPipelineTest(unittest.TestCase):
         self.assertTrue(log["enabled"])
 
     def test_log_structure_contains_required_summary_keys(self):
-        runner = self._make_runner(
-            weighting=SampleWeightingOptions(rare_policy="keep"))
+        runner = self._make_runner(weighting=SampleWeightingOptions())
         counts = {
             combine_ba_gf("A1", "g1"): 100,
             combine_ba_gf("A2", "g1"): 50,
@@ -122,28 +124,16 @@ class TrainerPipelineTest(unittest.TestCase):
         self.assertIn("summary", log)
         for key in (
             "weight_mean", "weight_median", "weight_p5", "weight_p95",
-            "weight_max_min_ratio", "n_classes_kept", "n_classes_zeroed",
+            "weight_max_min_ratio", "n_classes",
         ):
             self.assertIn(key, log["summary"])
-
-    def test_drop_policy_marks_rare_classes_zeroed_in_log(self):
-        runner = self._make_runner(
-            weighting=SampleWeightingOptions(
-                rare_policy="drop", min_count=10))
-        counts = {
-            combine_ba_gf("A1", "g1"): 100,
-            combine_ba_gf("A2", "g1"): 5,         # rare
-        }
-        weights, log = runner._compute_class_weights(_fake_labels(counts))
+        # Per-class DataFrame no longer carries a rare_action column —
+        # rare-class accounting lives in the label-transforms artifact.
         df = log["per_class_df"]
-        rare_row = df[df["bagf_id"] == combine_ba_gf("A2", "g1")].iloc[0]
-        common_row = df[df["bagf_id"] == combine_ba_gf("A1", "g1")].iloc[0]
-        self.assertEqual(rare_row["rare_action"], "zeroed")
-        self.assertEqual(common_row["rare_action"], "kept")
-        self.assertEqual(float(rare_row["weight"]), 0.0)
-        self.assertGreater(float(common_row["weight"]), 0.0)
-        self.assertEqual(log["summary"]["n_classes_kept"], 1)
-        self.assertEqual(log["summary"]["n_classes_zeroed"], 1)
+        self.assertNotIn("rare_action", df.columns)
+        self.assertIn("bagf_id", df.columns)
+        self.assertIn("count", df.columns)
+        self.assertIn("weight", df.columns)
 
     def test_unknown_strategy_raises_with_helpful_message(self):
         bad_opts = SampleWeightingOptions.__new__(SampleWeightingOptions)
@@ -151,8 +141,7 @@ class TrainerPipelineTest(unittest.TestCase):
         bad_opts.enabled = True
         bad_opts.strategy = "no_such_strategy"
         bad_opts.alpha = 0.5
-        bad_opts.min_count = 10
-        bad_opts.rare_policy = "drop"
+        bad_opts.weight_ratio_cap = None
         runner = self._make_runner(weighting=bad_opts)
         labels = _fake_labels({combine_ba_gf("A1", "g1"): 100})
         with self.assertRaisesRegex(ValueError, "Unknown weighting strategy"):

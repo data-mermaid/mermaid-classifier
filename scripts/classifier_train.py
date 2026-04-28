@@ -15,6 +15,8 @@ if credentials:
 
 from mermaid_classifier.pyspacer.train import (
         DatasetOptions, MLflowOptions, MLflowTrainingRunner)
+from mermaid_classifier.training.label_transforms import (
+        LabelTransformsOptions, TransformSpec)
 from mermaid_classifier.training.sample_weighting import (
         SampleWeightingOptions)
 
@@ -35,10 +37,21 @@ if __name__ == "__main__":
             # strategies: leaf_inverse, decomposed, effective_number.
             # Pass None (or omit) to disable weighting entirely.
             weighting=SampleWeightingOptions(
-                strategy='tree_balanced_ba_flat_gf',
+                strategy='effective_number',
                 alpha=0.1,
-                min_count=50,
-                rare_policy='drop',
+                weight_ratio_cap=500.0,  # bound max:min ratio of weights
+            ),
+            # Optional label-transforms pipeline. Drops/merges rare
+            # classes from train/ref/val so all three splits and the
+            # trained classifier share one consistent label space.
+            # Available transforms (see
+            # mermaid_classifier.training.label_transforms): drop_rare,
+            # merge_rare. Use a list of TransformSpec to compose stages.
+            label_transforms=LabelTransformsOptions(
+                enabled=True,
+                pipeline=[
+                    TransformSpec(name='drop_rare', params={'min_count': 50}),
+                ],
             ),
         ),
         mlflow_options=MLflowOptions(

@@ -16,19 +16,21 @@ from mermaid_classifier.training.sample_weighting import (
 )
 
 from tests.training.test_sample_weighting.fakes import (
-    FakeBALibrary, FakeGFLibrary, small_tree,
+    FakeGFLibrary, small_tree,
 )
 
 
 def _toy_class_counts() -> dict[str, int]:
-    """Six classes with one rare (count=2)."""
+    """Six classes, all with reasonable counts (the rare-class drop/merge
+    decision is now upstream of weighting, so this contract tests the
+    weighting layer with the kept-class set the data pipeline produces)."""
     return {
         combine_ba_gf("A1", "g1"): 100,
         combine_ba_gf("A2", "g1"): 100,
         combine_ba_gf("B1", "g1"): 50,
         combine_ba_gf("C1a", "g2"): 30,
         combine_ba_gf("A1", "g2"): 20,
-        combine_ba_gf("B1", "g2"): 2,        # rare
+        combine_ba_gf("B1", "g2"): 15,
     }
 
 
@@ -53,37 +55,25 @@ class StrategyContractTest(unittest.TestCase):
                 yield name, weights
 
     def test_returns_weight_for_every_class(self):
-        for _, weights in self._run_for_each(dict(rare_policy="keep")):
+        for _, weights in self._run_for_each({}):
             self.assertEqual(set(weights.keys()), set(self.counts.keys()))
 
-    def test_keep_policy_no_zero_weights(self):
-        for _, weights in self._run_for_each(dict(rare_policy="keep")):
+    def test_no_zero_weights(self):
+        # Universal contract: every class gets a strictly positive
+        # weight. Drop/merge decisions live in the data pipeline (see
+        # mermaid_classifier.training.label_transforms), so the
+        # weighting layer never produces a zero.
+        for _, weights in self._run_for_each({}):
             for label, w in weights.items():
                 self.assertGreater(
                     w, 0.0,
                     f"weight for {label!r} is non-positive: {w!r}",
                 )
 
-    def test_drop_policy_zeros_only_rare_classes(self):
-        for _, weights in self._run_for_each(
-            dict(rare_policy="drop", min_count=10),
-        ):
-            rare_label = combine_ba_gf("B1", "g2")
-            for label, w in weights.items():
-                if self.counts[label] < 10:
-                    self.assertEqual(
-                        w, 0.0,
-                        f"rare class {label!r} should be zeroed, got {w!r}",
-                    )
-                else:
-                    self.assertGreater(w, 0.0)
-            self.assertEqual(weights[rare_label], 0.0)
-
     def test_deterministic(self):
         for name in sorted(STRATEGY_REGISTRY):
             with self.subTest(strategy=name):
-                opts = SampleWeightingOptions(
-                    strategy=name, rare_policy="keep")
+                opts = SampleWeightingOptions(strategy=name)
                 w1 = compute_class_weights(
                     self.counts, self.ba_lib, self.gf_lib, opts)
                 w2 = compute_class_weights(
@@ -108,19 +98,22 @@ class StrategyContractTest(unittest.TestCase):
             opts.enabled = True
             opts.strategy = "no_such_strategy"
             opts.alpha = 0.5
-            opts.min_count = 10
-            opts.rare_policy = "drop"
+            opts.weight_ratio_cap = None
             compute_class_weights(
                 self.counts, self.ba_lib, self.gf_lib, opts)
 
-    def test_merge_policy_raises_not_implemented(self):
-        for name in sorted(STRATEGY_REGISTRY):
-            with self.subTest(strategy=name):
-                opts = SampleWeightingOptions(
-                    strategy=name, rare_policy="merge")
-                with self.assertRaises(NotImplementedError):
-                    compute_class_weights(
-                        self.counts, self.ba_lib, self.gf_lib, opts)
+    def test_weight_ratio_cap_bounds_weight_spread(self):
+        # Setting weight_ratio_cap=R must ensure max/min <= R for every
+        # registered strategy, including any that override compute() in
+        # the future. Since weights are universally positive (no
+        # zero-weighting in this layer), the cap applies to the full
+        # weight set.
+        cap = 5.0
+        tol = 1e-9
+        for _, weights in self._run_for_each({"weight_ratio_cap": cap}):
+            self.assertGreaterEqual(len(weights), 2)
+            ws = list(weights.values())
+            self.assertLessEqual(max(ws) / min(ws), cap + tol)
 
 
 if __name__ == "__main__":
