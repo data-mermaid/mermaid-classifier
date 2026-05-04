@@ -54,7 +54,7 @@ from mermaid_classifier.training.sample_weighting.registry import (
 
 # Default per Cui et al. 2019 — works well for moderate-to-high imbalance.
 # Bump to 0.999 or 0.9999 for stronger weighting on rare classes.
-BETA: float = 0.999
+BETA: float = 0.9999
 
 
 @register_strategy("effective_number")

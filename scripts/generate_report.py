@@ -125,6 +125,14 @@ EVALUATION_SECTIONS = {
             ('taxonomic/gf_precision_recall_f1.csv', 'csv'),
         ],
     },
+    'per_source': {
+        'title': 'Per-Source Breakdown',
+        'optional': True,
+        'artifacts': [
+            ('per_source/accuracy_by_source.png', 'png'),
+            ('per_source/metrics.csv', 'csv'),
+        ],
+    },
 }
 
 ROOT_EVALUATION_ARTIFACTS = [
@@ -368,7 +376,7 @@ def build_template_context(
         'has_training': artifacts['has_training'],
         'section_order': [
             'confusion_matrix', 'calibration', 'cover', 'probability',
-            'ranking', 'taxonomic',
+            'ranking', 'taxonomic', 'per_source',
         ],
         'n_classes': n_classes,
         'n_predictions': n_predictions,

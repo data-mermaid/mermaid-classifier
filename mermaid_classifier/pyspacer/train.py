@@ -8,7 +8,6 @@ import dataclasses
 from datetime import datetime, timedelta
 import enum
 from io import StringIO
-import math
 import os
 from pathlib import Path
 import re
@@ -72,6 +71,10 @@ from mermaid_classifier.training.label_transforms import (
 from mermaid_classifier.training.sample_weighting import (
     SampleWeightingOptions,
     compute_class_weights,
+)
+from mermaid_classifier.training.subsample import (
+    SubsampleOptions,
+    compute_per_class_targets,
 )
 
 
@@ -465,10 +468,21 @@ class DatasetOptions:
     PySpacer has an explanation of the three sets here:
     https://github.com/coralnet/pyspacer?tab=readme-ov-file#train_classifier
 
-    annotation_limit
+    subsample
 
-    If specified, only get up to this many annotations for training. This can
-    help with testing since the runtime is correlated to number of annotations.
+    Optional per-class subsampling applied after rollup + included-labels
+    filter and before the train/ref/val split. Replaces the old
+    ``annotation_limit`` knob, which was non-deterministic under DuckDB's
+    parallel scans (LIMIT without ORDER BY) and so produced different
+    subsets across processes.
+
+    Today's strategies:
+      * SubsampleOptions(strategy='stratified', total_annotations=N)
+        -- proportional subsample preserving class distribution.
+      * SubsampleOptions(strategy='balanced', target_per_class=K)
+        -- equalize counts per class (capped at available rows).
+    See ``mermaid_classifier.training.subsample`` for the full list and
+    instructions on adding new strategies.
     """
     include_mermaid: bool = True
     coralnet_sources_csv: str = None
@@ -477,7 +491,10 @@ class DatasetOptions:
     included_labels_csv: str = None
     excluded_labels_csv: str = None
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
-    annotation_limit: int | None = None
+    # Optional per-class subsampling. None means use all annotations.
+    # See mermaid_classifier.training.subsample for available strategies
+    # and how to add new ones (e.g. effective-number, log-balanced).
+    subsample: SubsampleOptions | None = None
     # Optional sample-weighting layer applied to TorchMLP cross-entropy
     # loss. None means no weighting (vanilla CE). See
     # mermaid_classifier.training.sample_weighting for available
@@ -497,9 +514,37 @@ class TrainingOptions:
     """
     epochs
 
-    Number of pyspacer training epochs to run.
+    Number of pyspacer training epochs to run. Acts as the upper bound:
+    if ``early_stopping_patience`` is set and triggered, training stops
+    earlier and the best-val_loss classifier is restored.
+
+    hidden_layer_sizes
+
+    Override the MLP architecture. Tuple of layer widths, e.g. (200, 100)
+    for a 2-hidden-layer net. None falls back to MermaidTrainer's
+    label-count heuristic. If set, learning_rate_init must also be set.
+
+    learning_rate_init
+
+    Override the MLP optimizer's initial learning rate. None falls back
+    to the heuristic. If set, hidden_layer_sizes must also be set.
+
+    early_stopping_patience
+
+    If set to a positive int, training stops once ``epoch/val_loss`` has
+    not improved for this many consecutive epochs, AND the classifier
+    is restored to its state at the epoch with the lowest val_loss
+    (rather than the latest epoch's state). None disables early
+    stopping; the loop runs for the full ``epochs`` budget.
+
+    Recommended starting value: 3. Lower (1-2) is too jumpy given the
+    natural epoch-to-epoch noise in val_loss; higher (>5) wastes wall
+    time on epochs that are unlikely to recover.
     """
     epochs: int = 10
+    hidden_layer_sizes: tuple[int, ...] | None = None
+    learning_rate_init: float | None = None
+    early_stopping_patience: int | None = None
 
 
 @dataclasses.dataclass
@@ -541,6 +586,11 @@ class TrainingDataset:
         self.options = options
         self.artifacts = Artifacts()
         self.profiled_sections = []
+        # Populated by _apply_subsample if subsampling is enabled; stays
+        # None otherwise. The runner's MLflow logging path checks for
+        # None so the no-subsample path stays artifact-free.
+        self._subsample_audit_df: pd.DataFrame | None = None
+        self._subsample_realized_total: int | None = None
         if settings.feature_cache_dir:
             os.makedirs(settings.feature_cache_dir, exist_ok=True)
             self._feature_dir = settings.feature_cache_dir
@@ -595,6 +645,10 @@ class TrainingDataset:
         )
         self._duck_conn = None
 
+        self.feature_loc_to_source: dict[
+            DataLocation, tuple[str, str]
+        ] = {}
+
         if not self.cn_source_filter.is_empty():
             with self.section_profiling("Reading CoralNet annotations"):
                 self.read_coralnet_data()
@@ -639,60 +693,9 @@ class TrainingDataset:
                 duck_table_name='annotations',
             )
 
-        if options.annotation_limit:
-
-            # See how many annotations we have.
-            count_up_to_limit = self.duck_conn.execute(
-                f"SELECT count(*)"
-                f" FROM annotations"
-                f" LIMIT {options.annotation_limit + 1}"
-            ).fetchall()[0][0]
-
-            # If we're over limit, log that fact.
-            if count_up_to_limit > options.annotation_limit:
-                logger.debug(
-                    f"Truncating the train data to"
-                    f" {options.annotation_limit} annotations."
-                )
-
-            # Determine how to balance out the annotations between
-            # sites.
-            # Ideally, each site contributes half the limit; but if one
-            # site's total is less than half the limit, we grab more from
-            # the other site.
-            cn_count_up_to_limit = self.duck_conn.execute(
-                f"SELECT count(*)"
-                f" FROM annotations"
-                f" WHERE site = '{Sites.CORALNET.value}'"
-                f" LIMIT {options.annotation_limit + 1}"
-            ).fetchall()[0][0]
-            mm_count_up_to_limit = self.duck_conn.execute(
-                f"SELECT count(*)"
-                f" FROM annotations"
-                f" WHERE site = '{Sites.MERMAID.value}'"
-                f" LIMIT {options.annotation_limit + 1}"
-            ).fetchall()[0][0]
-            half_limit = math.ceil(options.annotation_limit / 2)
-            if cn_count_up_to_limit <= half_limit:
-                cn_count = cn_count_up_to_limit
-                mm_count = options.annotation_limit - cn_count
-            else:
-                mm_count = min(mm_count_up_to_limit, half_limit)
-                cn_count = options.annotation_limit - mm_count
-
-            # Get the appropriate number of annotations from each site.
-            # https://duckdb.org/docs/stable/sql/query_syntax/setops#union
-            self.duck_conn.execute(
-                f"CREATE OR REPLACE TABLE annotations AS ("
-                f" (SELECT * FROM annotations"
-                f"  WHERE site = '{Sites.CORALNET.value}'"
-                f"  LIMIT {cn_count})"
-                f" UNION ALL"
-                f" (SELECT * FROM annotations"
-                f"  WHERE site = '{Sites.MERMAID.value}'"
-                f"  LIMIT {mm_count})"
-                f")"
-            )
+        if options.subsample is not None:
+            with self.section_profiling("Per-class subsampling"):
+                self._apply_subsample(options.subsample)
 
         if options.include_mermaid:
             # We'll check the annotation data's image IDs against the
@@ -739,6 +742,134 @@ class TrainingDataset:
         self.set_train_summary_stats()
 
 
+
+    def _apply_subsample(self, opts: SubsampleOptions) -> None:
+        """Deterministic per-class subsampling of the annotations table.
+
+        Replaces the old non-deterministic ``annotation_limit`` block.
+        Runs after rollup + included-labels filter, before the
+        train/ref/val split.
+
+        Pipeline (all in DuckDB, in-process):
+
+          1. Read per-class counts of the current annotations table,
+             keyed by ``(benthic_attribute_id, growth_form_id)``. Both
+             columns are post-rollup at this point.
+          2. Call ``compute_per_class_targets(opts, counts)`` to get
+             per-class target row counts. Strategy is dispatched by
+             ``opts.strategy`` (today: 'stratified' or 'balanced'; new
+             strategies plug in via ``training/subsample/registry.py``).
+          3. Materialize the target dict as a temp table and JOIN it
+             against a deterministic ROW_NUMBER() partitioned by class
+             and ordered by ``(site, project_id, image_id, row, col)``
+             -- the per-annotation primary key in this schema. That
+             ordering makes the subsample identical across processes
+             and across DuckDB thread counts.
+          4. Replace the ``annotations`` table with the surviving rows
+             and log realized per-class counts to MLflow as a CSV
+             artifact for after-the-fact auditing.
+
+        Extension hooks:
+          * Stratify at a coarser level by changing the PARTITION BY
+            columns and surfacing a ``stratification_level`` field on
+            ``SubsampleOptions``.
+          * Bootstrap oversampling for rare classes would be a
+            UNION-ALL pass over the surviving rows; gate on a new
+            ``opts.oversample`` field.
+        """
+        # Step 1: per-class counts (deterministic ORDER BY for stable
+        # iteration order downstream).
+        rows = self.duck_conn.execute(
+            "SELECT benthic_attribute_id, growth_form_id, COUNT(*)"
+            " FROM annotations"
+            " GROUP BY benthic_attribute_id, growth_form_id"
+            " ORDER BY benthic_attribute_id, growth_form_id"
+        ).fetchall()
+        class_counts: dict[tuple[str, str], int] = {
+            (ba, gf): n for ba, gf, n in rows
+        }
+
+        if not class_counts:
+            logger.warning(
+                "Subsampling skipped: annotations table is empty.")
+            return
+
+        # Step 2: dispatch to the strategy registry.
+        targets = compute_per_class_targets(opts, class_counts)
+
+        # Step 3: register targets as a DuckDB DataFrame and JOIN it
+        # against a deterministic ROW_NUMBER. We pass the dataframe via
+        # the connection's variable namespace (``df`` -> SQL view).
+        targets_df = pd.DataFrame(
+            [
+                {
+                    'benthic_attribute_id': ba,
+                    'growth_form_id': gf,
+                    'target_n': int(n),
+                }
+                for (ba, gf), n in targets.items()
+            ]
+        )
+        self.duck_conn.register('_subsample_targets', targets_df)
+        try:
+            # The (site, project_id, image_id, row, col) tuple is
+            # unique per annotation in this schema (CoralNet and
+            # MERMAID both produce point-level rows keyed this way),
+            # giving a fully deterministic row order across processes.
+            self.duck_conn.execute(
+                "CREATE OR REPLACE TABLE annotations AS"
+                " WITH numbered AS ("
+                "   SELECT *,"
+                "          ROW_NUMBER() OVER ("
+                "              PARTITION BY benthic_attribute_id,"
+                "                           growth_form_id"
+                "              ORDER BY site, project_id, image_id,"
+                "                       row, col"
+                "          ) AS _rn"
+                "   FROM annotations"
+                " )"
+                " SELECT n.* EXCLUDE (_rn)"
+                " FROM numbered n"
+                " JOIN _subsample_targets t USING ("
+                "     benthic_attribute_id, growth_form_id"
+                " )"
+                " WHERE n._rn <= t.target_n"
+            )
+        finally:
+            self.duck_conn.unregister('_subsample_targets')
+
+        # Step 4: log realized per-class counts. This is the after-the-
+        # fact audit trail: lets us confirm in MLflow that two parallel
+        # runs really did see the same data.
+        realized_rows = self.duck_conn.execute(
+            "SELECT benthic_attribute_id, growth_form_id, COUNT(*) AS n"
+            " FROM annotations"
+            " GROUP BY benthic_attribute_id, growth_form_id"
+            " ORDER BY benthic_attribute_id, growth_form_id"
+        ).fetchall()
+        realized_by_cls = {(ba, gf): n for ba, gf, n in realized_rows}
+
+        per_class_audit = pd.DataFrame([
+            {
+                'benthic_attribute_id': ba,
+                'growth_form_id': gf,
+                'pre_count': class_counts[(ba, gf)],
+                'target_n': targets.get((ba, gf), 0),
+                'realized_n': realized_by_cls.get((ba, gf), 0),
+            }
+            for (ba, gf) in sorted(class_counts)
+        ])
+        # Stash on self; logged to MLflow by the runner alongside the
+        # other dataset artifacts.
+        self._subsample_audit_df = per_class_audit
+        realized_total = int(per_class_audit['realized_n'].sum())
+        self._subsample_realized_total = realized_total
+        logger.info(
+            f"Subsample applied: strategy={opts.strategy!r},"
+            f" classes={len(class_counts)},"
+            f" target_total={opts.total_annotations},"
+            f" realized_total={realized_total}"
+        )
 
     def cleanup(self):
         """Clean up temporary feature vector files."""
@@ -1068,6 +1199,8 @@ class TrainingDataset:
             first_row = rows[0]
             bucket = first_row['bucket']
             feature_bucket_path = first_row['feature_vector']
+            site = first_row['site']
+            project_id = first_row['project_id']
 
             image_annotations = []
 
@@ -1090,7 +1223,9 @@ class TrainingDataset:
                     tmp_root, bucket, feature_bucket_path)
                 s3_keys[s3_key] = local_path
 
-            image_data.append((bucket, feature_bucket_path, image_annotations))
+            image_data.append(
+                (bucket, feature_bucket_path, site, project_id,
+                 image_annotations))
 
         # Parallel download of all feature vectors from S3.
         with self.section_profiling("Downloading feature vectors"):
@@ -1103,7 +1238,8 @@ class TrainingDataset:
         # Build ImageLabels with filesystem DataLocations.
         labels_data = ImageLabels()
 
-        for bucket, feature_bucket_path, image_annotations in image_data:
+        for (bucket, feature_bucket_path, site, project_id,
+             image_annotations) in image_data:
             # Skip images whose feature file failed to download.
             if (bucket, feature_bucket_path) in failed_keys:
                 continue
@@ -1115,6 +1251,7 @@ class TrainingDataset:
                 key=local_path,
             )
             labels_data.add_image(feature_loc, image_annotations)
+            self.feature_loc_to_source[feature_loc] = (site, project_id)
 
         return preprocess_labels(
             labels_data,
@@ -1533,6 +1670,10 @@ class TrainingRunner:
                 batch_size=batch_size,
                 on_epoch_end=self._on_epoch_end,
                 class_weight=class_weight,
+                hidden_layer_sizes=self.training_options.hidden_layer_sizes,
+                learning_rate_init=self.training_options.learning_rate_init,
+                early_stopping_patience=(
+                    self.training_options.early_stopping_patience),
             )
 
             train_msg = TrainClassifierMsg(
@@ -1703,7 +1844,18 @@ class MLflowTrainingRunner(TrainingRunner):
             if run_id in run_id_to_system_metrics_monitor:
                 run_id_to_system_metrics_monitor[run_id].monitors.append(SwapMonitor())
 
-            training_options_to_log = dict(epochs=self.training_options.epochs)
+            training_options_to_log = dict(
+                epochs=self.training_options.epochs,
+                # str(...) — MLflow params accept only strings/numbers,
+                # not tuples. 'None' encodes "use heuristic" cases.
+                hidden_layer_sizes=str(self.training_options.hidden_layer_sizes),
+                learning_rate_init=self.training_options.learning_rate_init,
+                early_stopping_patience=(
+                    self.training_options.early_stopping_patience
+                    if self.training_options.early_stopping_patience
+                    is not None else ''
+                ),
+            )
 
             mlflow.log_params(training_options_to_log)
 
@@ -1719,9 +1871,19 @@ class MLflowTrainingRunner(TrainingRunner):
                 included_labels_csv=os.path.basename(
                     self.dataset_options.included_labels_csv or ''),
                 ref_val_ratios=str(self.dataset_options.ref_val_ratios),
-                annotation_limit=self.dataset_options.annotation_limit or '',
             )
             mlflow.log_params(dataset_options_to_log)
+
+            # Subsample params: logged before training so they show up
+            # alongside dataset/training params even if the training
+            # run later fails. Per-class realized counts are logged as
+            # an artifact after dataset prep (see _log_subsample_audit).
+            if self.dataset_options.subsample is not None:
+                mlflow.log_params(
+                    self.dataset_options.subsample.to_log_dict()
+                )
+            else:
+                mlflow.log_params({"subsample/enabled": False})
 
             # Sample-weighting params: logged before training so they
             # show up alongside dataset/training params even if the
@@ -1754,6 +1916,7 @@ class MLflowTrainingRunner(TrainingRunner):
             # via _compute_class_weights. Log them now.
             self._log_weighting_artifacts()
             self._log_label_transforms_artifacts()
+            self._log_subsample_audit()
 
             profiles_df = pd.DataFrame(self.profiled_sections)
             self.log_dataframe(profiles_df, 'profiled_sections')
@@ -1803,17 +1966,51 @@ class MLflowTrainingRunner(TrainingRunner):
         """Log per-epoch metrics to MLflow.
 
         Logs step-based metrics that appear as live charts in the MLflow UI
-        during training.
+        during training. The val_loss + val_accuracy pair is the
+        canonical overfitting detector: when training_loss continues to
+        drop while val_loss begins to rise, the model is starting to
+        memorize the training set rather than generalize.
+
+        On the final epoch (whether the run hit the epoch budget or
+        triggered early stopping) the trainer adds summary fields
+        (`final_epoch`, `early_stopped`, `best_val_epoch`,
+        `best_val_loss`); we log them as flat scalar metrics so they're
+        easy to query post-hoc.
         """
         step = metrics["epoch"]
         mlflow.log_metric(
             "epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
+        if metrics.get("val_accuracy") is not None:
+            mlflow.log_metric(
+                "epoch/val_accuracy", metrics["val_accuracy"], step=step)
+        if metrics.get("val_loss") is not None:
+            mlflow.log_metric(
+                "epoch/val_loss", metrics["val_loss"], step=step)
         if metrics["training_loss"] is not None:
             mlflow.log_metric(
                 "epoch/training_loss", metrics["training_loss"], step=step)
         mlflow.log_metric(
             "epoch/cumulative_seconds",
             metrics["cumulative_seconds"], step=step)
+
+        # One-shot early-stopping summary (only present on the final
+        # epoch). Logged as scalar metrics with no step so they appear
+        # alongside the other run-level numbers.
+        if metrics.get("final_epoch") is not None:
+            mlflow.log_metric(
+                "early_stop/final_epoch",
+                float(metrics["final_epoch"]), step=0)
+            mlflow.log_metric(
+                "early_stop/triggered",
+                float(bool(metrics.get("early_stopped"))), step=0)
+            if metrics.get("best_val_epoch") is not None:
+                mlflow.log_metric(
+                    "early_stop/best_val_epoch",
+                    float(metrics["best_val_epoch"]), step=0)
+            if metrics.get("best_val_loss") is not None:
+                mlflow.log_metric(
+                    "early_stop/best_val_loss",
+                    float(metrics["best_val_loss"]), step=0)
 
     def _get_model_name(self):
         """
@@ -1846,8 +2043,18 @@ class MLflowTrainingRunner(TrainingRunner):
                 as_path = Path(self.dataset_options.coralnet_sources_csv)
                 model_name += f'-{self.alphanumeric_only_str(as_path.stem)}'
 
-            if limit := self.dataset_options.annotation_limit:
-                model_name += f'-AnnoLimit{limit}'
+            if (subsample := self.dataset_options.subsample) is not None:
+                # e.g. -SubStratified400000 or -SubBalancedTPC5000
+                if subsample.target_per_class is not None:
+                    model_name += (
+                        f'-Sub{subsample.strategy.capitalize()}'
+                        f'TPC{subsample.target_per_class}'
+                    )
+                else:
+                    model_name += (
+                        f'-Sub{subsample.strategy.capitalize()}'
+                        f'{subsample.total_annotations}'
+                    )
 
         # There's a 62 character limit for the 'model package group name'
         # which is built from the model name. For example, it could be the
@@ -1903,6 +2110,47 @@ class MLflowTrainingRunner(TrainingRunner):
         summary = weighting_log['summary']
         for k, v in summary.items():
             mlflow.log_metric(f'weighting/{k}', float(v), step=0)
+
+    def _log_subsample_audit(self) -> None:
+        """Log the per-class audit CSV and a single realized-total metric
+        produced by ``TrainingDataset._apply_subsample``.
+
+        Logs nothing if subsampling was disabled. The CSV is the
+        after-the-fact proof that two parallel runs trained on the same
+        rows: identical strategy + identical inputs must produce
+        identical (target_n, realized_n) per class. If you ever extend
+        this with a new strategy (e.g. effective_number) or a coarser
+        ``stratification_level``, the same audit covers it without
+        changes here.
+        """
+        df = getattr(self.dataset, '_subsample_audit_df', None)
+        if df is None:
+            return
+        # Decorate with human-readable names so the CSV is self-contained.
+        def _decorate(row):
+            try:
+                ba_name = ba_library.id_to_name(row['benthic_attribute_id']) \
+                    if row['benthic_attribute_id'] else ''
+                gf_name = gf_library.id_to_name(row['growth_form_id']) \
+                    if row['growth_form_id'] else ''
+            except Exception:
+                ba_name, gf_name = '', ''
+            return pd.Series({'ba_name': ba_name, 'gf_name': gf_name})
+
+        if not df.empty:
+            decorated = df.apply(_decorate, axis=1)
+            out = pd.concat([df, decorated], axis=1)
+            out = out[[
+                'benthic_attribute_id', 'ba_name',
+                'growth_form_id', 'gf_name',
+                'pre_count', 'target_n', 'realized_n',
+            ]].sort_values('realized_n', ascending=False)
+            self.log_dataframe(out, 'subsample/per_class_counts')
+
+        realized = getattr(self.dataset, '_subsample_realized_total', None)
+        if realized is not None:
+            mlflow.log_metric('subsample/realized_total', float(realized),
+                              step=0)
 
     def _log_label_transforms_artifacts(self) -> None:
         """Log per-stage TransformPlan records and summary metrics for
