@@ -88,6 +88,17 @@ class OptionsValidationTest(unittest.TestCase):
         self.assertEqual(d["subsample/min_per_class"], 5)
         self.assertIsNone(d["subsample/target_per_class"])
         self.assertIsNone(d["subsample/balance_alpha"])
+        # ``seed`` defaults to 0 and is logged for visibility even though
+        # the built-in allocators are deterministic by SQL ordering.
+        self.assertEqual(d["subsample/seed"], 0)
+
+    def test_to_log_dict_includes_explicit_seed(self):
+        opts = SubsampleOptions(
+            strategy="stratified",
+            total_annotations=400_000,
+            seed=42,
+        )
+        self.assertEqual(opts.to_log_dict()["subsample/seed"], 42)
 
     def test_strategies_constant_includes_known_strategies(self):
         # Sanity check that we don't accidentally drop a strategy from

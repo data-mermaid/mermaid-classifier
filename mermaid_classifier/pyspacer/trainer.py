@@ -44,6 +44,7 @@ class MermaidTrainer(ClassifierTrainer):
         hidden_layer_sizes: tuple[int, ...] | None = None,
         learning_rate_init: float | None = None,
         early_stopping_patience: int | None = None,
+        random_state: int = 0,
     ):
         if (hidden_layer_sizes is None) != (learning_rate_init is None):
             raise ValueError(
@@ -75,6 +76,13 @@ class MermaidTrainer(ClassifierTrainer):
         # and clf is restored to its best-val_loss state. The restored
         # clf is what gets calibrated and returned.
         self.early_stopping_patience = early_stopping_patience
+        # Forwarded to the underlying classifier on construction. For
+        # TorchMLPClassifier this seeds np.random.default_rng() and
+        # torch.manual_seed; for SGDClassifier it seeds sklearn's RNG.
+        # The MLP path historically passed no random_state, making it
+        # non-deterministic; this defaults to 0 to preserve the SGD
+        # path's prior behavior while closing the MLP gap.
+        self.random_state = random_state
         # Populated by __call__; readable by the runner for MLflow
         # logging. Pre-initialized so the runner never hits an
         # AttributeError when patience is None.
@@ -117,10 +125,12 @@ class MermaidTrainer(ClassifierTrainer):
                     hidden_layer_sizes=hls,
                     learning_rate_init=lr,
                     class_weight=self.class_weight,
+                    random_state=self.random_state,
                 )
             else:
                 clf = SGDClassifier(
-                    loss='log_loss', average=True, random_state=0)
+                    loss='log_loss', average=True,
+                    random_state=self.random_state)
 
             ref_accs = []
             t0 = time.time()

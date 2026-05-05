@@ -540,11 +540,21 @@ class TrainingOptions:
     Recommended starting value: 3. Lower (1-2) is too jumpy given the
     natural epoch-to-epoch noise in val_loss; higher (>5) wastes wall
     time on epochs that are unlikely to recover.
+
+    random_state
+
+    Random seed forwarded to the underlying classifier
+    (``TorchMLPClassifier`` or ``SGDClassifier``). For the MLP path
+    this seeds both the numpy RNG used to shuffle batches and
+    ``torch.manual_seed`` for weight initialization. Default ``0``
+    replaces the previous behavior in which the MLP path passed no
+    seed at all (and was therefore non-deterministic across runs).
     """
     epochs: int = 10
     hidden_layer_sizes: tuple[int, ...] | None = None
     learning_rate_init: float | None = None
     early_stopping_patience: int | None = None
+    random_state: int = 0
 
 
 @dataclasses.dataclass
@@ -1674,6 +1684,7 @@ class TrainingRunner:
                 learning_rate_init=self.training_options.learning_rate_init,
                 early_stopping_patience=(
                     self.training_options.early_stopping_patience),
+                random_state=self.training_options.random_state,
             )
 
             train_msg = TrainClassifierMsg(
@@ -1855,6 +1866,7 @@ class MLflowTrainingRunner(TrainingRunner):
                     if self.training_options.early_stopping_patience
                     is not None else ''
                 ),
+                random_state=self.training_options.random_state,
             )
 
             mlflow.log_params(training_options_to_log)

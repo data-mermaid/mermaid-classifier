@@ -80,10 +80,24 @@ class SubsampleOptions:
                               0.5 produces square-root sampling
                               (target_c ~ sqrt(n_c)). Required for
                               ``'soft_balanced'``; rejected otherwise.
+        seed               -- Random seed. **Currently unused by the
+                              built-in allocators**, which are fully
+                              deterministic via SQL ordering on the
+                              primary-key tuple ``(site, project_id,
+                              image_id, row, col)`` -- changing the seed
+                              does not change which rows are selected.
+                              The field exists so that (a) the seed
+                              shows up in MLflow params for visibility,
+                              and (b) future stochastic strategies
+                              (e.g. bootstrap oversampling) can read it
+                              without having to extend this dataclass
+                              again. Default ``0``.
 
-    Determinism: this dataclass carries no random state. Determinism is
-    a property of the SQL applied in TrainingDataset._apply_subsample
-    (deterministic ORDER BY on a primary-key tuple, not RANDOM()).
+    Determinism: today's built-in allocators carry no random state.
+    Determinism is a property of the SQL applied in
+    TrainingDataset._apply_subsample (deterministic ORDER BY on a
+    primary-key tuple, not RANDOM()). The ``seed`` field is reserved
+    for future stochastic strategies; see field docs above.
 
     Extension hooks (deliberately small today):
       * ``oversample: bool`` for bootstrap upsampling of rare classes.
@@ -102,6 +116,7 @@ class SubsampleOptions:
     min_per_class: int = 0
     target_per_class: int | None = None
     balance_alpha: float | None = None
+    seed: int = 0
 
     def __post_init__(self) -> None:
         if self.strategy not in SUBSAMPLE_STRATEGIES:
@@ -195,4 +210,5 @@ class SubsampleOptions:
             "subsample/min_per_class": self.min_per_class,
             "subsample/target_per_class": self.target_per_class,
             "subsample/balance_alpha": self.balance_alpha,
+            "subsample/seed": self.seed,
         }
