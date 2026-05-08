@@ -5,11 +5,6 @@ Provides hierarchy- and growth-form-aware per-class weight tensors that
 can be passed to ``nn.CrossEntropyLoss(weight=...)`` to mitigate label
 imbalance at training time.
 
-Drop/merge of rare classes is now handled in the data pipeline by
-``mermaid_classifier.training.label_transforms``; this module sees
-only the kept class set and is purely about computing positive
-per-class loss weights.
-
 Public API:
     Strategy                     -- abstract base class
     SampleWeightingOptions       -- configuration dataclass

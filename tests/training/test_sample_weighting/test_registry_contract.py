@@ -60,9 +60,7 @@ class StrategyContractTest(unittest.TestCase):
 
     def test_no_zero_weights(self):
         # Universal contract: every class gets a strictly positive
-        # weight. Drop/merge decisions live in the data pipeline (see
-        # mermaid_classifier.training.label_transforms), so the
-        # weighting layer never produces a zero.
+        # weight.
         for _, weights in self._run_for_each({}):
             for label, w in weights.items():
                 self.assertGreater(

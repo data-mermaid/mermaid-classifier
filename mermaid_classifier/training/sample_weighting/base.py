@@ -10,11 +10,6 @@ class wraps the call with shared behaviour:
   - apply the optional ``weight_ratio_cap`` to bound how much a single
     class can dominate the loss.
 
-Drop/merge of rare classes lives in
-``mermaid_classifier.training.label_transforms`` and is applied to the
-data pipeline (training labels, validation labels, classifier classes_)
-before any weighting runs. This module sees only the kept label set.
-
 Why a Protocol-style ``ba_library`` instead of importing
 ``BenthicAttributeLibrary`` directly: that class hits the MERMAID API
 on construction, so unit tests must inject a fake. We rely on duck

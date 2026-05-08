@@ -5,10 +5,6 @@ through to the strategy registry. We bypass the real
 BenthicAttributeLibrary/GrowthFormLibrary by monkeypatching the module
 globals in train.py with fakes — those real classes hit the MERMAID
 API on construction, which is unsuitable for unit tests.
-
-Rare-class drop/merge now lives in the label-transforms data pipeline
-(see ``mermaid_classifier.training.label_transforms``), so this layer
-just receives whichever class set the pipeline produced.
 """
 from __future__ import annotations
 

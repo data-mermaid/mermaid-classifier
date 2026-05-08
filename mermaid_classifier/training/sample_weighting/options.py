@@ -28,12 +28,6 @@ class SampleWeightingOptions:
                          single class can dominate the loss. ``None``
                          (default) disables capping. Must be ``>= 1.0``;
                          a cap of 1.0 forces all weights equal.
-
-    Note: rare-class drop/merge handling lives in
-    ``mermaid_classifier.training.label_transforms`` and is configured
-    via ``DatasetOptions.label_transforms_options``. This module is
-    purely about loss-weight computation over whatever class set the
-    label-transforms pipeline produces.
     """
 
     enabled: bool = True
