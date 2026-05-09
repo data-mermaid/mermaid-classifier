@@ -169,3 +169,5 @@ mlflow.db
 # AI
 CLAUDE.md
 .claude/
+
+sagemaker/

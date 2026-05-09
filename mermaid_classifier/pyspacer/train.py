@@ -1646,16 +1646,7 @@ class TrainingRunner:
             )
             self._weighting_log = weighting_log
 
-            trainer = MermaidTrainer(
-                batch_size=batch_size,
-                on_epoch_end=self._on_epoch_end,
-                class_weight=class_weight,
-                hidden_layer_sizes=self.training_options.hidden_layer_sizes,
-                learning_rate_init=self.training_options.learning_rate_init,
-                early_stopping_patience=(
-                    self.training_options.early_stopping_patience),
-                random_state=self.training_options.random_state,
-            )
+            trainer = self._create_trainer(batch_size, class_weight)
 
             train_msg = TrainClassifierMsg(
                 job_token=f'experiment_run_{run_name}',
@@ -1695,6 +1686,23 @@ class TrainingRunner:
     def _on_epoch_end(self, metrics: dict):
         """Called after each training epoch. Override for logging."""
         pass
+
+    def _create_trainer(self, batch_size, class_weight):
+        """Create the trainer instance used for this run.
+
+        Override in subclasses to swap in a custom trainer (e.g. for
+        autoresearch experiments).
+        """
+        return MermaidTrainer(
+            batch_size=batch_size,
+            on_epoch_end=self._on_epoch_end,
+            class_weight=class_weight,
+            hidden_layer_sizes=self.training_options.hidden_layer_sizes,
+            learning_rate_init=self.training_options.learning_rate_init,
+            early_stopping_patience=(
+                self.training_options.early_stopping_patience),
+            random_state=self.training_options.random_state,
+        )
 
     def _compute_class_weights(
         self,
