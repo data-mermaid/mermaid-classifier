@@ -627,8 +627,8 @@ def main():
         "--timeout", type=int, default=4500,
         help="Training timeout in seconds (default: 4500)")
     parser.add_argument(
-        "--model", type=str, default="claude-sonnet-4-6",
-        help="Claude model to use (default: claude-sonnet-4-6)")
+        "--model", type=str, default="claude-opus-4-7",
+        help="Claude model to use (default: claude-opus-4-7)")
     parser.add_argument(
         "--max-consecutive-failures", type=int, default=5,
         help="Stop after N consecutive failures (default: 5)")
