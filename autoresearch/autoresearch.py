@@ -30,36 +30,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
-
 logger = logging.getLogger(__name__)
-
-CLAUDE_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
-
-
-def get_anthropic_client() -> anthropic.Anthropic:
-    """Create an Anthropic client, using OAuth credentials from Claude Code
-    if ANTHROPIC_API_KEY is not set."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        logger.info("Using ANTHROPIC_API_KEY from environment")
-        return anthropic.Anthropic(api_key=api_key)
-
-    if CLAUDE_CREDENTIALS_PATH.exists():
-        with open(CLAUDE_CREDENTIALS_PATH) as f:
-            creds = json.load(f)
-        oauth = creds.get("claudeAiOauth", {})
-        token = oauth.get("accessToken")
-        if token:
-            logger.info("Using OAuth token from Claude Code credentials")
-            return anthropic.Anthropic(api_key=token)
-
-    raise RuntimeError(
-        "No Anthropic credentials found. Either set ANTHROPIC_API_KEY "
-        "or authenticate with Claude Code (which stores OAuth tokens "
-        f"in {CLAUDE_CREDENTIALS_PATH})."
-    )
-
 
 # ── Paths ──────────────────────────────────────────────────────────
 
@@ -271,7 +242,7 @@ def query_mlflow_balanced_accuracy(experiment_name: str = "autoresearch") -> flo
         return None
 
 
-# ── Claude API ─────────────────────────────────────────────────────
+# ── Claude CLI ─────────────────────────────────────────────────────
 
 SYSTEM_PROMPT_TEMPLATE = """You are an ML research agent running autonomous experiments on a coral reef classifier.
 
@@ -279,28 +250,32 @@ SYSTEM_PROMPT_TEMPLATE = """You are an ML research agent running autonomous expe
 
 ## Response Format
 
-Respond with a JSON object containing:
+Your response must be a JSON object with:
 - "hypothesis": A one-sentence description of what you're testing and why.
 - "file_changes": A list of objects, each with:
   - "filename": One of "train_experiment.py", "classifier.py", "trainer.py", "strategies.py"
   - "content": The complete new content of the file.
 
-Only include files you are actually changing. Unchanged files should be omitted.
+Only include files you are actually changing. Unchanged files should be omitted."""
 
-Example:
-```json
-{{
-  "hypothesis": "Add dropout of 0.2 between hidden layers to reduce overfitting",
-  "file_changes": [
-    {{
-      "filename": "classifier.py",
-      "content": "... full file content ..."
-    }}
-  ]
-}}
-```
-
-IMPORTANT: Return ONLY the JSON object. No markdown code fences, no explanation outside the JSON."""
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "hypothesis": {"type": "string"},
+        "file_changes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["filename", "content"],
+            },
+        },
+    },
+    "required": ["hypothesis", "file_changes"],
+}
 
 
 def build_user_prompt(
@@ -329,32 +304,26 @@ def read_experiment_files() -> dict[str, str]:
 
 
 def call_claude(
-    client: anthropic.Anthropic,
     model: str,
     system_prompt: str,
     user_prompt: str,
 ) -> dict:
-    """Call Claude API and parse response as JSON."""
-    response = client.messages.create(
-        model=model,
-        max_tokens=16000,
-        temperature=1.0,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
+    """Call Claude via the claude CLI and return structured JSON response."""
+    result = subprocess.run(
+        [
+            "claude", "-p", user_prompt,
+            "--bare",
+            "--output-format", "json",
+            "--json-schema", json.dumps(RESPONSE_SCHEMA),
+            "--system-prompt", system_prompt,
+            "--model", model,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
-
-    text = response.content[0].text.strip()
-
-    # Strip markdown code fences if present.
-    if text.startswith("```"):
-        lines = text.split("\n")
-        # Remove first line (```json or ```) and last line (```)
-        lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-
-    return json.loads(text)
+    response = json.loads(result.stdout)
+    return response.get("structured_output", response.get("result", {}))
 
 
 def apply_file_changes(changes: list[dict]) -> list[str]:
@@ -382,8 +351,6 @@ def run_autoresearch(args: argparse.Namespace) -> None:
         datefmt="%H:%M:%S",
     )
 
-    # Initialize Claude client.
-    client = get_anthropic_client()
     logger.info(f"Using model: {args.model}")
 
     # Initialize results tracking.
@@ -471,7 +438,7 @@ def run_autoresearch(args: argparse.Namespace) -> None:
         # 2. Call Claude.
         logger.info("Calling Claude API...")
         try:
-            response = call_claude(client, args.model, system_prompt, user_prompt)
+            response = call_claude(args.model, system_prompt, user_prompt)
             hypothesis = response.get("hypothesis", "no hypothesis provided")
             file_changes = response.get("file_changes", [])
         except Exception as e:

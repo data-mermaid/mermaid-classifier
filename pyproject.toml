@@ -48,6 +48,3 @@ jupyterlab = [
     # take effect.
     "ipympl",
 ]
-autoresearch = [
-    "anthropic>=0.50",
-]

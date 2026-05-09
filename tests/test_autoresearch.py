@@ -247,34 +247,40 @@ class TestFileChanges(unittest.TestCase):
 
 
 class TestClaudeResponseParsing(unittest.TestCase):
-    """Test parsing Claude API responses."""
+    """Test parsing Claude CLI responses."""
 
-    def test_parse_json_response(self):
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock()]
-        mock_response.content[0].text = json.dumps({
-            "hypothesis": "test dropout",
-            "file_changes": [
-                {"filename": "classifier.py", "content": "# with dropout"}
-            ],
+    def test_parse_structured_output(self):
+        """Test that structured_output from --json-schema is extracted."""
+        cli_response = json.dumps({
+            "result": "",
+            "structured_output": {
+                "hypothesis": "test dropout",
+                "file_changes": [
+                    {"filename": "classifier.py", "content": "# with dropout"}
+                ],
+            },
         })
+        mock_result = MagicMock()
+        mock_result.stdout = cli_response
+        mock_result.returncode = 0
 
-        with patch.object(ar.anthropic.Anthropic, "messages") as mock:
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            result = ar.call_claude(mock_client, "model", "system", "user")
+        with patch("subprocess.run", return_value=mock_result):
+            result = ar.call_claude("model", "system", "user")
 
         self.assertEqual(result["hypothesis"], "test dropout")
         self.assertEqual(len(result["file_changes"]), 1)
 
-    def test_parse_json_with_code_fences(self):
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock()]
-        mock_response.content[0].text = '```json\n{"hypothesis": "test", "file_changes": []}\n```'
+    def test_parse_fallback_to_result(self):
+        """Test fallback when structured_output is absent."""
+        cli_response = json.dumps({
+            "result": {"hypothesis": "test", "file_changes": []},
+        })
+        mock_result = MagicMock()
+        mock_result.stdout = cli_response
+        mock_result.returncode = 0
 
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
-        result = ar.call_claude(mock_client, "model", "system", "user")
+        with patch("subprocess.run", return_value=mock_result):
+            result = ar.call_claude("model", "system", "user")
 
         self.assertEqual(result["hypothesis"], "test")
 
