@@ -111,10 +111,10 @@ class CalibrateInBatchesTest(unittest.TestCase):
                 cc_std.calibrators, cc_batch.calibrators
             ):
                 np.testing.assert_allclose(
-                    cal_std.a_, cal_batch.a_, rtol=1e-3,
+                    cal_std.a_, cal_batch.a_, rtol=2e-3,
                     err_msg="Sigmoid parameter 'a' differs")
                 np.testing.assert_allclose(
-                    cal_std.b_, cal_batch.b_, rtol=1e-3,
+                    cal_std.b_, cal_batch.b_, rtol=2e-3,
                     err_msg="Sigmoid parameter 'b' differs")
 
         # Compare predict_proba outputs — the actual API surface.

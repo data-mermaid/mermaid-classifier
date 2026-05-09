@@ -329,6 +329,7 @@ class GenerateTrainingConfigTest(unittest.TestCase):
             '--label-mapping-csv', str(self.inputs['label_mapping']),
             '--growthforms-csv', str(self.inputs['growthforms']),
             '--min-annotations', '1000',
+            '--no-filter-by-s3-status',
         ]
         self.assertEqual(gtc.main(argv), 0)
 
