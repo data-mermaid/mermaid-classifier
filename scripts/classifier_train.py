@@ -37,10 +37,10 @@ if __name__ == "__main__":
     runner = MLflowTrainingRunner(
         dataset_options=DatasetOptions(
             # Specifying False here means you're only training on CoralNet sources.
-            include_mermaid=False,
-            coralnet_sources_csv='../sagemaker/configs/tiela77_top100_min1k/sources.csv',
-            label_rollup_spec_csv='../sagemaker/configs/tiela77_top100_min1k/rollups.csv',
-            included_labels_csv="../sagemaker/configs/tiela77_top100_min1k/included_labels.csv",
+            include_mermaid=True,
+            coralnet_sources_csv='../sagemaker/configs/tiela77_top108_hierarchy/sources.csv',
+            label_rollup_spec_csv='../sagemaker/configs/tiela77_top108_hierarchy/rollups.csv',
+            included_labels_csv="../sagemaker/configs/tiela77_top108_hierarchy/included_labels.csv",
             # Local-dev alternative for fast smoke runs (10 sources):
             # coralnet_sources_csv='../sagemaker/sources/CoralNetSourcesFirst10.csv',
             drop_growthforms=False,

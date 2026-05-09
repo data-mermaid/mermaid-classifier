@@ -1,68 +1,135 @@
 """Generate a self-contained training-config directory.
 
-Produces sources.csv, included_labels.csv, rollups.csv, and an audit
-README.md from the source-of-truth files in `drive_label_mappings/` and
-`coralnet_best_sources - coralnet_best_sources.csv`.
+Replicates the CoralNet -> MERMAID -> top-108 mapping logic from the
+mermaid-segmentation notebook coralnet_eda_validated.ipynb, against the
+live MERMAID API. Produces sources.csv, included_labels.csv,
+rollups.csv, and an audit README.md.
 
-Default invocation reproduces the `tiela77_top100_min1k` config:
-- 77 sources where Tiela's `ToKeep == "Yes"`
-- 109 top100 labels filtered to >= 1000 CoralNetAnnotations
-- Porites kept with three GF buckets (Branching, Massive, blank)
-- Species under top100 genera rolled up to the genus
-- Non-Porites genus growth forms collapsed to no-growth-form
-- Legacy "rolled up to <X>" rollups extracted from priority_notes
+For each CoralNet-mapped benthic attribute:
+
+1. If the BA is in EXCLUDED_NAMES, drop entirely (no rollup, no class).
+2. If already in the top-108 set, keep as-is.
+3. Otherwise walk parents (nearest first) to find a top-108 ancestor.
+4. Otherwise drop the label.
+
+Porites is the one BA that retains growth-form distinctions: three
+buckets (Branching, Massive, other/none) appear as separate classes in
+included_labels.csv. Porites species and Porites genus annotations are
+routed to the appropriate bucket via rollups (per Iain/Emily, 2026-05-08).
 
 Run from the mermaid-classifier directory:
 
     uv run python scripts/generate_training_config.py
 
-The same script is the documented way to regenerate with different
-thresholds — see `--help`.
+The script is the documented way to regenerate the training config on
+demand. See `--help`.
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import hashlib
-import io
+import json
 import logging
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
+from mermaid_classifier.common.benthic_attributes import (
+    BenthicAttributeLibrary,
+    CoralNetMermaidMapping,
+    GrowthFormLibrary,
+)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT = REPO_ROOT.parent
 
-# Defaults (relative to workspace root, resolved at runtime).
-DEFAULT_OUTPUT_DIR = WORKSPACE_ROOT / 'sagemaker' / 'configs' / 'tiela77_top100_min1k'
-DEFAULT_SOURCES_CSV = WORKSPACE_ROOT / 'coralnet_best_sources - coralnet_best_sources.csv'
+DEFAULT_OUTPUT_DIR = WORKSPACE_ROOT / 'sagemaker' / 'configs' / 'coralnet_top108'
+DEFAULT_SOURCES_CSV = WORKSPACE_ROOT / 'sagemaker' / 'sources' / 'CoralNetSourcesKept.csv'
 DEFAULT_LABELS_CSV = WORKSPACE_ROOT / 'drive_label_mappings' / (
     'coralnet_labels_mermaid_mapping_annotations - mapped_to_mermaid_attributes.csv'
 )
-DEFAULT_LABEL_MAPPING_CSV = WORKSPACE_ROOT / 'drive_label_mappings' / (
-    'coralnet_labels_mermaid_mapping_annotations - label_mapping.csv'
-)
-DEFAULT_GROWTHFORMS_CSV = WORKSPACE_ROOT / 'sagemaker' / 'labels' / 'all_benthic_attributes' / 'growthforms.csv'
-DEFAULT_S3_STATUS_CSV = WORKSPACE_ROOT / 'sagemaker' / 'sources' / 'coralnet_s3_actual_status.csv'
 
-# Labels Emily explicitly told us not to use; defensive — top100 already excludes them.
-DEFENSIVE_EXCLUDES = {
-    'Dead coral', 'Bleached coral', 'Other invertebrates', 'Other', 'Unknown',
-}
-
+# Porites is the only genus that retains GF distinctions (Iain confirmed
+# with Emily 2026-05-08). The bucket names are MERMAID growth-form names
+# resolved to UUIDs at runtime via GrowthFormLibrary.
 PORITES_NAME = 'Porites'
-DEFAULT_PORITES_GF_BUCKETS = ('Branching', 'Massive')
+PORITES_KEPT_GF_NAMES = ('Branching', 'Massive')
+
+# Excluded by name; defensive against the labels CSV being updated to
+# set top100=1 for any of these. Annotations of these labels are dropped
+# entirely (not rolled up to a parent — see priority_notes in the labels
+# CSV for rationale; e.g. Dead coral would otherwise pollute Bare substrate).
+EXCLUDED_NAMES = ('Dead coral', 'Bleached coral', 'Other invertebrates')
 
 logger = logging.getLogger(__name__)
 
 
-# ---------- Helpers ----------
+# ---------- API client constructors (injection points for tests) ----------
+
+def _load_ba_library() -> BenthicAttributeLibrary:
+    return BenthicAttributeLibrary()
+
+
+def _load_gf_library() -> GrowthFormLibrary:
+    return GrowthFormLibrary()
+
+
+def _load_cn_mapping() -> CoralNetMermaidMapping:
+    return CoralNetMermaidMapping()
+
+
+# ---------- Porites GF helpers ----------
+
+def _porites_bucket(gf_name: str) -> str:
+    """Map any GF name to one of PORITES_KEPT_GF_NAMES, or '' for the
+    'other/none' bucket. Case-insensitive.
+    """
+    canonical = (gf_name or '').strip().title()
+    return canonical if canonical in PORITES_KEPT_GF_NAMES else ''
+
+
+def _load_species_gf_lookup(labels_df: pd.DataFrame) -> dict[str, str]:
+    """ba_id -> canonical Porites bucket name (or '').
+
+    Reads the labels CSV's `growth forms` column. Single-value entries
+    (species' inherent GF, e.g. Porites lobata = 'massive') are bucketed
+    via _porites_bucket(). Multi-value entries (e.g. Porites genus's
+    'branching, massive, other/none') describe bucket *choices* for a
+    parent rather than an inherent GF, so they're skipped.
+    """
+    if 'growth forms' not in labels_df.columns:
+        return {}
+    lookup: dict[str, str] = {}
+    for _, row in labels_df.iterrows():
+        raw = row.get('growth forms')
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        if ',' in raw:
+            continue  # multi-value: bucket choices, not inherent GF
+        bucket = _porites_bucket(raw)
+        lookup[row['id']] = bucket
+    return lookup
+
+
+def _build_bucket_gf_uuid_lookup(gf_library: GrowthFormLibrary) -> dict[str, str]:
+    """{'': '', 'Branching': <uuid>, 'Massive': <uuid>}."""
+    name_to_uuid = {name: uuid for uuid, name in gf_library.by_id.items()}
+    out = {'': ''}
+    for bucket in PORITES_KEPT_GF_NAMES:
+        if bucket not in name_to_uuid:
+            raise KeyError(
+                f"GrowthFormLibrary has no '{bucket}' growth form;"
+                f" cannot build Porites buckets.")
+        out[bucket] = name_to_uuid[bucket]
+    return out
+
+
+# ---------- File audit ----------
 
 def _file_audit(path: Path) -> dict:
-    """Return path, mtime, sha1 prefix for a file we read."""
     if not path.exists():
         return {'path': str(path), 'mtime': 'MISSING', 'sha1_prefix': 'MISSING'}
     stat = path.stat()
@@ -79,265 +146,290 @@ def _file_audit(path: Path) -> dict:
     }
 
 
-def _build_gf_lookup(growthforms_csv: Path) -> dict[str, str]:
-    """name -> UUID for every growth form."""
-    df = pd.read_csv(growthforms_csv)
-    return dict(zip(df['name'], df['id']))
+def _iter_audit(items, key=None) -> str:
+    """sha1 prefix of a JSON-stringified iterable.
 
-
-def _build_ba_lookup(labels_df: pd.DataFrame) -> dict[str, str]:
-    """name -> UUID using the user-supplied mapped_to_mermaid_attributes file."""
-    return dict(zip(labels_df['name'], labels_df['id']))
-
-
-# ---------- Step A: sources ----------
-
-def select_sources(
-    sources_df: pd.DataFrame,
-    tokeep_value: str,
-    min_image_quality: int,
-    min_coral_diversity: int,
-    s3_status_csv: Path | None = None,
-) -> pd.DataFrame:
-    """Filter Tiela's scored sources to the kept set.
-
-    The InS3 column in `sources_df` is unreliable (the CSV claims 1,312
-    sources are present but only 555 actually have `annotations.csv` on S3
-    as of 2026-04-28). When `s3_status_csv` is provided, sources are
-    filtered against the freshly-probed `has_annotations_csv` column
-    instead. Pass None to skip S3 filtering entirely (e.g. for tests).
+    `key` extracts a hashable representation of each item; defaults to
+    `__dict__` for class instances and the item itself for dicts.
     """
-    required = {
-        'Source ID', 'ToKeep', 'ImageQuality', 'CoralDiversity',
-    }
-    missing = required - set(sources_df.columns)
-    if missing:
-        raise ValueError(f"sources CSV missing columns: {sorted(missing)}")
-
-    df = sources_df.copy()
-    df['Source ID'] = df['Source ID'].astype(int)
-    df = df[df['ToKeep'].astype(str) == tokeep_value]
-    df = df[df['ImageQuality'].fillna(-1).astype(int) >= min_image_quality]
-    df = df[df['CoralDiversity'].fillna(-1).astype(int) >= min_coral_diversity]
-    pre_s3 = len(df)
-
-    if s3_status_csv is not None:
-        if not s3_status_csv.exists():
-            raise FileNotFoundError(
-                f"S3 status CSV {s3_status_csv} not found. Generate it first"
-                f" with `scripts/probe_coralnet_s3_status.py`, or pass"
-                f" --no-filter-by-s3-status to skip the S3 reality check."
-            )
-        status = pd.read_csv(s3_status_csv)
-        status['id'] = status['id'].astype(int)
-        present_ids = set(status[status['has_annotations_csv'] == True]['id'])  # noqa: E712
-        df = df[df['Source ID'].isin(present_ids)]
-        dropped = pre_s3 - len(df)
-        if dropped:
-            logger.info(
-                "Dropped %d source(s) lacking annotations.csv on S3 per %s",
-                dropped, s3_status_csv.name,
-            )
-
-    return df.sort_values('Source ID').reset_index(drop=True)
+    h = hashlib.sha1()
+    for item in items:
+        if key is not None:
+            payload = key(item)
+        elif hasattr(item, '__dict__'):
+            payload = item.__dict__
+        else:
+            payload = item
+        h.update(json.dumps(payload, sort_keys=True, default=str)
+                 .encode('utf-8'))
+    return h.hexdigest()[:10]
 
 
-def write_sources_csv(sources_df: pd.DataFrame, out_path: Path) -> int:
-    """Write the 'id'-only CSV the pipeline expects."""
-    out_path.write_text(
-        'id\n' + '\n'.join(str(int(s)) for s in sources_df['Source ID']) + '\n'
-    )
-    return len(sources_df)
+# ---------- Step A: top-108 set ----------
 
+def resolve_top108_uuids(
+    top108_df: pd.DataFrame,
+    ba_lib: BenthicAttributeLibrary,
+) -> tuple[set[str], list[str], list[str]]:
+    """Resolve top-108 names -> UUIDs via the live BA library.
 
-# ---------- Step B: included labels ----------
+    Names in EXCLUDED_NAMES are dropped (defensive against future CSV
+    updates that flip top100=1 for them). Names absent from the API are
+    logged and skipped, not raised, so a slow-moving CSV doesn't crash
+    the run.
 
-def select_included_labels(
-    labels_df: pd.DataFrame,
-    top100_only: bool,
-    min_annotations: int,
-) -> pd.DataFrame:
-    """Select labels per top100 + min annotation threshold + defensive excludes."""
-    required = {'id', 'name', 'top100', 'CoralNetAnnotations', 'parent'}
-    missing = required - set(labels_df.columns)
-    if missing:
-        raise ValueError(f"labels CSV missing columns: {sorted(missing)}")
-
-    df = labels_df.copy()
-    if top100_only:
-        df = df[df['top100'] == 1.0]
-    df = df[df['CoralNetAnnotations'].fillna(0) >= min_annotations]
-    pre_defensive = len(df)
-    df = df[~df['name'].isin(DEFENSIVE_EXCLUDES)]
-    if len(df) < pre_defensive:
-        logger.info(
-            "Defensive filter removed %d row(s) named in DEFENSIVE_EXCLUDES",
-            pre_defensive - len(df),
-        )
-    return df.sort_values('name').reset_index(drop=True)
-
-
-def build_included_label_rows(
-    included_df: pd.DataFrame,
-    porites_gf_buckets: tuple[str, ...],
-    gf_lookup: dict[str, str],
-) -> list[tuple[str, str]]:
-    """Emit (ba_id, gf_id) rows. Porites contributes one row per bucket + blank."""
-    rows: list[tuple[str, str]] = []
-    porites_id = None
-
-    for _, row in included_df.iterrows():
-        if row['name'] == PORITES_NAME:
-            porites_id = row['id']
+    Returns (uuid_set, unresolved_names, excluded_names_seen).
+    """
+    uuids: set[str] = set()
+    unresolved: list[str] = []
+    excluded_seen: list[str] = []
+    for name in top108_df['name']:
+        if name in EXCLUDED_NAMES:
+            excluded_seen.append(name)
             continue
-        rows.append((row['id'], ''))
-
-    if porites_id is not None:
-        # Branching, Massive (named buckets) plus the empty bucket.
-        for gf_name in porites_gf_buckets:
-            if gf_name not in gf_lookup:
-                raise ValueError(
-                    f"Porites GF bucket '{gf_name}' not in growthforms.csv"
-                )
-            rows.append((porites_id, gf_lookup[gf_name]))
-        rows.append((porites_id, ''))
-
-    rows.sort()
-    return rows
-
-
-def write_included_labels_csv(rows: list[tuple[str, str]], out_path: Path) -> int:
-    with out_path.open('w', newline='') as f:
-        w = csv.writer(f)
-        w.writerow(['ba_id', 'gf_id'])
-        for ba_id, gf_id in rows:
-            w.writerow([ba_id, gf_id])
-    return len(rows)
+        try:
+            uuids.add(ba_lib.name_to_id(name))
+        except KeyError:
+            unresolved.append(name)
+    if unresolved:
+        logger.warning(
+            "%d top-108 name(s) not in MERMAID API: %s",
+            len(unresolved), sorted(unresolved),
+        )
+    if excluded_seen:
+        logger.warning(
+            "%d top-108 name(s) excluded by EXCLUDED_NAMES: %s",
+            len(excluded_seen), sorted(excluded_seen),
+        )
+    return uuids, unresolved, excluded_seen
 
 
-# ---------- Step C: rollups ----------
+def resolve_excluded_uuids(
+    ba_lib: BenthicAttributeLibrary,
+) -> set[str]:
+    """Resolve EXCLUDED_NAMES -> UUIDs. Missing names are logged + skipped."""
+    out: set[str] = set()
+    for name in EXCLUDED_NAMES:
+        try:
+            out.add(ba_lib.name_to_id(name))
+        except KeyError:
+            logger.warning(
+                "EXCLUDED_NAMES contains %r which is not in MERMAID API;"
+                " skipping (will not block any annotations).",
+                name,
+            )
+    return out
 
-ROLLED_UP_RE = re.compile(r'rolled up to (\w+)', re.IGNORECASE)
 
+# ---------- Step B: hierarchy walk -> rollup rows ----------
 
 def build_rollup_rows(
-    labels_df: pd.DataFrame,
-    label_mapping_df: pd.DataFrame,
-    included_label_names: set[str],
-    gf_lookup: dict[str, str],
-    ba_lookup: dict[str, str],
-    porites_gf_buckets: tuple[str, ...],
-) -> dict[str, list[tuple[str, str, str, str]]]:
-    """Build the four categories of rollup rows.
+    cn_mapping: CoralNetMermaidMapping,
+    ba_lib: BenthicAttributeLibrary,
+    gf_library: GrowthFormLibrary,
+    top108_uuids: set[str],
+    porites_uuid: str | None,
+    excluded_uuids: set[str],
+    bucket_gf_uuid_lookup: dict[str, str],
+    species_gf_lookup: dict[str, str],
+) -> tuple[list[tuple[str, str, str, str]], dict[str, int]]:
+    """Walk the BA hierarchy from each CoralNet-mapped BA up to a
+    top-108 ancestor, emitting rollup rows.
 
-    Returns a dict from category name -> list of
-    (from_ba_id, from_gf_id, to_ba_id, to_gf_id).
-    Categories: 'species_to_genus', 'nonporites_gf', 'porites_gf', 'legacy'.
+    Porites is special-cased: target_gf is one of Branching/Massive/'',
+    chosen from CN's GF if non-empty, else the species' inherent GF
+    from the labels CSV. All other top-108 BAs collapse GF to ''.
+
+    Annotations whose source BA is in excluded_uuids are dropped (no
+    rollup row, no walking past).
     """
-    species_rows: list[tuple[str, str, str, str]] = []
-    nonporites_gf_rows: list[tuple[str, str, str, str]] = []
-    porites_gf_rows: list[tuple[str, str, str, str]] = []
-    legacy_rows: list[tuple[str, str, str, str]] = []
-
-    # 1) Species/sub-taxa -> direct top100 parent.
-    for _, row in labels_df.iterrows():
-        if row['name'] in included_label_names:
-            continue  # this label IS in the included set; no rollup needed
-        parent_name = row['parent']
-        if (
-            isinstance(parent_name, str)
-            and parent_name in included_label_names
-            and parent_name in ba_lookup
-        ):
-            species_rows.append(
-                (row['id'], '', ba_lookup[parent_name], '')
-            )
-
-    # 2) Non-Porites genus GF -> empty GF.
-    porites_kept_gf_ids = {
-        gf_lookup[name] for name in porites_gf_buckets if name in gf_lookup
+    rollups: dict[tuple[str, str], tuple[str, str]] = {}
+    dropped = {
+        'no_top_level': 0, 'unknown_uuid': 0, 'null_ba': 0,
+        'excluded': 0,
     }
-    seen_gf_pairs: set[tuple[str, str]] = set()
-    for _, row in label_mapping_df.iterrows():
-        ba_name = row['benthic attribute']
-        gf_name = row.get('growth form')
-        if not isinstance(gf_name, str) or not gf_name.strip():
+    for entry in cn_mapping.mapping.values():
+        src_ba = entry.benthic_attribute_id
+        src_gf = entry.growth_form_id or ''
+        if not src_ba:
+            dropped['null_ba'] += 1
             continue
-        if ba_name not in included_label_names:
-            continue  # rollup target wouldn't be in scope anyway
-        if ba_name not in ba_lookup or gf_name not in gf_lookup:
+        if src_ba in excluded_uuids:
+            dropped['excluded'] += 1
             continue
-        ba_id = ba_lookup[ba_name]
-        gf_id = gf_lookup[gf_name]
-        pair = (ba_id, gf_id)
-        if pair in seen_gf_pairs:
-            continue
-        seen_gf_pairs.add(pair)
-
-        if ba_name == PORITES_NAME:
-            if gf_id in porites_kept_gf_ids:
-                continue  # keep Branching/Massive as-is
-            porites_gf_rows.append((ba_id, gf_id, ba_id, ''))
-        else:
-            nonporites_gf_rows.append((ba_id, gf_id, ba_id, ''))
-
-    # 3) Legacy "rolled up to X" rollups from priority_notes.
-    for _, row in labels_df.iterrows():
-        notes = row.get('priority_notes')
-        if not isinstance(notes, str):
-            continue
-        m = ROLLED_UP_RE.search(notes)
-        if not m:
-            continue
-        target_name = m.group(1)
-        if target_name not in ba_lookup:
+        if src_ba not in ba_lib.by_id:
+            dropped['unknown_uuid'] += 1
             logger.warning(
-                "priority_notes for %r references unknown rollup target %r;"
-                " skipping legacy rollup",
-                row['name'], target_name,
+                "CoralNet provider_id %s maps to BA UUID %s not in the live"
+                " MERMAID API; dropping.",
+                entry.provider_id, src_ba,
             )
             continue
-        legacy_rows.append((row['id'], '', ba_lookup[target_name], ''))
 
-    return {
-        'species_to_genus': sorted(species_rows),
-        'nonporites_gf': sorted(nonporites_gf_rows),
-        'porites_gf': sorted(porites_gf_rows),
-        'legacy': sorted(legacy_rows),
+        # Determine target_ba via the hierarchy walk (or self if in top-108).
+        if src_ba in top108_uuids:
+            target_ba = src_ba
+        else:
+            ancestors_leaf_first = list(
+                reversed(ba_lib.get_ancestor_ids(src_ba)))
+            target_ba = next(
+                (a for a in ancestors_leaf_first if a in top108_uuids), None)
+            if target_ba is None:
+                dropped['no_top_level'] += 1
+                continue
+
+        # Determine target_gf. Porites is special; everyone else collapses.
+        if porites_uuid is not None and target_ba == porites_uuid:
+            if src_gf:
+                bucket_name = _porites_bucket(gf_library.id_to_name(src_gf))
+            elif src_ba == porites_uuid:
+                # Porites genus, no CN GF -> the empty bucket.
+                bucket_name = ''
+            else:
+                # Porites species, no CN GF -> use species' inherent.
+                bucket_name = species_gf_lookup.get(src_ba, '')
+            target_gf = bucket_gf_uuid_lookup[bucket_name]
+        else:
+            target_gf = ''
+
+        # Skip self-mappings (no rollup needed).
+        if (src_ba, src_gf) == (target_ba, target_gf):
+            continue
+        rollups[(src_ba, src_gf)] = (target_ba, target_gf)
+
+    rows = sorted(
+        (src_ba, src_gf, to_ba, to_gf)
+        for (src_ba, src_gf), (to_ba, to_gf) in rollups.items()
+    )
+    # Categorize the deduped rollup rows for README reporting.
+    breakdown = {
+        'gf_collapse': sum(
+            1 for (sb, _), (tb, _) in rollups.items() if sb == tb),
+        'cross_ba': sum(
+            1 for (sb, _), (tb, _) in rollups.items() if sb != tb),
     }
+    porites_breakdown = _categorize_porites_rollups(
+        rollups, porites_uuid, bucket_gf_uuid_lookup,
+    )
+    return rows, {**dropped, **breakdown, **porites_breakdown}
 
 
-def write_rollups_csv(
-    categorized_rows: dict[str, list[tuple[str, str, str, str]]],
-    out_path: Path,
-) -> int:
-    flat = []
-    for rows in categorized_rows.values():
-        flat.extend(rows)
-    flat.sort()
+def _categorize_porites_rollups(
+    rollups: dict[tuple[str, str], tuple[str, str]],
+    porites_uuid: str | None,
+    bucket_gf_uuid_lookup: dict[str, str],
+) -> dict[str, int]:
+    """Count Porites-related rollup rows for README reporting.
+
+    Operates on the deduped rollups dict so counters match the rollup
+    row count exactly (avoids double-counting CN entries that share a
+    (from_ba, from_gf) key).
+    """
+    out = {
+        'porites_genus_gf_collapse': 0,
+        'porites_species_to_branching': 0,
+        'porites_species_to_massive': 0,
+        'porites_species_to_other': 0,
+    }
+    if porites_uuid is None:
+        return out
+    branching_uuid = bucket_gf_uuid_lookup.get('Branching', '')
+    massive_uuid = bucket_gf_uuid_lookup.get('Massive', '')
+    for (src_ba, _src_gf), (to_ba, to_gf) in rollups.items():
+        if to_ba != porites_uuid:
+            continue
+        if src_ba == porites_uuid:
+            out['porites_genus_gf_collapse'] += 1
+        elif to_gf == branching_uuid:
+            out['porites_species_to_branching'] += 1
+        elif to_gf == massive_uuid:
+            out['porites_species_to_massive'] += 1
+        else:
+            out['porites_species_to_other'] += 1
+    return out
+
+
+# ---------- Step C: included labels ----------
+
+def build_included_label_rows(
+    top108_uuids: set[str],
+    porites_uuid: str | None,
+    bucket_gf_uuid_lookup: dict[str, str],
+) -> list[tuple[str, str]]:
+    """Standard `(uuid, '')` rows + three Porites bucket rows."""
+    rows: set[tuple[str, str]] = set()
+    for uuid in top108_uuids:
+        if porites_uuid is not None and uuid == porites_uuid:
+            rows.add((porites_uuid, ''))
+            for bucket in PORITES_KEPT_GF_NAMES:
+                rows.add((porites_uuid, bucket_gf_uuid_lookup[bucket]))
+        else:
+            rows.add((uuid, ''))
+    return sorted(rows)
+
+
+# ---------- Step D: writers ----------
+
+def write_rollups_csv(rows, out_path: Path) -> int:
     with out_path.open('w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['from_ba_id', 'from_gf_id', 'to_ba_id', 'to_gf_id'])
-        for r in flat:
+        for r in rows:
             w.writerow(r)
-    return len(flat)
+    return len(rows)
 
 
-# ---------- Step D: README ----------
+def write_included_labels_csv(rows, out_path: Path) -> int:
+    with out_path.open('w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['ba_id', 'gf_id'])
+        for r in rows:
+            w.writerow(r)
+    return len(rows)
+
+
+def copy_sources_csv(in_path: Path, out_path: Path) -> int:
+    """Pass-through: read input, normalize id-or-Source-ID column, write."""
+    df = pd.read_csv(in_path)
+    if 'id' in df.columns:
+        col = 'id'
+    elif 'Source ID' in df.columns:
+        col = 'Source ID'
+    else:
+        raise ValueError(
+            f"{in_path}: must have an 'id' or 'Source ID' column")
+    out_path.write_text(
+        'id\n' + '\n'.join(str(int(s)) for s in df[col]) + '\n'
+    )
+    return len(df)
+
+
+# ---------- Step E: README ----------
 
 def write_readme(
     out_path: Path,
-    args: argparse.Namespace,
     audits: dict[str, dict],
     counts: dict,
-    unresolved_legacy: list[str],
+    unresolved_top108: list[str],
+    excluded_top108_seen: list[str],
 ) -> None:
     cli = ' '.join(sys.argv)
-    legacy_caveat = (
-        f"\n  - {len(unresolved_legacy)} legacy 'rolled up to X' rollups had"
-        f" targets not in the labels CSV; logged as warnings and dropped."
-        if unresolved_legacy else ''
-    )
+    unresolved_block = ''
+    if unresolved_top108:
+        unresolved_block = (
+            "\n## Unresolved top-108 names\n\n"
+            f"The following {len(unresolved_top108)} top-108 name(s) were"
+            " not found in the live MERMAID API and were skipped (not in"
+            " `included_labels.csv`):\n\n"
+            + ''.join(f"- `{n}`\n" for n in sorted(unresolved_top108))
+        )
+    excluded_top108_block = ''
+    if excluded_top108_seen:
+        excluded_top108_block = (
+            "\n*Note*: the labels CSV currently sets `top100=1` for"
+            f" {sorted(excluded_top108_seen)}, but EXCLUDED_NAMES dropped"
+            " them anyway.\n"
+        )
     body = f"""# Training Config: {out_path.parent.name}
 
 Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by
@@ -347,52 +439,79 @@ Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by
 {cli}
 ```
 
-## Parameters
+## Logic
 
-- `--tiela-tokeep`           = `{args.tiela_tokeep}`
-- `--min-image-quality`      = `{args.min_image_quality}`
-- `--min-coral-diversity`    = `{args.min_coral_diversity}`
-- `--top100-only`            = `{args.top100_only}`
-- `--min-annotations`        = `{args.min_annotations}`
-- `--porites-gf-buckets`     = `{', '.join(args.porites_gf_buckets)}`
+Replicates the validated EDA notebook
+(`data-mermaid/mermaid-segmentation@coralnet_eda/nbs/EDA/coralnet_eda_validated.ipynb`)
+in CoralNet -> MERMAID -> top-108 hierarchy-walk space, against the live
+MERMAID API. For each CoralNet-mapped benthic attribute:
+
+1. If the BA is in `EXCLUDED_NAMES` ({', '.join(EXCLUDED_NAMES)}), drop entirely.
+2. If already in the top-108 set, keep as-is.
+3. Otherwise walk parents (nearest first) to find a top-108 ancestor.
+4. Otherwise drop the label (`LabelFilter` removes it at training time).
 
 ## Source-of-truth inputs
 
 | File | Modified | sha1[:10] |
 | --- | --- | --- |
-| `{audits['sources']['path']}` | {audits['sources']['mtime']} | `{audits['sources']['sha1_prefix']}` |
 | `{audits['labels']['path']}` | {audits['labels']['mtime']} | `{audits['labels']['sha1_prefix']}` |
-| `{audits['label_mapping']['path']}` | {audits['label_mapping']['mtime']} | `{audits['label_mapping']['sha1_prefix']}` |
-| `{audits['growthforms']['path']}` | {audits['growthforms']['mtime']} | `{audits['growthforms']['sha1_prefix']}` |
+| `{audits['sources']['path']}` | {audits['sources']['mtime']} | `{audits['sources']['sha1_prefix']}` |
+
+Live MERMAID API (snapshotted at run time):
+- `https://api.datamermaid.org/v1/benthicattributes/?limit=5000` -> sha1 `{audits['ba_api']}`
+- `https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet` -> sha1 `{audits['cn_api']}`
 
 ## Outputs
 
-- `sources.csv` — **{counts['n_sources']}** CoralNet source IDs.
-- `included_labels.csv` — **{counts['n_included_rows']}** `(ba_id, gf_id)` rows
-  ({counts['n_included_labels']} distinct labels, of which Porites contributes
-  {counts['n_porites_rows']} rows for the kept growth forms + empty bucket).
-- `rollups.csv` — **{counts['n_rollups']}** rows total:
-    - species → top100 genus: {counts['n_rollup_species']}
-    - non-Porites genus GF → empty GF: {counts['n_rollup_nonporites_gf']}
-    - Porites GF (other than kept buckets) → empty GF: {counts['n_rollup_porites_gf']}
-    - legacy `priority_notes` rollups (e.g. → Mussidae): {counts['n_rollup_legacy']}
+- `sources.csv` - **{counts['n_sources']}** CoralNet source IDs (pass-through; no filtering).
+- `included_labels.csv` - **{counts['n_included']}** `(ba_id, gf_id)` rows
+  (Porites contributes 3 rows for the Branching / Massive / other-none buckets;
+  every other top-108 BA contributes 1 row).
+- `rollups.csv` - **{counts['n_rollups']}** unique `(from_ba, from_gf)` rows:
+    - GF-collapse rows (top-108 BA with non-bucket GF -> same BA, empty GF): {counts['n_gf_collapse']}
+    - cross-BA rollups (species or genus -> top-108 ancestor): {counts['n_cross_ba']}
 
-## Limitations and caveats
+### Porites buckets
 
-- The user's slack message says 19 of the 109 top100 labels have <1000
-  annotations; the source CSV says **28**. Per Q3 in planning, the file is
-  authoritative; the discrepancy is likely a stale slack count.
-- Legacy `rolled up to <X>` rollups are preserved verbatim per Q5. If the
-  rollup *target* X is not in `included_labels.csv`, the rolled-up annotations
-  will still be filtered out at training time — the rollup row exists for
-  documentation only.{legacy_caveat}
-- Annotation totals shown for selecting/excluding labels come from
-  `mapped_to_mermaid_attributes.csv` and are *across all CoralNet sources*;
-  the per-source-subset totals will be smaller. Per Q3 we did not recompute.
-- After training, inspect the MLflow `unmapped_labels.csv` artifact for the
-  authoritative list of CoralNet labels in the chosen sources that did not
-  map into the trained label space.
-"""
+Per Iain/Emily (2026-05-08), Porites is the only genus that retains
+growth-form distinctions. `included_labels.csv` has three Porites rows:
+`(Porites, Branching)`, `(Porites, Massive)`, `(Porites, '')`.
+
+Rollups feeding the buckets:
+- Porites genus with non-Branching/non-Massive GF -> `(Porites, '')`: {counts['n_porites_genus_gf_collapse']}
+- Porites species -> `(Porites, Branching)`: {counts['n_porites_species_to_branching']}
+- Porites species -> `(Porites, Massive)`: {counts['n_porites_species_to_massive']}
+- Porites species -> `(Porites, '')` (other/no inherent GF): {counts['n_porites_species_to_other']}
+
+Species' inherent GF comes from the labels CSV's `growth forms` column
+(single-value rows only). CN-supplied GF wins over the inherent GF when
+both are present.
+
+### Excluded labels
+
+These labels are excluded from training entirely (no rollup, no class):
+{chr(10).join(f"- `{n}`" for n in EXCLUDED_NAMES)}
+
+CoralNet mappings dropped because their BA is in EXCLUDED_NAMES: {counts['n_excluded']}.
+{excluded_top108_block}
+### Other dropped CoralNet mappings
+
+- Source BA UUID not in MERMAID API: {counts['n_unknown_uuid']}
+- No top-108 ancestor in the parent chain: {counts['n_no_top_level']}
+- CoralNet mapping with null benthic_attribute_id: {counts['n_null_ba']}
+
+## Deviation from notebook (justified)
+
+The notebook works on benthic-attribute *names* only and ignores growth
+forms. The training pipeline's `LabelRollupSpec` does literal
+`(from_ba_id, from_gf_id)` tuple lookup, so to keep this config
+self-contained (i.e. usable without setting
+`DatasetOptions.drop_growthforms=True`) this script enumerates every
+`(BA, GF)` pair present in the live CoralNet->MERMAID mapping and emits
+one rollup row per pair. Most pairs collapse to `(top-108 BA, '')`;
+Porites is the only exception (see above).
+{unresolved_block}"""
     out_path.write_text(body)
 
 
@@ -400,9 +519,6 @@ Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by
 
 def validate_outputs(out_dir: Path) -> None:
     """Round-trip the produced CSVs through the pipeline's CsvSpec subclasses."""
-    # Imported here so that script tests don't pay the import cost when not
-    # validating, and so we can run without a full pyspacer install in
-    # smoke tests.
     from mermaid_classifier.pyspacer.train import (
         CNSourceFilter, LabelFilter, LabelRollupSpec,
     )
@@ -410,9 +526,19 @@ def validate_outputs(out_dir: Path) -> None:
     with (out_dir / 'sources.csv').open() as f:
         CNSourceFilter(f)
     with (out_dir / 'included_labels.csv').open() as f:
-        LabelFilter(f, inclusion=True)
+        included = LabelFilter(f, inclusion=True)
     with (out_dir / 'rollups.csv').open() as f:
-        LabelRollupSpec(f)
+        rollups = LabelRollupSpec(f)
+
+    # Soft consistency: every rollup target must be in included_labels.
+    included_ba_ids = {ba for (ba, _gf) in included.bagf_set}
+    for (from_ba, from_gf), (to_ba, _to_gf) in rollups.lookup.items():
+        if to_ba not in included_ba_ids:
+            raise ValueError(
+                f"rollups.csv has to_ba_id={to_ba}"
+                f" (from {from_ba}, gf={from_gf!r}) not present in"
+                f" included_labels.csv - generation bug."
+            )
 
 
 # ---------- Main ----------
@@ -423,31 +549,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument('--output-dir', type=Path, default=DEFAULT_OUTPUT_DIR)
-    p.add_argument('--sources-csv', type=Path, default=DEFAULT_SOURCES_CSV)
-    p.add_argument('--labels-csv', type=Path, default=DEFAULT_LABELS_CSV)
-    p.add_argument('--label-mapping-csv', type=Path, default=DEFAULT_LABEL_MAPPING_CSV)
-    p.add_argument('--growthforms-csv', type=Path, default=DEFAULT_GROWTHFORMS_CSV)
-    p.add_argument('--s3-status-csv', type=Path, default=DEFAULT_S3_STATUS_CSV,
-                   help='CSV with id,has_annotations_csv from a fresh S3 probe '
-                        '(see scripts/probe_coralnet_s3_status.py). '
-                        'Sources without an actual annotations.csv on S3 are '
-                        'dropped from the output, regardless of the InS3 flag '
-                        'in the source-of-truth CSV.')
-    p.add_argument('--no-filter-by-s3-status', action='store_true',
-                   help='Skip the S3 reality check and trust the InS3 column. '
-                        'Only use for tests or when the S3 status CSV is '
-                        'genuinely unavailable.')
-    p.add_argument('--tiela-tokeep', default='Yes',
-                   help='String value of the ToKeep column to keep')
-    p.add_argument('--min-image-quality', type=int, default=0)
-    p.add_argument('--min-coral-diversity', type=int, default=0)
-    p.add_argument('--top100-only', action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument('--min-annotations', type=int, default=1000)
-    p.add_argument('--porites-gf-buckets', nargs='+',
-                   default=list(DEFAULT_PORITES_GF_BUCKETS))
+    p.add_argument('--sources-csv', type=Path, default=DEFAULT_SOURCES_CSV,
+                   help='Pass-through input. Must have an `id` or'
+                        ' `Source ID` column.')
+    p.add_argument('--labels-csv', type=Path, default=DEFAULT_LABELS_CSV,
+                   help='Top-108 source-of-truth. Filter is `top100 == 1`.')
     p.add_argument('--skip-validation', action='store_true',
-                   help='Skip round-tripping outputs through pipeline schemas '
-                        '(useful for tests)')
+                   help='Skip round-tripping outputs through pipeline'
+                        ' schemas (useful for tests).')
     return p.parse_args(argv)
 
 
@@ -458,91 +567,103 @@ def main(argv: list[str] | None = None) -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Audit inputs up front.
     audits = {
-        'sources': _file_audit(args.sources_csv),
         'labels': _file_audit(args.labels_csv),
-        'label_mapping': _file_audit(args.label_mapping_csv),
-        'growthforms': _file_audit(args.growthforms_csv),
+        'sources': _file_audit(args.sources_csv),
+        'ba_api': 'n/a',
+        'cn_api': 'n/a',
     }
-    for k, a in audits.items():
-        if a['mtime'] == 'MISSING':
-            raise FileNotFoundError(f"input {k}: {a['path']} not found")
+    if audits['labels']['mtime'] == 'MISSING':
+        raise FileNotFoundError(f"labels CSV not found: {args.labels_csv}")
+    if audits['sources']['mtime'] == 'MISSING':
+        raise FileNotFoundError(f"sources CSV not found: {args.sources_csv}")
 
-    # Load.
-    sources_df = pd.read_csv(args.sources_csv)
     labels_df = pd.read_csv(args.labels_csv)
-    label_mapping_df = pd.read_csv(args.label_mapping_csv)
-    gf_lookup = _build_gf_lookup(args.growthforms_csv)
-    ba_lookup = _build_ba_lookup(labels_df)
-
-    # Step A: sources.
-    sources_kept = select_sources(
-        sources_df,
-        tokeep_value=args.tiela_tokeep,
-        min_image_quality=args.min_image_quality,
-        min_coral_diversity=args.min_coral_diversity,
-        s3_status_csv=None if args.no_filter_by_s3_status else args.s3_status_csv,
+    required = {'id', 'name', 'top100'}
+    missing = required - set(labels_df.columns)
+    if missing:
+        raise ValueError(
+            f"labels CSV {args.labels_csv} missing columns: {sorted(missing)}")
+    top108_df = labels_df[
+        labels_df['top100'].fillna(0).astype(int) == 1].reset_index(drop=True)
+    logger.info(
+        "Loaded %d top-108 rows from %s",
+        len(top108_df), args.labels_csv.name,
     )
-    n_sources = write_sources_csv(sources_kept, args.output_dir / 'sources.csv')
 
-    # Step B: included labels.
-    included_df = select_included_labels(
-        labels_df,
-        top100_only=args.top100_only,
-        min_annotations=args.min_annotations,
+    ba_lib = _load_ba_library()
+    audits['ba_api'] = _iter_audit(ba_lib.raw_results)
+    gf_library = _load_gf_library()
+    cn_mapping = _load_cn_mapping()
+    # Touch .mapping to trigger lazy load before fingerprinting.
+    audits['cn_api'] = _iter_audit(cn_mapping.mapping.values())
+
+    top108_uuids, unresolved, excluded_top108_seen = resolve_top108_uuids(
+        top108_df, ba_lib)
+    excluded_uuids = resolve_excluded_uuids(ba_lib)
+    try:
+        porites_uuid: str | None = ba_lib.name_to_id(PORITES_NAME)
+    except KeyError:
+        logger.warning(
+            "Porites not found in MERMAID API; Porites bucket logic disabled.")
+        porites_uuid = None
+    bucket_gf_uuid_lookup = (
+        _build_bucket_gf_uuid_lookup(gf_library)
+        if porites_uuid is not None else {'': ''}
     )
-    porites_gf_buckets = tuple(args.porites_gf_buckets)
+    species_gf_lookup = _load_species_gf_lookup(labels_df)
+
+    rollup_rows, stats = build_rollup_rows(
+        cn_mapping, ba_lib, gf_library, top108_uuids,
+        porites_uuid, excluded_uuids,
+        bucket_gf_uuid_lookup, species_gf_lookup,
+    )
     included_rows = build_included_label_rows(
-        included_df,
-        porites_gf_buckets=porites_gf_buckets,
-        gf_lookup=gf_lookup,
-    )
-    n_included_rows = write_included_labels_csv(
+        top108_uuids, porites_uuid, bucket_gf_uuid_lookup)
+
+    n_sources = copy_sources_csv(
+        args.sources_csv, args.output_dir / 'sources.csv')
+    n_rollups = write_rollups_csv(
+        rollup_rows, args.output_dir / 'rollups.csv')
+    n_included = write_included_labels_csv(
         included_rows, args.output_dir / 'included_labels.csv')
 
-    # Step C: rollups.
-    included_label_names = set(included_df['name'])
-    categorized = build_rollup_rows(
-        labels_df=labels_df,
-        label_mapping_df=label_mapping_df,
-        included_label_names=included_label_names,
-        gf_lookup=gf_lookup,
-        ba_lookup=ba_lookup,
-        porites_gf_buckets=porites_gf_buckets,
-    )
-    n_rollups = write_rollups_csv(categorized, args.output_dir / 'rollups.csv')
-
-    # Step D: README.
-    n_porites_rows = sum(1 for ba_id, _ in included_rows
-                          if ba_id == ba_lookup.get(PORITES_NAME))
     counts = dict(
         n_sources=n_sources,
-        n_included_rows=n_included_rows,
-        n_included_labels=len(included_df),
-        n_porites_rows=n_porites_rows,
+        n_included=n_included,
         n_rollups=n_rollups,
-        n_rollup_species=len(categorized['species_to_genus']),
-        n_rollup_nonporites_gf=len(categorized['nonporites_gf']),
-        n_rollup_porites_gf=len(categorized['porites_gf']),
-        n_rollup_legacy=len(categorized['legacy']),
+        n_gf_collapse=stats['gf_collapse'],
+        n_cross_ba=stats['cross_ba'],
+        n_no_top_level=stats['no_top_level'],
+        n_unknown_uuid=stats['unknown_uuid'],
+        n_null_ba=stats['null_ba'],
+        n_excluded=stats['excluded'],
+        n_porites_genus_gf_collapse=stats['porites_genus_gf_collapse'],
+        n_porites_species_to_branching=stats['porites_species_to_branching'],
+        n_porites_species_to_massive=stats['porites_species_to_massive'],
+        n_porites_species_to_other=stats['porites_species_to_other'],
     )
     write_readme(
         out_path=args.output_dir / 'README.md',
-        args=args,
         audits=audits,
         counts=counts,
-        unresolved_legacy=[],
+        unresolved_top108=unresolved,
+        excluded_top108_seen=excluded_top108_seen,
     )
 
-    # Step E: validate.
     if not args.skip_validation:
         validate_outputs(args.output_dir)
 
     logger.info(
-        "Wrote %d sources, %d included-label rows (%d distinct labels), "
-        "%d rollups to %s",
-        n_sources, n_included_rows, len(included_df), n_rollups,
+        "Wrote %d sources, %d included labels, %d rollups"
+        " (%d cross-BA, %d GF collapses, %d Porites species buckets,"
+        " %d excluded CN entries) to %s",
+        n_sources, n_included, n_rollups,
+        stats['cross_ba'], stats['gf_collapse'],
+        stats['porites_species_to_branching']
+        + stats['porites_species_to_massive']
+        + stats['porites_species_to_other'],
+        stats['excluded'],
         args.output_dir,
     )
     return 0
