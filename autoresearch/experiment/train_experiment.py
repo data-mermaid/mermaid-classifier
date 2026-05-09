@@ -43,9 +43,9 @@ from trainer import ExperimentTrainer
 # invalidates all experiment comparisons.
 FROZEN_DATA = dict(
     include_mermaid=False,
-    coralnet_sources_csv='autoresearch/configs/sources.csv',
-    label_rollup_spec_csv='autoresearch/configs/rollups.csv',
-    included_labels_csv='autoresearch/configs/included_labels.csv',
+    coralnet_sources_csv='../sagemaker/configs/tiela77_top100_min1k/sources.csv',
+    label_rollup_spec_csv='../sagemaker/configs/tiela77_top100_min1k/rollups.csv',
+    included_labels_csv="../sagemaker/configs/tiela77_top100_min1k/included_labels.csv",
     drop_growthforms=False,
     ref_val_ratios=(0.1, 0.1),
 )
