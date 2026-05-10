@@ -11,7 +11,7 @@ Usage:
 Options:
     --max-hours N        Total time budget in hours (default: 12)
     --max-experiments N  Maximum number of experiments (default: 100)
-    --timeout N          Training timeout in seconds (default: 4500)
+    --timeout N          Training timeout in seconds (default: 7200)
     --model MODEL        Claude model to use (default: claude-opus-4-7)
     --max-consecutive-failures N  Stop after N consecutive *failures*
                          (CRASH/TIMEOUT/ABORT/api-error/no-changes).
@@ -980,8 +980,8 @@ def main():
         "--max-experiments", type=int, default=100,
         help="Maximum number of experiments (default: 100)")
     parser.add_argument(
-        "--timeout", type=int, default=4500,
-        help="Training timeout in seconds (default: 4500)")
+        "--timeout", type=int, default=7200,
+        help="Training timeout in seconds (default: 7200)")
     parser.add_argument(
         "--model", type=str, default="claude-opus-4-7",
         help="Claude model to use (default: claude-opus-4-7)")
