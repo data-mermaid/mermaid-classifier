@@ -270,19 +270,22 @@ class TestClaudeResponseParsing(unittest.TestCase):
         self.assertEqual(result["hypothesis"], "test dropout")
         self.assertEqual(len(result["file_changes"]), 1)
 
-    def test_parse_fallback_to_result(self):
-        """Test fallback when structured_output is absent."""
+    def test_cli_error_is_surfaced(self):
+        """When the CLI reports is_error, the result message is raised."""
         cli_response = json.dumps({
-            "result": {"hypothesis": "test", "file_changes": []},
+            "is_error": True,
+            "result": "Not logged in · Please run /login",
         })
         mock_result = MagicMock()
         mock_result.stdout = cli_response
-        mock_result.returncode = 0
+        mock_result.stderr = ""
+        mock_result.returncode = 1
 
         with patch("subprocess.run", return_value=mock_result):
-            result = ar.call_claude("model", "system", "user")
+            with self.assertRaises(RuntimeError) as ctx:
+                ar.call_claude("model", "system", "user")
 
-        self.assertEqual(result["hypothesis"], "test")
+        self.assertIn("Not logged in", str(ctx.exception))
 
 
 class TestCreateTrainerExtraction(unittest.TestCase):

@@ -312,7 +312,6 @@ def call_claude(
     result = subprocess.run(
         [
             "claude", "-p", user_prompt,
-            "--bare",
             "--output-format", "json",
             "--json-schema", json.dumps(RESPONSE_SCHEMA),
             "--system-prompt", system_prompt,
@@ -320,10 +319,20 @@ def call_claude(
         ],
         capture_output=True,
         text=True,
-        check=True,
     )
-    response = json.loads(result.stdout)
-    return response.get("structured_output", response.get("result", {}))
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"claude CLI returned exit {result.returncode} with non-JSON stdout. "
+            f"stdout={result.stdout[:500]!r} stderr={result.stderr[:500]!r}"
+        ) from e
+    if response.get("is_error") or "structured_output" not in response:
+        raise RuntimeError(
+            f"claude CLI error (exit {result.returncode}): "
+            f"{response.get('result', '<no result field>')}"
+        )
+    return response["structured_output"]
 
 
 def apply_file_changes(changes: list[dict]) -> list[str]:
