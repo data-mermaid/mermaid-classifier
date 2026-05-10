@@ -15,6 +15,10 @@ Options:
     --model MODEL        Claude model to use (default: claude-sonnet-4-6)
     --max-consecutive-failures N  Stop after N consecutive failures (default: 10)
     --dry-run            Show what would be done without running training
+    --skip-baseline      Reuse an already-completed baseline rather than
+                         re-running it. Pulls the metric from results.tsv
+                         and the telemetry from the latest finished MLflow
+                         run if telemetry/1.md is missing.
 """
 
 import argparse
@@ -188,6 +192,42 @@ def next_experiment_id() -> int:
         reader = csv.DictReader(f, delimiter="\t")
         ids = [int(row["id"]) for row in reader if row.get("id")]
     return max(ids, default=0) + 1
+
+
+def _latest_baseline_metric() -> float | None:
+    """Most recent ``balanced_accuracy`` from any row marked baseline."""
+    if not RESULTS_TSV.exists():
+        return None
+    with open(RESULTS_TSV) as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        rows = [r for r in reader
+                if (r.get("hypothesis") or "").strip() == "baseline"
+                and (r.get("balanced_accuracy") or "").strip()]
+    if not rows:
+        return None
+    try:
+        return float(rows[-1]["balanced_accuracy"])
+    except ValueError:
+        return None
+
+
+def _best_kept_metric() -> float | None:
+    """Max ``balanced_accuracy`` across all KEPT rows in ``results.tsv``."""
+    if not RESULTS_TSV.exists():
+        return None
+    best: float | None = None
+    with open(RESULTS_TSV) as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            if (row.get("status") or "").strip() != "KEPT":
+                continue
+            try:
+                v = float((row.get("balanced_accuracy") or "").strip())
+            except ValueError:
+                continue
+            if best is None or v > best:
+                best = v
+    return best
 
 
 # ── Git operations ─────────────────────────────────────────────────
@@ -474,53 +514,83 @@ def run_autoresearch(args: argparse.Namespace) -> None:
     program_md = PROGRAM_MD.read_text()
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(program_md=program_md)
 
-    # Run baseline.
-    logger.info("=" * 60)
-    logger.info("Running baseline experiment...")
-    logger.info("=" * 60)
+    # Run or reuse baseline.
+    if args.skip_baseline:
+        logger.info("=" * 60)
+        logger.info("Reusing existing baseline (--skip-baseline)")
+        logger.info("=" * 60)
+        baseline_metric = _latest_baseline_metric()
+        if baseline_metric is None:
+            logger.error(
+                "--skip-baseline requested but no baseline row with a "
+                "balanced_accuracy value was found in results.tsv")
+            sys.exit(1)
+        best_so_far = _best_kept_metric() or baseline_metric
 
-    returncode, stdout, stderr, duration = run_training(args.timeout)
-    if returncode != 0:
-        logger.error(f"Baseline training failed:\n{stderr[-2000:]}")
-        sys.exit(1)
+        # Make sure telemetry/1.md exists so the next prompt can include
+        # the baseline's full telemetry. Pull from MLflow on demand.
+        if not (TELEMETRY_DIR / "1.md").exists():
+            logger.info(
+                "telemetry/1.md missing; pulling from MLflow's most recent FINISHED run")
+            telemetry = fetch_run_telemetry()
+            if telemetry is None:
+                logger.warning(
+                    "Could not fetch baseline telemetry from MLflow; "
+                    "the next prompt will lack the telemetry section")
+            else:
+                write_telemetry_file(1, telemetry.full_markdown)
 
-    baseline_telemetry = fetch_run_telemetry()
-    if baseline_telemetry is None or "balanced_accuracy" not in baseline_telemetry.headline:
-        logger.error("Failed to extract baseline telemetry from MLflow")
-        sys.exit(1)
+        logger.info(
+            f"Baseline balanced_accuracy: {baseline_metric:.4f} "
+            f"(best_so_far: {best_so_far:.4f})")
+    else:
+        logger.info("=" * 60)
+        logger.info("Running baseline experiment...")
+        logger.info("=" * 60)
 
-    baseline_metric = baseline_telemetry.headline["balanced_accuracy"]
-    write_telemetry_file(1, baseline_telemetry.full_markdown)
+        returncode, stdout, stderr, duration = run_training(args.timeout)
+        if returncode != 0:
+            logger.error(f"Baseline training failed:\n{stderr[-2000:]}")
+            sys.exit(1)
 
-    best_so_far = baseline_metric
-    sha = git_commit(f"autoresearch baseline: balanced_accuracy={baseline_metric:.4f}")
+        baseline_telemetry = fetch_run_telemetry()
+        if baseline_telemetry is None or "balanced_accuracy" not in baseline_telemetry.headline:
+            logger.error("Failed to extract baseline telemetry from MLflow")
+            sys.exit(1)
 
-    baseline_row = {
-        "id": 1,
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "hypothesis": "baseline",
-        **_format_headline(baseline_telemetry.headline),
-        "best_so_far": f"{baseline_metric:.6f}",
-        "status": "KEPT",
-        "duration_s": f"{duration:.0f}",
-        "commit_sha": sha,
-        "analysis_excerpt": "",
-        "error": "",
-    }
-    append_result(baseline_row)
+        baseline_metric = baseline_telemetry.headline["balanced_accuracy"]
+        write_telemetry_file(1, baseline_telemetry.full_markdown)
+
+        best_so_far = baseline_metric
+        sha = git_commit(f"autoresearch baseline: balanced_accuracy={baseline_metric:.4f}")
+
+        baseline_row = {
+            "id": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "hypothesis": "baseline",
+            **_format_headline(baseline_telemetry.headline),
+            "best_so_far": f"{baseline_metric:.6f}",
+            "status": "KEPT",
+            "duration_s": f"{duration:.0f}",
+            "commit_sha": sha,
+            "analysis_excerpt": "",
+            "error": "",
+        }
+        append_result(baseline_row)
+
+        logger.info(f"Baseline balanced_accuracy: {baseline_metric:.4f}")
 
     # Update program.md with baseline metric.
     program_md = program_md.replace("{BASELINE_METRIC}", f"{baseline_metric:.4f}")
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(program_md=program_md)
 
-    logger.info(f"Baseline balanced_accuracy: {baseline_metric:.4f}")
     logger.info(f"Starting experiment loop (max {args.max_hours}h, {args.max_experiments} experiments)")
 
     # Main experiment loop.
     start_time = time.time()
     consecutive_failures = 0
     last_error = None
-    experiment_id = 2
+    experiment_id = next_experiment_id()
 
     while True:
         # Check stopping conditions.
@@ -737,6 +807,15 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Show what would be done without running training")
+    parser.add_argument(
+        "--skip-baseline", action="store_true",
+        help=(
+            "Skip the costly baseline training subprocess. Reuses the "
+            "most recent baseline row from results.tsv for the metric, "
+            "the max KEPT row for best_so_far, and pulls "
+            "telemetry/1.md from the latest finished MLflow run if "
+            "missing. Use when restarting after a baseline already ran."
+        ))
     args = parser.parse_args()
 
     # Handle Ctrl+C gracefully.

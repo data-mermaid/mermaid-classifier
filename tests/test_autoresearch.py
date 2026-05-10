@@ -169,6 +169,66 @@ class TestResultsTracking(unittest.TestCase):
         self.assertEqual(ar.next_experiment_id(), 2)
 
 
+class TestBaselineReuseHelpers(unittest.TestCase):
+    """Helpers used by --skip-baseline to recover state from results.tsv."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.orig_results = ar.RESULTS_TSV
+        ar.RESULTS_TSV = Path(self.tmpdir) / "results.tsv"
+        ar.init_results_tsv()
+
+    def tearDown(self):
+        ar.RESULTS_TSV = self.orig_results
+
+    def _row(self, **overrides) -> dict:
+        row = {f: "" for f in ar.RESULTS_FIELDS}
+        row.update(overrides)
+        return row
+
+    def test_latest_baseline_metric_returns_most_recent(self):
+        ar.append_result(self._row(
+            id=1, hypothesis="baseline",
+            balanced_accuracy="0.7790", status="KEPT"))
+        ar.append_result(self._row(
+            id=1, hypothesis="baseline",
+            balanced_accuracy="0.7800", status="KEPT"))
+        # Latest baseline row wins, even if non-baseline rows follow.
+        ar.append_result(self._row(
+            id=2, hypothesis="dropout p=0.3",
+            balanced_accuracy="0.7700", status="REVERTED"))
+        self.assertEqual(ar._latest_baseline_metric(), 0.78)
+
+    def test_latest_baseline_metric_skips_blank_rows(self):
+        ar.append_result(self._row(
+            id=1, hypothesis="baseline",
+            balanced_accuracy="0.7790", status="KEPT"))
+        # A baseline row with no balanced_accuracy (e.g. CRASH) is skipped.
+        ar.append_result(self._row(
+            id=1, hypothesis="baseline",
+            balanced_accuracy="", status="CRASH"))
+        self.assertEqual(ar._latest_baseline_metric(), 0.779)
+
+    def test_latest_baseline_metric_when_empty(self):
+        self.assertIsNone(ar._latest_baseline_metric())
+
+    def test_best_kept_metric_takes_max(self):
+        ar.append_result(self._row(
+            id=1, hypothesis="baseline",
+            balanced_accuracy="0.7790", status="KEPT"))
+        ar.append_result(self._row(
+            id=2, hypothesis="more epochs",
+            balanced_accuracy="0.8200", status="KEPT"))
+        ar.append_result(self._row(
+            id=3, hypothesis="dropout",
+            balanced_accuracy="0.8100", status="REVERTED"))
+        # 0.82 is KEPT; 0.81 is REVERTED so it doesn't count.
+        self.assertEqual(ar._best_kept_metric(), 0.82)
+
+    def test_best_kept_metric_when_empty(self):
+        self.assertIsNone(ar._best_kept_metric())
+
+
 class TestResultsTsvMigration(unittest.TestCase):
     """Test that an old (pre-headline-columns) results.tsv migrates cleanly."""
 
