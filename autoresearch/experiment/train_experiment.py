@@ -37,7 +37,7 @@ from mermaid_classifier.training.subsample import SubsampleOptions
 from trainer import ExperimentTrainer
 
 
-# ── FROZEN: data identity ──────────────────────────────────────────
+# ── FROZEN: data identity ────────────────────────────────────
 # DO NOT MODIFY these fields. They define what data enters training,
 # how labels are mapped, and how the data is split. Changing these
 # invalidates all experiment comparisons.
@@ -54,7 +54,7 @@ MLFLOW_OPTIONS = MLflowOptions(
     experiment_name="autoresearch",
     model_name='AutoResearch',
 )
-# ── END FROZEN ──────────────────────────────────────────────────────
+# ── END FROZEN ─────────────────────────────────────────────
 
 
 # ── MODIFIABLE: subsampling, weighting, training ────────────────────
@@ -74,9 +74,14 @@ WEIGHTING = SampleWeightingOptions(
     weight_ratio_cap=5000.0,
 )
 
+# Hypothesis: prior run with lr=1e-4 stopped at epoch 12 with
+# training_loss still decreasing (last=6.30, min=6.18) and val_loss
+# only barely plateauing (min 2.231 at epoch 9, 2.232 at epoch 12).
+# Bumping LR 3x lets the model take larger steps and reach a deeper
+# minimum before the patience=3 early-stopping budget runs out.
 TRAINING_OPTIONS = TrainingOptions(
     hidden_layer_sizes=(500, 300, 100),
-    learning_rate_init=1e-4,
+    learning_rate_init=3e-4,
     epochs=60,
     early_stopping_patience=3,
 )
