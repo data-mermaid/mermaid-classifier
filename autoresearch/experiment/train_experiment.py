@@ -77,7 +77,7 @@ WEIGHTING = SampleWeightingOptions(
 TRAINING_OPTIONS = TrainingOptions(
     hidden_layer_sizes=(500, 300, 100),
     learning_rate_init=1e-4,
-    epochs=40,
+    epochs=60,
     early_stopping_patience=3,
 )
 
