@@ -40,6 +40,8 @@ EXPERIMENT_DIR = AUTORESEARCH_DIR / "experiment"
 PROGRAM_MD = AUTORESEARCH_DIR / "program.md"
 RESULTS_TSV = AUTORESEARCH_DIR / "results.tsv"
 HASHES_FILE = AUTORESEARCH_DIR / "baseline_hashes.json"
+TELEMETRY_DIR = AUTORESEARCH_DIR / "telemetry"
+ANALYSES_DIR = AUTORESEARCH_DIR / "analyses"
 
 # Files the agent is allowed to modify.
 MODIFIABLE_FILES = [
@@ -111,9 +113,22 @@ def verify_hashes() -> tuple[bool, list[str]]:
 
 # ── Results tracking ───────────────────────────────────────────────
 
+HEADLINE_METRIC_KEYS = (
+    "balanced_accuracy",
+    "mcc",
+    "ece",
+    "top_5_accuracy",
+    "cross_branch_error_rate",
+    "within_branch_error_rate",
+    "precision_macro",
+    "recall_macro",
+)
+
 RESULTS_FIELDS = [
-    "id", "timestamp", "hypothesis", "balanced_accuracy",
-    "best_so_far", "status", "duration_s", "commit_sha", "error",
+    "id", "timestamp", "hypothesis",
+    *HEADLINE_METRIC_KEYS,
+    "best_so_far", "status", "duration_s", "commit_sha",
+    "analysis_excerpt", "error",
 ]
 
 
@@ -122,6 +137,36 @@ def init_results_tsv() -> None:
         with open(RESULTS_TSV, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=RESULTS_FIELDS, delimiter="\t")
             writer.writeheader()
+        return
+    _migrate_results_tsv()
+
+
+def _migrate_results_tsv() -> None:
+    """Bring an existing results.tsv up to the current RESULTS_FIELDS.
+
+    Idempotent: if the header already matches, no-op. Otherwise rewrite
+    with the new header, padding existing rows with empty strings for
+    new columns.
+    """
+    with open(RESULTS_TSV, newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        header = next(reader, None)
+        rows = list(reader)
+    if header == RESULTS_FIELDS:
+        return
+    name_to_idx = {name: i for i, name in enumerate(header or [])}
+    with open(RESULTS_TSV, "w", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(RESULTS_FIELDS)
+        for row in rows:
+            new_row = []
+            for field in RESULTS_FIELDS:
+                idx = name_to_idx.get(field)
+                if idx is not None and idx < len(row):
+                    new_row.append(row[idx])
+                else:
+                    new_row.append("")
+            writer.writerow(new_row)
 
 
 def append_result(row: dict) -> None:
@@ -154,12 +199,16 @@ def git_commit(message: str) -> str:
         ["git", "add"] + [str(f) for f in MODIFIABLE_FILES],
         cwd=ROOT_DIR, check=True, capture_output=True,
     )
-    # Also stage results.tsv if it exists.
-    if RESULTS_TSV.exists():
-        subprocess.run(
-            ["git", "add", str(RESULTS_TSV)],
-            cwd=ROOT_DIR, check=True, capture_output=True,
-        )
+    # Stage results.tsv and the per-experiment telemetry / analysis
+    # files alongside the experiment code so they roll back together
+    # on REVERTED runs.
+    extra_paths = [RESULTS_TSV, TELEMETRY_DIR, ANALYSES_DIR]
+    for p in extra_paths:
+        if p.exists():
+            subprocess.run(
+                ["git", "add", str(p)],
+                cwd=ROOT_DIR, check=True, capture_output=True,
+            )
     subprocess.run(
         ["git", "commit", "-m", message, "--allow-empty"],
         cwd=ROOT_DIR, check=True, capture_output=True,
@@ -209,37 +258,57 @@ def run_training(timeout_seconds: int) -> tuple[int, str, str, float]:
         return -1, "", f"TIMEOUT: training exceeded {timeout_seconds}s limit", duration
 
 
-# ── MLflow metric extraction ──────────────────────────────────────
+# ── MLflow telemetry extraction ───────────────────────────────────
+
+# Imported lazily inside helpers so the module loads even when mlflow
+# is unavailable (e.g. running unit tests without the pyspacer extras).
 
 
-def query_mlflow_balanced_accuracy(experiment_name: str = "autoresearch") -> float | None:
-    """Query the most recent MLflow run for balanced_accuracy."""
+def fetch_run_telemetry(experiment_name: str = "autoresearch"):
+    """Pull a full :class:`telemetry.RunTelemetry` for the latest run.
+
+    Returns ``None`` if extraction fails. Errors are logged but not
+    raised, so the loop can fall through to a CRASH status row.
+    """
     try:
-        import mlflow
-
-        experiment = mlflow.get_experiment_by_name(experiment_name)
-        if experiment is None:
-            logger.warning(f"MLflow experiment '{experiment_name}' not found")
-            return None
-
-        runs = mlflow.search_runs(
-            experiment_ids=[experiment.experiment_id],
-            order_by=["start_time DESC"],
-            max_results=1,
-        )
-        if runs.empty:
-            logger.warning("No MLflow runs found")
-            return None
-
-        metric_col = "metrics.balanced_accuracy"
-        if metric_col not in runs.columns:
-            logger.warning(f"'{metric_col}' not in MLflow run columns")
-            return None
-
-        return float(runs.iloc[0][metric_col])
+        from telemetry import extract_run_telemetry
+        return extract_run_telemetry(experiment_name=experiment_name)
     except Exception as e:
-        logger.error(f"Failed to query MLflow: {e}")
+        logger.error(f"Failed to extract MLflow telemetry: {e}")
         return None
+
+
+def write_telemetry_file(experiment_id: int, markdown: str) -> Path:
+    TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
+    path = TELEMETRY_DIR / f"{experiment_id}.md"
+    path.write_text(markdown)
+    return path
+
+
+def write_analysis_file(experiment_id: int, analysis: str) -> Path:
+    ANALYSES_DIR.mkdir(parents=True, exist_ok=True)
+    path = ANALYSES_DIR / f"{experiment_id}.md"
+    path.write_text(analysis)
+    return path
+
+
+def _load_recent_artifacts(directory: Path, current_id: int, n: int = 2) -> list[tuple[int, str]]:
+    """Load the most recent ``n`` markdown files under ``directory``.
+
+    Returns ``(experiment_id, body)`` tuples, ordered most-recent first.
+    Files for ``current_id`` are excluded so the prompt-builder doesn't
+    echo the in-flight experiment back.
+    """
+    if not directory.exists():
+        return []
+    ids: list[int] = []
+    for p in directory.glob("*.md"):
+        try:
+            ids.append(int(p.stem))
+        except ValueError:
+            continue
+    ids = [i for i in sorted(ids, reverse=True) if i != current_id][:n]
+    return [(i, (directory / f"{i}.md").read_text()) for i in ids]
 
 
 # ── Claude CLI ─────────────────────────────────────────────────────
@@ -250,8 +319,10 @@ SYSTEM_PROMPT_TEMPLATE = """You are an ML research agent running autonomous expe
 
 ## Response Format
 
-Your response must be a JSON object with:
-- "hypothesis": A one-sentence description of what you're testing and why.
+Your response must be a JSON object with these fields, in order:
+
+- "analysis": A multi-paragraph walk-through of the most recent experiment's telemetry. Cite specific numbers from the **Last 2 Experiments — Full Telemetry** block: per-class precision/recall, top confusion pairs, calibration bin gaps, training-loss vs. val-loss trajectory, top error-attribution LCAs, per-source min/max accuracy. Reference at least 3 specific telemetry observations. Do not propose changes here — only diagnose what the last run reveals.
+- "hypothesis": A one-sentence description of what you're testing next and why, derived from the analysis above.
 - "file_changes": A list of objects, each with:
   - "filename": One of "train_experiment.py", "classifier.py", "trainer.py", "strategies.py"
   - "content": The complete new content of the file.
@@ -261,6 +332,7 @@ Only include files you are actually changing. Unchanged files should be omitted.
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
+        "analysis": {"type": "string"},
         "hypothesis": {"type": "string"},
         "file_changes": {
             "type": "array",
@@ -274,7 +346,7 @@ RESPONSE_SCHEMA = {
             },
         },
     },
-    "required": ["hypothesis", "file_changes"],
+    "required": ["analysis", "hypothesis", "file_changes"],
 }
 
 
@@ -283,11 +355,24 @@ def build_user_prompt(
     results_tsv: str,
     recent_diffs: str,
     last_error: str | None = None,
+    prior_telemetry: list[tuple[int, str]] | None = None,
+    prior_analyses: list[tuple[int, str]] | None = None,
 ) -> str:
     parts = ["## Current Experiment Files\n"]
     for name, content in sorted(experiment_files.items()):
         parts.append(f"### {name}\n```python\n{content}\n```\n")
-    parts.append(f"## Experiment History\n```\n{results_tsv}\n```\n")
+    parts.append(f"## Headline Metrics History\n```\n{results_tsv}\n```\n")
+
+    if prior_telemetry:
+        parts.append("## Last 2 Experiments — Full Telemetry\n")
+        for exp_id, body in prior_telemetry:
+            parts.append(f"### Experiment {exp_id}\n{body}\n")
+
+    if prior_analyses:
+        parts.append("## Last 2 Experiments — Analysis\n")
+        for exp_id, body in prior_analyses:
+            parts.append(f"### Experiment {exp_id}\n{body}\n")
+
     if recent_diffs:
         parts.append(f"## Recent Diffs (last 5 kept experiments)\n```\n{recent_diffs}\n```\n")
     if last_error:
@@ -353,6 +438,20 @@ def apply_file_changes(changes: list[dict]) -> list[str]:
 # ── Main loop ──────────────────────────────────────────────────────
 
 
+def _empty_headline() -> dict[str, str]:
+    return {k: "" for k in HEADLINE_METRIC_KEYS}
+
+
+def _format_headline(headline: dict[str, float]) -> dict[str, str]:
+    return {k: f"{headline[k]:.6f}" if k in headline else "" for k in HEADLINE_METRIC_KEYS}
+
+
+def _analysis_excerpt(analysis: str, limit: int = 120) -> str:
+    """First ``limit`` chars of analysis with whitespace collapsed for TSV."""
+    cleaned = " ".join(analysis.split())
+    return cleaned[:limit]
+
+
 def run_autoresearch(args: argparse.Namespace) -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -385,25 +484,30 @@ def run_autoresearch(args: argparse.Namespace) -> None:
         logger.error(f"Baseline training failed:\n{stderr[-2000:]}")
         sys.exit(1)
 
-    baseline_metric = query_mlflow_balanced_accuracy()
-    if baseline_metric is None:
-        logger.error("Failed to extract baseline balanced_accuracy from MLflow")
+    baseline_telemetry = fetch_run_telemetry()
+    if baseline_telemetry is None or "balanced_accuracy" not in baseline_telemetry.headline:
+        logger.error("Failed to extract baseline telemetry from MLflow")
         sys.exit(1)
+
+    baseline_metric = baseline_telemetry.headline["balanced_accuracy"]
+    write_telemetry_file(1, baseline_telemetry.full_markdown)
 
     best_so_far = baseline_metric
     sha = git_commit(f"autoresearch baseline: balanced_accuracy={baseline_metric:.4f}")
 
-    append_result({
+    baseline_row = {
         "id": 1,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "hypothesis": "baseline",
-        "balanced_accuracy": f"{baseline_metric:.6f}",
+        **_format_headline(baseline_telemetry.headline),
         "best_so_far": f"{baseline_metric:.6f}",
         "status": "KEPT",
         "duration_s": f"{duration:.0f}",
         "commit_sha": sha,
+        "analysis_excerpt": "",
         "error": "",
-    })
+    }
+    append_result(baseline_row)
 
     # Update program.md with baseline metric.
     program_md = program_md.replace("{BASELINE_METRIC}", f"{baseline_metric:.4f}")
@@ -440,14 +544,23 @@ def run_autoresearch(args: argparse.Namespace) -> None:
         experiment_files = read_experiment_files()
         results_tsv = read_results_tsv()
         recent_diffs = git_recent_diffs(5)
+        prior_telemetry = _load_recent_artifacts(TELEMETRY_DIR, experiment_id)
+        prior_analyses = _load_recent_artifacts(ANALYSES_DIR, experiment_id)
 
         user_prompt = build_user_prompt(
-            experiment_files, results_tsv, recent_diffs, last_error)
+            experiment_files,
+            results_tsv,
+            recent_diffs,
+            last_error,
+            prior_telemetry=prior_telemetry,
+            prior_analyses=prior_analyses,
+        )
 
         # 2. Call Claude.
         logger.info("Calling Claude API...")
         try:
             response = call_claude(args.model, system_prompt, user_prompt)
+            analysis = response.get("analysis", "")
             hypothesis = response.get("hypothesis", "no hypothesis provided")
             file_changes = response.get("file_changes", [])
         except Exception as e:
@@ -465,6 +578,11 @@ def run_autoresearch(args: argparse.Namespace) -> None:
             last_error = "No file changes proposed"
             experiment_id += 1
             continue
+
+        # Persist analysis text immediately so the next iteration can
+        # cite it even if training crashes.
+        if analysis:
+            write_analysis_file(experiment_id, analysis)
 
         # 3. Apply changes and commit.
         changed = apply_file_changes(file_changes)
@@ -488,11 +606,12 @@ def run_autoresearch(args: argparse.Namespace) -> None:
                 "id": experiment_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "hypothesis": hypothesis,
-                "balanced_accuracy": "",
+                **_empty_headline(),
                 "best_so_far": f"{best_so_far:.6f}",
                 "status": "ABORT",
                 "duration_s": "0",
                 "commit_sha": commit_sha,
+                "analysis_excerpt": _analysis_excerpt(analysis),
                 "error": f"frozen files modified: {changed_frozen}",
             })
             consecutive_failures += 1
@@ -516,11 +635,12 @@ def run_autoresearch(args: argparse.Namespace) -> None:
                 "id": experiment_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "hypothesis": hypothesis,
-                "balanced_accuracy": "",
+                **_empty_headline(),
                 "best_so_far": f"{best_so_far:.6f}",
                 "status": status,
                 "duration_s": f"{duration:.0f}",
                 "commit_sha": commit_sha,
+                "analysis_excerpt": _analysis_excerpt(analysis),
                 "error": error_msg[:500],
             })
             consecutive_failures += 1
@@ -528,28 +648,33 @@ def run_autoresearch(args: argparse.Namespace) -> None:
             experiment_id += 1
             continue
 
-        # 6. Extract metric.
-        metric = query_mlflow_balanced_accuracy()
-        if metric is None:
-            logger.warning("Failed to extract balanced_accuracy, treating as crash")
+        # 6. Extract telemetry.
+        telemetry = fetch_run_telemetry()
+        if telemetry is None or "balanced_accuracy" not in telemetry.headline:
+            logger.warning("Failed to extract telemetry, treating as crash")
             git_reset_hard()
             append_result({
                 "id": experiment_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "hypothesis": hypothesis,
-                "balanced_accuracy": "",
+                **_empty_headline(),
                 "best_so_far": f"{best_so_far:.6f}",
                 "status": "CRASH",
                 "duration_s": f"{duration:.0f}",
                 "commit_sha": commit_sha,
-                "error": "Failed to extract balanced_accuracy from MLflow",
+                "analysis_excerpt": _analysis_excerpt(analysis),
+                "error": "Failed to extract telemetry from MLflow",
             })
             consecutive_failures += 1
-            last_error = "Failed to extract balanced_accuracy from MLflow"
+            last_error = "Failed to extract telemetry from MLflow"
             experiment_id += 1
             continue
 
+        write_telemetry_file(experiment_id, telemetry.full_markdown)
+        metric = telemetry.headline["balanced_accuracy"]
+
         # 7. Keep or revert.
+        prior_best = best_so_far
         if metric > best_so_far:
             best_so_far = metric
             status = "KEPT"
@@ -557,7 +682,7 @@ def run_autoresearch(args: argparse.Namespace) -> None:
             last_error = None
             logger.info(
                 f"KEPT: balanced_accuracy={metric:.4f}"
-                f" (improvement from {best_so_far:.4f})")
+                f" (improvement from {prior_best:.4f})")
         else:
             status = "REVERTED"
             consecutive_failures += 1
@@ -571,11 +696,12 @@ def run_autoresearch(args: argparse.Namespace) -> None:
             "id": experiment_id,
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "hypothesis": hypothesis,
-            "balanced_accuracy": f"{metric:.6f}",
+            **_format_headline(telemetry.headline),
             "best_so_far": f"{best_so_far:.6f}",
             "status": status,
             "duration_s": f"{duration:.0f}",
             "commit_sha": commit_sha,
+            "analysis_excerpt": _analysis_excerpt(analysis),
             "error": "",
         })
 

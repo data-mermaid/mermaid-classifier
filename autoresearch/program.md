@@ -32,6 +32,29 @@ The pipeline works as follows:
 
 To inject a custom component (e.g., a new weighting strategy from `strategies.py`), import it in `train_experiment.py` and wire it into the runner or trainer.
 
+## Available Telemetry
+
+After every training run the harness extracts a structured telemetry summary from MLflow and surfaces it back to you in the next prompt under **Last 2 Experiments — Full Telemetry**. Read it before forming a hypothesis. The blocks you will see:
+
+- **Headline metrics.** `balanced_accuracy`, `mcc`, `ece`, `top_5_accuracy`, `cross_branch_error_rate`, `within_branch_error_rate`, `precision_macro`, `recall_macro`. These also appear as columns in `## Headline Metrics History` so you can scan trends across experiments.
+- **All scalar metrics.** Includes `f1_macro`, `top_{1,3,10}_accuracy`, `mrr`, `log_loss`, `accuracy`, `gf_accuracy_gf_relevant`, `within_ba_gf_accuracy`, `hierarchical_top_5_mean_similarity`, cover metrics (`cover_mean_*`), per-source min/max accuracy, weighting summaries, early-stop diagnostics (`early_stop/{final_epoch,triggered,best_val_epoch,best_val_loss}`).
+- **Run params.** Subsample/weighting strategy + parameters, hidden layer sizes, learning rate, epochs, label rollups.
+- **Per-epoch curves.** First/last/min/max with their step indices for `epoch/{ref_accuracy,val_accuracy,val_loss,training_loss}`. Use this to spot overfitting (val_loss min step << final epoch) or underfitting (training_loss still falling at last epoch).
+- **`metrics_per_label.csv`.** 10 worst classes by recall, 10 best by recall, and median/p10/p90 of precision/recall/F1 across all classes.
+- **`confusion_matrix/percents.csv`.** Top-15 most-confused (true → predicted) class pairs.
+- **`calibration/per_bin_details.csv`.** Full 20-bin reliability table (confidence, accuracy, gap, count). Watch the `gap` column for systematic over- or under-confidence.
+- **`calibration/per_category_ece.csv`.** ECE per top-level category — tells you which families are mis-calibrated.
+- **`taxonomic/error_attribution.csv`.** Top-10 LCA error nodes by `pct_of_errors`. The `(cross-branch)` row is the share of errors that crossed top-level taxonomy boundaries. High value here ⇒ taxonomy-aware loss / hierarchical objectives may help; low value ⇒ errors live within a single family and finer-grained features matter more.
+- **`taxonomic/top_level_confusions.csv`.** Top-level family confusion matrix.
+- **`taxonomic/gf_precision_recall_f1.csv`.** Growth-form precision/recall/F1.
+- **`per_source/metrics.csv`.** 5 best + 5 worst data sources by `balanced_accuracy`. Use to spot domain-shift problems.
+- **`cover/per_class_cover_metrics.csv`.** 5 most-negatively- and 5 most-positively-biased classes plus an `r_squared` summary.
+- **`probability/per_category_log_loss.csv`** and **`ranking/{per_category_topk,hierarchical_topk}.csv`.** Per-category log-loss and top-k accuracy.
+- **`profiled_sections.csv`.** Top-5 wall-time consumers — useful to flag changes that would blow the 75-min budget.
+- **`weighting/per_class_weights.csv`** and **`subsample/per_class_counts.csv`.** Distribution stats (min/p25/median/p75/max, max/min ratio, total) so you can see how aggressive the current sampling/weighting strategy is.
+
+You will also see your own prior **Analysis** block in the next prompt — use it to avoid restating the same observations.
+
 ## Research Directions (suggestions, not exhaustive)
 
 ### Architecture (classifier.py)
@@ -75,12 +98,13 @@ To inject a custom component (e.g., a new weighting strategy from `strategies.py
 
 ## Rules
 
-1. **One hypothesis per experiment.** State your hypothesis clearly. Change one thing at a time so results are interpretable. Exception: if combining two previously-successful changes, state that explicitly.
-2. **Prefer simple changes over complex ones.** A single-line hyperparameter change that improves the metric is better than a 50-line architecture rewrite that improves it by the same amount. With only ~14 experiments per overnight run, prioritize high-impact changes.
-3. **Training must complete within 75 minutes.** A typical run takes ~45 minutes. If your change makes training significantly slower, reconsider. You have ~14 experiment slots per overnight run — spend them wisely.
-4. **If an experiment crashes, analyze the error and try something different.** Don't retry the same thing. Read the error output provided in the next prompt.
-5. **Review results.tsv.** Don't repeat failed approaches. Build on successful ones. Look for patterns in what works.
-6. **Build on success.** The current code reflects all kept improvements. Your next change should build on this improved baseline.
-7. **The FROZEN section must not be modified.** This is enforced by SHA256 verification.
-8. **All experiment files must remain valid Python.** Syntax errors waste an experiment slot.
-9. **Don't make the code unnecessarily complex.** If you're adding 100 lines to try something that could be done in 10, simplify.
+1. **Analyze before hypothesizing.** Your `analysis` field must reference at least 3 specific telemetry observations from the last experiment — for example, a class with low recall and its sample count, a top confusion pair, a calibration bin with a large gap, or a divergence point in the epoch curves. Vague analyses ("the model could be better calibrated") are not acceptable. The hypothesis must follow from the analysis, not the other way around.
+2. **One hypothesis per experiment.** State your hypothesis clearly. Change one thing at a time so results are interpretable. Exception: if combining two previously-successful changes, state that explicitly.
+3. **Prefer simple changes over complex ones.** A single-line hyperparameter change that improves the metric is better than a 50-line architecture rewrite that improves it by the same amount. With only ~14 experiments per overnight run, prioritize high-impact changes.
+4. **Training must complete within 75 minutes.** A typical run takes ~45 minutes. If your change makes training significantly slower, reconsider. You have ~14 experiment slots per overnight run — spend them wisely.
+5. **If an experiment crashes, analyze the error and try something different.** Don't retry the same thing. Read the error output provided in the next prompt.
+6. **Review the headline metrics history and prior analyses.** Don't repeat failed approaches. Build on successful ones. Look for patterns in what works across the full headline-metric column set, not just `balanced_accuracy`.
+7. **Build on success.** The current code reflects all kept improvements. Your next change should build on this improved baseline.
+8. **The FROZEN section must not be modified.** This is enforced by SHA256 verification.
+9. **All experiment files must remain valid Python.** Syntax errors waste an experiment slot.
+10. **Don't make the code unnecessarily complex.** If you're adding 100 lines to try something that could be done in 10, simplify.
