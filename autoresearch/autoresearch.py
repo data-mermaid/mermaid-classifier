@@ -23,6 +23,11 @@ Options:
                          re-running it. Pulls the metric from results.tsv
                          and the telemetry from the latest finished MLflow
                          run if telemetry/1.md is missing.
+    --auth-pause-hours N On AWS SSO expiry, pause and recheck every 60s
+                         for up to N hours. Re-authenticate during the
+                         pause via `aws sso login --profile wcs` in
+                         another shell to resume seamlessly. Past the
+                         cap, the harness exits cleanly (default: 12).
 """
 
 import argparse
@@ -324,36 +329,69 @@ def run_training(timeout_seconds: int) -> tuple[int, str, str, float]:
 
 
 AWS_PROFILE = "wcs"
+AUTH_RETRY_INTERVAL_SECONDS = 60
 
 
-def verify_aws_credentials() -> None:
-    """Verify AWS SSO credentials are valid; ``sys.exit(2)`` if not.
-
-    The training subprocess loads boto3 at import time and immediately
-    calls ``get_frozen_credentials``; if the SSO session has expired,
-    that fails ~1s into the subprocess and the loop logs a CRASH for a
-    cause that has nothing to do with the experiment. Calling the same
-    code path in-process from the harness, before launching training
-    or burning a Claude API call, lets us fail fast with a clear,
-    actionable message.
+def _check_aws_credentials() -> tuple[bool, str]:
+    """Return ``(ok, error_summary)``. Constructs a fresh
+    ``boto3.Session`` each call so the SSO token cache is re-read after
+    the user runs ``aws sso login`` in another shell.
     """
-    import boto3
-    from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
-
     try:
+        import boto3
         session = boto3.Session(profile_name=AWS_PROFILE)
         creds = session.get_credentials()
         if creds is None:
-            raise NoCredentialsError()
+            return False, "no credentials configured for profile"
         creds.get_frozen_credentials()
-    except (BotoCoreError, ClientError, NoCredentialsError, Exception) as e:
-        logger.error(
-            "AWS SSO credentials expired or unavailable (%s: %s).\n"
-            "  Run: aws sso login --profile %s\n"
-            "  Then re-run autoresearch.",
-            type(e).__name__, e, AWS_PROFILE,
-        )
-        sys.exit(2)
+        return True, ""
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def verify_aws_credentials(max_pause_hours: float = 12.0) -> None:
+    """Verify AWS SSO credentials, pausing and waiting on expiry.
+
+    The training subprocess calls boto3 at import time; if SSO has
+    expired, it crashes in ~1s. Calling the same path in-process here
+    catches expiry before paying for a Claude call or spawning a
+    doomed subprocess.
+
+    On expiry, logs an actionable one-time message asking the user to
+    run ``aws sso login --profile wcs`` and polls credentials every
+    ``AUTH_RETRY_INTERVAL_SECONDS`` (60s) for up to ``max_pause_hours``.
+    If the user re-authenticates in another shell during the pause,
+    the loop resumes silently. Otherwise the harness exits cleanly
+    with ``sys.exit(2)``.
+    """
+    ok, _ = _check_aws_credentials()
+    if ok:
+        return
+
+    max_pause_seconds = int(max_pause_hours * 3600)
+    logger.error(
+        "AWS SSO credentials expired or unavailable.\n"
+        "  Run: aws sso login --profile %s\n"
+        "  Loop paused; rechecking every %ds for up to %.1fh...",
+        AWS_PROFILE, AUTH_RETRY_INTERVAL_SECONDS, max_pause_hours,
+    )
+    pause_start = time.time()
+    while time.time() - pause_start < max_pause_seconds:
+        time.sleep(AUTH_RETRY_INTERVAL_SECONDS)
+        ok, _ = _check_aws_credentials()
+        if ok:
+            elapsed_minutes = (time.time() - pause_start) / 60
+            logger.info(
+                "AWS credentials restored after %.1f minutes; resuming.",
+                elapsed_minutes,
+            )
+            return
+
+    logger.error(
+        "AWS credentials still invalid after %.1fh; exiting.",
+        max_pause_hours,
+    )
+    sys.exit(2)
 
 
 # ── MLflow housekeeping ────────────────────────────────────────────
@@ -622,9 +660,12 @@ def run_autoresearch(args: argparse.Namespace) -> None:
 
     logger.info(f"Using model: {args.model}")
 
-    # Fail fast if AWS SSO is already expired before we burn any
-    # Claude calls or training subprocesses.
-    verify_aws_credentials()
+    # Pause-and-wait for valid AWS SSO credentials before burning any
+    # Claude calls or spawning training subprocesses. If SSO has
+    # expired, the harness will print a one-time message and poll
+    # until the user re-authenticates in another shell (or until the
+    # pause cap is hit).
+    verify_aws_credentials(max_pause_hours=args.auth_pause_hours)
 
     # Initialize results tracking.
     init_results_tsv()
@@ -738,8 +779,10 @@ def run_autoresearch(args: argparse.Namespace) -> None:
 
         # 0. Pre-flight: AWS SSO often expires partway through long
         # runs. Catch it here before paying for a Claude API call or
-        # spawning a subprocess that will crash in 1s.
-        verify_aws_credentials()
+        # spawning a subprocess that will crash in 1s. The harness
+        # pauses and polls if creds are invalid, letting the user
+        # re-authenticate in another shell without losing the loop.
+        verify_aws_credentials(max_pause_hours=args.auth_pause_hours)
 
         # 1. Build prompt.
         experiment_files = read_experiment_files()
@@ -956,6 +999,14 @@ def main():
             "the max KEPT row for best_so_far, and pulls "
             "telemetry/1.md from the latest finished MLflow run if "
             "missing. Use when restarting after a baseline already ran."
+        ))
+    parser.add_argument(
+        "--auth-pause-hours", type=float, default=12.0,
+        help=(
+            "On AWS SSO expiry, pause and recheck credentials every "
+            "60s for up to this many hours, then exit if still "
+            "invalid (default: 12). Re-authenticate during the pause "
+            "by running `aws sso login --profile wcs` in another shell."
         ))
     args = parser.parse_args()
 

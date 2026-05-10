@@ -647,52 +647,120 @@ class TestKeepOrRevert(unittest.TestCase):
 
 
 class TestVerifyAwsCredentials(unittest.TestCase):
-    """Pre-flight check exits cleanly on AWS SSO expiry."""
+    """Pre-flight check pauses on SSO expiry, exits cleanly past cap."""
 
-    def test_failure_exits_with_code_2(self):
-        # Mock boto3.Session so get_frozen_credentials raises.
-        mock_creds = MagicMock()
-        mock_creds.get_frozen_credentials.side_effect = RuntimeError(
-            "SSO token expired")
+    def _mock_boto3(self, get_credentials_returns):
+        """Helper: return a (mock_boto3, mock_botocore_exc) tuple where
+        ``boto3.Session().get_credentials()`` returns the given iterable
+        in sequence (one per call). Each item should either be a creds
+        object (with ``.get_frozen_credentials()``) or None to simulate
+        an unconfigured profile.
+        """
         mock_session = MagicMock()
-        mock_session.get_credentials.return_value = mock_creds
+        mock_session.get_credentials.side_effect = get_credentials_returns
+        mock_boto3 = MagicMock()
+        mock_boto3.Session.return_value = mock_session
+        return mock_boto3
+
+    def test_returns_silently_when_creds_valid(self):
+        # First check succeeds → no pause, no exit.
+        good_creds = MagicMock()
+        good_creds.get_frozen_credentials.return_value = ("ak", "sk", "tk")
+        mock_boto3 = self._mock_boto3([good_creds])
+        with patch.dict("sys.modules", {"boto3": mock_boto3}):
+            ar.verify_aws_credentials(max_pause_hours=0.001)
+        # Should not exit, should not sleep.
+
+    def test_resumes_when_creds_become_valid_during_pause(self):
+        # First call: bad → enter pause loop.
+        # Second call (after sleep): good → resume silently.
+        bad_creds = MagicMock()
+        bad_creds.get_frozen_credentials.side_effect = RuntimeError("expired")
+        good_creds = MagicMock()
+        good_creds.get_frozen_credentials.return_value = ("ak", "sk", "tk")
+        mock_boto3 = self._mock_boto3([bad_creds, good_creds])
+
+        with patch.dict("sys.modules", {"boto3": mock_boto3}):
+            with patch("time.sleep") as mock_sleep:
+                ar.verify_aws_credentials(max_pause_hours=12.0)
+        mock_sleep.assert_called_once_with(ar.AUTH_RETRY_INTERVAL_SECONDS)
+
+    def test_exits_with_code_2_after_pause_cap(self):
+        # All credentials checks fail. Pause cap of ~0 forces immediate
+        # exit. ``time.time`` is mocked so the wall-clock check fires
+        # after one poll iteration.
+        bad_creds = MagicMock()
+        bad_creds.get_frozen_credentials.side_effect = RuntimeError("expired")
+        # We call boto3.Session().get_credentials() many times; always bad.
+        mock_session = MagicMock()
+        mock_session.get_credentials.return_value = bad_creds
         mock_boto3 = MagicMock()
         mock_boto3.Session.return_value = mock_session
 
-        # botocore submodule shape required by the import.
-        mock_botocore_exc = MagicMock()
-        mock_botocore_exc.BotoCoreError = Exception
-        mock_botocore_exc.ClientError = Exception
-        mock_botocore_exc.NoCredentialsError = Exception
+        # time.time returns: pause_start, then a value past the cap.
+        time_values = iter([1000.0, 1000.0, 999_999.0])
 
-        with patch.dict("sys.modules", {
-            "boto3": mock_boto3,
-            "botocore": MagicMock(),
-            "botocore.exceptions": mock_botocore_exc,
-        }):
-            with self.assertRaises(SystemExit) as ctx:
-                ar.verify_aws_credentials()
+        with patch.dict("sys.modules", {"boto3": mock_boto3}):
+            with patch("time.sleep"):
+                with patch("time.time", side_effect=lambda: next(time_values)):
+                    with self.assertRaises(SystemExit) as ctx:
+                        ar.verify_aws_credentials(max_pause_hours=0.001)
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_no_credentials_exits_with_code_2(self):
-        # session.get_credentials() returns None.
+    def test_no_credentials_triggers_pause(self):
+        # session.get_credentials() returns None → treated as expired.
         mock_session = MagicMock()
         mock_session.get_credentials.return_value = None
         mock_boto3 = MagicMock()
         mock_boto3.Session.return_value = mock_session
-        mock_botocore_exc = MagicMock()
-        mock_botocore_exc.BotoCoreError = Exception
-        mock_botocore_exc.ClientError = Exception
-        mock_botocore_exc.NoCredentialsError = Exception
 
-        with patch.dict("sys.modules", {
-            "boto3": mock_boto3,
-            "botocore": MagicMock(),
-            "botocore.exceptions": mock_botocore_exc,
-        }):
-            with self.assertRaises(SystemExit) as ctx:
-                ar.verify_aws_credentials()
+        # Cap pause to a single iteration via time.time mock.
+        time_values = iter([1000.0, 1000.0, 999_999.0])
+        with patch.dict("sys.modules", {"boto3": mock_boto3}):
+            with patch("time.sleep"):
+                with patch("time.time", side_effect=lambda: next(time_values)):
+                    with self.assertRaises(SystemExit) as ctx:
+                        ar.verify_aws_credentials(max_pause_hours=0.001)
         self.assertEqual(ctx.exception.code, 2)
+
+
+class TestCheckAwsCredentials(unittest.TestCase):
+    """The pure boolean helper underneath verify_aws_credentials."""
+
+    def test_returns_true_when_valid(self):
+        good_creds = MagicMock()
+        good_creds.get_frozen_credentials.return_value = ("ak", "sk", "tk")
+        mock_session = MagicMock()
+        mock_session.get_credentials.return_value = good_creds
+        mock_boto3 = MagicMock()
+        mock_boto3.Session.return_value = mock_session
+        with patch.dict("sys.modules", {"boto3": mock_boto3}):
+            ok, msg = ar._check_aws_credentials()
+        self.assertTrue(ok)
+        self.assertEqual(msg, "")
+
+    def test_returns_false_when_no_credentials(self):
+        mock_session = MagicMock()
+        mock_session.get_credentials.return_value = None
+        mock_boto3 = MagicMock()
+        mock_boto3.Session.return_value = mock_session
+        with patch.dict("sys.modules", {"boto3": mock_boto3}):
+            ok, msg = ar._check_aws_credentials()
+        self.assertFalse(ok)
+        self.assertIn("no credentials", msg)
+
+    def test_returns_false_on_refresh_exception(self):
+        bad_creds = MagicMock()
+        bad_creds.get_frozen_credentials.side_effect = RuntimeError("SSO expired")
+        mock_session = MagicMock()
+        mock_session.get_credentials.return_value = bad_creds
+        mock_boto3 = MagicMock()
+        mock_boto3.Session.return_value = mock_session
+        with patch.dict("sys.modules", {"boto3": mock_boto3}):
+            ok, msg = ar._check_aws_credentials()
+        self.assertFalse(ok)
+        self.assertIn("RuntimeError", msg)
+        self.assertIn("SSO expired", msg)
 
 
 class TestCleanupOrphanedRun(unittest.TestCase):
