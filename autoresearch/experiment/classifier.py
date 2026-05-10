@@ -26,13 +26,14 @@ import torch.nn.functional as F
 
 
 class _MLPModule(nn.Module):
-    """Linear -> ReLU -> ... -> Linear stack. Output returns raw logits."""
+    """Linear -> ReLU -> Dropout -> ... -> Linear stack. Output returns raw logits."""
 
     def __init__(
         self,
         n_features_in: int,
         hidden_layer_sizes: Sequence[int],
         n_outputs: int,
+        dropout: float = 0.0,
     ):
         super().__init__()
         layer_sizes = [n_features_in, *hidden_layer_sizes, n_outputs]
@@ -40,6 +41,7 @@ class _MLPModule(nn.Module):
         for in_size, out_size in zip(layer_sizes[:-1], layer_sizes[1:]):
             layers.append(nn.Linear(in_size, out_size))
         self.linears = nn.ModuleList(layers)
+        self.dropout = float(dropout)
 
         for linear in self.linears:
             nn.init.xavier_uniform_(linear.weight)
@@ -50,6 +52,9 @@ class _MLPModule(nn.Module):
             x = linear(x)
             if i < len(self.linears) - 1:
                 x = F.relu(x)
+                if self.dropout > 0.0:
+                    x = F.dropout(
+                        x, p=self.dropout, training=self.training)
         return x
 
 
@@ -78,6 +83,7 @@ class ExperimentMLPClassifier:
         beta_2: float = 0.999,
         epsilon: float = 1e-8,
         class_weight: dict | None = None,
+        dropout: float = 0.0,
     ):
         if activation != "relu":
             raise ValueError(
@@ -85,6 +91,9 @@ class ExperimentMLPClassifier:
         if solver != "adam":
             raise ValueError(
                 f"Only solver='adam' supported, got {solver!r}.")
+        if not (0.0 <= float(dropout) < 1.0):
+            raise ValueError(
+                f"dropout must be in [0.0, 1.0), got {dropout!r}.")
 
         self.hidden_layer_sizes = tuple(hidden_layer_sizes)
         self.activation = activation
@@ -100,6 +109,7 @@ class ExperimentMLPClassifier:
         self.beta_2 = beta_2
         self.epsilon = epsilon
         self.class_weight = class_weight
+        self.dropout = float(dropout)
 
     def _resolve_batch_size(self, n_samples: int) -> int:
         if self.batch_size == "auto":
@@ -130,6 +140,7 @@ class ExperimentMLPClassifier:
             n_features_in=self.n_features_in_,
             hidden_layer_sizes=self.hidden_layer_sizes,
             n_outputs=len(self.classes_),
+            dropout=self.dropout,
         )
 
     def _init_optimizer(self) -> None:
@@ -282,6 +293,7 @@ class ExperimentMLPClassifier:
             "beta_2": self.beta_2,
             "epsilon": self.epsilon,
             "class_weight": getattr(self, "class_weight", None),
+            "dropout": self.dropout,
         }
 
     def set_params(self, **params: Any) -> "ExperimentMLPClassifier":
@@ -309,11 +321,13 @@ class ExperimentMLPClassifier:
         optimizer_state = state.pop("_optimizer_state", None)
         self.__dict__.update(state)
         self.__dict__.setdefault("class_weight", None)
+        self.__dict__.setdefault("dropout", 0.0)
         if module_state is not None:
             self._module = _MLPModule(
                 n_features_in=self.n_features_in_,
                 hidden_layer_sizes=self.hidden_layer_sizes,
                 n_outputs=len(self.classes_),
+                dropout=self.dropout,
             )
             self._module.load_state_dict(module_state)
         if optimizer_state is not None:

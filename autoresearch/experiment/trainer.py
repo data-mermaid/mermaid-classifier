@@ -47,6 +47,7 @@ class ExperimentTrainer(ClassifierTrainer):
         learning_rate_init: float | None = None,
         early_stopping_patience: int | None = None,
         random_state: int = 0,
+        dropout: float = 0.0,
     ):
         if (hidden_layer_sizes is None) != (learning_rate_init is None):
             raise ValueError(
@@ -67,6 +68,7 @@ class ExperimentTrainer(ClassifierTrainer):
         self.learning_rate_init = learning_rate_init
         self.early_stopping_patience = early_stopping_patience
         self.random_state = random_state
+        self.dropout = float(dropout)
         self._early_stop_info: dict | None = None
 
     def __call__(self, labels, nbr_epochs, pc_models, clf_type):
@@ -101,6 +103,7 @@ class ExperimentTrainer(ClassifierTrainer):
                     learning_rate_init=lr,
                     class_weight=self.class_weight,
                     random_state=self.random_state,
+                    dropout=self.dropout,
                 )
             else:
                 from sklearn.linear_model import SGDClassifier

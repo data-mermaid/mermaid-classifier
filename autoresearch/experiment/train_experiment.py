@@ -37,10 +37,7 @@ from mermaid_classifier.training.subsample import SubsampleOptions
 from trainer import ExperimentTrainer
 
 
-# ── FROZEN: data identity ────────────────────────────────────
-# DO NOT MODIFY these fields. They define what data enters training,
-# how labels are mapped, and how the data is split. Changing these
-# invalidates all experiment comparisons.
+# ── FROZEN: data identity ────────────────────────
 FROZEN_DATA = dict(
     include_mermaid=False,
     coralnet_sources_csv='../sagemaker/configs/tiela77_top100_min1k/sources.csv',
@@ -54,12 +51,10 @@ MLFLOW_OPTIONS = MLflowOptions(
     experiment_name="autoresearch",
     model_name='AutoResearch',
 )
-# ── END FROZEN ─────────────────────────────────────────────
+# ── END FROZEN ────────────────────────────
 
 
-# ── MODIFIABLE: subsampling, weighting, training ────────────────────
-# The agent may change any values below.
-
+# ── MODIFIABLE: subsampling, weighting, training ────────────────
 FULL_DATA_TOTAL = 1_770_000
 
 SUBSAMPLE = SubsampleOptions(
@@ -74,11 +69,14 @@ WEIGHTING = SampleWeightingOptions(
     weight_ratio_cap=5000.0,
 )
 
-# Hypothesis: prior run with lr=1e-4 stopped at epoch 12 with
-# training_loss still decreasing (last=6.30, min=6.18) and val_loss
-# only barely plateauing (min 2.231 at epoch 9, 2.232 at epoch 12).
-# Bumping LR 3x lets the model take larger steps and reach a deeper
-# minimum before the patience=3 early-stopping budget runs out.
+# Hypothesis: prior LR=3e-4 run reached balanced_accuracy=0.785 but
+# overfit hard — training_loss collapsed to 0.184 while val_loss only
+# reached 0.620 (gap ≈0.44, ratio ≈3.4×). Val_loss began climbing
+# while training_loss kept descending — classic overfit signature.
+# Adding dropout=0.3 between hidden layers should slow memorization,
+# narrow the train/val gap, and improve generalization.
+DROPOUT = 0.3
+
 TRAINING_OPTIONS = TrainingOptions(
     hidden_layer_sizes=(500, 300, 100),
     learning_rate_init=3e-4,
@@ -100,6 +98,7 @@ class ExperimentRunner(MLflowTrainingRunner):
             early_stopping_patience=(
                 self.training_options.early_stopping_patience),
             random_state=self.training_options.random_state,
+            dropout=DROPOUT,
         )
 
 

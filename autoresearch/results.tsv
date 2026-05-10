@@ -1,3 +1,4 @@
 id	timestamp	hypothesis	balanced_accuracy	mcc	ece	top_5_accuracy	cross_branch_error_rate	within_branch_error_rate	precision_macro	recall_macro	best_so_far	status	duration_s	commit_sha	analysis_excerpt	error
 1	2026-05-10T00:09:11+00:00	baseline	0.779000								0.779000	KEPT	4037	396a401		
 1	2026-05-10T02:03:39+00:00	baseline	0.780000								0.780000	KEPT	3874	83bc6d1		
+2	2026-05-10T21:35:18+00:00	Increasing learning_rate_init from 1e-4 to 3e-4 will allow the (500, 300, 100) MLP to make larger gradient steps and reach a deeper minimum before early stopping triggers, addressing the apparent undertraining (training_loss still decreasing at final epoch, val_loss plateauing after only 9 epochs).	0.785000	0.823000	0.092017	0.943650	0.730843	0.269157	0.790000	0.785000	0.785000	KEPT	2051	5c14323	The last experiment achieved balanced_accuracy=0.724 — well below the 0.78 baseline mentioned for the prior dataset. Sev	
