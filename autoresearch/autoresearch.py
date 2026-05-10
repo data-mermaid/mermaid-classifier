@@ -11,9 +11,13 @@ Usage:
 Options:
     --max-hours N        Total time budget in hours (default: 12)
     --max-experiments N  Maximum number of experiments (default: 100)
-    --timeout N          Training timeout in seconds (default: 1800)
-    --model MODEL        Claude model to use (default: claude-sonnet-4-6)
-    --max-consecutive-failures N  Stop after N consecutive failures (default: 10)
+    --timeout N          Training timeout in seconds (default: 4500)
+    --model MODEL        Claude model to use (default: claude-opus-4-7)
+    --max-consecutive-failures N  Stop after N consecutive *failures*
+                         (CRASH/TIMEOUT/ABORT/api-error/no-changes).
+                         REVERTED experiments do NOT count, since they
+                         are normal hypothesis tests that didn't
+                         improve the metric (default: 5).
     --dry-run            Show what would be done without running training
     --skip-baseline      Reuse an already-completed baseline rather than
                          re-running it. Pulls the metric from results.tsv
@@ -268,6 +272,24 @@ def git_reset_hard() -> None:
     )
 
 
+def git_show_commit(sha: str, max_chars: int = 6000) -> str:
+    """Return the patch for a single commit, scoped to experiment/.
+
+    Used to capture the diff that was applied for a CRASH/TIMEOUT
+    experiment before ``git_reset_hard`` discards it, so the next
+    prompt can show Claude exactly which change failed.
+    """
+    if not sha:
+        return ""
+    result = subprocess.run(
+        ["git", "show", sha, "--", "autoresearch/experiment/"],
+        cwd=ROOT_DIR, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout[:max_chars]
+
+
 def git_recent_diffs(n: int = 5) -> str:
     """Get diffs of the last N commits."""
     result = subprocess.run(
@@ -296,6 +318,79 @@ def run_training(timeout_seconds: int) -> tuple[int, str, str, float]:
     except subprocess.TimeoutExpired:
         duration = time.time() - t0
         return -1, "", f"TIMEOUT: training exceeded {timeout_seconds}s limit", duration
+
+
+# ── AWS credentials pre-flight ─────────────────────────────────────
+
+
+AWS_PROFILE = "wcs"
+
+
+def verify_aws_credentials() -> None:
+    """Verify AWS SSO credentials are valid; ``sys.exit(2)`` if not.
+
+    The training subprocess loads boto3 at import time and immediately
+    calls ``get_frozen_credentials``; if the SSO session has expired,
+    that fails ~1s into the subprocess and the loop logs a CRASH for a
+    cause that has nothing to do with the experiment. Calling the same
+    code path in-process from the harness, before launching training
+    or burning a Claude API call, lets us fail fast with a clear,
+    actionable message.
+    """
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
+
+    try:
+        session = boto3.Session(profile_name=AWS_PROFILE)
+        creds = session.get_credentials()
+        if creds is None:
+            raise NoCredentialsError()
+        creds.get_frozen_credentials()
+    except (BotoCoreError, ClientError, NoCredentialsError, Exception) as e:
+        logger.error(
+            "AWS SSO credentials expired or unavailable (%s: %s).\n"
+            "  Run: aws sso login --profile %s\n"
+            "  Then re-run autoresearch.",
+            type(e).__name__, e, AWS_PROFILE,
+        )
+        sys.exit(2)
+
+
+# ── MLflow housekeeping ────────────────────────────────────────────
+
+
+def cleanup_orphaned_run(experiment_name: str = "autoresearch") -> None:
+    """Mark any RUNNING autoresearch MLflow run as FAILED.
+
+    When a training subprocess is killed (TIMEOUT) or crashes, it never
+    calls ``mlflow.end_run()``, leaving the run stuck in the RUNNING
+    state. That pollutes the MLflow store and can confuse future
+    telemetry pulls (e.g. ``fetch_run_telemetry`` filters on FINISHED,
+    but search queries like "all my recent runs" still see the orphan).
+
+    Best-effort: any exception is logged but does not interrupt the
+    experiment loop.
+    """
+    try:
+        import mlflow
+        from mlflow.tracking import MlflowClient
+
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            return
+        runs = mlflow.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            filter_string="attributes.status = 'RUNNING'",
+            order_by=["attribute.start_time DESC"],
+            max_results=1,
+        )
+        if runs.empty:
+            return
+        run_id = runs.iloc[0]["run_id"]
+        MlflowClient().set_terminated(run_id, status="FAILED")
+        logger.info(f"Marked orphaned MLflow run {run_id[:8]} as FAILED")
+    except Exception as e:
+        logger.warning(f"cleanup_orphaned_run failed: {e}")
 
 
 # ── MLflow telemetry extraction ───────────────────────────────────
@@ -397,6 +492,7 @@ def build_user_prompt(
     last_error: str | None = None,
     prior_telemetry: list[tuple[int, str]] | None = None,
     prior_analyses: list[tuple[int, str]] | None = None,
+    last_failed_diff: str | None = None,
 ) -> str:
     parts = ["## Current Experiment Files\n"]
     for name, content in sorted(experiment_files.items()):
@@ -416,7 +512,15 @@ def build_user_prompt(
     if recent_diffs:
         parts.append(f"## Recent Diffs (last 5 kept experiments)\n```\n{recent_diffs}\n```\n")
     if last_error:
-        parts.append(f"## Last Experiment Error\n```\n{last_error[:3000]}\n```\n")
+        parts.append(f"## Last Experiment Error\n```\n{last_error[:6000]}\n```\n")
+    if last_failed_diff:
+        parts.append(
+            "## Last Failed Experiment Diff\n"
+            "The change below was applied and triggered the CRASH/TIMEOUT above. "
+            "The file changes have been reverted; do NOT re-propose this exact "
+            "diff unless you can explain why the failure mode no longer applies.\n\n"
+            f"```\n{last_failed_diff}\n```\n"
+        )
     return "\n".join(parts)
 
 
@@ -486,6 +590,23 @@ def _format_headline(headline: dict[str, float]) -> dict[str, str]:
     return {k: f"{headline[k]:.6f}" if k in headline else "" for k in HEADLINE_METRIC_KEYS}
 
 
+def _keep_or_revert(metric: float, best_so_far: float) -> tuple[str, int]:
+    """Pure helper: classify a completed experiment's outcome.
+
+    Returns ``(status, consecutive_failures_delta)`` where the delta is
+    the new value of ``consecutive_failures`` after this outcome — i.e.
+    ``0`` for both KEPT (improvement) and REVERTED (no improvement).
+
+    Extracted from the loop body so the policy is independently
+    testable. The bug we're fixing here was that REVERTED used to
+    increment ``consecutive_failures``, which conflated "successful
+    experiment that didn't help" with "the loop is broken".
+    """
+    if metric > best_so_far:
+        return "KEPT", 0
+    return "REVERTED", 0
+
+
 def _analysis_excerpt(analysis: str, limit: int = 120) -> str:
     """First ``limit`` chars of analysis with whitespace collapsed for TSV."""
     cleaned = " ".join(analysis.split())
@@ -500,6 +621,10 @@ def run_autoresearch(args: argparse.Namespace) -> None:
     )
 
     logger.info(f"Using model: {args.model}")
+
+    # Fail fast if AWS SSO is already expired before we burn any
+    # Claude calls or training subprocesses.
+    verify_aws_credentials()
 
     # Initialize results tracking.
     init_results_tsv()
@@ -589,7 +714,8 @@ def run_autoresearch(args: argparse.Namespace) -> None:
     # Main experiment loop.
     start_time = time.time()
     consecutive_failures = 0
-    last_error = None
+    last_error: str | None = None
+    last_failed_diff: str | None = None
     experiment_id = next_experiment_id()
 
     while True:
@@ -610,6 +736,11 @@ def run_autoresearch(args: argparse.Namespace) -> None:
         logger.info(f"Experiment {experiment_id}")
         logger.info("=" * 60)
 
+        # 0. Pre-flight: AWS SSO often expires partway through long
+        # runs. Catch it here before paying for a Claude API call or
+        # spawning a subprocess that will crash in 1s.
+        verify_aws_credentials()
+
         # 1. Build prompt.
         experiment_files = read_experiment_files()
         results_tsv = read_results_tsv()
@@ -624,6 +755,7 @@ def run_autoresearch(args: argparse.Namespace) -> None:
             last_error,
             prior_telemetry=prior_telemetry,
             prior_analyses=prior_analyses,
+            last_failed_diff=last_failed_diff,
         )
 
         # 2. Call Claude.
@@ -671,6 +803,7 @@ def run_autoresearch(args: argparse.Namespace) -> None:
         if not ok:
             logger.error(
                 f"ABORT: frozen files modified: {changed_frozen}")
+            last_failed_diff = git_show_commit(commit_sha)
             git_reset_hard()
             append_result({
                 "id": experiment_id,
@@ -694,12 +827,17 @@ def run_autoresearch(args: argparse.Namespace) -> None:
         returncode, stdout, stderr, duration = run_training(args.timeout)
 
         if returncode != 0:
-            error_msg = stderr[-2000:] if stderr else "unknown error"
+            error_msg = stderr[-6000:] if stderr else "unknown error"
             if returncode == -1:
                 status = "TIMEOUT"
             else:
                 status = "CRASH"
             logger.warning(f"Training {status}: {error_msg[:200]}")
+            # Capture the diff that triggered this failure BEFORE the
+            # reset deletes the commit; the next prompt shows it to
+            # Claude so it doesn't re-propose the same broken change.
+            last_failed_diff = git_show_commit(commit_sha)
+            cleanup_orphaned_run()
             git_reset_hard()
             append_result({
                 "id": experiment_id,
@@ -722,6 +860,8 @@ def run_autoresearch(args: argparse.Namespace) -> None:
         telemetry = fetch_run_telemetry()
         if telemetry is None or "balanced_accuracy" not in telemetry.headline:
             logger.warning("Failed to extract telemetry, treating as crash")
+            last_failed_diff = git_show_commit(commit_sha)
+            cleanup_orphaned_run()
             git_reset_hard()
             append_result({
                 "id": experiment_id,
@@ -745,18 +885,19 @@ def run_autoresearch(args: argparse.Namespace) -> None:
 
         # 7. Keep or revert.
         prior_best = best_so_far
-        if metric > best_so_far:
+        status, consecutive_failures = _keep_or_revert(metric, best_so_far)
+        last_error = None
+        last_failed_diff = None
+        if status == "KEPT":
             best_so_far = metric
-            status = "KEPT"
-            consecutive_failures = 0
-            last_error = None
             logger.info(
                 f"KEPT: balanced_accuracy={metric:.4f}"
                 f" (improvement from {prior_best:.4f})")
         else:
-            status = "REVERTED"
-            consecutive_failures += 1
-            last_error = None
+            # REVERTED is a normal outcome of a hypothesis test, not a
+            # failure of the loop — _keep_or_revert resets the counter
+            # so honest non-improvements don't accumulate toward an
+            # early exit.
             logger.info(
                 f"REVERTED: balanced_accuracy={metric:.4f}"
                 f" (no improvement over {best_so_far:.4f})")

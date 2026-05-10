@@ -625,6 +625,184 @@ class TestTelemetryRendering(unittest.TestCase):
         self.assertIn("balanced_accuracy", tel.full_markdown)
 
 
+class TestKeepOrRevert(unittest.TestCase):
+    """The keep/revert policy: REVERTED must reset consecutive_failures."""
+
+    def test_kept_resets_counter(self):
+        status, counter = ar._keep_or_revert(metric=0.85, best_so_far=0.80)
+        self.assertEqual(status, "KEPT")
+        self.assertEqual(counter, 0)
+
+    def test_reverted_resets_counter(self):
+        # The bug we're fixing: REVERTED used to increment.
+        status, counter = ar._keep_or_revert(metric=0.78, best_so_far=0.80)
+        self.assertEqual(status, "REVERTED")
+        self.assertEqual(counter, 0)
+
+    def test_tie_is_revert(self):
+        # metric == best_so_far is a non-improvement → REVERTED.
+        status, counter = ar._keep_or_revert(metric=0.80, best_so_far=0.80)
+        self.assertEqual(status, "REVERTED")
+        self.assertEqual(counter, 0)
+
+
+class TestVerifyAwsCredentials(unittest.TestCase):
+    """Pre-flight check exits cleanly on AWS SSO expiry."""
+
+    def test_failure_exits_with_code_2(self):
+        # Mock boto3.Session so get_frozen_credentials raises.
+        mock_creds = MagicMock()
+        mock_creds.get_frozen_credentials.side_effect = RuntimeError(
+            "SSO token expired")
+        mock_session = MagicMock()
+        mock_session.get_credentials.return_value = mock_creds
+        mock_boto3 = MagicMock()
+        mock_boto3.Session.return_value = mock_session
+
+        # botocore submodule shape required by the import.
+        mock_botocore_exc = MagicMock()
+        mock_botocore_exc.BotoCoreError = Exception
+        mock_botocore_exc.ClientError = Exception
+        mock_botocore_exc.NoCredentialsError = Exception
+
+        with patch.dict("sys.modules", {
+            "boto3": mock_boto3,
+            "botocore": MagicMock(),
+            "botocore.exceptions": mock_botocore_exc,
+        }):
+            with self.assertRaises(SystemExit) as ctx:
+                ar.verify_aws_credentials()
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_no_credentials_exits_with_code_2(self):
+        # session.get_credentials() returns None.
+        mock_session = MagicMock()
+        mock_session.get_credentials.return_value = None
+        mock_boto3 = MagicMock()
+        mock_boto3.Session.return_value = mock_session
+        mock_botocore_exc = MagicMock()
+        mock_botocore_exc.BotoCoreError = Exception
+        mock_botocore_exc.ClientError = Exception
+        mock_botocore_exc.NoCredentialsError = Exception
+
+        with patch.dict("sys.modules", {
+            "boto3": mock_boto3,
+            "botocore": MagicMock(),
+            "botocore.exceptions": mock_botocore_exc,
+        }):
+            with self.assertRaises(SystemExit) as ctx:
+                ar.verify_aws_credentials()
+        self.assertEqual(ctx.exception.code, 2)
+
+
+class TestCleanupOrphanedRun(unittest.TestCase):
+    """MLflow cleanup marks a stuck RUNNING run as FAILED."""
+
+    def _import_pandas(self):
+        try:
+            import pandas as pd
+            return pd
+        except ImportError:
+            self.skipTest("pandas not installed")
+
+    def test_marks_running_run_as_failed(self):
+        pd = self._import_pandas()
+        runs_df = pd.DataFrame([{"run_id": "run-abc-123"}])
+        mock_mlflow = MagicMock()
+        mock_mlflow.get_experiment_by_name.return_value = MagicMock(
+            experiment_id="13")
+        mock_mlflow.search_runs.return_value = runs_df
+        mock_client_instance = MagicMock()
+        mock_client_class = MagicMock(return_value=mock_client_instance)
+
+        with patch.dict("sys.modules", {
+            "mlflow": mock_mlflow,
+            "mlflow.tracking": MagicMock(MlflowClient=mock_client_class),
+        }):
+            ar.cleanup_orphaned_run()
+
+        mock_client_instance.set_terminated.assert_called_once_with(
+            "run-abc-123", status="FAILED")
+
+    def test_no_running_runs_is_noop(self):
+        pd = self._import_pandas()
+        empty_df = pd.DataFrame()
+        mock_mlflow = MagicMock()
+        mock_mlflow.get_experiment_by_name.return_value = MagicMock(
+            experiment_id="13")
+        mock_mlflow.search_runs.return_value = empty_df
+        mock_client_instance = MagicMock()
+        mock_client_class = MagicMock(return_value=mock_client_instance)
+
+        with patch.dict("sys.modules", {
+            "mlflow": mock_mlflow,
+            "mlflow.tracking": MagicMock(MlflowClient=mock_client_class),
+        }):
+            ar.cleanup_orphaned_run()
+
+        mock_client_instance.set_terminated.assert_not_called()
+
+    def test_swallows_mlflow_errors(self):
+        # Best-effort: an internal failure must not propagate.
+        mock_mlflow = MagicMock()
+        mock_mlflow.get_experiment_by_name.side_effect = RuntimeError(
+            "MLflow unreachable")
+        with patch.dict("sys.modules", {
+            "mlflow": mock_mlflow,
+            "mlflow.tracking": MagicMock(),
+        }):
+            try:
+                ar.cleanup_orphaned_run()
+            except Exception as e:
+                self.fail(f"cleanup_orphaned_run raised: {e}")
+
+
+class TestPromptIncludesFailedDiff(unittest.TestCase):
+    """build_user_prompt includes the failed diff section when set."""
+
+    def test_section_present_when_diff_passed(self):
+        prompt = ar.build_user_prompt(
+            experiment_files={},
+            results_tsv="",
+            recent_diffs="",
+            last_failed_diff="diff --git a/foo b/foo\n+ broken_change",
+        )
+        self.assertIn("## Last Failed Experiment Diff", prompt)
+        self.assertIn("broken_change", prompt)
+        self.assertIn("do NOT re-propose", prompt)
+
+    def test_section_absent_when_diff_none(self):
+        prompt = ar.build_user_prompt(
+            experiment_files={},
+            results_tsv="",
+            recent_diffs="",
+            last_failed_diff=None,
+        )
+        self.assertNotIn("## Last Failed Experiment Diff", prompt)
+
+    def test_section_absent_when_diff_empty(self):
+        prompt = ar.build_user_prompt(
+            experiment_files={},
+            results_tsv="",
+            recent_diffs="",
+            last_failed_diff="",
+        )
+        self.assertNotIn("## Last Failed Experiment Diff", prompt)
+
+    def test_last_error_truncation_is_6000(self):
+        # Sentinel char chosen so it can't appear in the prompt's
+        # boilerplate ("Experiment" contains 'x', so use 'Q' instead).
+        big_error = "Q" * 10000
+        prompt = ar.build_user_prompt(
+            experiment_files={},
+            results_tsv="",
+            recent_diffs="",
+            last_error=big_error,
+        )
+        # Raised from 2000/3000 to 6000 to fit full tracebacks.
+        self.assertEqual(prompt.count("Q"), 6000)
+
+
 class TestCreateTrainerExtraction(unittest.TestCase):
     """Test that the _create_trainer extraction in TrainingRunner works."""
 
