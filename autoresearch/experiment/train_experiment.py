@@ -51,10 +51,10 @@ MLFLOW_OPTIONS = MLflowOptions(
     experiment_name="autoresearch",
     model_name='AutoResearch',
 )
-# ── END FROZEN ────────────────────────────
+# ── END FROZEN ───────────────────────────
 
 
-# ── MODIFIABLE: subsampling, weighting, training ────────────────
+# ── MODIFIABLE: subsampling, weighting, training ──────────────
 FULL_DATA_TOTAL = 1_770_000
 
 SUBSAMPLE = SubsampleOptions(
@@ -69,13 +69,21 @@ WEIGHTING = SampleWeightingOptions(
     weight_ratio_cap=5000.0,
 )
 
-# Hypothesis: prior LR=3e-4 run reached balanced_accuracy=0.785 but
-# overfit hard — training_loss collapsed to 0.184 while val_loss only
-# reached 0.620 (gap ≈0.44, ratio ≈3.4×). Val_loss began climbing
-# while training_loss kept descending — classic overfit signature.
-# Adding dropout=0.3 between hidden layers should slow memorization,
-# narrow the train/val gap, and improve generalization.
+# Hypothesis: prior runs (ba=0.785 with dropout=0.3 + LR=3e-4)
+# show ref_acc=0.833 ≈ val_acc=0.831 (gap 0.002), so the model is
+# NOT overfitting at the prediction level. The 0.44 train/val loss
+# gap and mid-bin overconfidence (bins 3–5 gaps +0.15 to +0.17)
+# come from unbounded weight norms: the inline L2 penalty with
+# alpha=1e-4 scaled per-batch is ~2.5e-7, effectively zero. Label
+# smoothing (ba=0.766, REVERTED) was the wrong fix because it hurt
+# recall on rare classes. Switching the optimizer to AdamW with
+# weight_decay=0.01 gives decoupled, principled weight regularization
+# that should complement dropout=0.3 and reduce the mid-bin
+# overconfidence driving cross-branch confusions (Bare substrate
+# → Macroalgae 13%, Soft coral → Hard coral 7%).
 DROPOUT = 0.3
+WEIGHT_DECAY = 0.01
+SOLVER = "adamw"
 
 TRAINING_OPTIONS = TrainingOptions(
     hidden_layer_sizes=(500, 300, 100),
@@ -99,6 +107,8 @@ class ExperimentRunner(MLflowTrainingRunner):
                 self.training_options.early_stopping_patience),
             random_state=self.training_options.random_state,
             dropout=DROPOUT,
+            weight_decay=WEIGHT_DECAY,
+            solver=SOLVER,
         )
 
 

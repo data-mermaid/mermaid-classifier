@@ -71,7 +71,7 @@ class ExperimentMLPClassifier:
         self,
         hidden_layer_sizes: Sequence[int] = (100,),
         activation: str = "relu",
-        solver: str = "adam",
+        solver: str = "adamw",
         alpha: float = 0.0001,
         batch_size: int | str = "auto",
         learning_rate_init: float = 0.001,
@@ -84,16 +84,20 @@ class ExperimentMLPClassifier:
         epsilon: float = 1e-8,
         class_weight: dict | None = None,
         dropout: float = 0.0,
+        weight_decay: float = 0.0,
     ):
         if activation != "relu":
             raise ValueError(
                 f"Only activation='relu' supported, got {activation!r}.")
-        if solver != "adam":
+        if solver not in ("adam", "adamw"):
             raise ValueError(
-                f"Only solver='adam' supported, got {solver!r}.")
+                f"Only solver in {{'adam','adamw'}} supported, got {solver!r}.")
         if not (0.0 <= float(dropout) < 1.0):
             raise ValueError(
                 f"dropout must be in [0.0, 1.0), got {dropout!r}.")
+        if float(weight_decay) < 0.0:
+            raise ValueError(
+                f"weight_decay must be >= 0, got {weight_decay!r}.")
 
         self.hidden_layer_sizes = tuple(hidden_layer_sizes)
         self.activation = activation
@@ -110,6 +114,7 @@ class ExperimentMLPClassifier:
         self.epsilon = epsilon
         self.class_weight = class_weight
         self.dropout = float(dropout)
+        self.weight_decay = float(weight_decay)
 
     def _resolve_batch_size(self, n_samples: int) -> int:
         if self.batch_size == "auto":
@@ -144,12 +149,25 @@ class ExperimentMLPClassifier:
         )
 
     def _init_optimizer(self) -> None:
-        self._optimizer = torch.optim.Adam(
-            self._module.parameters(),
-            lr=self.learning_rate_init,
-            betas=(self.beta_1, self.beta_2),
-            eps=self.epsilon,
-        )
+        # AdamW decouples weight decay from the gradient update, giving
+        # principled L2-style regularization that the prior Adam +
+        # alpha=1e-4 L2 penalty (effectively ~2.5e-7 per step) did not
+        # provide. weight_decay=0 reproduces plain Adam behavior.
+        if self.solver == "adamw":
+            self._optimizer = torch.optim.AdamW(
+                self._module.parameters(),
+                lr=self.learning_rate_init,
+                betas=(self.beta_1, self.beta_2),
+                eps=self.epsilon,
+                weight_decay=self.weight_decay,
+            )
+        else:
+            self._optimizer = torch.optim.Adam(
+                self._module.parameters(),
+                lr=self.learning_rate_init,
+                betas=(self.beta_1, self.beta_2),
+                eps=self.epsilon,
+            )
 
     def _build_class_weight_tensor(self) -> torch.Tensor | None:
         if self.class_weight is None:
@@ -218,6 +236,11 @@ class ExperimentMLPClassifier:
         total_weighted_loss = 0.0
         total_seen = 0
 
+        # If AdamW is supplying weight decay, skip the inline L2 penalty
+        # to avoid double-regularizing. Keep it active for plain Adam to
+        # preserve prior baseline semantics.
+        use_inline_l2 = self.solver != "adamw"
+
         for start in range(0, n_samples, batch_size):
             end = min(start + batch_size, n_samples)
             xb = X_tensor[start:end]
@@ -228,8 +251,11 @@ class ExperimentMLPClassifier:
             logits = self._module(xb)
             data_loss = F.cross_entropy(
                 logits, yb, weight=self._class_weight_tensor)
-            reg_loss = (0.5 * self.alpha / mb_size) * self._l2_penalty()
-            loss = data_loss + reg_loss
+            if use_inline_l2:
+                reg_loss = (0.5 * self.alpha / mb_size) * self._l2_penalty()
+                loss = data_loss + reg_loss
+            else:
+                loss = data_loss
             loss.backward()
             self._optimizer.step()
 
@@ -294,6 +320,7 @@ class ExperimentMLPClassifier:
             "epsilon": self.epsilon,
             "class_weight": getattr(self, "class_weight", None),
             "dropout": self.dropout,
+            "weight_decay": self.weight_decay,
         }
 
     def set_params(self, **params: Any) -> "ExperimentMLPClassifier":
@@ -322,6 +349,8 @@ class ExperimentMLPClassifier:
         self.__dict__.update(state)
         self.__dict__.setdefault("class_weight", None)
         self.__dict__.setdefault("dropout", 0.0)
+        self.__dict__.setdefault("weight_decay", 0.0)
+        self.__dict__.setdefault("solver", "adam")
         if module_state is not None:
             self._module = _MLPModule(
                 n_features_in=self.n_features_in_,
