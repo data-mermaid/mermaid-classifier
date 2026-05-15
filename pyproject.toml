@@ -35,6 +35,7 @@ pyspacer = [
     # searches from cwd, which seems more practical when settings
     # are in an installed package, which is our intended usage.
     "pydantic-settings",
+    "pyyaml",
     "s3fs",
     # pyspacer uses scikit-learn, but we also use it directly for metrics.
     "scikit-learn",
