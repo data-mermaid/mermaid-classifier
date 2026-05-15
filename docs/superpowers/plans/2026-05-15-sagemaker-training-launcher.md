@@ -20,19 +20,19 @@
 |------|-----------------|----------------|
 | `mermaid_classifier/sagemaker/__init__.py` | 1 | Subpackage marker. |
 | `mermaid_classifier/sagemaker/config.py` | 1 | Pydantic `TrainingRunConfig` + sub-models + `from_yaml_path()` + `build_options()`. The only file that maps YAML ↔ pyspacer dataclasses. |
-| `tests/sagemaker/__init__.py` | 1 | Test package marker. |
-| `tests/sagemaker/test_config.py` | 1 | Unit tests for the schema. |
+| `tests/sagemaker_launcher/__init__.py` | 1 | Test package marker. |
+| `tests/sagemaker_launcher/test_config.py` | 1 | Unit tests for the schema. |
 | `sagemaker/configs/example/training_config.yaml` | 2 | Reference YAML, fully populated, with comments. |
 | `sagemaker/configs/example/sources.csv` | 2 | 2-source fixture for smoke tests. |
 | `sagemaker/configs/example/rollups.csv` | 2 | Empty header-only fixture. |
 | `sagemaker/configs/example/included_labels.csv` | 2 | Empty header-only fixture. |
 | `scripts/sagemaker_train_entrypoint.py` | 3 | Container entrypoint: stage logging, env dump, YAML → options → `runner.run()`. |
-| `tests/sagemaker/test_entrypoint.py` | 3 | Unit tests for the entrypoint (mocked runner). |
+| `tests/sagemaker_launcher/test_entrypoint.py` | 3 | Unit tests for the entrypoint (mocked runner). |
 | `docker/training/Dockerfile` | 4 | CPU-only `python:3.10-slim` image; CPU torch installed before `.[pyspacer]`. |
 | `docker/training/entrypoint.sh` | 4 | `exec python -u scripts/sagemaker_train_entrypoint.py "$@"`. |
 | `docker/training/local_smoke.sh` | 5 | Builds the image, runs the example config locally with `-v` mounts, asserts exit 0. |
 | `scripts/launch_training_sagemaker.py` | 6 | SageMaker SDK launcher: argparse, validate, S3 sync, `Estimator.fit(wait=True, logs="All")`. |
-| `tests/sagemaker/test_launcher.py` | 6 | Unit tests for the launcher (mocked boto3/SDK). |
+| `tests/sagemaker_launcher/test_launcher.py` | 6 | Unit tests for the launcher (mocked boto3/SDK). |
 | `docs/training_at_scale.md` | 7 | One-time setup runbook. |
 | `pyproject.toml` (modified) | 1, 6 | Adds `pyyaml` to `[pyspacer]`; adds new `[sagemaker]` extra with the SageMaker SDK. |
 
@@ -43,8 +43,8 @@
 **Files:**
 - Create: `mermaid_classifier/sagemaker/__init__.py`
 - Create: `mermaid_classifier/sagemaker/config.py`
-- Create: `tests/sagemaker/__init__.py`
-- Create: `tests/sagemaker/test_config.py`
+- Create: `tests/sagemaker_launcher/__init__.py`
+- Create: `tests/sagemaker_launcher/test_config.py`
 - Modify: `pyproject.toml` (add `pyyaml` to `[pyspacer]` extras)
 
 ### Why this comes first
@@ -60,7 +60,7 @@ The schema is the architectural keystone (per the spec). Everything else either 
 ```bash
 mkdir -p mermaid_classifier/sagemaker tests/sagemaker
 touch mermaid_classifier/sagemaker/__init__.py
-touch tests/sagemaker/__init__.py
+touch tests/sagemaker_launcher/__init__.py
 ```
 
 - [ ] **Step 1.2:** Add `pyyaml` to `[pyspacer]` extras in `pyproject.toml`.
@@ -82,7 +82,7 @@ pip install -e .[pyspacer]
 
 - [ ] **Step 1.3:** Write the failing test file.
 
-Create `tests/sagemaker/test_config.py`:
+Create `tests/sagemaker_launcher/test_config.py`:
 
 ```python
 """Unit tests for the Pydantic TrainingRunConfig schema.
@@ -275,7 +275,7 @@ if __name__ == "__main__":
 - [ ] **Step 1.4:** Run the test to verify it fails.
 
 ```bash
-cd tests && python -m unittest sagemaker.test_config -v
+cd tests && python -m unittest sagemaker_launcher.test_config -v
 ```
 
 Expected: `ModuleNotFoundError: No module named 'mermaid_classifier.sagemaker.config'` or `ImportError: cannot import name 'TrainingRunConfig'`. Failure is expected — `config.py` doesn't exist yet.
@@ -524,7 +524,7 @@ class TrainingRunConfig(BaseModel):
 - [ ] **Step 1.6:** Run the tests to verify they pass.
 
 ```bash
-cd tests && python -m unittest sagemaker.test_config -v
+cd tests && python -m unittest sagemaker_launcher.test_config -v
 ```
 
 Expected: all tests pass. `BuildOptionsTest.test_build_options_produces_three_dataclasses` runs if pyspacer extras are installed; otherwise it's skipped.
@@ -536,8 +536,8 @@ cd /Users/gregn/Documents/wcs/mermaid-classifier
 git add pyproject.toml \
     mermaid_classifier/sagemaker/__init__.py \
     mermaid_classifier/sagemaker/config.py \
-    tests/sagemaker/__init__.py \
-    tests/sagemaker/test_config.py
+    tests/sagemaker_launcher/__init__.py \
+    tests/sagemaker_launcher/test_config.py
 git commit -m "$(cat <<'EOF'
 feat(sagemaker): add Pydantic TrainingRunConfig schema
 
@@ -561,7 +561,7 @@ EOF
 - Create: `sagemaker/configs/example/sources.csv`
 - Create: `sagemaker/configs/example/rollups.csv`
 - Create: `sagemaker/configs/example/included_labels.csv`
-- Modify: `tests/sagemaker/test_config.py` (add example-loads-OK test)
+- Modify: `tests/sagemaker_launcher/test_config.py` (add example-loads-OK test)
 
 ### Why this is task 2
 The example serves three purposes: (1) committed template users copy when starting a new run, (2) fixture for the local Docker smoke test in Task 5, (3) sanity test that the schema and a real YAML stay in sync.
@@ -660,7 +660,7 @@ Header-only files are valid — pyspacer's CSV specs accept empty bodies.
 
 - [ ] **Step 2.3:** Add a test that loads the committed example.
 
-Edit `tests/sagemaker/test_config.py`. After the `BuildOptionsTest` class and before the `if __name__ == "__main__":` block, append:
+Edit `tests/sagemaker_launcher/test_config.py`. After the `BuildOptionsTest` class and before the `if __name__ == "__main__":` block, append:
 
 ```python
 class ExampleYamlTest(unittest.TestCase):
@@ -684,7 +684,7 @@ class ExampleYamlTest(unittest.TestCase):
 - [ ] **Step 2.4:** Run the new test.
 
 ```bash
-cd tests && python -m unittest sagemaker.test_config.ExampleYamlTest -v
+cd tests && python -m unittest sagemaker_launcher.test_config.ExampleYamlTest -v
 ```
 
 Expected: passes.
@@ -693,7 +693,7 @@ Expected: passes.
 
 ```bash
 cd /Users/gregn/Documents/wcs/mermaid-classifier
-git add sagemaker/configs/example/ tests/sagemaker/test_config.py
+git add sagemaker/configs/example/ tests/sagemaker_launcher/test_config.py
 git commit -m "$(cat <<'EOF'
 feat(sagemaker): add example config dir + schema-conformance test
 
@@ -712,7 +712,7 @@ EOF
 
 **Files:**
 - Create: `scripts/sagemaker_train_entrypoint.py`
-- Create: `tests/sagemaker/test_entrypoint.py`
+- Create: `tests/sagemaker_launcher/test_entrypoint.py`
 
 ### Why this comes before Docker
 The entrypoint can be unit-tested with a mocked runner without ever building the image. Getting the contract right here means Task 4 is just packaging.
@@ -733,7 +733,7 @@ Stage markers around each phase. First-line dump (Python/pkg versions + env + di
 
 - [ ] **Step 3.1:** Write the failing test file.
 
-Create `tests/sagemaker/test_entrypoint.py`:
+Create `tests/sagemaker_launcher/test_entrypoint.py`:
 
 ```python
 """Unit tests for scripts/sagemaker_train_entrypoint.py.
@@ -903,7 +903,7 @@ if __name__ == "__main__":
 - [ ] **Step 3.2:** Run the test to verify it fails.
 
 ```bash
-cd tests && python -m unittest sagemaker.test_entrypoint -v
+cd tests && python -m unittest sagemaker_launcher.test_entrypoint -v
 ```
 
 Expected: failure — `scripts/sagemaker_train_entrypoint.py` does not exist.
@@ -1085,7 +1085,7 @@ if __name__ == "__main__":
 - [ ] **Step 3.4:** Run the entrypoint tests.
 
 ```bash
-cd tests && python -m unittest sagemaker.test_entrypoint -v
+cd tests && python -m unittest sagemaker_launcher.test_entrypoint -v
 ```
 
 Expected: all four tests pass.
@@ -1094,7 +1094,7 @@ Expected: all four tests pass.
 
 ```bash
 cd /Users/gregn/Documents/wcs/mermaid-classifier
-git add scripts/sagemaker_train_entrypoint.py tests/sagemaker/test_entrypoint.py
+git add scripts/sagemaker_train_entrypoint.py tests/sagemaker_launcher/test_entrypoint.py
 git commit -m "$(cat <<'EOF'
 feat(sagemaker): add container entrypoint that drives MLflowTrainingRunner
 
@@ -1363,7 +1363,7 @@ EOF
 
 **Files:**
 - Create: `scripts/launch_training_sagemaker.py`
-- Create: `tests/sagemaker/test_launcher.py`
+- Create: `tests/sagemaker_launcher/test_launcher.py`
 - Modify: `pyproject.toml` (add `[sagemaker]` extras with the SDK)
 
 ### Why this comes last
@@ -1389,7 +1389,7 @@ pip install -e .[sagemaker,pyspacer]
 
 - [ ] **Step 6.2:** Write the failing test file.
 
-Create `tests/sagemaker/test_launcher.py`:
+Create `tests/sagemaker_launcher/test_launcher.py`:
 
 ```python
 """Unit tests for scripts/launch_training_sagemaker.py.
@@ -1563,7 +1563,7 @@ if __name__ == "__main__":
 - [ ] **Step 6.3:** Run the tests to verify they fail.
 
 ```bash
-cd tests && python -m unittest sagemaker.test_launcher -v
+cd tests && python -m unittest sagemaker_launcher.test_launcher -v
 ```
 
 Expected: failure — `scripts/launch_training_sagemaker.py` does not exist.
@@ -1807,7 +1807,7 @@ if __name__ == "__main__":
 - [ ] **Step 6.5:** Run the tests to verify they pass.
 
 ```bash
-cd tests && python -m unittest sagemaker.test_launcher -v
+cd tests && python -m unittest sagemaker_launcher.test_launcher -v
 ```
 
 Expected: all four tests pass.
@@ -1831,7 +1831,7 @@ Expected: prints `DRY RUN -- not submitting`, the resolved defaults (`ml.m5.4xla
 
 ```bash
 cd /Users/gregn/Documents/wcs/mermaid-classifier
-git add pyproject.toml scripts/launch_training_sagemaker.py tests/sagemaker/test_launcher.py
+git add pyproject.toml scripts/launch_training_sagemaker.py tests/sagemaker_launcher/test_launcher.py
 git commit -m "$(cat <<'EOF'
 feat(sagemaker): add training launcher using SageMaker SDK Estimator
 
