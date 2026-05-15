@@ -113,7 +113,7 @@ def _upload_config_dir(
     return f"s3://{staging_bucket}/{key_prefix}/"
 
 
-def _build_environment(args) -> dict[str, str]:
+def _build_environment(args: argparse.Namespace) -> dict[str, str]:
     return {
         "MLFLOW_TRACKING_SERVER": args.mlflow_tracking_uri,
         "AWS_DEFAULT_REGION": args.region,
@@ -197,6 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     log.info("Run ID:          %s", run_id)
     log.info("Output S3:       %s", output_path)
     log.info("CloudWatch:      %s", cw_url)
+    log.info("MLflow:          %s", args.mlflow_tracking_uri)
 
     estimator_kwargs = dict(
         image_uri=args.ecr_image_uri,

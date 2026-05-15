@@ -130,16 +130,27 @@ class EntrypointHappyPathTest(unittest.TestCase):
         finally:
             root.removeHandler(handler)
         log_text = buf.getvalue()
-        # We expect ENTER markers in this exact order. EXIT markers
-        # appear too; we only assert ENTER ordering here.
-        markers = [
-            line for line in log_text.splitlines()
-            if "ENTER" in line
-        ]
-        self.assertTrue(any("load_config" in m for m in markers))
-        self.assertTrue(any("apply_env" in m for m in markers))
-        self.assertTrue(any("build_options" in m for m in markers))
-        self.assertTrue(any("runner_run" in m for m in markers))
+        # Build a list of (stage_name, line_index) for each ENTER marker
+        # we find, then assert the canonical order.
+        all_lines = log_text.splitlines()
+        stage_names = ["load_config", "apply_env", "build_options", "runner_run"]
+        indices = []
+        for stage in stage_names:
+            for i, line in enumerate(all_lines):
+                if f"[stage:{stage}] ENTER" in line:
+                    indices.append(i)
+                    break
+            else:
+                self.fail(
+                    f"Missing ENTER marker for stage '{stage}' in log:\n"
+                    f"{log_text}")
+        self.assertEqual(
+            indices, sorted(indices),
+            "Stage ENTER markers appeared out of order. The env-before-"
+            "pyspacer-import contract relies on apply_env preceding "
+            "build_options preceding runner_run. Got indices: %s for "
+            "stages %s" % (indices, stage_names),
+        )
 
 
 class EntrypointFailureTest(unittest.TestCase):
