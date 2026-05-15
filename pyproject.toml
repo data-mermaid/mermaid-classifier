@@ -49,3 +49,6 @@ jupyterlab = [
     # take effect.
     "ipympl",
 ]
+sagemaker = [
+    "sagemaker>=2.0,<3.0",
+]
