@@ -56,8 +56,8 @@ def _stage(name: str):
         log.info("[stage:%s] EXIT", name)
 
 
-def _redact_env(env: dict) -> dict:
-    out = {}
+def _redact_env(env: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
     for key, value in env.items():
         upper = key.upper()
         if any(frag in upper for frag in _SECRET_KEY_FRAGMENTS):
