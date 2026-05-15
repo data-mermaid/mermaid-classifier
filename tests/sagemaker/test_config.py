@@ -224,5 +224,23 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertEqual(training.hidden_layer_sizes, (200, 100))
 
 
+class ExampleYamlTest(unittest.TestCase):
+
+    def test_committed_example_loads(self):
+        # Resolve relative to the repo root (the tests/ dir is one
+        # level deep so the example is at ../sagemaker/configs/example).
+        here = Path(__file__).resolve().parent.parent.parent
+        example = here / "sagemaker" / "configs" / "example" \
+            / "training_config.yaml"
+        self.assertTrue(
+            example.is_file(),
+            f"Example YAML not found at {example}",
+        )
+        config = TrainingRunConfig.from_yaml_path(example)
+        self.assertIsNotNone(config.dataset.subsample)
+        self.assertEqual(
+            config.dataset.subsample.strategy, "balanced")
+
+
 if __name__ == "__main__":
     unittest.main()

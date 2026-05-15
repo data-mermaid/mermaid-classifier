@@ -1,0 +1,59 @@
+# Example training config for the SageMaker launcher.
+#
+# Copy this directory to a new name (e.g. sagemaker/configs/my-run/),
+# edit values, then run:
+#   python scripts/launch_training_sagemaker.py \
+#     --config-dir sagemaker/configs/my-run \
+#     --mlflow-tracking-uri <ARN> \
+#     --role-arn <ARN> \
+#     --ecr-image-uri <URI> \
+#     --staging-bucket <BUCKET>
+#
+# CSV paths are resolved as siblings of THIS file. Bare filenames only.
+
+dataset:
+  include_mermaid: false
+  # 2-source fixture; replace with your sources.csv for real runs.
+  coralnet_sources_csv: sources.csv
+  drop_growthforms: false
+  label_rollup_spec_csv: rollups.csv
+  included_labels_csv: included_labels.csv
+  ref_val_ratios: [0.1, 0.1]
+  # Subsample. Strategies: 'stratified', 'balanced', 'soft_balanced'.
+  # Keep this section out (set to null) to disable subsampling entirely.
+  subsample:
+    strategy: balanced
+    total_annotations: 1000
+    min_per_class: 10
+  # Sample weighting. Remove the block (or set enabled: false) to
+  # disable.
+  weighting:
+    enabled: true
+    strategy: effective_number
+    alpha: 0.5
+    weight_ratio_cap: 5000.0
+
+training:
+  epochs: 1
+  # PyTorch MLP head architecture. None falls back to MermaidTrainer's
+  # label-count heuristic.
+  hidden_layer_sizes: [200, 100]
+  learning_rate_init: 0.0001
+  early_stopping_patience: 3
+  random_state: 0
+
+mlflow:
+  experiment_name: example-smoke-test
+  model_name: ExampleModel
+  # annotations_to_log: all  # Uncomment to log all annotations as an artifact.
+
+# Env vars applied BEFORE importing mermaid_classifier. Keep secrets
+# out of this file; commit only non-sensitive values. The launcher
+# overrides MLFLOW_TRACKING_SERVER from its --mlflow-tracking-uri
+# flag, so the value here is just a placeholder for local smoke runs.
+env:
+  MLFLOW_TRACKING_SERVER: file:./mlruns
+  WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
+  CORALNET_TRAIN_DATA_BUCKET: coral-reef-training
+  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
+  MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
