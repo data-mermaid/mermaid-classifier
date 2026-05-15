@@ -86,7 +86,7 @@ class SubsampleStrategiesTest(unittest.TestCase):
             path = _write(Path(td), _yaml.dump(base))
             return TrainingRunConfig.from_yaml_path(path)
 
-    def test_stratified_requires_total_annotations(self):
+    def test_stratified_with_total_annotations_loads(self):
         config = self._load(textwrap.dedent("""\
               subsample:
                 strategy: stratified
@@ -142,6 +142,43 @@ class WeightingTest(unittest.TestCase):
             path = _write(Path(td), bad_yaml)
             with self.assertRaises(ValidationError):
                 TrainingRunConfig.from_yaml_path(path)
+
+
+class ApplyEnvTest(unittest.TestCase):
+
+    def test_apply_env_writes_to_os_environ(self):
+        import os
+        from unittest import mock
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), MINIMAL_YAML)
+            config = TrainingRunConfig.from_yaml_path(path)
+            with mock.patch.dict(os.environ, {}, clear=False):
+                # Pre-existing env vars (if any) stay; we only assert
+                # that ours are written.
+                os.environ.pop("MLFLOW_TRACKING_SERVER", None)
+                os.environ.pop("WEIGHTS_LOCATION", None)
+                config.apply_env()
+                self.assertEqual(
+                    os.environ["MLFLOW_TRACKING_SERVER"], "file:./mlruns")
+                self.assertEqual(
+                    os.environ["WEIGHTS_LOCATION"],
+                    "s3://bucket/weights.pt")
+
+    def test_apply_env_with_empty_block_is_noop(self):
+        import os
+        from unittest import mock
+        yaml_no_env = MINIMAL_YAML.replace(
+            "env:\n  MLFLOW_TRACKING_SERVER: file:./mlruns\n"
+            "  WEIGHTS_LOCATION: s3://bucket/weights.pt\n",
+            "",
+        )
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), yaml_no_env)
+            config = TrainingRunConfig.from_yaml_path(path)
+            self.assertEqual(config.env, {})
+            with mock.patch.dict(os.environ, {}, clear=False):
+                # apply_env on empty dict must not raise.
+                config.apply_env()
 
 
 class RequiredFieldsTest(unittest.TestCase):

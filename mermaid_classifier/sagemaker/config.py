@@ -20,15 +20,13 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-# Mirror SUBSAMPLE_STRATEGIES from mermaid_classifier.training.subsample.options.
-# Duplicated here to avoid importing the pyspacer subtree at module load.
-# Keep in sync when adding a new strategy in pyspacer.
-_SUBSAMPLE_STRATEGIES = ("stratified", "balanced", "soft_balanced")
-
-
 class SubsampleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Keep in sync with SUBSAMPLE_STRATEGIES in
+    # mermaid_classifier.training.subsample.options when adding a strategy.
+    # Duplicated here as a Literal so this module avoids importing the
+    # pyspacer subtree at load time.
     strategy: Literal["stratified", "balanced", "soft_balanced"]
     total_annotations: int | None = None
     min_per_class: int = 0
