@@ -116,7 +116,7 @@ class SubsampleStrategiesTest(unittest.TestCase):
 
 class WeightingTest(unittest.TestCase):
 
-    def test_default_weighting_strategy(self):
+    def test_weighting_yaml_overrides_default(self):
         with TemporaryDirectory() as td:
             path = _write(Path(td), MINIMAL_YAML)
             config = TrainingRunConfig.from_yaml_path(path)
@@ -124,6 +124,17 @@ class WeightingTest(unittest.TestCase):
         self.assertEqual(
             config.dataset.weighting.strategy, "effective_number")
         self.assertEqual(config.dataset.weighting.alpha, 0.5)
+
+    def test_weighting_default_strategy_is_tree_balanced(self):
+        """Bare WeightingConfig() should use tree_balanced_ba_flat_gf,
+        matching the default in mermaid_classifier.training.sample_weighting.options.
+        """
+        from mermaid_classifier.sagemaker.config import WeightingConfig
+        w = WeightingConfig()
+        self.assertTrue(w.enabled)
+        self.assertEqual(w.strategy, "tree_balanced_ba_flat_gf")
+        self.assertEqual(w.alpha, 0.5)
+        self.assertIsNone(w.weight_ratio_cap)
 
     def test_invalid_alpha_rejected(self):
         bad_yaml = MINIMAL_YAML.replace("alpha: 0.5", "alpha: 1.5")
@@ -155,7 +166,7 @@ class BuildOptionsTest(unittest.TestCase):
             from mermaid_classifier.pyspacer.train import (
                 DatasetOptions, MLflowOptions, TrainingOptions,
             )
-        except (ImportError, Exception):
+        except Exception:
             self.skipTest("pyspacer extras not installed")
         with TemporaryDirectory() as td:
             tmp = Path(td)
