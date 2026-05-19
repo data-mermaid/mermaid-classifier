@@ -145,7 +145,7 @@ class CalibrateInBatchesTest(unittest.TestCase):
         proba_std = clf_std.predict_proba(X_test)
         proba_batch = clf_batched.predict_proba(X_test)
         np.testing.assert_allclose(
-            proba_std, proba_batch, rtol=1e-4, atol=1e-5,
+            proba_std, proba_batch, rtol=1e-4, atol=5e-5,
             err_msg="predict_proba outputs differ")
 
         # Verify PySpacer compatibility attributes

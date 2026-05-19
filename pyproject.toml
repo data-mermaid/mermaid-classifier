@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mermaid-classifier"
 version = "0.1a1"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "boto3",
 ]

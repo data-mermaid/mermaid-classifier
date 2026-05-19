@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   test:
-    name: unittest (Linux, Python 3.10)
+    name: unittest (Linux, Python 3.12)
     runs-on: ubuntu-latest
 
     steps:
@@ -23,7 +23,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.10'
+          python-version: '3.12'
           enable-cache: true
 
       - name: Install package with pyspacer extras
