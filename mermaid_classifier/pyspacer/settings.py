@@ -27,6 +27,8 @@ def automatic_batch_size() -> int:
     base_overhead_bytes = 3e9
     rough_available_ram_bytes = max(total_ram_bytes - base_overhead_bytes, 0)
 
+    # Calibrated from training tests: ref_size of 50000 fits in ~3GB
+    # of available RAM. Scale linearly with detected RAM.
     ref_size = int(rough_available_ram_bytes * (50000 / 3e9))
 
     if ref_size < 5000:
