@@ -348,8 +348,9 @@ def build_template_context(
         title = (f"Classifier Report - {metadata['experiment_name']} - "
                  f"{metadata['run_name']}")
 
-    n_classes = metadata['params'].get('num_classes', '')
-    n_predictions = metadata['params'].get('num_predictions', '')
+    params = metadata.get('params', {})
+    n_classes = params.get('num_classes', '')
+    n_predictions = params.get('num_predictions', '')
 
     return {
         'title': title,
