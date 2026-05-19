@@ -28,12 +28,10 @@ from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
+from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
-from spacer.tasks import train_classifier as spacer_train_classifier
-
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
-
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
     BenthicAttributeLibrary,
@@ -59,8 +57,6 @@ from mermaid_classifier.pyspacer.utils import (
 
 
 logger = logging_config_for_script('train')
-
-
 
 
 ba_library = BenthicAttributeLibrary()
@@ -446,8 +442,6 @@ class TrainingDataset:
         self.artifacts = Artifacts()
         self.profiled_sections = []
 
-
-
         if options.coralnet_sources_csv:
             with open(options.coralnet_sources_csv) as csv_f:
                 self.cn_source_filter = CNSourceFilter(csv_f)
@@ -503,8 +497,6 @@ class TrainingDataset:
                 self.read_mermaid_data()
         else:
             self.artifacts.mermaid_project_stats = pd.DataFrame()
-
-
 
         # Now this should have annotations populated.
         if not self.duckdb_annotations_table_exists():
@@ -606,15 +598,11 @@ class TrainingDataset:
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
-
-
         with self.section_profiling("Prep annotations for PySpacer"):
             self.labels = self.prep_annotations_for_pyspacer()
             self.add_training_set_names()
 
         self.set_train_summary_stats()
-
-
 
     @contextmanager
     def section_profiling(self, section_name: str):
@@ -1370,7 +1358,7 @@ class TrainingRunner:
         )
 
         with self.section_profiling("PySpacer training call"):
-            return_msg = spacer_train_classifier(train_msg)
+            return_msg = train_classifier(train_msg)
 
         logger.info(
             f"Train time (from return msg): {return_msg.runtime:.1f} s")
