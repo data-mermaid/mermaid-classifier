@@ -42,6 +42,9 @@ pyspacer = [
     # torch is already a transitive dep via pyspacer, but we import it
     # directly in torch_classifier.py so declare it here too.
     "torch",
+    # Transitive via pyspacer; pinning here lets [tool.uv.sources] redirect
+    # it to the CPU index on Linux instead of pulling the CUDA wheel.
+    "torchvision",
 ]
 jupyterlab = [
     # For interactive matplotlib in JupyterLab. After installation, the
@@ -52,3 +55,17 @@ jupyterlab = [
 sagemaker = [
     "sagemaker>=2.0,<3.0",
 ]
+
+# On Linux (i.e. the SageMaker training image) pull torch + torchvision from
+# PyTorch's CPU wheel index. Without this, uv resolves them from PyPI which
+# bundles the ~2GB CUDA runtime — we never use GPU at training time.
+# Mac dev is unaffected: sys_platform != 'linux' falls through to PyPI, whose
+# macOS wheels are already CPU/MPS-only.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
