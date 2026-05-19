@@ -668,9 +668,8 @@ class TrainingDataset:
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
-        with self.section_profiling("Prep annotations for PySpacer"):
-            self.labels = self.prep_annotations_for_pyspacer()
-            self.add_training_set_names()
+        self.labels = self.prep_annotations_for_pyspacer()
+        self.add_training_set_names()
 
         self.set_train_summary_stats()
 
@@ -984,78 +983,84 @@ class TrainingDataset:
 
     def prep_annotations_for_pyspacer(self):
 
-        annotations_by_image = duckdb_grouped_rows(
-            duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            grouping_column_names=['bucket', 'feature_vector'],
-        )
+        with self.section_profiling("Collecting feature paths"):
 
-        # First pass: collect annotations and unique S3 keys.
-        s3_keys: dict[tuple[str, str], str] = {}
-        tmp_root = self._feature_temp_dir.name
-        # image_data: list of (bucket, key, annotations)
-        image_data = []
+            annotations_by_image = duckdb_grouped_rows(
+                duck_conn=self.duck_conn,
+                duck_table_name='annotations',
+                grouping_column_names=['bucket', 'feature_vector'],
+            )
 
-        for rows in annotations_by_image:
+            # First pass: collect annotations and unique S3 keys.
+            s3_keys: dict[tuple[str, str], str] = {}
+            tmp_root = self._feature_temp_dir.name
+            # image_data: list of (bucket, key, annotations)
+            image_data = []
 
-            # Here, in one loop iteration, we're given all the
-            # annotation rows for a single image.
-            first_row = rows[0]
-            bucket = first_row['bucket']
-            feature_bucket_path = first_row['feature_vector']
+            for rows in annotations_by_image:
 
-            image_annotations = []
+                # Here, in one loop iteration, we're given all the
+                # annotation rows for a single image.
+                first_row = rows[0]
+                bucket = first_row['bucket']
+                feature_bucket_path = first_row['feature_vector']
 
-            # One annotation per row.
-            for row in rows:
+                image_annotations = []
 
-                bagf = combine_ba_gf(
-                    row['benthic_attribute_id'], row['growth_form_id'])
+                # One annotation per row.
+                for row in rows:
 
-                annotation = (
-                    int(row['row']),
-                    int(row['col']),
-                    bagf,
-                )
-                image_annotations.append(annotation)
+                    bagf = combine_ba_gf(
+                        row['benthic_attribute_id'], row['growth_form_id'])
 
-            s3_key = (bucket, feature_bucket_path)
-            if s3_key not in s3_keys:
-                local_path = os.path.join(
-                    tmp_root, bucket, feature_bucket_path)
-                s3_keys[s3_key] = local_path
+                    annotation = (
+                        int(row['row']),
+                        int(row['col']),
+                        bagf,
+                    )
+                    image_annotations.append(annotation)
 
-            image_data.append((bucket, feature_bucket_path, image_annotations))
+                s3_key = (bucket, feature_bucket_path)
+                if s3_key not in s3_keys:
+                    local_path = os.path.join(
+                        tmp_root, bucket, feature_bucket_path)
+                    s3_keys[s3_key] = local_path
+
+                image_data.append(
+                    (bucket, feature_bucket_path, image_annotations))
 
         # Parallel download of all feature vectors from S3.
         with self.section_profiling("Downloading feature vectors"):
-            failed_keys = download_features_parallel(s3_keys, max_workers=settings.download_max_workers)
+            failed_keys = download_features_parallel(
+                s3_keys, max_workers=settings.download_max_workers)
 
         if failed_keys:
             logger.warning(
                 f"{len(failed_keys)} feature vector download(s) failed.")
 
-        # Build ImageLabels with filesystem DataLocations.
-        labels_data = ImageLabels()
+        with self.section_profiling("Building PySpacer labels"):
 
-        for bucket, feature_bucket_path, image_annotations in image_data:
-            # Skip images whose feature file failed to download.
-            if (bucket, feature_bucket_path) in failed_keys:
-                continue
+            # Build ImageLabels with filesystem DataLocations.
+            labels_data = ImageLabels()
 
-            local_path = s3_keys[(bucket, feature_bucket_path)]
+            for bucket, feature_bucket_path, image_annotations in image_data:
+                # Skip images whose feature file failed to download.
+                if (bucket, feature_bucket_path) in failed_keys:
+                    continue
 
-            feature_loc = DataLocation(
-                storage_type='filesystem',
-                key=local_path,
+                local_path = s3_keys[(bucket, feature_bucket_path)]
+
+                feature_loc = DataLocation(
+                    storage_type='filesystem',
+                    key=local_path,
+                )
+                labels_data.add_image(feature_loc, image_annotations)
+
+            return preprocess_labels(
+                labels_data,
+                split_ratios=self.options.ref_val_ratios,
+                split_mode=SplitMode.POINTS_STRATIFIED,
             )
-            labels_data.add_image(feature_loc, image_annotations)
-
-        return preprocess_labels(
-            labels_data,
-            split_ratios=self.options.ref_val_ratios,
-            split_mode=SplitMode.POINTS_STRATIFIED,
-        )
 
     @property
     def duck_conn(self):
