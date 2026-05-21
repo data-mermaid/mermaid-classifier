@@ -13,11 +13,20 @@ so callers can sequence env-var application correctly.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+# Mirrors the MLflow registered-model name regex enforced by the
+# SageMaker MLflow registry. Validating at config load fails the job
+# cheaply (before any training work) instead of at the very end after
+# `mlflow.sklearn.log_model(registered_model_name=...)` has spent hours
+# of compute.
+_MLFLOW_MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,56}$")
 
 
 class SubsampleConfig(BaseModel):
@@ -122,6 +131,27 @@ class MLflowConfig(BaseModel):
     experiment_name: str | None = None
     model_name: str | None = None
     annotations_to_log: str | None = None
+
+    @field_validator("model_name")
+    @classmethod
+    def _model_name_matches_mlflow_regex(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _MLFLOW_MODEL_NAME_RE.fullmatch(v):
+            bad = sorted({c for c in v if not (c.isalnum() or c == "-")})
+            disallowed = (
+                f" Disallowed characters in value: {bad!r}." if bad else ""
+            )
+            raise ValueError(
+                f"model_name {v!r} is not a legal MLflow registered-model "
+                f"name. Required pattern: "
+                f"{_MLFLOW_MODEL_NAME_RE.pattern} (alphanumerics and "
+                f"hyphens only; must start and end with an alphanumeric; "
+                f"max 57 characters)."
+                f"{disallowed} "
+                f"Tip: replace underscores or dots with hyphens."
+            )
+        return v
 
 
 class TrainingRunConfig(BaseModel):

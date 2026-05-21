@@ -7,119 +7,201 @@ the 192-source production run.
 For day-to-day local iteration use `scripts/classifier_train.py`. The
 SageMaker path is for production / large runs only.
 
-## One-time setup
+## Prerequisites
 
-You need to do these once per AWS account.
+You should already have:
 
-### 1. ECR repo
+- An AWS SSO account in the MERMAID org with the `SageMaker`
+  permission set assigned to account `554812291621`.
+- Docker installed locally.
+- `uv` installed locally (`pip install uv` or via Homebrew).
 
-Create the container registry that will hold the training image:
+Everything else -- IAM roles, the ECR repository, the S3 staging
+bucket, the MLflow App -- is provisioned by IaC in the
+[mermaid-api](https://github.com/data-mermaid/mermaid-api) repo and
+already exists in the dev account.
 
-    aws ecr create-repository \
-        --repository-name mermaid-classifier-training \
-        --region us-east-1 \
-        --profile wcs
+## Concrete values you'll need
 
-### 2. IAM role for training jobs
+| What | Value |
+|---|---|
+| AWS account | `554812291621` (dev) |
+| Region | `us-east-1` |
+| ECR repo | `554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-training` |
+| Launcher IAM role | `arn:aws:iam::554812291621:role/dev-mermaid-classifier-launcher-role` |
+| Training execution role | `arn:aws:iam::554812291621:role/dev-sm-execution-role` |
+| Staging S3 bucket | `dev-datamermaid-sm-data` (runs land under `runs/<run-id>/`) |
+| MLflow tracking URI | `arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2` (look up by name if it changes -- see step 2) |
 
-Create an IAM role (e.g. `MermaidClassifierTrainerRole`) that SageMaker
-will assume during the job. Trust policy:
+## 1. AWS profile setup
 
-    {
-      "Version": "2012-10-17",
-      "Statement": [{
-        "Effect": "Allow",
-        "Principal": {"Service": "sagemaker.amazonaws.com"},
-        "Action": "sts:AssumeRole"
-      }]
-    }
+You don't run training directly as your SSO role. You log in via SSO,
+then role-chain into the launcher role, which has scoped permissions
+for ECR push/pull, SageMaker training-job submission, and S3 writes
+under the staging bucket's `runs/` prefix.
 
-Inline permissions:
+Add the following to `~/.aws/config`:
 
-- `s3:GetObject` + `s3:ListBucket` on the training-data bucket
-  (`coral-reef-training` and any others the YAML's `env` overrides).
-- `s3:GetObject` + `s3:PutObject` + `s3:ListBucket` on the staging
-  bucket you pass to `--staging-bucket` (for config upload + output).
-- `ecr:GetAuthorizationToken`, `ecr:BatchCheckLayerAvailability`,
-  `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` on `*` (image pull).
-- `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`
-  on `/aws/sagemaker/TrainingJobs*`.
-- `sagemaker-mlflow:*` on the MLflow tracking server ARN, OR the
-  equivalent IAM allow for whatever MLflow auth you use.
+```ini
+[profile wcs-sso]
+sso_start_url      = https://<your-aws-sso-portal>.awsapps.com/start
+sso_region         = us-east-1
+sso_account_id     = 554812291621
+sso_role_name      = SageMaker
+region             = us-east-1
+output             = json
 
-### 3. Build and push the image
+[profile wcs-launcher]
+source_profile     = wcs-sso
+role_arn           = arn:aws:iam::554812291621:role/dev-mermaid-classifier-launcher-role
+region             = us-east-1
+duration_seconds   = 28800
+```
 
-From `mermaid-classifier/`:
+Log in once per work session:
 
-    ACCOUNT_ID=<your-account-id>
-    REGION=us-east-1
-    IMAGE=${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/mermaid-classifier-training:latest
+```bash
+aws sso login --profile wcs-sso
+aws sts get-caller-identity --profile wcs-launcher
+```
 
-    aws ecr get-login-password --region ${REGION} --profile wcs \
-        | docker login --username AWS --password-stdin \
-            ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+The second call should return an `Arn` ending in
+`.../dev-mermaid-classifier-launcher-role/...`. Export `AWS_PROFILE`
+to avoid repeating the flag:
 
-    docker buildx build --platform linux/amd64 \
-        -t ${IMAGE} \
-        -f docker/training/Dockerfile .
+```bash
+export AWS_PROFILE=wcs-launcher
+```
 
-    docker push ${IMAGE}
+## 2. Look up the MLflow tracking URI
 
-Re-run this every time you change code. The image tag is the unit of
-versioning -- promote a build by tagging it (`:prod`, `:2026-05-15`,
-etc.) and pushing.
+MERMAID's MLflow is deployed as a SageMaker MLflow App. Discover the
+ARN once and reuse it:
 
-### 4. Verify locally first
+```bash
+aws sagemaker list-mlflow-apps --region us-east-1 \
+    --query 'MlflowAppSummaries[].[Name,Arn]' --output table
+```
 
-Before paying SageMaker:
+You're looking for the one named `pyspacer`. Copy its `Arn` -- you'll
+pass it as `--mlflow-tracking-uri`.
 
-    bash docker/training/local_smoke.sh
+## 3. Build and push the image
+
+From the `mermaid-classifier/` repo root:
+
+```bash
+ACCOUNT=554812291621
+REGION=us-east-1
+IMAGE=${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/mermaid-classifier-training:latest
+
+aws ecr get-login-password --region ${REGION} \
+    | docker login --username AWS --password-stdin ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
+
+docker buildx build --platform linux/amd64 -t ${IMAGE} -f docker/training/Dockerfile .
+docker push ${IMAGE}
+```
+
+Re-run this every time you change code that affects the container
+(Dockerfile, `mermaid_classifier/`, `scripts/sagemaker_train_entrypoint.py`,
+`docker/training/entrypoint.sh`, or `pyproject.toml` / `uv.lock`). The
+image tag is the unit of versioning -- promote a build by tagging it
+(`:prod`, `:2026-05-15`, etc.) and pushing.
+
+### Optional local smoke
+
+```bash
+bash docker/training/local_smoke.sh
+```
 
 This builds the image, runs the example config with `-v` mounts, and
-asserts that the container reaches the `build_options` stage. Without
-real AWS creds it cannot complete training, but it catches packaging
-and entrypoint mistakes.
+asserts the container reaches the `build_options` stage. Useful for
+catching packaging and entrypoint mistakes before pushing.
 
-## Launching a training run
+**On Apple Silicon (ARM) Macs**, the smoke run goes through Docker
+Desktop's qemu emulation and often segfaults inside torch/pyarrow on
+import. If you see a `qemu: uncaught target signal 11` after stage
+`build_options ENTER`, that's emulation noise -- the image is fine and
+will run cleanly on the native x86 SageMaker instance. Treat reaching
+`[stage:build_options] ENTER` as success.
 
-### 5. Author a config dir
+## 4. Author a config dir
 
 Copy `sagemaker/configs/example/` to a new name:
 
-    cp -r sagemaker/configs/example sagemaker/configs/my-run
+```bash
+cp -r sagemaker/configs/example sagemaker/configs/my-run
+```
 
-Edit `training_config.yaml` to point at your sources/rollups/included-labels
-CSVs (paths are resolved as siblings of the YAML, so just `sources.csv`
-not `/abs/path/sources.csv`). Replace the placeholder CSVs with the
-real ones for your experiment.
+Edit `training_config.yaml` to point at your sources / rollups /
+included-labels CSVs (paths are resolved as siblings of the YAML, so
+just `sources.csv`, not `/abs/path/sources.csv`). Replace the
+placeholder CSVs with the real ones for your experiment.
 
-### 6. SageMaker smoke run
+## 5. Dry-run the launcher
 
-Before the production run, do a 1-source / 1-epoch run on the
-cheapest instance to prove the whole pipeline works end-to-end:
+Before paying SageMaker, validate the config and print the planned
+Estimator without uploading or submitting:
 
-    python scripts/launch_training_sagemaker.py \
-        --config-dir sagemaker/configs/example \
-        --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:ACCT:mlflow-app/APP \
-        --role-arn arn:aws:iam::ACCT:role/MermaidClassifierTrainerRole \
-        --ecr-image-uri ACCT.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-training:latest \
-        --staging-bucket my-staging-bucket \
-        --instance-type ml.m5.2xlarge
+```bash
+export EXEC_ROLE=arn:aws:iam::554812291621:role/dev-sm-execution-role
+export STAGING=dev-datamermaid-sm-data
+export MLFLOW_ARN=arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2
+
+uv run --extra pyspacer --extra sagemaker python scripts/launch_training_sagemaker.py \
+    --config-dir sagemaker/configs/my-run \
+    --role-arn ${EXEC_ROLE} \
+    --ecr-image-uri ${IMAGE} \
+    --staging-bucket ${STAGING} \
+    --mlflow-tracking-uri ${MLFLOW_ARN} \
+    --instance-type ml.m5.2xlarge \
+    --dry-run
+```
+
+Expected: a `DRY RUN` block listing the planned config and exiting
+cleanly. SDK regex-deprecation warnings from `sagemaker_core` /
+`smdebug_rulesconfig` are harmless.
+
+## 6. SageMaker smoke run
+
+Before the production run, do a 1-source / 1-epoch run on the cheapest
+instance to prove the whole pipeline works end-to-end. Drop
+`--dry-run`:
+
+```bash
+uv run --extra pyspacer --extra sagemaker python scripts/launch_training_sagemaker.py \
+    --config-dir sagemaker/configs/example \
+    --role-arn ${EXEC_ROLE} \
+    --ecr-image-uri ${IMAGE} \
+    --staging-bucket ${STAGING} \
+    --mlflow-tracking-uri ${MLFLOW_ARN} \
+    --instance-type ml.m5.2xlarge
+```
 
 Expect: ~10-20 minutes wall-clock, ~$0.15, an MLflow run with metrics
 + artifacts, CloudWatch logs streaming live to your terminal.
 
-### 7. Production run
+> The launcher uses `estimator.fit(wait=True, logs="All")` to tail
+> CloudWatch logs to your terminal. The launcher role does not
+> currently include CloudWatch Logs read permissions, so this step
+> fails with `AccessDeniedException` on `logs:DescribeLogStreams`
+> *after the training job has already been submitted*. The job itself
+> is unaffected -- monitor it via the CloudWatch URL the launcher
+> printed, or via `aws logs tail` from an admin profile (see step 8).
+
+## 7. Production run
 
 For the full 192-source run, the defaults are tuned to be a sensible
 starting point:
 
-    python scripts/launch_training_sagemaker.py \
-        --config-dir sagemaker/configs/my-run \
-        --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:ACCT:mlflow-app/APP \
-        --role-arn arn:aws:iam::ACCT:role/MermaidClassifierTrainerRole \
-        --ecr-image-uri ACCT.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-training:latest \
-        --staging-bucket my-staging-bucket
+```bash
+uv run --extra pyspacer --extra sagemaker python scripts/launch_training_sagemaker.py \
+    --config-dir sagemaker/configs/my-run \
+    --role-arn ${EXEC_ROLE} \
+    --ecr-image-uri ${IMAGE} \
+    --staging-bucket ${STAGING} \
+    --mlflow-tracking-uri ${MLFLOW_ARN}
+```
 
 This uses:
 
@@ -129,8 +211,32 @@ This uses:
 - 200 GB volume.
 - 24h max runtime (hard kill).
 
-`--dry-run` prints the planned Estimator config and exits without
-submitting.
+## 8. Monitor a running job
+
+The launcher prints a CloudWatch URL and run ID when it submits.
+After that, three options:
+
+**Browser** -- open the printed CloudWatch URL.
+
+**`aws logs tail`** -- requires CloudWatch Logs read permissions
+(your SSO `SageMaker` permission set has them via
+`AmazonSageMakerFullAccess`; the launcher role currently does not):
+
+```bash
+aws logs tail /aws/sagemaker/TrainingJobs \
+    --profile wcs-sso --region us-east-1 \
+    --log-stream-name-prefix <run-id>/ \
+    --follow
+```
+
+**Status only**:
+
+```bash
+aws sagemaker describe-training-job \
+    --training-job-name <run-id> \
+    --query '[TrainingJobStatus,SecondaryStatus,FailureReason]' \
+    --output table
+```
 
 ## Tuning for cost vs speed
 
@@ -160,20 +266,28 @@ Use only for runs you're OK retrying.
    `s3://<staging-bucket>/runs/<run-id>/config/`, so you can re-run
    the smoke test against that exact bundle:
 
-       aws s3 sync s3://<staging-bucket>/runs/<run-id>/config/ /tmp/repro/
-       SAGEMAKER_CONFIG_DIR=/tmp/repro python scripts/sagemaker_train_entrypoint.py
+   ```bash
+   aws s3 sync s3://${STAGING}/runs/<run-id>/config/ /tmp/repro/
+   SAGEMAKER_CONFIG_DIR=/tmp/repro uv run --extra pyspacer python scripts/sagemaker_train_entrypoint.py
+   ```
 
    (This skips Docker; runs the entrypoint directly against your
    local pyspacer install.)
 
 ## MLflow
 
-The container needs to reach the MLflow tracking server. The server
-URI flows through the launcher's `--mlflow-tracking-uri` flag into the
+The container needs to reach the MLflow tracking server. The URI
+flows through the launcher's `--mlflow-tracking-uri` flag into the
 `MLFLOW_TRACKING_SERVER` env var on the Estimator. The training run
 appears under whatever `experiment_name` is set in the YAML.
 
-If MLflow auth is via the SageMaker IAM integration (server URI is an
-`arn:aws:sagemaker:...:mlflow-app/...`), the training role needs
-`sagemaker-mlflow:*` on that ARN. Without it the runner will hang or
-fail at the first `mlflow.log_param` call.
+For SageMaker-managed MLflow Apps (ARN of the form
+`arn:aws:sagemaker:...:mlflow-app/...`), the training execution role
+needs `sagemaker-mlflow:*` -- already attached to
+`dev-sm-execution-role` via the IaC.
+
+Artifact uploads (`mlflow.log_artifact(...)`) land in the MLflow
+App's backing S3 bucket; the execution role's S3 grants cover this.
+If a run logs metrics/params successfully but fails on
+`log_artifact`, the artifact bucket isn't covered by the execution
+role's S3 policy -- escalate to the IaC owner.

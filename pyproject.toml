@@ -21,6 +21,9 @@ pyspacer = [
     "duckdb",
     "matplotlib",
     "mlflow>=3",
+    # Registers the 'arn:' URI scheme handler so MLflow can talk to a
+    # SageMaker-managed MLflow App or Tracking Server via its ARN.
+    "sagemaker-mlflow",
     "numpy",
     # MLflow requires pandas, so we might as well use it when convenient.
     "pandas",
@@ -69,3 +72,6 @@ explicit = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[dependency-groups]
+sagemaker = []

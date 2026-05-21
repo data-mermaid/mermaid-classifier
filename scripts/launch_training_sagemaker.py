@@ -226,9 +226,14 @@ def main(argv: list[str] | None = None) -> None:
     }
 
     log.info("Submitting TrainingJob...")
-    estimator.fit(inputs=inputs, wait=True, logs="All",
+    # logs="None" disables local CloudWatch log streaming. The launcher
+    # IAM role doesn't have logs:DescribeLogStreams; tailing would crash
+    # the launcher even though the job itself runs fine. wait=True still
+    # blocks on completion via describe-training-job (which is permitted).
+    estimator.fit(inputs=inputs, wait=True, logs="None",
                   job_name=run_id)
     log.info("Job %s reached terminal state.", run_id)
+    log.info("CloudWatch logs: %s", cw_url)
 
 
 if __name__ == "__main__":

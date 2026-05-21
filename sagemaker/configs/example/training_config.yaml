@@ -54,6 +54,6 @@ mlflow:
 env:
   MLFLOW_TRACKING_SERVER: file:./mlruns
   WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
-  CORALNET_TRAIN_DATA_BUCKET: coral-reef-training
-  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
+  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
+  MERMAID_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

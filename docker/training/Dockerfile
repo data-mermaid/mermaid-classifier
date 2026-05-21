@@ -5,7 +5,7 @@
 #
 # See docs/training_at_scale.md for the full build/push runbook.
 
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 # Build deps for pyarrow, duckdb, and the rest of the pyspacer chain.
 RUN apt-get update && apt-get install -y --no-install-recommends \

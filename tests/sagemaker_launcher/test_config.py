@@ -224,6 +224,59 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertEqual(training.hidden_layer_sizes, (200, 100))
 
 
+class MLflowModelNameTest(unittest.TestCase):
+    """The MLflow registered-model regex must be enforced at load time
+    so that a typo in `mlflow.model_name` fails the SageMaker job before
+    training starts, not at the registration step after hours of compute.
+    """
+
+    def _load_with_model_name(self, name: str) -> TrainingRunConfig:
+        yaml_text = MINIMAL_YAML.replace(
+            "model_name: TestModel", f"model_name: {name}")
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), yaml_text)
+            return TrainingRunConfig.from_yaml_path(path)
+
+    def test_hyphenated_name_accepted(self):
+        config = self._load_with_model_name("top108-192best-v1")
+        self.assertEqual(config.mlflow.model_name, "top108-192best-v1")
+
+    def test_underscore_rejected(self):
+        with self.assertRaisesRegex(ValidationError, r"'_'"):
+            self._load_with_model_name("top108_192best_v1")
+
+    def test_dot_rejected(self):
+        with self.assertRaisesRegex(ValidationError, r"'\.'"):
+            self._load_with_model_name("model.v1")
+
+    def test_leading_hyphen_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._load_with_model_name("-leading")
+
+    def test_trailing_hyphen_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._load_with_model_name("trailing-")
+
+    def test_over_57_chars_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._load_with_model_name("a" * 58)
+
+    def test_exactly_57_chars_accepted(self):
+        config = self._load_with_model_name("a" * 57)
+        self.assertEqual(config.mlflow.model_name, "a" * 57)
+
+    def test_none_accepted(self):
+        # Omitting model_name lets MermaidTrainer auto-generate a safe one
+        # via _get_model_name(); the validator must not reject None.
+        import yaml as _yaml
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["mlflow"].pop("model_name")
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), _yaml.dump(base))
+            config = TrainingRunConfig.from_yaml_path(path)
+        self.assertIsNone(config.mlflow.model_name)
+
+
 class ExampleYamlTest(unittest.TestCase):
 
     def test_committed_example_loads(self):
