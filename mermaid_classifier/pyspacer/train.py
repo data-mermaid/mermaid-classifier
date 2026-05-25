@@ -23,12 +23,15 @@ except ImportError as err:
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
+from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
+from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
 from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
+from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
     BenthicAttributeLibrary,
@@ -1334,9 +1337,17 @@ class TrainingRunner:
         model_loc = DataLocation('memory', key='classifier.pkl')
         valresult_loc = DataLocation('memory', key='valresult.json')
 
+        batch_size = int(settings.spacer_batch_size)
+        logger.info(f"Batch size: {batch_size}")
+
+        trainer = MermaidTrainer(
+            batch_size=batch_size,
+            on_epoch_end=self._on_epoch_end,
+        )
+
         train_msg = TrainClassifierMsg(
             job_token=f'experiment_run_{run_name}',
-            trainer_name='minibatch',
+            trainer=trainer,
             nbr_epochs=self.training_options.epochs,
             clf_type='MLP',
             labels=self.dataset.labels,
@@ -1361,6 +1372,10 @@ class TrainingRunner:
             f"Accuracy progression during training epochs: {ref_accs_str}")
 
         return return_msg, model_loc, valresult_loc
+
+    def _on_epoch_end(self, metrics: dict):
+        """Called after each training epoch. Override for logging."""
+        pass
 
     def log_dataset_artifacts(self):
         """
@@ -1411,9 +1426,15 @@ class MLflowTrainingRunner(TrainingRunner):
             run_name = f'{model_name}-{self.current_time_str()}'
 
         logger.info(f"Experiment: {self.mlflow_options.experiment_name}")
+        mlflow.enable_system_metrics_logging()
         mlflow.set_experiment(self.mlflow_options.experiment_name)
 
         with mlflow.start_run(run_name=run_name):
+
+            # Add swap monitoring to MLflow's system metrics polling loop.
+            run_id = mlflow.active_run().info.run_id
+            if run_id in run_id_to_system_metrics_monitor:
+                run_id_to_system_metrics_monitor[run_id].monitors.append(SwapMonitor())
 
             training_options_to_log = dict(epochs=self.training_options.epochs)
 
@@ -1473,6 +1494,22 @@ class MLflowTrainingRunner(TrainingRunner):
         logger.info(f"Model ID: {model_info.model_id}")
 
         return return_msg, model_loc
+
+    def _on_epoch_end(self, metrics: dict):
+        """Log per-epoch metrics to MLflow.
+
+        Logs step-based metrics that appear as live charts in the MLflow UI
+        during training.
+        """
+        step = metrics["epoch"]
+        mlflow.log_metric(
+            "epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
+        if metrics["training_loss"] is not None:
+            mlflow.log_metric(
+                "epoch/training_loss", metrics["training_loss"], step=step)
+        mlflow.log_metric(
+            "epoch/cumulative_seconds",
+            metrics["cumulative_seconds"], step=step)
 
     def _get_model_name(self):
         """

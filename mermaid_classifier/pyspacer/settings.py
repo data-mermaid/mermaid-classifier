@@ -5,19 +5,31 @@ import psutil
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def automatic_ref_max_size() -> int:
+def automatic_batch_size() -> int:
     """
-    Calculate a rough maximum reference-set size to use for training, based on
-    the amount of memory on the system.
+    Calculate a rough batch size for training, based on the amount of
+    memory on the system.
     This calculation is based on training test-runs that used pyspacer's
     EfficientNetExtractor.
+
+    This value is the default for SPACER_BATCH_SIZE: the batch size for
+    training partial_fit calls and calibration. Controls memory usage
+    during every training epoch and during calibration score computation.
+
+    Peak memory during training is dominated by one batch of feature
+    vectors + sklearn internal buffers (~60% of batch).
     """
     total_ram_bytes = psutil.virtual_memory().total
-    # Presume 2GB are needed for other stuff on the system besides training.
-    rough_available_ram_bytes = total_ram_bytes - 2e9
-    # Testing showed that on 8GB (6GB + 2GB) RAM, ref set size of 100000
-    # worked, but 200000 crashed.
-    ref_size = int(rough_available_ram_bytes * (100000 / (6e9)))
+
+    # Reserve 3GB for OS, Python runtime, DuckDB tables, data prep
+    # intermediates (ImageLabels, train_test_split copies), and heap
+    # fragmentation. 
+    base_overhead_bytes = 3e9
+    rough_available_ram_bytes = max(total_ram_bytes - base_overhead_bytes, 0)
+
+    # Calibrated from training tests: ref_size of 50000 fits in ~3GB
+    # of available RAM. Scale linearly with detected RAM.
+    ref_size = int(rough_available_ram_bytes * (50000 / 3e9))
 
     if ref_size < 5000:
         # Don't go lower than the pyspacer default.
@@ -71,7 +83,7 @@ class Settings(BaseSettings):
     spacer_extractors_cache_dir: str | None = None
     # Yes, this is str. After it gets through the settings machinery,
     # pyspacer will convert to int.
-    spacer_ref_set_max_size: str | None = str(automatic_ref_max_size())
+    spacer_batch_size: str | None = str(automatic_batch_size())
     mlflow_http_request_max_retries: str | None = None
     mlflow_default_experiment_name: str | None = None
 
@@ -93,17 +105,6 @@ def set_env_vars_for_packages():
         # were downloaded from S3 or from a URL.
         # This is required if loading weights from such a source.
         spacer_extractors_cache_dir='SPACER_EXTRACTORS_CACHE_DIR',
-        # This pyspacer training setting is:
-        # - A cap on the reference set size, as a number of point-features
-        # - The size of batches used during training
-        # Raising this can better accommodate rare classes in large training
-        # runs, and can improve the trainer's ability to calibrate between
-        # epochs.
-        # However, this setting is also tied to training's memory usage,
-        # so monitor memory usage when increasing this setting. If the system
-        # becomes unresponsive during pyspacer training, definitely try
-        # lowering this.
-        spacer_ref_set_max_size='SPACER_TRAINING_BATCH_LABEL_COUNT',
         aws_region='SPACER_AWS_REGION',
         # If True, AWS is accessed without any credentials, which can
         # simplify setup while still allowing access to public S3 files.
@@ -127,3 +128,11 @@ def set_env_vars_for_packages():
             # Ensure the value's set in the OS environment
             # so that spacer or MLflow sees it.
             os.environ[env_var_name] = var_value
+
+    # Effectively disable PySpacer's ref set size cap.
+    # PySpacer's split_labels() caps the ref set via
+    # config.TRAINING_BATCH_LABEL_COUNT. With batch calibration in
+    # trainer.py, the ref set no longer needs to fit in memory at once,
+    # so we set this to a very large value to let ref_val_ratios alone
+    # determine the ref set size.
+    os.environ['SPACER_TRAINING_BATCH_LABEL_COUNT'] = str(2**31 - 1)

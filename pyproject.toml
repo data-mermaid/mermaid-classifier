@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mermaid-classifier"
 version = "0.1a1"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "boto3",
 ]
@@ -26,7 +26,7 @@ pyspacer = [
     "pyarrow",
     # The core API of pyspacer is still ever-changing, and classifier
     # compatibility can be tricky too, so specifying version is important.
-    "pyspacer==0.13.0",
+    "pyspacer==0.14.0",
     # python-dotenv by itself isn't explicit about what variable
     # names it accepts.
     # python-decouple and pydantic-settings are more explicit.
