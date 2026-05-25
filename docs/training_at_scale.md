@@ -238,6 +238,39 @@ aws sagemaker describe-training-job \
     --output table
 ```
 
+## 9. Generate a report locally from a SageMaker run
+
+`scripts/generate_report.py` produces a self-contained HTML report from
+any MLflow run. To point it at the SageMaker MLflow App (rather than
+the default local `sqlite:///mlflow.db` in `.env`), pass the App ARN
+via `--mlflow-tracking-uri`. The same flag exists on
+`scripts/evaluate_model.py`.
+
+```bash
+aws sso login --profile wcs-sso
+export AWS_PROFILE=wcs-launcher
+aws sts get-caller-identity   # confirm role-chained identity
+
+# (Re)discover the ARN if needed:
+aws sagemaker list-mlflow-apps --region us-east-1 \
+    --query 'MlflowAppSummaries[].[Name,Arn]' --output table
+
+cd mermaid-classifier
+uv run python scripts/generate_report.py \
+    --run-id <mlflow-run-id> \
+    --mlflow-tracking-uri ${MLFLOW_ARN} \
+    --output report_<run-id-prefix>.html
+```
+
+The launcher role (`dev-mermaid-classifier-launcher-role`) already
+carries the required `sagemaker-mlflow:*` grant on the App ARN, so the
+same profile used to launch training works for reading runs back.
+
+If you see `No module named sagemaker_mlflow`, run `uv sync` to install
+the plugin (it's already in `uv.lock` under the `pyspacer` extra). If
+you see `AccessDeniedException` on `sagemaker-mlflow:CallMlflowApi`,
+your active profile is not the launcher role.
+
 ## Tuning for cost vs speed
 
 | Instance | vCPU | RAM | $/hr | When to use |
