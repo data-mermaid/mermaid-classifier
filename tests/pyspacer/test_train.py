@@ -5,6 +5,8 @@ import unittest
 from unittest import mock
 
 import pandas as pd
+from spacer.data_classes import DataLocation, ImageLabels
+from spacer.messages import TrainingTaskLabels
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
 from mermaid_classifier.pyspacer.settings import settings
@@ -168,8 +170,16 @@ class ReadCoralNetDataTest(BaseTrainTest):
                 mock.patch.object(
                     CoralNetMermaidMapping, '_download_mapping',
                 ) as mock_download_mapping,
+                # read_coralnet_data uses S3FileSystem.exists to skip
+                # sources whose annotations.csv isn't in S3. The test
+                # serves its CSV from a local tempfile, so short-circuit
+                # that check.
+                mock.patch(
+                    'mermaid_classifier.pyspacer.train.S3FileSystem',
+                ) as mock_s3fs_cls,
             ):
                 mock_download_mapping.return_value = mapping
+                mock_s3fs_cls.return_value.exists.return_value = True
 
                 dataset.read_coralnet_data()
 
@@ -443,3 +453,73 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
         self.assertIn(
             "You can configure the tolerance for missing feature vectors",
             message)
+
+
+class AddTrainingSetNamesTest(BaseTrainTest):
+    """
+    add_training_set_names() tags each annotation row with its train/ref/val
+    bucket via a LEFT OUTER JOIN. The labels side uses filesystem-backed
+    feature_locs (post the pre-download speedup), so the join keys must be
+    recovered from feature_loc_to_s3_key -- otherwise every row ends up with
+    training_set NULL and the dataset summary reports the entire run as
+    "dropped during stratification".
+    """
+
+    def test_join_populates_training_set(self):
+        dataset = NoInitDataset()
+        dataset.feature_loc_to_s3_key = {}
+
+        # Annotations table mirrors what read_coralnet_data produces:
+        # S3-style bucket + key, integer row/col.
+        annotations_df = pd.DataFrame({
+            'bucket': ['cn-data'] * 4,
+            'feature_vector': (
+                ['s12/i12345.featurevector'] * 2
+                + ['s12/i67890.featurevector'] * 2),
+            'row': [100, 200, 300, 400],
+            'col': [10, 20, 30, 40],
+            'site': [Sites.CORALNET.value] * 4,
+            'image_id': ['12345', '12345', '67890', '67890'],
+            'project_id': ['12'] * 4,
+        })
+        dataset.duck_conn.execute(
+            "CREATE TABLE annotations AS SELECT * FROM annotations_df"
+        )
+
+        # The labels side uses filesystem storage with local cache paths --
+        # the bucket_name / key on the DataLocation no longer line up with
+        # what's in the annotations table, so the join must reach through
+        # feature_loc_to_s3_key.
+        loc1 = DataLocation(
+            storage_type='filesystem',
+            key='/tmp/cache/cn-data/s12/i12345.featurevector',
+        )
+        loc2 = DataLocation(
+            storage_type='filesystem',
+            key='/tmp/cache/cn-data/s12/i67890.featurevector',
+        )
+        dataset.feature_loc_to_s3_key[loc1] = (
+            'cn-data', 's12/i12345.featurevector')
+        dataset.feature_loc_to_s3_key[loc2] = (
+            'cn-data', 's12/i67890.featurevector')
+
+        train = ImageLabels()
+        train.add_image(loc1, [(100, 10, 'BA1'), (200, 20, 'BA2')])
+        ref = ImageLabels()
+        ref.add_image(loc2, [(300, 30, 'BA1')])
+        val = ImageLabels()
+        val.add_image(loc2, [(400, 40, 'BA2')])
+        dataset.labels = TrainingTaskLabels(train=train, ref=ref, val=val)
+
+        dataset.add_training_set_names()
+
+        result = sorted(dataset.duck_conn.execute(
+            "SELECT feature_vector, row, col, training_set"
+            " FROM annotations"
+        ).fetchall())
+        self.assertEqual(result, [
+            ('s12/i12345.featurevector', 100, 10, 'train'),
+            ('s12/i12345.featurevector', 200, 20, 'train'),
+            ('s12/i67890.featurevector', 300, 30, 'ref'),
+            ('s12/i67890.featurevector', 400, 40, 'val'),
+        ])
