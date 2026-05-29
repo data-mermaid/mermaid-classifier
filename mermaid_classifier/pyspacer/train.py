@@ -37,10 +37,10 @@ from spacer.task_utils import preprocess_labels, SplitMode
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
-    BenthicAttributeLibrary,
     combine_ba_gf,
     CoralNetMermaidMapping,
-    GrowthFormLibrary,
+    get_benthic_attribute_library,
+    get_growth_form_library,
     split_ba_gf,
 )
 from mermaid_classifier.common.csv_utils import ColumnSpec, CsvSpec
@@ -60,10 +60,6 @@ from mermaid_classifier.pyspacer.utils import (
 
 
 logger = logging_config_for_script('train')
-
-
-ba_library = BenthicAttributeLibrary()
-gf_library = GrowthFormLibrary()
 
 
 class Sites(enum.Enum):
@@ -509,6 +505,11 @@ class TrainingDataset:
         self.profiled_sections = []
         self._feature_temp_dir = tempfile.TemporaryDirectory(
             prefix='mermaid_features_')
+        # Maps a downloaded feature vector's local path (used as the key of
+        # the filesystem DataLocations in self.labels) back to its original
+        # (bucket, feature_vector) S3 location. add_training_set_names() needs
+        # this to match the labels to the annotations table.
+        self._feature_path_to_s3_location: dict[str, tuple[str, str]] = {}
 
 
 
@@ -1025,6 +1026,9 @@ class TrainingDataset:
                     local_path = os.path.join(
                         tmp_root, bucket, feature_bucket_path)
                     s3_keys[s3_key] = local_path
+                    # Remember how to get back from the local download path
+                    # to the original S3 location, for add_training_set_names.
+                    self._feature_path_to_s3_location[local_path] = s3_key
 
                 image_data.append(
                     (bucket, feature_bucket_path, image_annotations))
@@ -1186,9 +1190,15 @@ class TrainingDataset:
                 for feature_loc, row, col in (
                     self.generate_training_set_annotations(training_set)
                 ):
+                    # feature_loc is a filesystem DataLocation whose key is a
+                    # local download path; map it back to the original S3
+                    # (bucket, feature_vector) so it matches the annotations
+                    # table's join columns.
+                    bucket, feature_vector = (
+                        self._feature_path_to_s3_location[feature_loc.key])
                     tup = (
-                        feature_loc.bucket_name,
-                        feature_loc.key,
+                        bucket,
+                        feature_vector,
                         row,
                         col,
                         set_name,
@@ -1252,7 +1262,7 @@ class TrainingDataset:
             duck_table_name='ba_counts',
             base_column_name='benthic_attribute_id',
             new_column_name='benthic_attribute_name',
-            base_to_new_func=ba_library.id_to_name,
+            base_to_new_func=get_benthic_attribute_library().id_to_name,
         )
         # Sort by total annotation count, and reorder columns
         # while we're at it.
@@ -1291,7 +1301,7 @@ class TrainingDataset:
             duck_table_name='bagf_counts',
             base_column_name='benthic_attribute_id',
             new_column_name='benthic_attribute_name',
-            base_to_new_func=ba_library.id_to_name,
+            base_to_new_func=get_benthic_attribute_library().id_to_name,
         )
         # Add GF names for readability.
         duckdb_add_column(
@@ -1299,7 +1309,7 @@ class TrainingDataset:
             duck_table_name='bagf_counts',
             base_column_name='growth_form_id',
             new_column_name='growth_form_name',
-            base_to_new_func=gf_library.id_to_name,
+            base_to_new_func=get_growth_form_library().id_to_name,
         )
         # Sort by annotation count, and reorder columns
         # while we're at it.
@@ -1581,7 +1591,8 @@ class MLflowTrainingRunner(TrainingRunner):
             )
 
             per_label_prf, overall_metrics = precision_recall_f1(
-                val_results, self.format_metric, ba_library, gf_library)
+                val_results, self.format_metric,
+                get_benthic_attribute_library(), get_growth_form_library())
             overall_metrics['accuracy'] = self.format_metric(return_msg.acc)
 
             # Log overall metrics with log_metric(). Note that this method
@@ -1787,7 +1798,8 @@ class MLflowTrainingRunner(TrainingRunner):
         self, val_results: ValResults, normalize: bool, filestem: str
     ):
         with make_confusion_matrix(
-            val_results, normalize, ba_library, gf_library,
+            val_results, normalize,
+            get_benthic_attribute_library(), get_growth_form_library(),
         ) as (df, fig):
 
             self.log_dataframe(df, filestem)
