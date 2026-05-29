@@ -1,0 +1,53 @@
+# Training run: all 1,370 CoralNet sources currently in
+# 2605-coralnet-public-sources (extracted across this session's batches:
+# 190 pre-existing + 552 from batch 1 + 619 from batch 2). Uses the
+# same top-108 benthic-attribute hierarchy as coralnet_top108_best/.
+#
+# included_labels.csv and rollups.csv are verbatim copies from
+# sagemaker/configs/coralnet_top108_best/ (generated 2026-05-08 by
+# scripts/generate_training_config.py). Regenerate from the latest
+# MERMAID API if the taxonomy has drifted.
+#
+# Feature-completeness note: 8 of the 1,370 sources are partial
+# (~1.86% of expected featurevectors missing across the bucket),
+# all due to upstream data issues that retry cannot fix.
+# TRAINING_INPUTS_PERCENT_MISSING_ALLOWED="5" tolerates this gap.
+
+dataset:
+  include_mermaid: false
+  coralnet_sources_csv: sources.csv
+  drop_growthforms: false
+  label_rollup_spec_csv: rollups.csv
+  included_labels_csv: included_labels.csv
+  ref_val_ratios: [0.1, 0.1]
+  # Class-balanced subsampling. Linear scale from 192-source config:
+  # 5,400 annotations/source x 1,370 sources = ~7.4M.
+  subsample:
+    strategy: balanced
+    total_annotations: 7400000
+    min_per_class: 200
+  weighting:
+    enabled: true
+    strategy: effective_number
+    alpha: 0.5
+    weight_ratio_cap: 5000.0
+
+training:
+  epochs: 40
+  hidden_layer_sizes: [500, 300, 100]
+  learning_rate_init: 0.0001
+  early_stopping_patience: 3
+  random_state: 0
+
+mlflow:
+  experiment_name: coralnet-top108-full-1370sources
+  model_name: top108-full-v1
+
+env:
+  # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
+  # do not override here.
+  WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
+  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
+  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
+  TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "5"
+  MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

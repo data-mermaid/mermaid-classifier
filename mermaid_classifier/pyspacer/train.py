@@ -1018,11 +1018,18 @@ class TrainingDataset:
         # only the first ~20k rows and crashes when later rows violate the
         # inferred type. Read everything as text; columns we actually use
         # (Row, Column, Image ID, Label ID) are cast explicitly downstream.
+        #
+        # quote='"', escape='"': force standard CSV quote handling. The
+        # auto-detector samples the first ~20k rows and may infer
+        # quote=None if those rows don't happen to contain quoted fields,
+        # then choke when later rows DO use quoting (e.g. site metadata
+        # like "Sheltered fringing reef, steep" with an embedded comma).
         self.duck_conn.execute(
             f"CREATE TABLE annotations AS"
             f" SELECT *"
             f" FROM read_csv({annotations_uri_list}, filename = true,"
-            f" union_by_name = true, all_varchar = true)"
+            f" union_by_name = true, all_varchar = true,"
+            f" quote = '\"', escape = '\"')"
         )
 
         # 1) Normalize the column names with the open data bucket parquet
