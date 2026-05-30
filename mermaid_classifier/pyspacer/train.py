@@ -2,12 +2,14 @@
 Train a classifier using feature vectors and annotations
 provided on S3.
 """
+import concurrent.futures
 from contextlib import contextmanager
 import dataclasses
 from datetime import datetime, timedelta
 import enum
 from io import StringIO
 import math
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -25,6 +27,7 @@ import psutil
 from s3fs.core import S3FileSystem
 from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
+from spacer.aws import get_s3_resource
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
@@ -34,10 +37,10 @@ from spacer.task_utils import preprocess_labels, SplitMode
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
-    BenthicAttributeLibrary,
     combine_ba_gf,
     CoralNetMermaidMapping,
-    GrowthFormLibrary,
+    get_benthic_attribute_library,
+    get_growth_form_library,
     split_ba_gf,
 )
 from mermaid_classifier.common.csv_utils import ColumnSpec, CsvSpec
@@ -57,10 +60,6 @@ from mermaid_classifier.pyspacer.utils import (
 
 
 logger = logging_config_for_script('train')
-
-
-ba_library = BenthicAttributeLibrary()
-gf_library = GrowthFormLibrary()
 
 
 class Sites(enum.Enum):
@@ -100,6 +99,69 @@ def section_profiling(profiled_sections: list[dict], section_name: str):
         f" Elapsed time = {section_profile['hms']},"
         f" Memory usage at end = {section_profile['memory_usage_at_end']}"
     )
+
+
+def download_features_parallel(
+    s3_keys: dict[tuple[str, str], str],
+    max_workers: int = 50,
+) -> set[tuple[str, str]]:
+    """
+    Download feature vectors from S3 in parallel.
+
+    Args:
+        s3_keys: Mapping of (bucket, key) → local_path for each file
+            to download.
+        max_workers: Number of concurrent download threads.
+
+    Returns:
+        Set of (bucket, key) tuples that failed to download.
+    """
+    total = len(s3_keys)
+    if total == 0:
+        return set()
+
+    logger.info(
+        f"Downloading {total} feature vectors"
+        f" with {max_workers} workers...")
+
+    # Pre-create all unique parent directories.
+    unique_dirs = {os.path.dirname(local_path)
+                   for local_path in s3_keys.values()}
+    for d in unique_dirs:
+        os.makedirs(d, exist_ok=True)
+
+    failed: set[tuple[str, str]] = set()
+    succeeded = 0
+
+    def _download(item):
+        (bucket, key), local_path = item
+        s3 = get_s3_resource()
+        s3.Object(bucket, key).download_file(local_path)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_workers
+    ) as executor:
+        futures = {
+            executor.submit(_download, item): item
+            for item in s3_keys.items()
+        }
+        for i, future in enumerate(
+            concurrent.futures.as_completed(futures), 1
+        ):
+            (bucket, key), local_path = futures[future]
+            try:
+                future.result()
+                succeeded += 1
+            except Exception as e:
+                failed.add((bucket, key))
+                logger.warning(
+                    f"Failed to download s3://{bucket}/{key}: {e}")
+            if i % 1000 == 0 or i == total:
+                logger.info(
+                    f"Download progress: {i}/{total}"
+                    f" ({succeeded} ok, {len(failed)} failed)")
+
+    return failed
 
 
 class LabelFilter(CsvSpec):
@@ -441,6 +503,15 @@ class TrainingDataset:
         self.options = options
         self.artifacts = Artifacts()
         self.profiled_sections = []
+        self._feature_temp_dir = tempfile.TemporaryDirectory(
+            prefix='mermaid_features_')
+        # Maps a downloaded feature vector's local path (used as the key of
+        # the filesystem DataLocations in self.labels) back to its original
+        # (bucket, feature_vector) S3 location. add_training_set_names() needs
+        # this to match the labels to the annotations table.
+        self._feature_path_to_s3_location: dict[str, tuple[str, str]] = {}
+
+
 
         if options.coralnet_sources_csv:
             with open(options.coralnet_sources_csv) as csv_f:
@@ -598,11 +669,16 @@ class TrainingDataset:
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
-        with self.section_profiling("Prep annotations for PySpacer"):
-            self.labels = self.prep_annotations_for_pyspacer()
-            self.add_training_set_names()
+        self.labels = self.prep_annotations_for_pyspacer()
+        self.add_training_set_names()
 
         self.set_train_summary_stats()
+
+
+
+    def cleanup(self):
+        """Clean up temporary feature vector files."""
+        self._feature_temp_dir.cleanup()
 
     @contextmanager
     def section_profiling(self, section_name: str):
@@ -908,49 +984,87 @@ class TrainingDataset:
 
     def prep_annotations_for_pyspacer(self):
 
-        annotations_by_image = duckdb_grouped_rows(
-            duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            grouping_column_names=['bucket', 'feature_vector'],
-        )
+        with self.section_profiling("Collecting feature paths"):
 
-        labels_data = ImageLabels()
-
-        for rows in annotations_by_image:
-
-            # Here, in one loop iteration, we're given all the
-            # annotation rows for a single image.
-            first_row = rows[0]
-            bucket = first_row['bucket']
-            feature_bucket_path = first_row['feature_vector']
-
-            image_annotations = []
-
-            # One annotation per row.
-            for row in rows:
-
-                bagf = combine_ba_gf(
-                    row['benthic_attribute_id'], row['growth_form_id'])
-
-                annotation = (
-                    int(row['row']),
-                    int(row['col']),
-                    bagf,
-                )
-                image_annotations.append(annotation)
-
-            feature_loc = DataLocation(
-                storage_type='s3',
-                bucket_name=bucket,
-                key=feature_bucket_path,
+            annotations_by_image = duckdb_grouped_rows(
+                duck_conn=self.duck_conn,
+                duck_table_name='annotations',
+                grouping_column_names=['bucket', 'feature_vector'],
             )
-            labels_data.add_image(feature_loc, image_annotations)
 
-        return preprocess_labels(
-            labels_data,
-            split_ratios=self.options.ref_val_ratios,
-            split_mode=SplitMode.POINTS_STRATIFIED,
-        )
+            # First pass: collect annotations and unique S3 keys.
+            s3_keys: dict[tuple[str, str], str] = {}
+            tmp_root = self._feature_temp_dir.name
+            # image_data: list of (bucket, key, annotations)
+            image_data = []
+
+            for rows in annotations_by_image:
+
+                # Here, in one loop iteration, we're given all the
+                # annotation rows for a single image.
+                first_row = rows[0]
+                bucket = first_row['bucket']
+                feature_bucket_path = first_row['feature_vector']
+
+                image_annotations = []
+
+                # One annotation per row.
+                for row in rows:
+
+                    bagf = combine_ba_gf(
+                        row['benthic_attribute_id'], row['growth_form_id'])
+
+                    annotation = (
+                        int(row['row']),
+                        int(row['col']),
+                        bagf,
+                    )
+                    image_annotations.append(annotation)
+
+                s3_key = (bucket, feature_bucket_path)
+                if s3_key not in s3_keys:
+                    local_path = os.path.join(
+                        tmp_root, bucket, feature_bucket_path)
+                    s3_keys[s3_key] = local_path
+                    # Remember how to get back from the local download path
+                    # to the original S3 location, for add_training_set_names.
+                    self._feature_path_to_s3_location[local_path] = s3_key
+
+                image_data.append(
+                    (bucket, feature_bucket_path, image_annotations))
+
+        # Parallel download of all feature vectors from S3.
+        with self.section_profiling("Downloading feature vectors"):
+            failed_keys = download_features_parallel(
+                s3_keys, max_workers=settings.download_max_workers)
+
+        if failed_keys:
+            logger.warning(
+                f"{len(failed_keys)} feature vector download(s) failed.")
+
+        with self.section_profiling("Building PySpacer labels"):
+
+            # Build ImageLabels with filesystem DataLocations.
+            labels_data = ImageLabels()
+
+            for bucket, feature_bucket_path, image_annotations in image_data:
+                # Skip images whose feature file failed to download.
+                if (bucket, feature_bucket_path) in failed_keys:
+                    continue
+
+                local_path = s3_keys[(bucket, feature_bucket_path)]
+
+                feature_loc = DataLocation(
+                    storage_type='filesystem',
+                    key=local_path,
+                )
+                labels_data.add_image(feature_loc, image_annotations)
+
+            return preprocess_labels(
+                labels_data,
+                split_ratios=self.options.ref_val_ratios,
+                split_mode=SplitMode.POINTS_STRATIFIED,
+            )
 
     @property
     def duck_conn(self):
@@ -1076,9 +1190,15 @@ class TrainingDataset:
                 for feature_loc, row, col in (
                     self.generate_training_set_annotations(training_set)
                 ):
+                    # feature_loc is a filesystem DataLocation whose key is a
+                    # local download path; map it back to the original S3
+                    # (bucket, feature_vector) so it matches the annotations
+                    # table's join columns.
+                    bucket, feature_vector = (
+                        self._feature_path_to_s3_location[feature_loc.key])
                     tup = (
-                        feature_loc.bucket_name,
-                        feature_loc.key,
+                        bucket,
+                        feature_vector,
                         row,
                         col,
                         set_name,
@@ -1142,7 +1262,7 @@ class TrainingDataset:
             duck_table_name='ba_counts',
             base_column_name='benthic_attribute_id',
             new_column_name='benthic_attribute_name',
-            base_to_new_func=ba_library.id_to_name,
+            base_to_new_func=get_benthic_attribute_library().id_to_name,
         )
         # Sort by total annotation count, and reorder columns
         # while we're at it.
@@ -1181,7 +1301,7 @@ class TrainingDataset:
             duck_table_name='bagf_counts',
             base_column_name='benthic_attribute_id',
             new_column_name='benthic_attribute_name',
-            base_to_new_func=ba_library.id_to_name,
+            base_to_new_func=get_benthic_attribute_library().id_to_name,
         )
         # Add GF names for readability.
         duckdb_add_column(
@@ -1189,7 +1309,7 @@ class TrainingDataset:
             duck_table_name='bagf_counts',
             base_column_name='growth_form_id',
             new_column_name='growth_form_name',
-            base_to_new_func=gf_library.id_to_name,
+            base_to_new_func=get_growth_form_library().id_to_name,
         )
         # Sort by annotation count, and reorder columns
         # while we're at it.
@@ -1318,60 +1438,68 @@ class TrainingRunner:
             run_name = self.current_time_str()
         logger.info(f"Run: {run_name}")
 
-        self.dataset = TrainingDataset(self.dataset_options)
+        try:
+            self.dataset = TrainingDataset(self.dataset_options)
 
-        # The dataset's profiled sections are done. The runner will add the
-        # remaining profiled sections.
-        self.profiled_sections = self.dataset.profiled_sections.copy()
+            # The dataset's profiled sections are done. The runner will
+            # add the remaining profiled sections.
+            self.profiled_sections = self.dataset.profiled_sections.copy()
 
-        # Log dataset artifacts now, so they can be inspected during
-        # training.
-        with self.section_profiling("Logging dataset artifacts"):
-            self.log_dataset_artifacts()
+            # Log dataset artifacts now, so they can be inspected during
+            # training.
+            with self.section_profiling("Logging dataset artifacts"):
+                self.log_dataset_artifacts()
 
-        logger.info("Proceeding to train with:")
-        logger.info(self.dataset.describe_train_summary_stats())
+            logger.info("Proceeding to train with:")
+            logger.info(self.dataset.describe_train_summary_stats())
 
-        # Not sure about saving these anywhere other than memory
-        # for now.
-        model_loc = DataLocation('memory', key='classifier.pkl')
-        valresult_loc = DataLocation('memory', key='valresult.json')
+            # Not sure about saving these anywhere other than memory
+            # for now.
+            model_loc = DataLocation('memory', key='classifier.pkl')
+            valresult_loc = DataLocation('memory', key='valresult.json')
 
-        batch_size = int(settings.spacer_batch_size)
-        logger.info(f"Batch size: {batch_size}")
+            batch_size = int(settings.spacer_batch_size)
+            logger.info(f"Batch size: {batch_size}")
 
-        trainer = MermaidTrainer(
-            batch_size=batch_size,
-            on_epoch_end=self._on_epoch_end,
-        )
+            trainer = MermaidTrainer(
+                batch_size=batch_size,
+                on_epoch_end=self._on_epoch_end,
+            )
 
-        train_msg = TrainClassifierMsg(
-            job_token=f'experiment_run_{run_name}',
-            trainer=trainer,
-            nbr_epochs=self.training_options.epochs,
-            clf_type='MLP',
-            labels=self.dataset.labels,
-            previous_model_locs=[],
-            model_loc=model_loc,
-            valresult_loc=valresult_loc,
-            feature_cache_dir=TrainClassifierMsg.FeatureCache.AUTO,
-        )
+            train_msg = TrainClassifierMsg(
+                job_token=f'experiment_run_{run_name}',
+                trainer=trainer,
+                nbr_epochs=self.training_options.epochs,
+                clf_type='MLP',
+                labels=self.dataset.labels,
+                previous_model_locs=[],
+                model_loc=model_loc,
+                valresult_loc=valresult_loc,
+                feature_cache_dir=TrainClassifierMsg.FeatureCache.DISABLED,
+            )
 
-        with self.section_profiling("PySpacer training call"):
-            return_msg = train_classifier(train_msg)
+            with self.section_profiling("PySpacer training call"):
+                return_msg = train_classifier(train_msg)
 
-        logger.info(
-            f"Train time (from return msg): {return_msg.runtime:.1f} s")
+            logger.info(
+                f"Train time (from return msg):"
+                f" {return_msg.runtime:.1f} s")
 
-        logger.info(
-            f"New model's accuracy: {self.format_metric(return_msg.acc)}")
+            logger.info(
+                f"New model's accuracy:"
+                f" {self.format_metric(return_msg.acc)}")
 
-        ref_accs_str = ", ".join(
-            [str(self.format_metric(acc)) for acc in return_msg.ref_accs])
-        logger.debug(
-            f"Accuracy progression during training epochs: {ref_accs_str}")
+            ref_accs_str = ", ".join(
+                [str(self.format_metric(acc))
+                 for acc in return_msg.ref_accs])
+            logger.debug(
+                f"Accuracy progression during training epochs:"
+                f" {ref_accs_str}")
 
-        return return_msg, model_loc, valresult_loc
+            return return_msg, model_loc, valresult_loc
+        finally:
+            if self.dataset is not None:
+                self.dataset.cleanup()
 
     def _on_epoch_end(self, metrics: dict):
         """Called after each training epoch. Override for logging."""
@@ -1463,7 +1591,8 @@ class MLflowTrainingRunner(TrainingRunner):
             )
 
             per_label_prf, overall_metrics = precision_recall_f1(
-                val_results, self.format_metric, ba_library, gf_library)
+                val_results, self.format_metric,
+                get_benthic_attribute_library(), get_growth_form_library())
             overall_metrics['accuracy'] = self.format_metric(return_msg.acc)
 
             # Log overall metrics with log_metric(). Note that this method
@@ -1669,7 +1798,8 @@ class MLflowTrainingRunner(TrainingRunner):
         self, val_results: ValResults, normalize: bool, filestem: str
     ):
         with make_confusion_matrix(
-            val_results, normalize, ba_library, gf_library,
+            val_results, normalize,
+            get_benthic_attribute_library(), get_growth_form_library(),
         ) as (df, fig):
 
             self.log_dataframe(df, filestem)
