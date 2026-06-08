@@ -1609,6 +1609,9 @@ class MLflowTrainingRunner(TrainingRunner):
 
             clf = load_classifier(model_loc)
 
+            ba_library = get_benthic_attribute_library()
+            gf_library = get_growth_form_library()
+
             ctx = MetricsContext(
                 val_results=val_results,
                 ba_library=ba_library,
