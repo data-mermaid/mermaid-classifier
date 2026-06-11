@@ -9,7 +9,6 @@ requires-python = ">=3.12"
 dependencies = [
     "boto3",
     "jinja2",
-    "jupyterlab>=4.5.5",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -40,6 +39,7 @@ pyspacer = [
     "scikit-learn",
 ]
 jupyterlab = [
+    "jupyterlab>=4.5.5",
     # For interactive matplotlib in JupyterLab. After installation, the
     # browser tab running JupyterLab must be hard-refreshed for this to
     # take effect.
