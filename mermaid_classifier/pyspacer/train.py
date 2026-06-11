@@ -31,19 +31,17 @@ from spacer.aws import get_s3_resource
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
 from spacer.messages import TrainClassifierMsg
 from spacer.storage import load_classifier
+from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
-
-from spacer.tasks import train_classifier as spacer_train_classifier
 
 from mermaid_classifier.pyspacer.settings import training_batch_size
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
-
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
-    BenthicAttributeLibrary,
     combine_ba_gf,
     CoralNetMermaidMapping,
-    GrowthFormLibrary,
+    get_benthic_attribute_library,
+    get_growth_form_library,
     split_ba_gf,
 )
 from mermaid_classifier.common.csv_utils import ColumnSpec, CsvSpec
@@ -67,12 +65,6 @@ from mermaid_classifier.pyspacer.utils import (
 
 
 logger = logging_config_for_script('train')
-
-
-
-
-ba_library = BenthicAttributeLibrary()
-gf_library = GrowthFormLibrary()
 
 
 class Sites(enum.Enum):
@@ -524,6 +516,11 @@ class TrainingDataset:
             self._feature_temp_dir = tempfile.TemporaryDirectory(
                 prefix='mermaid_features_')
             self._feature_dir = self._feature_temp_dir.name
+        # Maps a downloaded feature vector's local path (used as the key of
+        # the filesystem DataLocations in self.labels) back to its original
+        # (bucket, feature_vector) S3 location. add_training_set_names() needs
+        # this to match the labels to the annotations table.
+        self._feature_path_to_s3_location: dict[str, tuple[str, str]] = {}
 
 
 
@@ -582,8 +579,6 @@ class TrainingDataset:
                 self.read_mermaid_data()
         else:
             self.artifacts.mermaid_project_stats = pd.DataFrame()
-
-
 
         # Now this should have annotations populated.
         if not self.duckdb_annotations_table_exists():
@@ -685,11 +680,8 @@ class TrainingDataset:
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
-
-
-        with self.section_profiling("Prep annotations for PySpacer"):
-            self.labels = self.prep_annotations_for_pyspacer()
-            self.add_training_set_names()
+        self.labels = self.prep_annotations_for_pyspacer()
+        self.add_training_set_names()
 
         self.set_train_summary_stats()
 
@@ -1004,78 +996,87 @@ class TrainingDataset:
 
     def prep_annotations_for_pyspacer(self):
 
-        annotations_by_image = duckdb_grouped_rows(
-            duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            grouping_column_names=['bucket', 'feature_vector'],
-        )
+        with self.section_profiling("Collecting feature paths"):
 
-        # First pass: collect annotations and unique S3 keys.
-        s3_keys: dict[tuple[str, str], str] = {}
-        tmp_root = self._feature_dir
-        # image_data: list of (bucket, key, annotations)
-        image_data = []
+            annotations_by_image = duckdb_grouped_rows(
+                duck_conn=self.duck_conn,
+                duck_table_name='annotations',
+                grouping_column_names=['bucket', 'feature_vector'],
+            )
 
-        for rows in annotations_by_image:
+            # First pass: collect annotations and unique S3 keys.
+            s3_keys: dict[tuple[str, str], str] = {}
+            tmp_root = self._feature_dir
+            # image_data: list of (bucket, key, annotations)
+            image_data = []
 
-            # Here, in one loop iteration, we're given all the
-            # annotation rows for a single image.
-            first_row = rows[0]
-            bucket = first_row['bucket']
-            feature_bucket_path = first_row['feature_vector']
+            for rows in annotations_by_image:
 
-            image_annotations = []
+                # Here, in one loop iteration, we're given all the
+                # annotation rows for a single image.
+                first_row = rows[0]
+                bucket = first_row['bucket']
+                feature_bucket_path = first_row['feature_vector']
 
-            # One annotation per row.
-            for row in rows:
+                image_annotations = []
 
-                bagf = combine_ba_gf(
-                    row['benthic_attribute_id'], row['growth_form_id'])
+                # One annotation per row.
+                for row in rows:
 
-                annotation = (
-                    int(row['row']),
-                    int(row['col']),
-                    bagf,
-                )
-                image_annotations.append(annotation)
+                    bagf = combine_ba_gf(
+                        row['benthic_attribute_id'], row['growth_form_id'])
 
-            s3_key = (bucket, feature_bucket_path)
-            if s3_key not in s3_keys:
-                local_path = os.path.join(
-                    tmp_root, bucket, feature_bucket_path)
-                s3_keys[s3_key] = local_path
+                    annotation = (
+                        int(row['row']),
+                        int(row['col']),
+                        bagf,
+                    )
+                    image_annotations.append(annotation)
 
-            image_data.append((bucket, feature_bucket_path, image_annotations))
+                s3_key = (bucket, feature_bucket_path)
+                if s3_key not in s3_keys:
+                    local_path = os.path.join(
+                        tmp_root, bucket, feature_bucket_path)
+                    s3_keys[s3_key] = local_path
+                    # Remember how to get back from the local download path
+                    # to the original S3 location, for add_training_set_names.
+                    self._feature_path_to_s3_location[local_path] = s3_key
+
+                image_data.append(
+                    (bucket, feature_bucket_path, image_annotations))
 
         # Parallel download of all feature vectors from S3.
         with self.section_profiling("Downloading feature vectors"):
-            failed_keys = download_features_parallel(s3_keys, max_workers=settings.download_max_workers)
+            failed_keys = download_features_parallel(
+                s3_keys, max_workers=settings.download_max_workers)
 
         if failed_keys:
             logger.warning(
                 f"{len(failed_keys)} feature vector download(s) failed.")
 
-        # Build ImageLabels with filesystem DataLocations.
-        labels_data = ImageLabels()
+        with self.section_profiling("Building PySpacer labels"):
 
-        for bucket, feature_bucket_path, image_annotations in image_data:
-            # Skip images whose feature file failed to download.
-            if (bucket, feature_bucket_path) in failed_keys:
-                continue
+            # Build ImageLabels with filesystem DataLocations.
+            labels_data = ImageLabels()
 
-            local_path = s3_keys[(bucket, feature_bucket_path)]
+            for bucket, feature_bucket_path, image_annotations in image_data:
+                # Skip images whose feature file failed to download.
+                if (bucket, feature_bucket_path) in failed_keys:
+                    continue
 
-            feature_loc = DataLocation(
-                storage_type='filesystem',
-                key=local_path,
+                local_path = s3_keys[(bucket, feature_bucket_path)]
+
+                feature_loc = DataLocation(
+                    storage_type='filesystem',
+                    key=local_path,
+                )
+                labels_data.add_image(feature_loc, image_annotations)
+
+            return preprocess_labels(
+                labels_data,
+                split_ratios=self.options.ref_val_ratios,
+                split_mode=SplitMode.POINTS_STRATIFIED,
             )
-            labels_data.add_image(feature_loc, image_annotations)
-
-        return preprocess_labels(
-            labels_data,
-            split_ratios=self.options.ref_val_ratios,
-            split_mode=SplitMode.POINTS_STRATIFIED,
-        )
 
     @property
     def duck_conn(self):
@@ -1201,9 +1202,15 @@ class TrainingDataset:
                 for feature_loc, row, col in (
                     self.generate_training_set_annotations(training_set)
                 ):
+                    # feature_loc is a filesystem DataLocation whose key is a
+                    # local download path; map it back to the original S3
+                    # (bucket, feature_vector) so it matches the annotations
+                    # table's join columns.
+                    bucket, feature_vector = (
+                        self._feature_path_to_s3_location[feature_loc.key])
                     tup = (
-                        feature_loc.bucket_name,
-                        feature_loc.key,
+                        bucket,
+                        feature_vector,
                         row,
                         col,
                         set_name,
@@ -1267,7 +1274,7 @@ class TrainingDataset:
             duck_table_name='ba_counts',
             base_column_name='benthic_attribute_id',
             new_column_name='benthic_attribute_name',
-            base_to_new_func=ba_library.id_to_name,
+            base_to_new_func=get_benthic_attribute_library().id_to_name,
         )
         # Sort by total annotation count, and reorder columns
         # while we're at it.
@@ -1306,7 +1313,7 @@ class TrainingDataset:
             duck_table_name='bagf_counts',
             base_column_name='benthic_attribute_id',
             new_column_name='benthic_attribute_name',
-            base_to_new_func=ba_library.id_to_name,
+            base_to_new_func=get_benthic_attribute_library().id_to_name,
         )
         # Add GF names for readability.
         duckdb_add_column(
@@ -1314,7 +1321,7 @@ class TrainingDataset:
             duck_table_name='bagf_counts',
             base_column_name='growth_form_id',
             new_column_name='growth_form_name',
-            base_to_new_func=gf_library.id_to_name,
+            base_to_new_func=get_growth_form_library().id_to_name,
         )
         # Sort by annotation count, and reorder columns
         # while we're at it.
@@ -1497,7 +1504,7 @@ class TrainingRunner:
             )
 
             with self.section_profiling("PySpacer training call"):
-                return_msg = spacer_train_classifier(train_msg)
+                return_msg = train_classifier(train_msg)
 
             logger.info(
                 f"Train time (from return msg):"
@@ -1615,6 +1622,9 @@ class MLflowTrainingRunner(TrainingRunner):
             mlflow.log_dict(val_results.serialize(), 'valresult.json')
 
             clf = load_classifier(model_loc)
+
+            ba_library = get_benthic_attribute_library()
+            gf_library = get_growth_form_library()
 
             ctx = MetricsContext(
                 val_results=val_results,

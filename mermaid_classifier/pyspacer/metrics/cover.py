@@ -87,6 +87,11 @@ def compute_cover(ctx: MetricsContext) -> MetricGroupResult:
     result = MetricGroupResult()
 
     if len(significant) > 0:
+        # r_squared is NaN for classes whose true cover is constant across
+        # images; median over all-NaN warns "Mean of empty slice" via
+        # pandas → numpy. Drop NaNs first; fall back to NaN if none remain.
+        r2_values = significant['r_squared'].dropna()
+        median_r2 = float(r2_values.median()) if len(r2_values) > 0 else float('nan')
         result.scalars.extend([
             ScalarMetric(
                 name='cover_mean_abs_bias_pct',
@@ -99,7 +104,7 @@ def compute_cover(ctx: MetricsContext) -> MetricGroupResult:
                 value=float(significant['mae_pct'].mean())),
             ScalarMetric(
                 name='cover_median_r_squared',
-                value=float(significant['r_squared'].median())),
+                value=median_r2),
         ])
     else:
         result.scalars.extend([
