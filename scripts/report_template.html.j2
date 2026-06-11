@@ -625,21 +625,21 @@
 </section>
 <script>
 (function () {
-  var container = document.getElementById('per-label-table');
+  const container = document.getElementById('per-label-table');
   if (!container) return;
-  var table = container.querySelector('table');
+  const table = container.querySelector('table');
   if (!table) return;
-  var headers = Array.prototype.slice.call(table.querySelectorAll('th'));
+  const headers = Array.prototype.slice.call(table.querySelectorAll('th'));
 
   // Rename column headers to human-friendly labels.
-  var colRenames = {
+  const colRenames = {
     'bagf_name': 'Label',
     'precision': 'Precision',
     'recall':    'Recall',
     'f1_score':  'F1'
   };
   headers.forEach(function (th) {
-    var raw = th.textContent.trim();
+    const raw = th.textContent.trim();
     if (colRenames[raw] !== undefined) {
       th.textContent = colRenames[raw];
       th.dataset.baseText = colRenames[raw];
@@ -647,32 +647,32 @@
   });
 
   // Hide bagf_id column.
-  var bagfIndex = -1;
+  let bagfIndex = -1;
   headers.forEach(function (th, i) {
     if (th.textContent.trim() === 'bagf_id') { bagfIndex = i; }
   });
   if (bagfIndex !== -1) {
     headers[bagfIndex].style.display = 'none';
-    var allRows = table.querySelectorAll('tr');
+    const allRows = table.querySelectorAll('tr');
     allRows.forEach(function (row) {
-      var cells = row.querySelectorAll('td, th');
+      const cells = row.querySelectorAll('td, th');
       if (cells[bagfIndex]) { cells[bagfIndex].style.display = 'none'; }
     });
   }
 
   // Color Precision, Recall, F1 cells (using renamed headers).
-  var colorCols = { 'Precision': true, 'Recall': true, 'F1': true };
-  var colorColIndices = [];
+  const colorCols = { 'Precision': true, 'Recall': true, 'F1': true };
+  const colorColIndices = [];
   headers.forEach(function (th, i) {
     if (colorCols[th.textContent.trim()]) { colorColIndices.push(i); }
   });
-  var bodyRows = Array.prototype.slice.call(table.querySelectorAll('tbody tr'));
+  const bodyRows = Array.prototype.slice.call(table.querySelectorAll('tbody tr'));
   bodyRows.forEach(function (row) {
-    var cells = row.querySelectorAll('td');
+    const cells = row.querySelectorAll('td');
     colorColIndices.forEach(function (ci) {
-      var cell = cells[ci];
+      const cell = cells[ci];
       if (!cell) return;
-      var val = parseFloat(cell.textContent);
+      const val = parseFloat(cell.textContent);
       if (isNaN(val)) return;
       if (val >= 0.8) {
         cell.style.color = '#38a169';
@@ -688,8 +688,8 @@
   });
 
   // Column sort: make numeric column headers clickable.
-  var sortState = { col: -1, asc: true };
-  var tbody = table.querySelector('tbody');
+  const sortState = { col: -1, asc: true };
+  const tbody = table.querySelector('tbody');
 
   function getSortRows() {
     return Array.prototype.slice.call(tbody.querySelectorAll('tr'));
@@ -697,7 +697,7 @@
 
   function updateArrows(activeIndex) {
     headers.forEach(function (th, i) {
-      var base = th.dataset.baseText;
+      const base = th.dataset.baseText;
       if (!base) return;
       if (i === activeIndex) {
         th.textContent = base + (sortState.asc ? ' \u25b2' : ' \u25bc');
@@ -708,11 +708,11 @@
   }
 
   function isNumericCol(colIndex) {
-    var rows = getSortRows();
-    for (var r = 0; r < Math.min(rows.length, 5); r++) {
-      var cells = rows[r].querySelectorAll('td');
+    const rows = getSortRows();
+    for (let r = 0; r < Math.min(rows.length, 5); r++) {
+      const cells = rows[r].querySelectorAll('td');
       if (!cells[colIndex]) return false;
-      var v = cells[colIndex].textContent.trim();
+      const v = cells[colIndex].textContent.trim();
       if (v !== '' && isNaN(parseFloat(v))) return false;
     }
     return true;
@@ -731,12 +731,12 @@
         sortState.col = i;
         sortState.asc = true;
       }
-      var rows = getSortRows();
+      const rows = getSortRows();
       rows.sort(function (a, b) {
-        var ca = a.querySelectorAll('td')[i];
-        var cb = b.querySelectorAll('td')[i];
-        var va = ca ? parseFloat(ca.textContent) : NaN;
-        var vb = cb ? parseFloat(cb.textContent) : NaN;
+        const ca = a.querySelectorAll('td')[i];
+        const cb = b.querySelectorAll('td')[i];
+        const va = ca ? parseFloat(ca.textContent) : NaN;
+        const vb = cb ? parseFloat(cb.textContent) : NaN;
         if (isNaN(va) && isNaN(vb)) return 0;
         if (isNaN(va)) return 1;
         if (isNaN(vb)) return -1;
