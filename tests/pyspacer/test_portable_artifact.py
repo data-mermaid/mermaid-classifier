@@ -165,5 +165,55 @@ class LoadValidationTest(unittest.TestCase):
                 load_predictor(model_pt, model_json)
 
 
+import os
+
+
+class LiveModelParityTest(unittest.TestCase):
+    def _load_live_model(self):
+        from spacer.storage import storage_factory
+        from spacer.data_classes import DataLocation
+        from urllib.parse import urlparse
+        import pickle
+
+        loc = os.environ["PORTABLE_ARTIFACT_LIVE_MODEL"]
+        uri = urlparse(loc)
+        if uri.scheme == "s3":
+            data_loc = DataLocation(
+                "s3", bucket_name=uri.netloc, key=uri.path.strip("/"))
+        else:
+            data_loc = DataLocation("filesystem", key=loc)
+        storage = storage_factory(data_loc.storage_type, data_loc.bucket_name)
+        with storage.load(data_loc.key) as stream:
+            return pickle.load(stream)
+
+    @unittest.skipUnless(
+        os.environ.get("PORTABLE_ARTIFACT_LIVE_MODEL"),
+        "set PORTABLE_ARTIFACT_LIVE_MODEL to run live-model parity",
+    )
+    def test_live_model_export_round_trip_within_tolerance(self):
+        from mermaid_classifier.pyspacer.inference import (
+            export_artifact, load_predictor,
+        )
+        model = self._load_live_model()
+        input_dim = int(model.calibrated_classifiers_[0].estimator.n_features_in_)
+
+        feats_path = os.environ.get("PORTABLE_ARTIFACT_LIVE_FEATURES")
+        if feats_path:
+            X = np.load(feats_path).astype(np.float32)
+        else:
+            rng = np.random.default_rng(0)
+            X = rng.normal(0, 1, size=(256, input_dim)).astype(np.float32)
+
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, manifest, max_diff = export_artifact(model, d, X)
+            self.assertLess(max_diff, 1e-6)
+            self.assertEqual(manifest["input_dim"], input_dim)
+            self.assertEqual(manifest["classes"], model.classes_.tolist())
+            predictor = load_predictor(model_pt, Path(d) / "model.json")
+            got = predictor.predict_proba(X)
+        self.assertLess(
+            float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()
