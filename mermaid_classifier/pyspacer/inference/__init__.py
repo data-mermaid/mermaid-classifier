@@ -20,4 +20,9 @@ class ManifestError(Exception):
     (schema version, class count, or input_dim mismatch)."""
 
 
-__all__ = ["SCHEMA_VERSION", "TASK_NAME", "ParityError", "ManifestError"]
+from mermaid_classifier.pyspacer.inference.export import export_artifact  # noqa: E402
+
+__all__ = [
+    "SCHEMA_VERSION", "TASK_NAME", "ParityError", "ManifestError",
+    "export_artifact",
+]

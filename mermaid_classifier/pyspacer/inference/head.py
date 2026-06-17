@@ -7,8 +7,12 @@ Pipeline (multiclass, K > 2):
   c_k    = sigmoid(-(a_k * p_k + b_k))      # per-class Platt sigmoid
   proba  = c / c.sum(dim=1)                 # row-normalize; uniform if sum == 0
   proba  = where(1 < proba <= 1+1e-5, 1.0)  # sklearn overshoot clip
+
+Note: ``from __future__ import annotations`` (PEP 563) must NOT appear here.
+TorchScript's recursive module compiler calls ``ann_to_type`` on class-level
+annotations at import time; PEP 563 turns those annotations into strings
+(``'int'`` instead of ``int``), causing "Unknown type annotation: 'int'".
 """
-from __future__ import annotations
 
 import numpy as np
 import torch

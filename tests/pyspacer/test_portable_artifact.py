@@ -60,5 +60,55 @@ class HeadParityTest(unittest.TestCase):
         np.testing.assert_allclose(got.sum(axis=1), 1.0, atol=1e-5)
 
 
+import json
+import tempfile
+from pathlib import Path
+
+
+class ExportTest(unittest.TestCase):
+    def test_export_writes_pt_and_manifest_and_passes_parity(self):
+        from mermaid_classifier.pyspacer.inference import export_artifact
+        model, X = make_calibrated_model()
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, manifest, max_diff = export_artifact(model, d, X)
+            self.assertTrue(Path(model_pt).is_file())
+            self.assertTrue((Path(d) / "model.json").is_file())
+            self.assertLess(max_diff, 1e-6)
+
+            self.assertEqual(manifest["schema_version"], 1)
+            self.assertEqual(manifest["task"], "pyspacer_mlp_classifier")
+            self.assertEqual(manifest["classes"], model.classes_.tolist())
+            self.assertEqual(manifest["input_dim"], X.shape[1])
+            self.assertEqual(manifest["config"], {"patch_size": 224})
+            self.assertIn("torch", manifest["trained_with"])
+            self.assertIn("sklearn", manifest["trained_with"])
+
+            on_disk = json.loads((Path(d) / "model.json").read_text())
+            self.assertEqual(on_disk, manifest)
+
+    def test_frozen_graph_reloads_and_matches_source(self):
+        import torch
+        from mermaid_classifier.pyspacer.inference import export_artifact
+        model, X = make_calibrated_model()
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, _, _ = export_artifact(model, d, X)
+            graph = torch.jit.load(str(model_pt))
+            graph.eval()
+            with torch.no_grad():
+                got = graph(torch.from_numpy(X.astype(np.float32))).numpy()
+        self.assertLess(float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
+
+    def test_parity_gate_raises_when_graph_diverges(self):
+        from mermaid_classifier.pyspacer.inference import (
+            export_artifact, ParityError,
+        )
+        model, X = make_calibrated_model()
+        # Corrupt a calibrator so the source model no longer matches a head
+        # rebuilt from the (now-tampered) parameters via an impossible tol.
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ParityError):
+                export_artifact(model, d, X, tol=-1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
