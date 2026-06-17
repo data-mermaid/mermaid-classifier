@@ -484,20 +484,23 @@ class MLflowOptions:
     This name gets truncated at 50 characters to avoid a potential crash when
     logging the model.
 
-    annotations_to_log
+    extra_annotations_to_log
 
-    If specified, log training annotations as an MLflow artifact, in tabular
-    form. One table row per point-annotation. This can serve as a sanity
-    check, but the artifact can get quite large.
+    In addition to the validation-split annotations (which are always logged
+    as the `annotations_val` artifact so others can independently re-evaluate
+    the model), optionally log a further set of training annotations as an
+    MLflow artifact, in tabular form. One table row per point-annotation.
+    This can serve as a sanity check or debugging aid, but the artifact can
+    get quite large.
     Supported formats:
     'all': log all annotations
     's123': log annotations from CoralNet source of ID 123
     'i456': log annotations from CoralNet image of ID 456
-    <not specified>: log nothing
+    <not specified>: log nothing extra
     """
     experiment_name: str | None = settings.mlflow_default_experiment_name
     model_name: str | None = None
-    annotations_to_log: str | None = None
+    extra_annotations_to_log: str | None = None
 
 
 class TrainingDataset:
@@ -1787,9 +1790,9 @@ class MLflowTrainingRunner(TrainingRunner):
                 artifacts.unmapped_labels,
                 'unmapped_labels')
 
-        # Log annotations, if specified.
-        if self.mlflow_options.annotations_to_log is not None:
-            log_spec = self.mlflow_options.annotations_to_log.lower()
+        # Log extra annotations, if specified.
+        if self.mlflow_options.extra_annotations_to_log is not None:
+            log_spec = self.mlflow_options.extra_annotations_to_log.lower()
             df = self.dataset.get_annotations(log_spec)
 
             self.log_dataframe(df, f'annotations_{log_spec}')
