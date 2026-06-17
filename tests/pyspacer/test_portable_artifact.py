@@ -110,5 +110,60 @@ class ExportTest(unittest.TestCase):
                 export_artifact(model, d, X, tol=-1.0)
 
 
+class LoadValidationTest(unittest.TestCase):
+    def _export(self, d):
+        from mermaid_classifier.pyspacer.inference import export_artifact
+        model, X = make_calibrated_model()
+        model_pt, manifest, _ = export_artifact(model, d, X)
+        return model_pt, Path(d) / "model.json", model, X
+
+    def test_load_predictor_round_trip_matches_source(self):
+        from mermaid_classifier.pyspacer.inference import load_predictor
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, model_json, model, X = self._export(d)
+            predictor = load_predictor(model_pt, model_json)
+            self.assertEqual(predictor.classes, model.classes_.tolist())
+            self.assertEqual(predictor.input_dim, X.shape[1])
+            got = predictor.predict_proba(X)
+            self.assertLess(
+                float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
+
+    def test_schema_version_mismatch_raises(self):
+        from mermaid_classifier.pyspacer.inference import (
+            load_predictor, ManifestError,
+        )
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, model_json, _, _ = self._export(d)
+            manifest = json.loads(Path(model_json).read_text())
+            manifest["schema_version"] = 999
+            Path(model_json).write_text(json.dumps(manifest))
+            with self.assertRaises(ManifestError):
+                load_predictor(model_pt, model_json)
+
+    def test_class_count_mismatch_raises(self):
+        from mermaid_classifier.pyspacer.inference import (
+            load_predictor, ManifestError,
+        )
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, model_json, _, _ = self._export(d)
+            manifest = json.loads(Path(model_json).read_text())
+            manifest["classes"] = manifest["classes"][:-1]  # drop one class
+            Path(model_json).write_text(json.dumps(manifest))
+            with self.assertRaises(ManifestError):
+                load_predictor(model_pt, model_json)
+
+    def test_input_dim_mismatch_raises(self):
+        from mermaid_classifier.pyspacer.inference import (
+            load_predictor, ManifestError,
+        )
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, model_json, _, _ = self._export(d)
+            manifest = json.loads(Path(model_json).read_text())
+            manifest["input_dim"] = manifest["input_dim"] + 7  # wrong dim
+            Path(model_json).write_text(json.dumps(manifest))
+            with self.assertRaises(ManifestError):
+                load_predictor(model_pt, model_json)
+
+
 if __name__ == "__main__":
     unittest.main()

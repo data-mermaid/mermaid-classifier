@@ -21,8 +21,11 @@ class ManifestError(Exception):
 
 
 from mermaid_classifier.pyspacer.inference.export import export_artifact  # noqa: E402
+from mermaid_classifier.pyspacer.inference.loader import (  # noqa: E402
+    Predictor, load_predictor,
+)
 
 __all__ = [
     "SCHEMA_VERSION", "TASK_NAME", "ParityError", "ManifestError",
-    "export_artifact",
+    "export_artifact", "Predictor", "load_predictor",
 ]
