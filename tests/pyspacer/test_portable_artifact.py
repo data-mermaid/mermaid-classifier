@@ -28,5 +28,37 @@ class ScaffoldTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
 
+import numpy as np
+import torch
+
+from pyspacer._calibrated_model_fixture import make_calibrated_model
+
+
+class HeadParityTest(unittest.TestCase):
+    def test_head_matches_source_predict_proba(self):
+        from mermaid_classifier.pyspacer.inference.head import (
+            build_calibrated_head,
+        )
+        model, X = make_calibrated_model()
+        head = build_calibrated_head(model)
+        head.eval()
+        with torch.no_grad():
+            got = head(torch.from_numpy(X.astype(np.float32))).numpy()
+        expected = model.predict_proba(X)
+        self.assertEqual(got.shape, expected.shape)
+        self.assertLess(float(np.max(np.abs(got - expected))), 1e-6)
+
+    def test_rows_sum_to_one(self):
+        from mermaid_classifier.pyspacer.inference.head import (
+            build_calibrated_head,
+        )
+        model, X = make_calibrated_model()
+        head = build_calibrated_head(model)
+        head.eval()
+        with torch.no_grad():
+            got = head(torch.from_numpy(X.astype(np.float32))).numpy()
+        np.testing.assert_allclose(got.sum(axis=1), 1.0, atol=1e-5)
+
+
 if __name__ == "__main__":
     unittest.main()
