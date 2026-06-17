@@ -103,8 +103,7 @@ class ExportTest(unittest.TestCase):
             export_artifact, ParityError,
         )
         model, X = make_calibrated_model()
-        # Corrupt a calibrator so the source model no longer matches a head
-        # rebuilt from the (now-tampered) parameters via an impossible tol.
+        # Force the gate to fire with an impossible tolerance: any non-negative max diff > -1.0 always raises.
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(ParityError):
                 export_artifact(model, d, X, tol=-1.0)

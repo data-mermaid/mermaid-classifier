@@ -61,6 +61,8 @@ class CalibratedHead(nn.Module):
             if i < n - 1:
                 x = F.relu(x)
             i += 1
+        # Computed in float32, matching TorchMLPClassifier._forward_probs; the ~1e-7 residual
+        # vs sklearn's float64 path is expected and bounded by the export-time parity gate.
         p = F.softmax(x, dim=1)
         c = torch.sigmoid(-(self.a * p + self.b))
         denom = c.sum(dim=1, keepdim=True)
