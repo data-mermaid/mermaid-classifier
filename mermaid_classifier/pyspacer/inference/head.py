@@ -17,6 +17,8 @@ import torch.nn.functional as F
 
 
 class CalibratedHead(nn.Module):
+    n_classes: int
+
     def __init__(
         self,
         weights: list[torch.Tensor],
@@ -25,6 +27,16 @@ class CalibratedHead(nn.Module):
         b: torch.Tensor,
     ):
         super().__init__()
+        if a.ndim != 1 or b.ndim != 1:
+            raise ValueError(
+                f"Calibration parameters a and b must be 1-D tensors; got"
+                f" a.shape={tuple(a.shape)}, b.shape={tuple(b.shape)}."
+            )
+        if a.shape != b.shape:
+            raise ValueError(
+                f"Calibration parameters a and b must have the same shape; got"
+                f" a.shape={tuple(a.shape)}, b.shape={tuple(b.shape)}."
+            )
         self.linears = nn.ModuleList()
         for w, bias in zip(weights, biases):
             layer = nn.Linear(int(w.shape[1]), int(w.shape[0]))
