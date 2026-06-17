@@ -278,7 +278,7 @@ class HeadParityTest(unittest.TestCase):
         np.testing.assert_allclose(got.sum(axis=1), 1.0, atol=1e-5)
 ```
 
-> Note: run unittest **from the `tests/` directory** so the namespace-package import path resolves (matches the repo convention). `tests/pyspacer/` has no `__init__.py` — it is a namespace package, and the fixture is imported as `from pyspacer._calibrated_model_fixture import ...`.
+> Note: run unittest **from the `tests/` directory** so the import path resolves (matches the repo convention). `tests/pyspacer/` is a regular package (it has an `__init__.py`) but `tests/` itself does not, so run from `tests/` and import the fixture as `from pyspacer._calibrated_model_fixture import ...`.
 
 - [ ] **Step 3: Run test to verify it fails**
 
@@ -913,7 +913,7 @@ gh pr create --base inference_split \
 
 ## Notes for the implementer
 
-- **Run unittest from the `tests/` directory** (`cd tests && python -m unittest pyspacer.test_portable_artifact -v`), matching the existing repo convention (e.g. `pyspacer.test_inference_decoupling`). `tests/` and `tests/pyspacer/` have **no** `__init__.py` — they are namespace packages — so do **not** add `__init__.py` files, and import the fixture as `from pyspacer._calibrated_model_fixture import make_calibrated_model` (a `pyspacer.`-rooted import, not `tests.pyspacer.`).
+- **Run unittest from the `tests/` directory** (`cd tests && python -m unittest pyspacer.test_portable_artifact -v`), matching the existing repo convention (e.g. `pyspacer.test_inference_decoupling`). `tests/pyspacer/` is a regular package (has an `__init__.py`) while `tests/` itself has none, so running from `tests/` makes `pyspacer` the import root: import the fixture as `from pyspacer._calibrated_model_fixture import make_calibrated_model` (a `pyspacer.`-rooted import, not `tests.pyspacer.`). Do not add a `tests/__init__.py`.
 - **Install:** `pip install -e .[inference]` is sufficient to build, export, load, and test (torch + sklearn + pyspacer come via the extra). Per the root CLAUDE.md, prefer `uv run` if the environment is uv-managed.
 - **TorchScript scripting** of `CalibratedHead` relies on the `ModuleList` loop with a manual index counter (scriptable) and buffer-backed `a`/`b`. If `torch.jit.script` ever rejects the module on a torch upgrade, the parity gate in Task 3 is the safety net — it will fail loudly rather than ship a divergent graph.
 - **Why eager parity in Task 2 then frozen parity in Task 3:** the eager test isolates math errors (clean Python traceback); the frozen test catches scripting/freezing divergence. Both assert `1e-6`.

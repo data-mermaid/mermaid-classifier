@@ -3,10 +3,10 @@ against the source model, and write the generated manifest."""
 from __future__ import annotations
 
 import json
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import numpy as np
-import sklearn
 import torch
 
 from mermaid_classifier.pyspacer.inference import (
@@ -58,7 +58,10 @@ def export_artifact(
         "config": config if config is not None else {"patch_size": 224},
         "trained_with": {
             "torch": torch.__version__,
-            "sklearn": sklearn.__version__,
+            # Read via importlib.metadata so importing this module (and thus
+            # the inference package) doesn't pull in sklearn — the serve path
+            # needs only torch/numpy.
+            "sklearn": _pkg_version("scikit-learn"),
         },
     }
 

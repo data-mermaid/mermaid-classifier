@@ -41,6 +41,13 @@ class CalibratedHead(nn.Module):
                 f"Calibration parameters a and b must have the same shape; got"
                 f" a.shape={tuple(a.shape)}, b.shape={tuple(b.shape)}."
             )
+        if len(weights) != len(biases):
+            raise ValueError(
+                f"weights and biases must have the same length; got"
+                f" {len(weights)} weights and {len(biases)} biases."
+            )
+        if len(weights) == 0:
+            raise ValueError("weights must contain at least one layer.")
         self.linears = nn.ModuleList()
         for w, bias in zip(weights, biases):
             layer = nn.Linear(int(w.shape[1]), int(w.shape[0]))
