@@ -9,40 +9,42 @@ requires-python = ">=3.10"
 dependencies = [
     "boto3",
     "jinja2",
-    "jupyterlab>=4.5.5",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["mermaid_classifier"]
 
 [project.optional-dependencies]
-pyspacer = [
+# Minimal deps to LOAD and RUN a trained classifier (inference / serving lanes).
+# pyspacer transitively brings torch, torchvision, scikit-learn, Pillow, numpy,
+# boto3. The TorchMLPClassifier in this package needs only numpy + torch, and
+# importing it no longer triggers settings (the import side effect was removed),
+# so the training-only settings deps (pydantic-settings, psutil) are NOT needed.
+inference = [
+    # Pinned to Release 0.14.0 (git hash b52acdb)
+    "pyspacer==0.14.0",
+]
+# Everything needed to TRAIN: the inference stack plus orchestration, metrics,
+# data loading, and the settings layer.
+training = [
+    "mermaid-classifier[inference]",
     "beautifulsoup4",
     "duckdb",
     "matplotlib",
     "mlflow>=3",
-    "numpy",
     # MLflow requires pandas, so we might as well use it when convenient.
     "pandas",
     "psutil",
     "pyarrow",
-    # Pinned to Release 0.14.0 (git hash b52acdb)
-    "pyspacer==0.14.0",
-    # python-dotenv by itself isn't explicit about what variable
-    # names it accepts.
-    # python-decouple and pydantic-settings are more explicit.
-    # The former searches for .env from __file__. The latter
-    # searches from cwd, which seems more practical when settings
-    # are in an installed package, which is our intended usage.
+    # python-dotenv by itself isn't explicit about what variable names it
+    # accepts; pydantic-settings is more explicit and searches from cwd.
     "pydantic-settings",
     "s3fs",
     # pyspacer uses scikit-learn, but we also use it directly for metrics.
     "scikit-learn",
-    # torch is already a transitive dep via pyspacer, but we import it
-    # directly in torch_classifier.py so declare it here too.
-    "torch",
 ]
 jupyterlab = [
+    "jupyterlab>=4.5.5",
     # For interactive matplotlib in JupyterLab. After installation, the
     # browser tab running JupyterLab must be hard-refreshed for this to
     # take effect.

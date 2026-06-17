@@ -11,7 +11,7 @@ Both sources are loaded into a shared DuckDB `annotations` table using SQL (not 
 
 ## Design Decisions
 
-**Side-effect-on-import**: `__init__.py` calls `set_env_vars_for_packages()` immediately on import. This must run before any PySpacer or MLflow modules are imported. Code that uses pyspacer internals depends on this having executed first.
+**Explicit env setup (no import side effect)**: `set_env_vars_for_packages()` normalizes `Settings` into `SPACER_*`/`MLFLOW_*` env vars and must run before any PySpacer or MLflow work. It used to run as a side effect of importing this subpackage, but that forced inference-only consumers (which just need `torch_classifier.TorchMLPClassifier` to load a trained model) to install training-only settings deps (`pydantic-settings`, `psutil`). It is now called explicitly by the training entry points — `TrainingRunner.__init__` and the `scripts/` mains — and is idempotent. Importing `mermaid_classifier.pyspacer.torch_classifier` no longer triggers it, which keeps `mermaid-classifier[inference]` minimal (just `pyspacer`).
 
 **Memory-efficient streaming in trainer**: `MermaidTrainer` in `trainer.py` uses a streaming design -- reference accuracy and calibration both load features in batches from disk, accumulating only scalar predictions. Reference and training data are never held in memory simultaneously. This prevents OOM on large datasets.
 

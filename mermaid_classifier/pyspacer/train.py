@@ -60,7 +60,7 @@ from mermaid_classifier.pyspacer.metrics import (
 from mermaid_classifier.pyspacer.metrics._logging import (
     log_dataframe as _log_dataframe,
 )
-from mermaid_classifier.pyspacer.settings import settings
+from mermaid_classifier.pyspacer.settings import settings, set_env_vars_for_packages
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
 from mermaid_classifier.training.sample_weighting import (
@@ -1597,6 +1597,11 @@ class TrainingRunner:
         dataset_options: DatasetOptions = None,
         training_options: TrainingOptions = None,
     ):
+        # Normalize Settings -> SPACER_*/MLFLOW_* env vars before any PySpacer
+        # or MLflow work. This used to run as an import side effect of
+        # mermaid_classifier.pyspacer; it now runs here (the programmatic entry
+        # point for all training) and in the scripts/ mains. Idempotent.
+        set_env_vars_for_packages()
         self.dataset_options = dataset_options or DatasetOptions()
         self.training_options = training_options or TrainingOptions()
 
