@@ -25,7 +25,8 @@ pyspacer = [
     "pandas",
     "psutil",
     "pyarrow",
-    # Pinned to Release 0.14.0 (git hash b52acdb)
+    # The core API of pyspacer is still ever-changing, and classifier
+    # compatibility can be tricky too, so specifying version is important.
     "pyspacer==0.14.0",
     # python-dotenv by itself isn't explicit about what variable
     # names it accepts.

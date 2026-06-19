@@ -31,8 +31,9 @@ if __name__ == "__main__":
         mlflow_options=MLflowOptions(
             experiment_name="pyspacer-beta-test",
             model_name='GregTest',
-            # Logs all input annotations to MLflow. Also possible to just log a subset.
-            #annotations_to_log='all',
+            # Logs all input annotations to MLflow (in addition to the
+            # always-logged validation split). Also possible to just log a subset.
+            #extra_annotations_to_log='all',
         ),
     )
     runner.run()
