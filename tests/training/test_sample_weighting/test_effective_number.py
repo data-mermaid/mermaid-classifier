@@ -13,7 +13,7 @@ from mermaid_classifier.training.sample_weighting.effective_number import (
     BETA,
 )
 
-from tests.training.test_sample_weighting.fakes import (
+from .fakes import (
     FakeGFLibrary, small_tree,
 )
 

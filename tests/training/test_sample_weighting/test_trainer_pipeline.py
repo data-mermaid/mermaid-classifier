@@ -18,7 +18,7 @@ from mermaid_classifier.training.sample_weighting import (
     SampleWeightingOptions,
 )
 
-from tests.training.test_sample_weighting.fakes import (
+from .fakes import (
     FakeGFLibrary, small_tree,
 )
 
@@ -53,15 +53,19 @@ class TrainerPipelineTest(unittest.TestCase):
         cls.train_mod = train_mod
 
     def setUp(self):
-        # Replace the module-level taxonomy singletons with our fakes
-        # for the duration of each test (in case earlier tests poisoned
-        # them).
+        # Replace the cached taxonomy-library accessors with ones that
+        # return our fakes, for the duration of each test. train.py calls
+        # get_benthic_attribute_library() / get_growth_form_library()
+        # (the real ones hit the MERMAID API on construction).
+        fake_ba = small_tree()
+        fake_gf = FakeGFLibrary({"g1": "GF1", "g2": "GF2"})
         self._patches = [
             mock.patch.object(
-                self.train_mod, "ba_library", small_tree()),
+                self.train_mod, "get_benthic_attribute_library",
+                lambda: fake_ba),
             mock.patch.object(
-                self.train_mod, "gf_library",
-                FakeGFLibrary({"g1": "GF1", "g2": "GF2"})),
+                self.train_mod, "get_growth_form_library",
+                lambda: fake_gf),
         ]
         for p in self._patches:
             p.start()
