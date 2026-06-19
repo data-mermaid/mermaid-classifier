@@ -10,7 +10,7 @@ from spacer.data_classes import ValResults
 from mermaid_classifier.pyspacer.metrics._context import MetricsContext
 from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.probability import compute_probability
-from metrics_test_helpers import MockBALibrary, MockGFLibrary, MockClf, format_metric
+from pyspacer.metrics_test_helpers import MockBALibrary, MockGFLibrary, MockClf, format_metric
 
 
 def _make_ctx(classes, gt_labels, proba):

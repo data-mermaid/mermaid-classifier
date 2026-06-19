@@ -165,7 +165,13 @@ def load_csv_as_html_table(
     ascending: bool = True,
 ) -> str:
     """Read a CSV with pandas and return an HTML table string."""
-    df = pd.read_csv(csv_path)
+    try:
+        df = pd.read_csv(csv_path)
+    except pd.errors.EmptyDataError:
+        # Optional artifacts (e.g. excluded labels or a rollup spec) that
+        # weren't specified in the training parameters are still logged as
+        # empty (0-cell) CSVs, which pandas can't parse.
+        return '<span>(Empty)</span>'
     if sort_by is not None and sort_by in df.columns:
         df = df.sort_values(by=sort_by, ascending=ascending)
     return df.to_html(
@@ -348,8 +354,9 @@ def build_template_context(
         title = (f"Classifier Report - {metadata['experiment_name']} - "
                  f"{metadata['run_name']}")
 
-    n_classes = metadata['params'].get('num_classes', '')
-    n_predictions = metadata['params'].get('num_predictions', '')
+    params = metadata.get('params', {})
+    n_classes = params.get('num_classes', '')
+    n_predictions = params.get('num_predictions', '')
 
     return {
         'title': title,

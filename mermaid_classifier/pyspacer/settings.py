@@ -46,7 +46,10 @@ def training_batch_size(
         # (100,) for small ones; num_classes is the output layer.
         # Use the larger architecture as a conservative estimate.
         activation_units = 200 + 100 + num_classes
-        activation_bytes = activation_units * _BYTES_PER_FLOAT
+        # sklearn's backprop holds both forward activations and backprop
+        # deltas (plus gradient buffers) per layer, so the per-sample
+        # activation memory is roughly double the forward-pass size.
+        activation_bytes = 2 * activation_units * _BYTES_PER_FLOAT
     else:
         # SGDClassifier has negligible internal buffers.
         activation_bytes = 0
@@ -105,8 +108,10 @@ class Settings(BaseSettings):
     training_inputs_percent_missing_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
     # Override for training batch size. If None (default),
-    # training_batch_size() auto-calculates at runtime.
-    spacer_batch_size: str | None = None
+    # training_batch_size() auto-calculates at runtime. Typed as int so
+    # Pydantic validates the env var at startup rather than failing
+    # mid-run, after the (expensive) data-prep step.
+    spacer_batch_size: int | None = None
     feature_cache_dir: str | None = None
     download_max_workers: int = 50
     mlflow_http_request_max_retries: str | None = None
