@@ -74,6 +74,10 @@ from mermaid_classifier.training.subsample import (
 logger = logging_config_for_script('train')
 
 
+ba_library = get_benthic_attribute_library()
+gf_library = get_growth_form_library()
+
+
 class Sites(enum.Enum):
     CORALNET = 'coralnet'
     MERMAID = 'mermaid'
