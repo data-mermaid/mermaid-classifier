@@ -256,7 +256,7 @@ class TrainingRunConfig(BaseModel):
         mlflow_options = MLflowOptions(
             experiment_name=m.experiment_name,
             model_name=m.model_name,
-            annotations_to_log=m.annotations_to_log,
+            extra_annotations_to_log=m.annotations_to_log,
         )
 
         return dataset_options, training_options, mlflow_options

@@ -1,6 +1,7 @@
 """Tests for scripts.launch_training (mermaid-classifier)."""
 from __future__ import annotations
 
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +11,19 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import launch_training as lt  # type: ignore
+# launch_training imports the SageMaker SDK at module level. That SDK is an
+# optional extra (`sagemaker`), deliberately excluded from the default test
+# install (`--extra pyspacer`), so skip this module entirely when it's absent.
+# Check `sagemaker.estimator` specifically: `sagemaker-mlflow` (a pyspacer-extra
+# dep) provides a partial `sagemaker` namespace without the full SDK.
+_HAS_SAGEMAKER = importlib.util.find_spec("sagemaker.estimator") is not None
+if _HAS_SAGEMAKER:
+    import launch_training as lt  # type: ignore
+
+
+def setUpModule():
+    if not _HAS_SAGEMAKER:
+        raise unittest.SkipTest("sagemaker SDK not installed (`sagemaker` extra)")
 
 
 def _minimal_yaml() -> str:

@@ -1,12 +1,14 @@
 from contextlib import contextmanager
+import importlib
 from io import StringIO
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 import pandas as pd
 from spacer.data_classes import DataLocation, ImageLabels
-from spacer.messages import TrainingTaskLabels
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
 from mermaid_classifier.pyspacer.settings import settings
@@ -69,8 +71,8 @@ class NoInitDataset(TrainingDataset):
     def __init__(self):
         self._duck_conn = None
         self.artifacts = Artifacts()
-        self._feature_temp_dir = tempfile.TemporaryDirectory(prefix='mermaid_features_')
-        self._feature_dir = self._feature_temp_dir.name
+        self._feature_temp_dir = None
+        self._feature_dir = '/tmp/mermaid_features_test'
 
 
 class BaseTrainTest(unittest.TestCase):
@@ -455,71 +457,106 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
             message)
 
 
+class LazyLibraryTest(BaseTrainTest):
+    """
+    The BA and GF libraries hit the MERMAID API in their __init__. Importing
+    the train module must not trigger those network calls (it used to, via
+    module-level singletons), so unit tests can run offline.
+    """
+
+    def test_importing_train_does_not_call_the_mermaid_api(self):
+        module_name = 'mermaid_classifier.pyspacer.train'
+
+        def fail(*args, **kwargs):
+            raise AssertionError(
+                "Importing train made a network call to the MERMAID API")
+
+        original_module = sys.modules.get(module_name)
+        try:
+            with mock.patch('urllib.request.urlopen', side_effect=fail):
+                # Force a fresh import so the module body re-executes.
+                sys.modules.pop(module_name, None)
+                importlib.import_module(module_name)
+        finally:
+            # Restore the originally-imported module for other tests.
+            if original_module is not None:
+                sys.modules[module_name] = original_module
+
+
 class AddTrainingSetNamesTest(BaseTrainTest):
     """
-    add_training_set_names() tags each annotation row with its train/ref/val
-    bucket via a LEFT OUTER JOIN. The labels side uses filesystem-backed
-    feature_locs (post the pre-download speedup), so the join keys must be
-    recovered from feature_loc_to_s3_key -- otherwise every row ends up with
-    training_set NULL and the dataset summary reports the entire run as
-    "dropped during stratification".
+    Test add_training_set_names(), which writes the train/ref/val split
+    info back into the DuckDB annotations table (as a training_set column)
+    for the reporting/stats artifacts.
     """
 
-    def test_join_populates_training_set(self):
-        dataset = NoInitDataset()
-        dataset.feature_loc_to_s3_key = {}
+    def test_training_set_populated_with_filesystem_locations(self):
+        """
+        prep_annotations_for_pyspacer() builds the PySpacer labels with
+        filesystem DataLocations (local download paths), not S3 keys. So
+        add_training_set_names() can't read (bucket, feature_vector) off
+        the DataLocation directly; it must map the local path back to the
+        original S3 location to match the annotations table.
 
-        # Annotations table mirrors what read_coralnet_data produces:
-        # S3-style bucket + key, integer row/col.
+        Otherwise the join matches nothing, every annotation gets a NULL
+        training_set, and the stats artifacts wrongly report 100% dropped.
+        """
         annotations_df = pd.DataFrame({
-            'bucket': ['cn-data'] * 4,
-            'feature_vector': (
-                ['s12/i12345.featurevector'] * 2
-                + ['s12/i67890.featurevector'] * 2),
-            'row': [100, 200, 300, 400],
-            'col': [10, 20, 30, 40],
-            'site': [Sites.CORALNET.value] * 4,
-            'image_id': ['12345', '12345', '67890', '67890'],
-            'project_id': ['12'] * 4,
+            'bucket': ['bucketA', 'bucketA', 'bucketB'],
+            'feature_vector': [
+                'cn/img1.featurevector',
+                'cn/img1.featurevector',
+                'mermaid/img2.featurevector',
+            ],
+            'row': [10, 30, 50],
+            'col': [20, 40, 60],
         })
+
+        dataset = NoInitDataset()
         dataset.duck_conn.execute(
             "CREATE TABLE annotations AS SELECT * FROM annotations_df"
         )
 
-        # The labels side uses filesystem storage with local cache paths --
-        # the bucket_name / key on the DataLocation no longer line up with
-        # what's in the annotations table, so the join must reach through
-        # feature_loc_to_s3_key.
-        loc1 = DataLocation(
-            storage_type='filesystem',
-            key='/tmp/cache/cn-data/s12/i12345.featurevector',
-        )
-        loc2 = DataLocation(
-            storage_type='filesystem',
-            key='/tmp/cache/cn-data/s12/i67890.featurevector',
-        )
-        dataset.feature_loc_to_s3_key[loc1] = (
-            'cn-data', 's12/i12345.featurevector')
-        dataset.feature_loc_to_s3_key[loc2] = (
-            'cn-data', 's12/i67890.featurevector')
+        # The labels carry filesystem DataLocations keyed by local download
+        # paths, alongside a mapping back to the original (bucket, key).
+        loc1_path = '/tmp/feat/bucketA/cn/img1.featurevector'
+        loc2_path = '/tmp/feat/bucketB/mermaid/img2.featurevector'
+        dataset._feature_path_to_s3_location = {
+            loc1_path: ('bucketA', 'cn/img1.featurevector'),
+            loc2_path: ('bucketB', 'mermaid/img2.featurevector'),
+        }
 
-        train = ImageLabels()
-        train.add_image(loc1, [(100, 10, 'BA1'), (200, 20, 'BA2')])
-        ref = ImageLabels()
-        ref.add_image(loc2, [(300, 30, 'BA1')])
-        val = ImageLabels()
-        val.add_image(loc2, [(400, 40, 'BA2')])
-        dataset.labels = TrainingTaskLabels(train=train, ref=ref, val=val)
+        dataset.labels = SimpleNamespace(
+            train=ImageLabels({
+                DataLocation('filesystem', loc1_path): [(10, 20, 'BA1')],
+            }),
+            ref=ImageLabels({
+                DataLocation('filesystem', loc1_path): [(30, 40, 'BA1')],
+            }),
+            val=ImageLabels({
+                DataLocation('filesystem', loc2_path): [(50, 60, 'BA2')],
+            }),
+        )
 
         dataset.add_training_set_names()
 
-        result = sorted(dataset.duck_conn.execute(
-            "SELECT feature_vector, row, col, training_set"
-            " FROM annotations"
-        ).fetchall())
-        self.assertEqual(result, [
-            ('s12/i12345.featurevector', 100, 10, 'train'),
-            ('s12/i12345.featurevector', 200, 20, 'train'),
-            ('s12/i67890.featurevector', 300, 30, 'ref'),
-            ('s12/i67890.featurevector', 400, 40, 'val'),
-        ])
+        result = dataset.duck_conn.execute(
+            "SELECT bucket, feature_vector, row, col, training_set"
+            " FROM annotations ORDER BY bucket, row"
+        ).fetchall()
+
+        self.assertListEqual(
+            result,
+            [
+                ('bucketA', 'cn/img1.featurevector', 10, 20, 'train'),
+                ('bucketA', 'cn/img1.featurevector', 30, 40, 'ref'),
+                ('bucketB', 'mermaid/img2.featurevector', 50, 60, 'val'),
+            ],
+            msg="Each annotation should be matched to its train/ref/val set",
+        )
+
+        dropped = dataset.duck_conn.execute(
+            "SELECT count(*) FROM annotations WHERE training_set IS NULL"
+        ).fetchone()[0]
+        self.assertEqual(
+            dropped, 0, msg="No annotation should be reported as dropped")
