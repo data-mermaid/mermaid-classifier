@@ -222,12 +222,27 @@ class LiveModelParityTest(unittest.TestCase):
         model = self._load_live_model()
         input_dim = int(model.calibrated_classifiers_[0].estimator.n_features_in_)
 
+        # Parity must be proven on REAL EfficientNet features. Random vectors
+        # sit in flat softmax regions and under-exercise the per-class
+        # calibration tails, where the frozen graph diverges most — so we
+        # refuse to "prove" parity on them. Build the .npy with
+        # scripts/extract_reference_features.py.
         feats_path = os.environ.get("PORTABLE_ARTIFACT_LIVE_FEATURES")
-        if feats_path:
-            X = np.load(feats_path).astype(np.float32)
-        else:
-            rng = np.random.default_rng(0)
-            X = rng.normal(0, 1, size=(256, input_dim)).astype(np.float32)
+        if not feats_path:
+            self.fail(
+                "PORTABLE_ARTIFACT_LIVE_MODEL is set but"
+                " PORTABLE_ARTIFACT_LIVE_FEATURES is not. The live parity gate"
+                " requires REAL EfficientNet features (no random fallback)."
+                " Generate them with"
+                " `python scripts/extract_reference_features.py --out X.npy"
+                " <.featurevector files>` and set PORTABLE_ARTIFACT_LIVE_FEATURES=X.npy."
+            )
+        X = np.load(feats_path).astype(np.float32)
+        if X.ndim != 2 or X.shape[1] != input_dim:
+            self.fail(
+                f"real features must be (N, {input_dim}) to match the live"
+                f" model; got {X.shape}."
+            )
 
         with tempfile.TemporaryDirectory() as d:
             model_pt, manifest, max_diff = export_artifact(model, d, X)
