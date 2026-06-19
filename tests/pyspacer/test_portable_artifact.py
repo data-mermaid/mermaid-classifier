@@ -2,6 +2,7 @@
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 
 class ScaffoldTest(unittest.TestCase):
@@ -107,6 +108,31 @@ class ExportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(ParityError):
                 export_artifact(model, d, X, tol=-1.0)
+
+    def test_export_raises_when_sklearn_unpinned(self):
+        from mermaid_classifier.pyspacer.inference import (
+            export_artifact, SklearnPinError,
+        )
+        model, X = make_calibrated_model()
+        with tempfile.TemporaryDirectory() as d:
+            # Patch the proven version to something the runner can't have, so
+            # the installed sklearn is guaranteed to differ.
+            with mock.patch(
+                "mermaid_classifier.pyspacer.inference.export"
+                ".PARITY_PROVEN_SKLEARN", "0.0.0-never",
+            ):
+                with self.assertRaises(SklearnPinError):
+                    export_artifact(model, d, X)
+
+    def test_export_manifest_records_proven_sklearn(self):
+        from mermaid_classifier.pyspacer.inference import (
+            export_artifact, PARITY_PROVEN_SKLEARN,
+        )
+        model, X = make_calibrated_model()
+        with tempfile.TemporaryDirectory() as d:
+            _, manifest, _ = export_artifact(model, d, X)
+        self.assertEqual(manifest["trained_with"]["sklearn"],
+                         PARITY_PROVEN_SKLEARN)
 
 
 class LoadValidationTest(unittest.TestCase):

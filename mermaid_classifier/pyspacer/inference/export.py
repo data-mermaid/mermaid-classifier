@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from mermaid_classifier.pyspacer.inference import (
-    SCHEMA_VERSION, TASK_NAME, ParityError,
+    SCHEMA_VERSION, TASK_NAME, PARITY_PROVEN_SKLEARN, ParityError, SklearnPinError,
 )
 from mermaid_classifier.pyspacer.inference.head import build_calibrated_head
 
@@ -23,12 +23,25 @@ def export_artifact(
     config: dict | None = None,
     task: str = TASK_NAME,
     tol: float = 1e-6,
+    enforce_sklearn_pin: bool = True,
 ):
     """Build, freeze, parity-gate, and persist the portable artifact.
 
     Returns (model_pt_path, manifest_dict, max_abs_diff). Raises ParityError
     if the frozen graph diverges from ``model.predict_proba`` beyond ``tol``.
+    Raises SklearnPinError if the installed scikit-learn differs from
+    PARITY_PROVEN_SKLEARN and enforce_sklearn_pin is True.
     """
+    sklearn_version = _pkg_version("scikit-learn")
+    if enforce_sklearn_pin and sklearn_version != PARITY_PROVEN_SKLEARN:
+        raise SklearnPinError(
+            f"scikit-learn {sklearn_version} != parity-proven"
+            f" {PARITY_PROVEN_SKLEARN}. Refusing to export: a sklearn change can"
+            " silently alter CalibratedClassifierCV calibration semantics."
+            " Re-prove parity on real features (live parity test), then update"
+            " PARITY_PROVEN_SKLEARN and the pyproject pin together to bump."
+        )
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -61,7 +74,7 @@ def export_artifact(
             # Read via importlib.metadata so importing this module (and thus
             # the inference package) doesn't pull in sklearn — the serve path
             # needs only torch/numpy.
-            "sklearn": _pkg_version("scikit-learn"),
+            "sklearn": sklearn_version,
         },
     }
 
