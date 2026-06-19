@@ -121,6 +121,15 @@ class MetricsCoordinator:
     def _log_result(self, result: MetricGroupResult):
         """Log all parts of a MetricGroupResult to MLflow."""
         for scalar in result.scalars:
+            # Skip NaN values: MLflow's log_model re-logs run metrics to
+            # associate them with the model, and its dedup-on-conflict filter
+            # can't recognize an already-logged NaN (NaN != NaN), so it retries
+            # the insert and crashes on the metrics UNIQUE constraint.
+            if scalar.value is None or np.isnan(scalar.value):
+                logger.warning(
+                    "Skipping metric %r with non-finite value %r",
+                    scalar.name, scalar.value)
+                continue
             mlflow.log_metric(scalar.name, scalar.value)
 
         for df_result in result.dataframes:
