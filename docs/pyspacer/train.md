@@ -160,8 +160,10 @@ runner = MLflowTrainingRunner(
         experiment_name="My Experiment 1",
         # This gets date/time appended to the end of it.
         model_name='my-model',
-        # Logs all input annotations to MLflow. Also possible to just log a subset.
-        annotations_to_log='all',
+        # Logs all input annotations to MLflow, in addition to the
+        # validation-split annotations that are always logged. Also possible
+        # to just log a subset.
+        extra_annotations_to_log='all',
     ),
 )
 runner.run()
