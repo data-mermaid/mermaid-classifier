@@ -71,6 +71,8 @@ class NoInitDataset(TrainingDataset):
     def __init__(self):
         self._duck_conn = None
         self.artifacts = Artifacts()
+        self._feature_temp_dir = None
+        self._feature_dir = '/tmp/mermaid_features_test'
 
 
 class BaseTrainTest(unittest.TestCase):

@@ -15,6 +15,14 @@ These are found in `mermaid_classifier.common`. Once this package is installed (
 
 This is found in `mermaid_classifier.pyspacer`.
 
+### Scripts
+
+The `scripts/` directory holds command-line entry points that *drive* the package, as opposed to the importable `mermaid_classifier` library code described above. Each script is run with `python scripts/<name>.py` from the repo root (see the script's module docstring for arguments):
+
+- `classifier_train.py` — run a training job.
+- `evaluate_model.py` — evaluate a pre-trained model and log results to MLflow.
+- `generate_report.py` — render a self-contained HTML report from an MLflow run, using the Jinja2 template `report_template.html.j2`. This is currently the only way to generate an HTML report.
+
 ### Documentation
 
 See the [docs](docs) section for usage explanations.
@@ -92,3 +100,56 @@ Although this project isn't on PyPI, the fact that it's set up as a package make
 - Import from this project, compared to an ad-hoc addition to `sys.path`, for example.
 
 - Manage project dependencies.
+
+
+## Architecture
+
+### Package Layout (flat layout, not src/)
+
+- `mermaid_classifier/common/` -- Shared utilities (MERMAID API clients, DuckDB helpers, CSV parsing, plotting)
+- `mermaid_classifier/pyspacer/` -- PySpacer training and classification pipeline
+- `tests/pyspacer/` -- Unit tests (unittest, not pytest)
+- `pyspacer_example/` -- Jupyter notebook demo with sample `.env`
+- `v1/` -- Legacy code, not incorporated into current version
+
+### Training Pipeline (train.py)
+
+The core pipeline flows through `TrainingDataset` -> `TrainingRunner` / `MLflowTrainingRunner`:
+
+1. **Data loading**: `read_coralnet_data()` reads per-source CSVs from S3 via DuckDB; `read_mermaid_data()` reads a Parquet file. Both write to a DuckDB `annotations` table.
+2. **Label mapping**: CoralNet label IDs are mapped to MERMAID BA+GF using `CoralNetMermaidMapping` (fetched from MERMAID API, cached after first load).
+3. **Filtering & rollup**: `LabelFilter`, `LabelRollupSpec`, `CNSourceFilter` (all `CsvSpec` subclasses) control which labels/sources are included and how labels are consolidated.
+4. **Feature vector validation**: Checks S3 for missing `.fv` files; drops or aborts based on `TRAINING_INPUTS_PERCENT_MISSING_ALLOWED`.
+5. **Train/ref/val split**: Uses PySpacer's `preprocess_labels()` with `SplitMode`.
+6. **Training**: Calls PySpacer's `train_classifier()` with `TrainClassifierMsg`.
+7. **Logging**: `MLflowTrainingRunner` logs model, metrics (precision/recall/F1), confusion matrices, and profiling data to MLflow.
+
+### Key Patterns
+
+- **Configuration**: Pydantic `Settings` class reads from `.env` file in cwd. Setting names are lowercase in code, UPPERCASE in `.env`. See `pyspacer_example/.env` for all options.
+- **DuckDB as ETL engine**: All data transformations use SQL via DuckDB (not pandas). Helpers in `duckdb_utils.py` provide context managers for temp tables, column transforms, batched iteration, etc.
+- **NULL growth forms**: CoralNet labels without a growth form must be stored as empty string `''` in DuckDB (not NULL), because NULL breaks JOINs. Tests specifically verify this.
+- **BA+GF separator**: `::` separates benthic attribute from growth form (e.g., `Acropora::Branching` or `Hard coral::` for no GF). Empty growth forms must still have the trailing `::`.
+- **CsvSpec pattern**: `LabelFilter`, `LabelRollupSpec`, and `CNSourceFilter` all inherit from `CsvSpec`, which validates CSV columns and initializes from a file-like object.
+- **Context managers for resource cleanup**: `section_profiling()` for timing, `make_confusion_matrix()` for matplotlib figures, `duckdb_temp_table_name()` for temp tables.
+
+### Testing Patterns
+
+- Tests use `unittest` (not pytest).
+- `SettingsOverride` / `override_settings()` context manager patches Pydantic settings for test isolation.
+- `NoInitDataset` bypasses expensive `TrainingDataset.__init__` (which hits S3 and MERMAID API) to test individual methods.
+- `CoralNetMermaidMapping._download_mapping` is mocked to avoid live API calls.
+
+### Configuration (Settings)
+
+Key settings (set via `.env` or environment variables):
+
+| Setting | Purpose |
+|---|---|
+| `CORALNET_TRAIN_DATA_BUCKET` / `MERMAID_TRAIN_DATA_BUCKET` | S3 buckets for training data |
+| `WEIGHTS_LOCATION` | Path to EfficientNet extractor weights |
+| `AWS_ANONYMOUS` | `True` for public S3 access without credentials |
+| `MLFLOW_TRACKING_SERVER` | MLflow server URI (ARN or localhost) |
+| `SPACER_EXTRACTORS_CACHE_DIR` | Cache dir for downloaded weights |
+| `SPACER_BATCH_SIZE` | Training batch size for partial_fit calls (auto-calculated from RAM) |
+| `MLFLOW_HTTP_REQUEST_MAX_RETRIES` | Default 7 is slow; 2 recommended |

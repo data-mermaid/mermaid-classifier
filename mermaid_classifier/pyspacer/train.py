@@ -53,7 +53,11 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_transform_column,
 )
 from mermaid_classifier.pyspacer.metrics import (
-    make_confusion_matrix, precision_recall_f1)
+    MetricsContext, MetricsCoordinator,
+)
+from mermaid_classifier.pyspacer.metrics._logging import (
+    log_dataframe as _log_dataframe,
+)
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
@@ -480,20 +484,23 @@ class MLflowOptions:
     This name gets truncated at 50 characters to avoid a potential crash when
     logging the model.
 
-    annotations_to_log
+    extra_annotations_to_log
 
-    If specified, log training annotations as an MLflow artifact, in tabular
-    form. One table row per point-annotation. This can serve as a sanity
-    check, but the artifact can get quite large.
+    In addition to the validation-split annotations (which are always logged
+    as the `annotations_val` artifact so others can independently re-evaluate
+    the model), optionally log a further set of training annotations as an
+    MLflow artifact, in tabular form. One table row per point-annotation.
+    This can serve as a sanity check or debugging aid, but the artifact can
+    get quite large.
     Supported formats:
     'all': log all annotations
     's123': log annotations from CoralNet source of ID 123
     'i456': log annotations from CoralNet image of ID 456
-    <not specified>: log nothing
+    <not specified>: log nothing extra
     """
     experiment_name: str | None = settings.mlflow_default_experiment_name
     model_name: str | None = None
-    annotations_to_log: str | None = None
+    extra_annotations_to_log: str | None = None
 
 
 class TrainingDataset:
@@ -503,8 +510,14 @@ class TrainingDataset:
         self.options = options
         self.artifacts = Artifacts()
         self.profiled_sections = []
-        self._feature_temp_dir = tempfile.TemporaryDirectory(
-            prefix='mermaid_features_')
+        if settings.feature_cache_dir:
+            os.makedirs(settings.feature_cache_dir, exist_ok=True)
+            self._feature_dir = settings.feature_cache_dir
+            self._feature_temp_dir = None
+        else:
+            self._feature_temp_dir = tempfile.TemporaryDirectory(
+                prefix='mermaid_features_')
+            self._feature_dir = self._feature_temp_dir.name
         # Maps a downloaded feature vector's local path (used as the key of
         # the filesystem DataLocations in self.labels) back to its original
         # (bucket, feature_vector) S3 location. add_training_set_names() needs
@@ -678,7 +691,8 @@ class TrainingDataset:
 
     def cleanup(self):
         """Clean up temporary feature vector files."""
-        self._feature_temp_dir.cleanup()
+        if self._feature_temp_dir is not None:
+            self._feature_temp_dir.cleanup()
 
     @contextmanager
     def section_profiling(self, section_name: str):
@@ -994,7 +1008,7 @@ class TrainingDataset:
 
             # First pass: collect annotations and unique S3 keys.
             s3_keys: dict[tuple[str, str], str] = {}
-            tmp_root = self._feature_temp_dir.name
+            tmp_root = self._feature_dir
             # image_data: list of (bucket, key, annotations)
             image_data = []
 
@@ -1568,6 +1582,22 @@ class MLflowTrainingRunner(TrainingRunner):
 
             mlflow.log_params(training_options_to_log)
 
+            dataset_options_to_log = dict(
+                include_mermaid=self.dataset_options.include_mermaid,
+                coralnet_sources_csv=os.path.basename(
+                    self.dataset_options.coralnet_sources_csv or ''),
+                drop_growthforms=self.dataset_options.drop_growthforms,
+                label_rollup_spec_csv=os.path.basename(
+                    self.dataset_options.label_rollup_spec_csv or ''),
+                excluded_labels_csv=os.path.basename(
+                    self.dataset_options.excluded_labels_csv or ''),
+                included_labels_csv=os.path.basename(
+                    self.dataset_options.included_labels_csv or ''),
+                ref_val_ratios=str(self.dataset_options.ref_val_ratios),
+                annotation_limit=self.dataset_options.annotation_limit or '',
+            )
+            mlflow.log_params(dataset_options_to_log)
+
             self.log_system_specs()
 
             # Here's the actual training and data prep.
@@ -1578,44 +1608,41 @@ class MLflowTrainingRunner(TrainingRunner):
             self.log_dataframe(profiles_df, 'profiled_sections')
 
             val_results = ValResults.load(valresult_loc)
+            mlflow.log_dict(val_results.serialize(), 'valresult.json')
 
-            self.log_confusion_matrix(
+            clf = load_classifier(model_loc)
+
+            ba_library = get_benthic_attribute_library()
+            gf_library = get_growth_form_library()
+
+            ctx = MetricsContext(
                 val_results=val_results,
-                normalize=False,
-                filestem='confusion_matrix/frequencies',
-            )
-            self.log_confusion_matrix(
-                val_results=val_results,
-                normalize=True,
-                filestem='confusion_matrix/percents',
+                ba_library=ba_library,
+                gf_library=gf_library,
+                format_func=self.format_metric,
+                dataset=self.dataset,
+                clf=clf,
             )
 
-            per_label_prf, overall_metrics = precision_recall_f1(
-                val_results, self.format_metric,
-                get_benthic_attribute_library(), get_growth_form_library())
-            overall_metrics['accuracy'] = self.format_metric(return_msg.acc)
+            coordinator = MetricsCoordinator(
+                ctx, duck_conn=self.dataset.duck_conn)
+            coordinator.compute_and_log_all()
 
-            # Log overall metrics with log_metric(). Note that this method
-            # only takes numeric values.
-            for metric_name, metric_value in overall_metrics.items():
-                mlflow.log_metric(metric_name, metric_value)
-            # Log overall metrics as an artifact.
-            mlflow.log_dict(overall_metrics, 'metrics_overall.yaml')
-            # Log per-label metrics as an artifact.
-            self.log_dataframe(
-                pd.DataFrame(per_label_prf), 'metrics_per_label')
-
-            # ref_accs is probably the only other part of return_msg to save.
-            ref_accs_dict = dict()
-            for epoch_number, acc in enumerate(return_msg.ref_accs, 1):
-                ref_accs_dict[epoch_number] = self.format_metric(acc)
+            # Accuracy and ref_accs come from pyspacer's return_msg,
+            # not our metrics module.
+            mlflow.log_metric(
+                'accuracy', self.format_metric(return_msg.acc))
+            ref_accs_dict = {
+                epoch: self.format_metric(acc)
+                for epoch, acc in enumerate(return_msg.ref_accs, 1)
+            }
             mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
 
             # Save and register the trained model.
             signature = mlflow.models.infer_signature(
                 params=training_options_to_log)
             model_info = mlflow.sklearn.log_model(
-                sk_model=load_classifier(model_loc),
+                sk_model=clf,
                 registered_model_name=model_name,
                 signature=signature,
             )
@@ -1688,14 +1715,25 @@ class MLflowTrainingRunner(TrainingRunner):
         """
         return ''.join([char for char in s if char.isalnum()])
 
+    @staticmethod
+    def _existing_ancestor(path: str) -> str:
+        """Walk up from path until an existing directory is found."""
+        p = path
+        while not os.path.exists(p):
+            parent = os.path.dirname(p)
+            if parent == p:
+                return '/'
+            p = parent
+        return p
+
     def log_system_specs(self):
         mlflow.log_dict(
             dict(
                 total_ram_gb=psutil.virtual_memory().total / 10**9,
-                # We're not specifying our own feature cache dir, which means
-                # it's an OS-created temp dir, so we care about the free space
-                # on the OS partition.
-                free_storage_gb=psutil.disk_usage('/').free / 10**9,
+                free_storage_gb=psutil.disk_usage(
+                    self._existing_ancestor(
+                        settings.feature_cache_dir or '/')
+                ).free / 10**9,
             ),
             'system_specs.yaml',
         )
@@ -1752,19 +1790,19 @@ class MLflowTrainingRunner(TrainingRunner):
                 artifacts.unmapped_labels,
                 'unmapped_labels')
 
-        # Log other options given to the training process.
-        other_options = dict(
-            drop_growthforms=self.dataset_options.drop_growthforms,
-            annotation_limit=self.dataset_options.annotation_limit,
-        )
-        mlflow.log_dict(other_options, 'other_options.yaml')
-
-        # Log annotations, if specified.
-        if self.mlflow_options.annotations_to_log is not None:
-            log_spec = self.mlflow_options.annotations_to_log.lower()
+        # Log extra annotations, if specified.
+        if self.mlflow_options.extra_annotations_to_log is not None:
+            log_spec = self.mlflow_options.extra_annotations_to_log.lower()
             df = self.dataset.get_annotations(log_spec)
 
             self.log_dataframe(df, f'annotations_{log_spec}')
+
+        # Always log the validation split annotations so others can
+        # independently re-evaluate the model.
+        val_annotations_df = self.dataset.duck_conn.execute(
+            "SELECT * FROM annotations WHERE training_set = 'val'"
+        ).fetch_df()
+        self.log_dataframe(val_annotations_df, 'annotations_val')
 
     def log_dataframe(self, df, filestem):
         """
@@ -1773,34 +1811,4 @@ class MLflowTrainingRunner(TrainingRunner):
         external program such as Excel / LibreOffice Calc.
         To save a .csv, we use log_text() instead, with this helper function.
         """
-        duck_conn = self.dataset.duck_conn
-
-        with duckdb_temp_table_name(duck_conn) as table_name:
-            duck_conn.execute(
-                f"CREATE TABLE {table_name} AS SELECT * FROM df"
-            )
-
-            with tempfile.NamedTemporaryFile(
-                mode='w+t', suffix='.csv', delete_on_close=False,
-            ) as f:
-                # DuckDB will reopen the file, so close first.
-                f.close()
-                duck_conn.execute(f"COPY {table_name} TO '{f.name}'")
-
-                # Need to open yet again to get the DuckDB-written contents.
-                with open(f.name) as f_new:
-                    mlflow.log_text(f_new.read(), filestem + '.csv')
-
-                # As this context manager finishes, the temp file will be
-                # deleted.
-
-    def log_confusion_matrix(
-        self, val_results: ValResults, normalize: bool, filestem: str
-    ):
-        with make_confusion_matrix(
-            val_results, normalize,
-            get_benthic_attribute_library(), get_growth_form_library(),
-        ) as (df, fig):
-
-            self.log_dataframe(df, filestem)
-            mlflow.log_figure(fig, filestem + '.png')
+        _log_dataframe(self.dataset.duck_conn, df, filestem)
