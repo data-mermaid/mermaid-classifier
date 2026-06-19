@@ -1574,6 +1574,7 @@ dependencies = [
 [package.optional-dependencies]
 inference = [
     { name = "pyspacer" },
+    { name = "scikit-learn" },
 ]
 jupyterlab = [
     { name = "ipympl" },
@@ -1610,7 +1611,8 @@ requires-dist = [
     { name = "pydantic-settings", marker = "extra == 'training'" },
     { name = "pyspacer", marker = "extra == 'inference'", specifier = "==0.14.0" },
     { name = "s3fs", marker = "extra == 'training'" },
-    { name = "scikit-learn", marker = "extra == 'training'" },
+    { name = "scikit-learn", marker = "extra == 'inference'", specifier = "==1.5.2" },
+    { name = "scikit-learn", marker = "extra == 'training'", specifier = "==1.5.2" },
 ]
 provides-extras = ["inference", "training", "jupyterlab"]
 

@@ -23,6 +23,9 @@ packages = ["mermaid_classifier"]
 inference = [
     # Pinned to Release 0.14.0 (git hash b52acdb)
     "pyspacer==0.14.0",
+    # Parity gate was proven against this sklearn; see PARITY_PROVEN_SKLEARN.
+    # A bump can silently change CalibratedClassifierCV calibration semantics.
+    "scikit-learn==1.5.2",
 ]
 # Everything needed to TRAIN: the inference stack plus orchestration, metrics,
 # data loading, and the settings layer.
@@ -41,7 +44,8 @@ training = [
     "pydantic-settings",
     "s3fs",
     # pyspacer uses scikit-learn, but we also use it directly for metrics.
-    "scikit-learn",
+    # Pinned in lockstep with PARITY_PROVEN_SKLEARN (see inference extra).
+    "scikit-learn==1.5.2",
 ]
 jupyterlab = [
     "jupyterlab>=4.5.5",
