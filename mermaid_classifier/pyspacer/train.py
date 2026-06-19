@@ -1474,7 +1474,7 @@ class TrainingRunner:
             num_classes = len(self.dataset.labels.ref.classes_set)
 
             if settings.spacer_batch_size is not None:
-                batch_size = int(settings.spacer_batch_size)
+                batch_size = settings.spacer_batch_size
                 logger.info(
                     f"Batch size: {batch_size} (from SPACER_BATCH_SIZE)")
             else:
