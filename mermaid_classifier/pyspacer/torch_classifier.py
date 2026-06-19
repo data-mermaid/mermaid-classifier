@@ -129,16 +129,22 @@ class TorchMLPClassifier:
         return min(int(self.batch_size), n_samples)
 
     def _seed_rng(self) -> np.random.Generator:
-        # Match sklearn's MLP behaviour: `_fit` re-creates the per-call RNG
-        # from `self.random_state` every time, so identical input + same
-        # `random_state` reproduces the same shuffle across partial_fit
-        # calls. Callers that want per-call variation should vary
-        # random_state themselves (as MermaidTrainer does implicitly by
-        # passing different batches).
+        # int random_state: re-create a seeded RNG from `self.random_state`
+        # every call, so identical input + same `random_state` reproduces
+        # the same shuffle across partial_fit calls.
         base_seed = self.random_state
-        if base_seed is None:
-            return np.random.default_rng()
-        return np.random.default_rng(int(base_seed))
+        if base_seed is not None:
+            return np.random.default_rng(int(base_seed))
+        # random_state=None: seed a per-instance RNG *once* from NumPy's
+        # global RNG and reuse it across calls. This matches sklearn, whose
+        # `check_random_state(None)` returns the global singleton — so
+        # `np.random.seed(...)` makes shuffling reproducible — while still
+        # advancing between calls (no fixed shuffle).
+        if not hasattr(self, "_none_rng"):
+            self._none_rng = np.random.default_rng(
+                np.random.randint(0, np.iinfo(np.int32).max)
+            )
+        return self._none_rng
 
     def _labels_to_indices(self, y: np.ndarray) -> np.ndarray:
         # searchsorted on sorted classes_ is fast and stable.
@@ -283,6 +289,16 @@ class TorchMLPClassifier:
                 " before predict/predict_proba."
             )
         X_arr = np.asarray(X, dtype=np.float32)
+        # Match sklearn's MLPClassifier contract: X must be 2D with the
+        # fitted feature count. Validating here turns an opaque downstream
+        # softmax crash into an actionable error.
+        if X_arr.ndim != 2:
+            raise ValueError(f"X must be 2D, got shape {X_arr.shape}")
+        if X_arr.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X_arr.shape[1]} features, expected"
+                f" {self.n_features_in_}"
+            )
         self._module.eval()
         with torch.no_grad():
             probs = F.softmax(self._module(torch.from_numpy(X_arr)), dim=1)
