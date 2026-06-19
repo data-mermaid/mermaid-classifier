@@ -1,0 +1,36 @@
+name: Tests
+
+on:
+  pull_request:
+
+# Cancel in-progress runs when a PR is updated.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: unittest (Linux, Python 3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Install package with pyspacer extras
+        # --frozen fails CI if uv.lock is out of sync with pyproject.toml,
+        # rather than silently updating it. Keeps CI reproducible.
+        run: uv sync --frozen --extra pyspacer
+
+      - name: Run tests
+        working-directory: tests
+        run: uv run --no-sync python -m unittest -v
