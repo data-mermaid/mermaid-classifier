@@ -10,7 +10,7 @@ from mermaid_classifier.pyspacer.metrics.calibration import (
     _adaptive_ece,
     compute_calibration,
 )
-from .metrics_test_helpers import MockBALibrary, MockGFLibrary, make_val_results, format_metric
+from pyspacer.metrics_test_helpers import MockBALibrary, MockGFLibrary, make_val_results, format_metric
 
 
 def _make_ctx(gt_indices, est_indices, classes, scores=None):

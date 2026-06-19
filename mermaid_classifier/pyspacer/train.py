@@ -713,10 +713,7 @@ class TrainingDataset:
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
-
-
-        with self.section_profiling("Prep annotations for PySpacer"):
-            self.labels = self.prep_annotations_for_pyspacer()
+        self.labels = self.prep_annotations_for_pyspacer()
 
         with self.section_profiling("Tag DuckDB rows with training set"):
             self.add_training_set_names()
@@ -1650,7 +1647,7 @@ class TrainingRunner:
             num_classes = len(self.dataset.labels.ref.classes_set)
 
             if settings.spacer_batch_size is not None:
-                batch_size = int(settings.spacer_batch_size)
+                batch_size = settings.spacer_batch_size
                 logger.info(
                     f"Batch size: {batch_size} (from SPACER_BATCH_SIZE)")
             else:
@@ -1740,8 +1737,8 @@ class TrainingRunner:
 
         weights = compute_class_weights(
             class_counts=class_counts,
-            ba_library=ba_library,
-            gf_library=gf_library,
+            ba_library=get_benthic_attribute_library(),
+            gf_library=get_growth_form_library(),
             options=opts,
         )
 
@@ -2080,6 +2077,9 @@ class MLflowTrainingRunner(TrainingRunner):
 
         # Decorate with BA/GF names. Defensive: if any label fails to
         # parse, leave the name columns blank rather than failing the run.
+        ba_library = get_benthic_attribute_library()
+        gf_library = get_growth_form_library()
+
         def _decorate(row):
             try:
                 ba_id, gf_id = split_ba_gf(row['bagf_id'])
@@ -2121,6 +2121,9 @@ class MLflowTrainingRunner(TrainingRunner):
         if df is None:
             return
         # Decorate with human-readable names so the CSV is self-contained.
+        ba_library = get_benthic_attribute_library()
+        gf_library = get_growth_form_library()
+
         def _decorate(row):
             try:
                 ba_name = ba_library.id_to_name(row['benthic_attribute_id']) \
