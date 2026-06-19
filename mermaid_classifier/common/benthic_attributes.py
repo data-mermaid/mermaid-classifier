@@ -3,6 +3,7 @@
 from collections import defaultdict
 import csv
 import dataclasses
+import functools
 import json
 import operator
 import urllib.request
@@ -138,6 +139,25 @@ class GrowthFormLibrary:
         if gf_id == '':
             return ''
         return self.by_id[gf_id]
+
+
+@functools.cache
+def get_benthic_attribute_library() -> BenthicAttributeLibrary:
+    """
+    Lazily construct (and cache) the BA library singleton. Use this instead
+    of constructing BenthicAttributeLibrary() at import time, so that merely
+    importing a module doesn't hit the MERMAID API.
+    """
+    return BenthicAttributeLibrary()
+
+
+@functools.cache
+def get_growth_form_library() -> GrowthFormLibrary:
+    """
+    Lazily construct (and cache) the GF library singleton. See
+    get_benthic_attribute_library().
+    """
+    return GrowthFormLibrary()
 
 
 @dataclasses.dataclass

@@ -12,7 +12,7 @@ from mermaid_classifier.pyspacer.metrics.ranking import (
     _compute_topk_mrr,
     compute_ranking,
 )
-from .metrics_test_helpers import MockBALibrary, MockGFLibrary, MockClf, format_metric
+from pyspacer.metrics_test_helpers import MockBALibrary, MockGFLibrary, MockClf, format_metric
 
 
 class ComputeTopKMRRTest(unittest.TestCase):
