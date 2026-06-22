@@ -80,5 +80,22 @@ class ResolveMlflowModelIdTest(unittest.TestCase):
             float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
 
 
+class PyspacerPickleGuardTest(unittest.TestCase):
+    """Guard: annotation.py must not reuse the pyspacer classify/pickle path."""
+
+    def _source(self):
+        from mermaid_classifier.pyspacer import annotation
+        return Path(annotation.__file__).read_text()
+
+    def test_no_classify_image_or_classifyimagemsg(self):
+        src = self._source()
+        self.assertNotIn("classify_image", src)
+        self.assertNotIn("ClassifyImageMsg", src)
+
+    def test_imports_load_predictor(self):
+        src = self._source()
+        self.assertIn("load_predictor", src)
+
+
 if __name__ == "__main__":
     unittest.main()

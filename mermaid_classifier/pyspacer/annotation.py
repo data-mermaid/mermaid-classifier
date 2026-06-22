@@ -19,9 +19,7 @@ import mlflow
 import numpy as np
 from spacer.data_classes import DataLocation
 from spacer.extractors import EfficientNetExtractor
-from spacer.messages import ClassifyImageMsg
 from spacer.storage import load_image, storage_factory
-from spacer.tasks import classify_image
 
 from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary, GrowthFormLibrary)
@@ -31,6 +29,7 @@ from mermaid_classifier.common.plots import (
     plot_point_markers,
     PointMarker,
 )
+from mermaid_classifier.pyspacer.inference import load_predictor
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import mlflow_connect
 
@@ -203,11 +202,7 @@ class AnnotationRun:
             self.image_loc = self.get_coralnet_image(image_id)
             auto_plot_title = f"CoralNet image {image_id}"
 
-        classifier_loc = self.parse_location_str(
-            classifier,
-            is_classifier=True,
-        )
-        if classifier_loc:
+        if classifier:
             auto_plot_title += f"\nClassified by: {classifier}"
         else:
             auto_plot_title += f"\nAnnotations from CSV file"
@@ -216,33 +211,33 @@ class AnnotationRun:
 
         weights_loc = self.parse_location_str(weights_location)
 
-        if classifier_loc:
+        if classifier:
 
-            # Classify with pyspacer
+            # Classify with the portable artifact: extract features with
+            # pyspacer's EfficientNet extractor, then predict with the loaded
+            # TorchScript head (no classifier pickle, no pyspacer classify call).
 
-            message = ClassifyImageMsg(
-                job_token=f'{image}_classify',
-                image_loc=self.image_loc,
-                extractor=EfficientNetExtractor(
-                    data_locations=dict(weights=weights_loc),
-                ),
-                rowcols=[rowcol for rowcol in annotations.keys()],
-                classifier_loc=classifier_loc,
+            model_pt, model_json = resolve_classifier_artifact(classifier)
+            predictor = load_predictor(model_pt, model_json)
+
+            print("Extracting features and classifying...")
+            image = load_image(self.image_loc)
+            extractor = EfficientNetExtractor(
+                data_locations=dict(weights=weights_loc),
             )
-
-            print("Running classify_image()...")
-            return_message = classify_image(message)
+            rowcols = list(annotations.keys())
+            features, _ = extractor(image, rowcols)
             print("Finished classifying")
 
             predictions_per_point = max(num_predictions_to_save, 1)
 
             # Get top label(s) and score(s) for each point
-            labels = return_message.classes
-            for i, (row, column, msg_scores) in enumerate(
-                return_message.scores
-            ):
+            labels = predictor.classes
+            for row, column in rowcols:
+                proba = predictor.predict_proba(
+                    features.get_array((row, column)))[0]
                 top_predictions = sorted(
-                    zip(labels, msg_scores), key=itemgetter(1), reverse=True)
+                    zip(labels, proba), key=itemgetter(1), reverse=True)
                 annotations[(row, column)] = [
                     label for label, score
                     in top_predictions[:predictions_per_point]]
@@ -296,20 +291,10 @@ class AnnotationRun:
                 self.label_ids_to_names[bagf_id] = name
 
     @staticmethod
-    def parse_location_str(
-        location: str, is_classifier: bool = False,
-    ) -> DataLocation:
+    def parse_location_str(location: str) -> DataLocation:
 
         if not location:
             return None
-
-        if is_classifier:
-            match = MLFLOW_MODEL_ID_REGEX.fullmatch(location)
-            if match:
-                # MLflow registered model ID.
-                # This'll require the tracking server to be running.
-                model_id = location
-                location = mlflow_model_id_to_pkl_uri(model_id)
 
         # Now we may or may not have an MLflow-proxied URI
         # beginning with `mlflow-artifacts:/`.
