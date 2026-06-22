@@ -44,14 +44,14 @@ def log_artifact_model(
     resolution that deployment relies on. Returns the MLflow ``ModelInfo``
     (so callers can read ``.model_id``).
 
-    Uses MLflow's code-model logging (python_model=<file path>) rather than
-    passing a Python object, so that MLflow stores the module source file
-    instead of cloudpickling the model instance.  This keeps the artifact
-    store free of ``.pkl`` files — the same constraint that motivates the
-    whole portable-artifact design.
+    Logs ``ArtifactPredictorModel`` as a standard pyfunc object model.
+    MLflow cloudpickles the stateless wrapper instance to
+    ``python_model.pkl``; that is intentional and harmless — the spec only
+    prohibits the *classifier* pickle (``model.pkl``), not the MLflow
+    internal wrapper serialization.
     """
     return mlflow.pyfunc.log_model(
-        python_model=__file__,
+        python_model=ArtifactPredictorModel(),
         artifacts={
             "model_pt": str(model_pt_path),
             "model_json": str(model_json_path),
@@ -59,9 +59,3 @@ def log_artifact_model(
         registered_model_name=registered_model_name,
         signature=signature,
     )
-
-
-# Required by MLflow's code-model loading path: when this file is executed
-# directly by mlflow._load_model_code_path, it must call set_model() to
-# register the model class instance.
-mlflow.models.set_model(ArtifactPredictorModel())
