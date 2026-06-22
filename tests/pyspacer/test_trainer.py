@@ -9,12 +9,14 @@ Covers two distinct features of MermaidTrainer:
 """
 
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.neural_network import MLPClassifier
 
+import mermaid_classifier.pyspacer.trainer as trainer_module
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
 
@@ -348,3 +350,26 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         self.assertIn('final_epoch', captured[-1])
         self.assertIn('best_val_epoch', captured[-1])
         self.assertIn('best_val_loss', captured[-1])
+
+
+class TrainerCleanupGuardTest(unittest.TestCase):
+    """Guard against reintroducing the removed SGD/clf_type path or the
+    no-benefit pyspacer imports into trainer.py (#58)."""
+
+    def setUp(self):
+        self.source = Path(trainer_module.__file__).read_text()
+
+    def test_no_sgd_or_clf_type_references(self):
+        for token in ('SGDClassifier', 'clf_type'):
+            self.assertNotIn(
+                token, self.source,
+                f"{token} should not reappear in trainer.py")
+
+    def test_no_dead_pyspacer_imports(self):
+        self.assertNotIn(
+            'from spacer import config', self.source,
+            "trainer.py should not re-import spacer.config")
+        # Guard against re-importing the dead calc_acc function from pyspacer
+        self.assertNotIn(
+            'from spacer.train_utils import calc_acc', self.source,
+            "trainer.py should use sklearn.metrics.accuracy_score")
