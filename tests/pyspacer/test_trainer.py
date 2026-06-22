@@ -13,7 +13,6 @@ from unittest import mock
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import SGDClassifier
 from sklearn.neural_network import MLPClassifier
 
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
@@ -42,7 +41,7 @@ class CalibrateInBatchesTest(unittest.TestCase):
     calibration to CalibratedClassifierCV(cv='prefit').fit().
     """
 
-    def _train_and_calibrate_both_ways(self, clf_type, n_classes):
+    def _train_and_calibrate_both_ways(self, n_classes):
         """
         Helper: create synthetic data, train a classifier, calibrate
         with both the old (standard) and new (batched) approaches,
@@ -77,20 +76,15 @@ class CalibrateInBatchesTest(unittest.TestCase):
         X_train, X_ref = X[:split], X[split:]
         y_train, y_ref = y[:split], y[split:]
 
-        # Train base classifier using partial_fit (same as production)
-        if clf_type == 'MLP':
-            # Pin random_state so weight initialization is deterministic
-            # across runs (SGDClassifier below already does). Without it the
-            # MLP seeds from NumPy's OS-entropy global RNG, so the trained
-            # weights — and the cross-BLAS FP drift they produce — vary every
-            # run, making the calibration-equivalence comparison flaky on
-            # Linux CI.
-            clf = MLPClassifier(
-                hidden_layer_sizes=(20,), learning_rate_init=1e-3,
-                random_state=0)
-        else:
-            clf = SGDClassifier(
-                loss='log_loss', average=True, random_state=0)
+        # Train base classifier using partial_fit (same as production).
+        # Pin random_state so weight initialization is deterministic across
+        # runs. Without it the MLP seeds from NumPy's OS-entropy global RNG,
+        # so the trained weights — and the cross-BLAS FP drift they produce —
+        # vary every run, making the calibration-equivalence comparison flaky
+        # on Linux CI.
+        clf = MLPClassifier(
+            hidden_layer_sizes=(20,), learning_rate_init=1e-3,
+            random_state=0)
         clf.partial_fit(X_train, y_train, classes=classes)
 
         # Standard calibration (current approach)
@@ -104,19 +98,14 @@ class CalibrateInBatchesTest(unittest.TestCase):
 
         return clf_standard, clf_batched, X_ref
 
-    def test_sgd_multiclass_calibration_equivalence(self):
-        """SGDClassifier with 5 classes: batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('SGD', 5)
-        self._assert_calibration_equivalent(std, batched, X)
-
     def test_mlp_multiclass_calibration_equivalence(self):
         """MLPClassifier with 5 classes: batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('MLP', 5)
+        std, batched, X = self._train_and_calibrate_both_ways(5)
         self._assert_calibration_equivalent(std, batched, X)
 
-    def test_sgd_binary_calibration_equivalence(self):
-        """SGDClassifier with 2 classes (binary edge case): batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('SGD', 2)
+    def test_mlp_binary_calibration_equivalence(self):
+        """MLPClassifier with 2 classes (binary edge case): batch == standard."""
+        std, batched, X = self._train_and_calibrate_both_ways(2)
         self._assert_calibration_equivalent(std, batched, X)
 
     def _assert_calibration_equivalent(self, clf_std, clf_batched, X_test):

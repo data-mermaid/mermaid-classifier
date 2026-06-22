@@ -380,21 +380,18 @@ class MermaidTrainer(ClassifierTrainer):
             x_arr = np.array(x_batch)
             y_arr = np.array(y_batch)
 
-            # Use the same response method sklearn uses internally:
-            # decision_function (preferred) or predict_proba (fallback).
-            # See CalibratedClassifierCV.fit() which calls
-            # _get_response_values with ["decision_function", "predict_proba"].
-            if hasattr(clf, 'decision_function'):
-                preds = clf.decision_function(x_arr)
-            else:
-                preds = clf.predict_proba(x_arr)
-            if preds.ndim == 1:
-                preds = preds.reshape(-1, 1)
-
+            # MLP calibrates from predict_proba. TorchMLPClassifier exposes
+            # no decision_function, and predict_proba always returns a 2-D
+            # (N, K) array. For binary classifiers, _fit_calibrator expects
+            # (N, 1) — just the positive-class column — matching sklearn's
+            # prefit calibration path. Multiclass keeps (N, K) as-is.
+            preds = clf.predict_proba(x_arr)
+            if len(clf.classes_) == 2:
+                preds = preds[:, 1:]
             all_preds.append(preds)
             all_y.append(y_arr)
 
-        predictions = np.vstack(all_preds)  # (N, K) or (N, 1)
+        predictions = np.vstack(all_preds)  # (N, K)
         y = np.concatenate(all_y)           # (N,)
 
         # _fit_calibrator is a private sklearn API used here for memory
