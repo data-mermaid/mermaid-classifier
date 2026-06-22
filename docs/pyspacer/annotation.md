@@ -19,9 +19,11 @@ row,column
 
 The classifier location can be specified as any of the following strings:
 
-- An S3 URI to the model's .pkl file; starts with `s3://`. MLflow-logged models can be specified like this, if you can find where MLflow logged it in S3.
-- A MLflow registered Model ID; starts with `m-`. This option requires the applicable MLflow tracking server to be running.
-- A local filepath.
+- An MLflow registered Model ID; starts with `m-`. Resolves the logged model's `model.pt` + `model.json` artifact. Requires the applicable MLflow tracking server to be running.
+- An S3 URI to the **directory** containing `model.pt` + `model.json`; starts with `s3://` (e.g. `s3://bucket/models/run-abc/`). Both files are downloaded to a temp dir.
+- A local **directory** path containing `model.pt` + `model.json`.
+
+  > Note: as of issue #60, the classifier is the portable TorchScript artifact (`model.pt` + `model.json`), not a single `.pkl`. The S3-URI and local-path forms now name the *directory* holding both files, not a pickle file.
 
 Putting it together, we set up an `AnnotationRun` and show its result:
 
