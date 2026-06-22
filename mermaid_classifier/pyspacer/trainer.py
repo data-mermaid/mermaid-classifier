@@ -6,6 +6,7 @@ and per-epoch MLflow callbacks.
 import copy
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from logging import getLogger
 
 import numpy as np
@@ -22,6 +23,20 @@ from spacer.train_utils import evaluate_classifier
 from mermaid_classifier.pyspacer.torch_classifier import TorchMLPClassifier
 
 logger = getLogger(__name__)
+
+
+@contextmanager
+def _log_entry_and_exit(name: str):
+    """Reproduces pyspacer's config.log_entry_and_exit DEBUG logging:
+    'Entering: <name>' on enter, 'Exiting: <name> after <s> seconds.'
+    on exit, timing the body."""
+    start_time = time.time()
+    logger.debug('Entering: %s', name)
+    try:
+        yield
+    finally:
+        logger.debug(
+            'Exiting: %s after %f seconds.', name, time.time() - start_time)
 
 
 class MermaidTrainer(ClassifierTrainer):
@@ -113,7 +128,7 @@ class MermaidTrainer(ClassifierTrainer):
         classes_list = list(labels.ref.classes_set)
 
         # Initialize classifier and train
-        with config.log_entry_and_exit("training using " + clf_type):
+        with _log_entry_and_exit("training using " + clf_type):
             if clf_type == 'MLP':
                 if self.hidden_layer_sizes is not None:
                     hls, lr = self.hidden_layer_sizes, self.learning_rate_init
@@ -278,7 +293,7 @@ class MermaidTrainer(ClassifierTrainer):
         # Calibration: stream ref data in batches — avoids loading full feature
         # vectors into memory. Only scalar prediction scores accumulate
         # (O(N * K) instead of O(N * 4096)).
-        with config.log_entry_and_exit("calibration"):
+        with _log_entry_and_exit("calibration"):
             clf_calibrated = self._calibrate_in_batches(clf, labels.ref)
 
         classes = clf_calibrated.classes_.tolist()
