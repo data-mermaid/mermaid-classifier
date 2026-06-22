@@ -529,7 +529,7 @@ class TrainingOptions:
     random_state
 
     Random seed forwarded to the underlying classifier
-    (``TorchMLPClassifier`` or ``SGDClassifier``). For the MLP path
+    (``TorchMLPClassifier``). For the MLP path
     this seeds both the numpy RNG used to shuffle batches and
     ``torch.manual_seed`` for weight initialization. Default ``0``
     replaces the previous behavior in which the MLP path passed no
@@ -1639,7 +1639,6 @@ class TrainingRunner:
             logger.info("Proceeding to train with:")
             logger.info(self.dataset.describe_train_summary_stats())
 
-            clf_type = 'MLP'
             num_classes = len(self.dataset.labels.ref.classes_set)
 
             if settings.spacer_batch_size is not None:
@@ -1677,7 +1676,7 @@ class TrainingRunner:
             labels = preprocess_labels(self.dataset.labels)
             with self.section_profiling("PySpacer training call"):
                 clf_calibrated, val_results, return_msg = trainer(
-                    labels, self.training_options.epochs, [], clf_type)
+                    labels, self.training_options.epochs, [])
 
             logger.info(
                 f"Train time (from return msg):"

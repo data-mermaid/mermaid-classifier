@@ -186,8 +186,8 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
 
     We script val_loss via a subclass that overrides
     `_calc_acc_and_log_loss_batched` to return values from a queue,
-    and use a small synthetic dataset that the SGDClassifier path can
-    chew through quickly. Each test scripts a different val_loss
+    and use a small synthetic dataset that a real TorchMLPClassifier
+    can chew through quickly. Each test scripts a different val_loss
     pattern (monotone-down, V-shape, plateau-then-rise) and asserts
     the right epoch is the stopping/best epoch.
     """
@@ -275,8 +275,7 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
             on_epoch_end=lambda m: captured.append(dict(m)),
             early_stopping_patience=patience,
         )
-        # clf_type='LR' -> SGDClassifier path; cheaper to fit than MLP.
-        trainer(labels, nbr_epochs=n_epochs, pc_models=[], clf_type='LR')
+        trainer(labels, nbr_epochs=n_epochs, pc_models=[])
         return trainer, captured
 
     def test_no_patience_runs_full_budget(self):

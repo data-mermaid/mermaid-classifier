@@ -11,10 +11,8 @@ from logging import getLogger
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
-from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import accuracy_score, log_loss as sklearn_log_loss
 
-from spacer import config
 from spacer.data_classes import ImageLabels, ValResults
 from spacer.messages import TrainClassifierReturnMsg
 from spacer.train_classifier import ClassifierTrainer
@@ -76,9 +74,7 @@ class MermaidTrainer(ClassifierTrainer):
         self.batch_size = batch_size
         self.on_epoch_end = on_epoch_end
         # Optional per-class loss weighting passed through to the
-        # underlying TorchMLPClassifier. Only used for clf_type='MLP'.
-        # The SGDClassifier branch ignores this (sklearn SGD has its own
-        # class_weight kwarg, but plumbing it would expand scope).
+        # underlying TorchMLPClassifier.
         self.class_weight = class_weight
         # Optional MLP architecture/lr overrides. When None, the MLP
         # branch falls back to the label-count heuristic below.
@@ -91,19 +87,16 @@ class MermaidTrainer(ClassifierTrainer):
         # and clf is restored to its best-val_loss state. The restored
         # clf is what gets calibrated and returned.
         self.early_stopping_patience = early_stopping_patience
-        # Forwarded to the underlying classifier on construction. For
-        # TorchMLPClassifier this seeds np.random.default_rng() and
-        # torch.manual_seed; for SGDClassifier it seeds sklearn's RNG.
-        # The MLP path historically passed no random_state, making it
-        # non-deterministic; this defaults to 0 to preserve the SGD
-        # path's prior behavior while closing the MLP gap.
+        # Forwarded to the underlying TorchMLPClassifier on construction;
+        # it seeds np.random.default_rng() and torch.manual_seed. Defaults
+        # to 0 so MLP weight initialization is deterministic across runs.
         self.random_state = random_state
         # Populated by __call__; readable by the runner for MLflow
         # logging. Pre-initialized so the runner never hits an
         # AttributeError when patience is None.
         self._early_stop_info: dict | None = None
 
-    def __call__(self, labels, nbr_epochs, pc_models, clf_type):
+    def __call__(self, labels, nbr_epochs, pc_models):
         logger.debug(
             f"Unique classes:"
             f" Train + Ref = {len(labels.ref.classes_set)},"
@@ -123,29 +116,22 @@ class MermaidTrainer(ClassifierTrainer):
         logger.debug(
             f"Batch size: {self.batch_size} labels")
 
-        assert clf_type in config.CLASSIFIER_TYPES
-
         classes_list = list(labels.ref.classes_set)
 
         # Initialize classifier and train
-        with _log_entry_and_exit("training using " + clf_type):
-            if clf_type == 'MLP':
-                if self.hidden_layer_sizes is not None:
-                    hls, lr = self.hidden_layer_sizes, self.learning_rate_init
-                elif labels.train.label_count >= 50000:
-                    hls, lr = (200, 100), 1e-4
-                else:
-                    hls, lr = (100,), 1e-3
-                clf = TorchMLPClassifier(
-                    hidden_layer_sizes=hls,
-                    learning_rate_init=lr,
-                    class_weight=self.class_weight,
-                    random_state=self.random_state,
-                )
+        with _log_entry_and_exit("training MLP"):
+            if self.hidden_layer_sizes is not None:
+                hls, lr = self.hidden_layer_sizes, self.learning_rate_init
+            elif labels.train.label_count >= 50000:
+                hls, lr = (200, 100), 1e-4
             else:
-                clf = SGDClassifier(
-                    loss='log_loss', average=True,
-                    random_state=self.random_state)
+                hls, lr = (100,), 1e-3
+            clf = TorchMLPClassifier(
+                hidden_layer_sizes=hls,
+                learning_rate_init=lr,
+                class_weight=self.class_weight,
+                random_state=self.random_state,
+            )
 
             ref_accs = []
             t0 = time.time()
@@ -200,8 +186,7 @@ class MermaidTrainer(ClassifierTrainer):
                         # Snapshot the current clf state so we can
                         # restore it if a later epoch overfits. deepcopy
                         # is the safe path for sklearn-compatible
-                        # estimators with arbitrary internal state
-                        # (TorchMLPClassifier, SGDClassifier, etc.).
+                        # estimators with arbitrary internal state.
                         best_clf_snapshot = copy.deepcopy(clf)
                         epochs_since_best = 0
                     else:
