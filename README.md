@@ -151,5 +151,5 @@ Key settings (set via `.env` or environment variables):
 | `AWS_ANONYMOUS` | `True` for public S3 access without credentials |
 | `MLFLOW_TRACKING_SERVER` | MLflow server URI (ARN or localhost) |
 | `SPACER_EXTRACTORS_CACHE_DIR` | Cache dir for downloaded weights |
-| `SPACER_BATCH_SIZE` | Training batch size for partial_fit calls (auto-calculated from RAM) |
+| `SPACER_BATCH_SIZE` | Override for training batch size; if unset, auto-calculated from available memory at training time |
 | `MLFLOW_HTTP_REQUEST_MAX_RETRIES` | Default 7 is slow; 2 recommended |
