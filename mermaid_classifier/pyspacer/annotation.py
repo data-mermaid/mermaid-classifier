@@ -8,6 +8,7 @@ from operator import itemgetter
 import os
 from pathlib import Path
 import re
+import tempfile
 from urllib.parse import urlparse
 import urllib.request
 
@@ -42,14 +43,54 @@ from mermaid_classifier.pyspacer.utils import mlflow_connect
 MLFLOW_MODEL_ID_REGEX = re.compile(r'm-[a-f0-9]{30,32}')
 
 
-def mlflow_model_id_to_pkl_uri(model_id: str) -> str:
+def mlflow_model_id_to_artifact_uris(model_id: str) -> tuple[str, str]:
 
     time_taken = mlflow_connect()
     print(f"Time to connect to MLflow tracking: {time_taken}")
 
-    model_filename = 'model.pkl'
     logged_model = mlflow.get_logged_model(model_id)
-    return logged_model.artifact_location + '/' + model_filename
+    base = logged_model.artifact_location
+    # #57's log_artifact_model logs model_pt/model_json as pyfunc artifacts,
+    # which MLflow stores under the model's artifacts/ subdirectory.
+    return f'{base}/artifacts/model.pt', f'{base}/artifacts/model.json'
+
+
+def _download_pair_to_tempdir(
+    pt_loc: DataLocation, json_loc: DataLocation,
+) -> tuple[Path, Path]:
+    """Download an S3 model.pt + model.json pair into one temp dir."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix='clf_artifact_'))
+    paths = []
+    for loc, name in [(pt_loc, 'model.pt'), (json_loc, 'model.json')]:
+        storage = storage_factory(loc.storage_type, loc.bucket_name)
+        stream = storage.load(loc.key)
+        dest = tmp_dir / name
+        dest.write_bytes(stream.getvalue())
+        paths.append(dest)
+    return paths[0], paths[1]
+
+
+def resolve_classifier_artifact(location: str) -> tuple[Path, Path]:
+    """Resolve a classifier location to local (model.pt, model.json) paths.
+
+    Accepts an MLflow model ID (m-...), an S3 directory URI, or a local
+    directory. The S3/filesystem forms point at the *directory* containing
+    model.pt + model.json (migrated from the old single-pickle meaning).
+    """
+    if MLFLOW_MODEL_ID_REGEX.fullmatch(location):
+        pt_uri, json_uri = mlflow_model_id_to_artifact_uris(location)
+        local_pt = mlflow.artifacts.download_artifacts(artifact_uri=pt_uri)
+        local_json = mlflow.artifacts.download_artifacts(artifact_uri=json_uri)
+        return Path(local_pt), Path(local_json)
+
+    # Directory mode: S3 URI or local filesystem directory.
+    base = location.rstrip('/')
+    pt_loc = AnnotationRun.parse_location_str(f'{base}/model.pt')
+    json_loc = AnnotationRun.parse_location_str(f'{base}/model.json')
+
+    if pt_loc.storage_type == 's3':
+        return _download_pair_to_tempdir(pt_loc, json_loc)
+    return Path(pt_loc.key), Path(json_loc.key)
 
 
 class AnnotationRun:
