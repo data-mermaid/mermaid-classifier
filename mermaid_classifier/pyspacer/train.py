@@ -1648,12 +1648,11 @@ class TrainingRunner:
                     f"Batch size: {batch_size} (from SPACER_BATCH_SIZE)")
             else:
                 batch_size, available_gb = training_batch_size(
-                    clf_type=clf_type, num_classes=num_classes)
+                    num_classes=num_classes)
                 logger.info(
                     f"Batch size: {batch_size}"
                     f" (auto, based on {available_gb:.1f} GB"
-                    f" available memory, {num_classes} classes,"
-                    f" clf_type={clf_type})")
+                    f" available memory, {num_classes} classes)")
 
             class_weight, weighting_log = self._compute_class_weights(
                 self.dataset.labels,
