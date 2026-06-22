@@ -8,7 +8,7 @@ rollup + included-labels filter and before the train/ref/val split.
 Public API:
     SubsampleOptions             -- configuration dataclass (lives on
                                     ``DatasetOptions.subsample``).
-    SUBSAMPLE_STRATEGIES         -- name -> allocator function lookup.
+    SUBSAMPLE_STRATEGIES         -- tuple of allowed strategy names.
     compute_per_class_targets    -- dispatch entry point used by the
                                     pipeline.
 

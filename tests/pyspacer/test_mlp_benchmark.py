@@ -244,6 +244,28 @@ class TorchMLPBenchmarkTest(MLPBenchmarkBase, unittest.TestCase):
             random_state=SEED,
         )
 
+    def test_old_pickle_without_class_weight_tensor_can_resume(self):
+        # Simulate a pre-class_weight pickle: its state lacks both
+        # ``class_weight`` and ``_class_weight_tensor``. __setstate__
+        # must backfill them so a subsequent partial_fit (which reads
+        # self._class_weight_tensor unconditionally) doesn't raise
+        # AttributeError.
+        clf = self._make_classifier()
+        self._train(clf)
+        state = clf.__getstate__()
+        state.pop("class_weight", None)
+        state.pop("_class_weight_tensor", None)
+
+        restored = TorchMLPClassifier.__new__(TorchMLPClassifier)
+        restored.__setstate__(state)
+        self.assertIsNone(restored._class_weight_tensor)
+
+        # Resuming training must not raise.
+        restored.partial_fit(
+            self.X_train[:PARTIAL_FIT_BATCH],
+            self.y_train[:PARTIAL_FIT_BATCH],
+        )
+
 
 class MLPParityTest(unittest.TestCase):
     """Direct head-to-head: torch must match sklearn accuracy within

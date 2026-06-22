@@ -227,17 +227,22 @@ def build_rollup_rows(
     gf_lookup: dict[str, str],
     ba_lookup: dict[str, str],
     porites_gf_buckets: tuple[str, ...],
-) -> dict[str, list[tuple[str, str, str, str]]]:
+) -> tuple[dict[str, list[tuple[str, str, str, str]]], list[str]]:
     """Build the four categories of rollup rows.
 
-    Returns a dict from category name -> list of
-    (from_ba_id, from_gf_id, to_ba_id, to_gf_id).
-    Categories: 'species_to_genus', 'nonporites_gf', 'porites_gf', 'legacy'.
+    Returns ``(categorized, unresolved_legacy)`` where ``categorized`` is
+    a dict from category name -> list of
+    (from_ba_id, from_gf_id, to_ba_id, to_gf_id)
+    (categories: 'species_to_genus', 'nonporites_gf', 'porites_gf',
+    'legacy') and ``unresolved_legacy`` is the list of label names whose
+    legacy "rolled up to X" target was not found in the labels CSV (these
+    are logged as warnings and dropped).
     """
     species_rows: list[tuple[str, str, str, str]] = []
     nonporites_gf_rows: list[tuple[str, str, str, str]] = []
     porites_gf_rows: list[tuple[str, str, str, str]] = []
     legacy_rows: list[tuple[str, str, str, str]] = []
+    unresolved_legacy: list[str] = []
 
     # 1) Species/sub-taxa -> direct top100 parent.
     for _, row in labels_df.iterrows():
@@ -296,15 +301,17 @@ def build_rollup_rows(
                 " skipping legacy rollup",
                 row['name'], target_name,
             )
+            unresolved_legacy.append(row['name'])
             continue
         legacy_rows.append((row['id'], '', ba_lookup[target_name], ''))
 
-    return {
+    categorized = {
         'species_to_genus': sorted(species_rows),
         'nonporites_gf': sorted(nonporites_gf_rows),
         'porites_gf': sorted(porites_gf_rows),
         'legacy': sorted(legacy_rows),
     }
+    return categorized, sorted(unresolved_legacy)
 
 
 def write_rollups_csv(
@@ -503,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Step C: rollups.
     included_label_names = set(included_df['name'])
-    categorized = build_rollup_rows(
+    categorized, unresolved_legacy = build_rollup_rows(
         labels_df=labels_df,
         label_mapping_df=label_mapping_df,
         included_label_names=included_label_names,
@@ -532,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
         args=args,
         audits=audits,
         counts=counts,
-        unresolved_legacy=[],
+        unresolved_legacy=unresolved_legacy,
     )
 
     # Step E: validate.

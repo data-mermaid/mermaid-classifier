@@ -52,6 +52,23 @@ class StratifiedTest(unittest.TestCase):
         opts = SubsampleOptions(strategy="stratified", total_annotations=100)
         self.assertEqual(compute_per_class_targets(opts, {}), {})
 
+    def test_overshoot_never_trims_below_min_per_class(self):
+        # 5 abundant classes, tiny budget, min_per_class=10. Each class
+        # floors to 10 (sum 50), overshooting the budget of 10. The trim
+        # must NOT pull any class below the floor -- it accepts the
+        # residual overshoot rather than dropping rare classes to 0.
+        counts = {(f"c{i}", ""): 1000 for i in range(5)}
+        opts = SubsampleOptions(
+            strategy="stratified",
+            total_annotations=10,
+            min_per_class=10,
+        )
+        targets = compute_per_class_targets(opts, counts)
+        self.assertEqual(len(targets), 5)
+        for cls, t in targets.items():
+            self.assertGreaterEqual(
+                t, 10, f"{cls} trimmed below min_per_class floor")
+
     def test_overshoot_trims_largest_class(self):
         # Three equal-size classes, budget=100. Naive rounding gives
         # 33+33+33=99; the trim helper accepts the 1-row undershoot

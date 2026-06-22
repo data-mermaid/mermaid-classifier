@@ -104,7 +104,8 @@ def _stratified(
         target = max(options.min_per_class, min(n, proportional))
         targets[cls] = target
 
-    return _trim_overshoot(targets, target_total, class_counts)
+    return _trim_overshoot(
+        targets, target_total, class_counts, options.min_per_class)
 
 
 def _balanced(
@@ -137,6 +138,7 @@ def _trim_overshoot(
     targets: ClassTargets,
     target_total: int,
     class_counts: ClassCounts,
+    min_per_class: int,
 ) -> ClassTargets:
     """Reduce per-class targets if rounding overshot the budget.
 
@@ -161,20 +163,14 @@ def _trim_overshoot(
         key=lambda cls: (-class_counts[cls], cls),
     )
     trimmed = dict(targets)
-    # We don't know what min_per_class was here without the options
-    # object, but trimmed[cls] is already >= min_per_class from the
-    # allocator (which applied the floor). So a safe lower bound to
-    # respect is the floor implied by the current value: we never go
-    # below the smaller of the current target and a hard zero. In
-    # practice trimming a few rows from the largest class never bumps
-    # against the floor, so this is fine.
+    # Never trim a class below ``min_per_class`` -- preserving the floor
+    # is more important than hitting ``target_total`` exactly. If every
+    # class is already at its floor, the residual overshoot is accepted
+    # and the subsample slightly exceeds the budget (documented above).
     for cls in order:
         if overshoot == 0:
             break
-        # Trim at most (current_target - 0) rows from this class; in
-        # the proportional-rounding case overshoot is at most ~ K/2
-        # where K = number of classes, so this loop is short.
-        room = trimmed[cls]
+        room = max(0, trimmed[cls] - min_per_class)
         delta = min(room, overshoot)
         trimmed[cls] -= delta
         overshoot -= delta

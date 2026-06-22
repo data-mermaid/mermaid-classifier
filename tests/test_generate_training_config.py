@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 # Allow importing scripts/generate_training_config.py.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / 'scripts'))
@@ -332,6 +334,48 @@ class GenerateTrainingConfigTest(unittest.TestCase):
             '--no-filter-by-s3-status',
         ]
         self.assertEqual(gtc.main(argv), 0)
+
+
+class BuildRollupRowsTest(unittest.TestCase):
+    """Direct unit tests for the build_rollup_rows return contract."""
+
+    @staticmethod
+    def _empty_mapping() -> pd.DataFrame:
+        return pd.DataFrame(columns=['benthic attribute', 'growth form'])
+
+    def test_unresolved_legacy_target_is_reported(self):
+        # priority_notes references a rollup target absent from ba_lookup;
+        # it must be dropped from 'legacy' AND surfaced in unresolved.
+        labels_df = pd.DataFrame([
+            {'id': 'ba_x', 'name': 'GhostGenus', 'parent': 'Orphan',
+             'priority_notes': 'rolled up to GhostTarget in current model.'},
+        ])
+        categorized, unresolved = gtc.build_rollup_rows(
+            labels_df=labels_df,
+            label_mapping_df=self._empty_mapping(),
+            included_label_names=set(),
+            gf_lookup={},
+            ba_lookup={},  # GhostTarget absent -> unresolved
+            porites_gf_buckets=(),
+        )
+        self.assertEqual(categorized['legacy'], [])
+        self.assertEqual(unresolved, ['GhostGenus'])
+
+    def test_resolved_legacy_target_not_reported(self):
+        labels_df = pd.DataFrame([
+            {'id': 'ba_x', 'name': 'GhostGenus', 'parent': 'Orphan',
+             'priority_notes': 'rolled up to RealTarget in current model.'},
+        ])
+        categorized, unresolved = gtc.build_rollup_rows(
+            labels_df=labels_df,
+            label_mapping_df=self._empty_mapping(),
+            included_label_names=set(),
+            gf_lookup={},
+            ba_lookup={'RealTarget': 'ba_real'},
+            porites_gf_buckets=(),
+        )
+        self.assertEqual(categorized['legacy'], [('ba_x', '', 'ba_real', '')])
+        self.assertEqual(unresolved, [])
 
 
 if __name__ == '__main__':
