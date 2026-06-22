@@ -1638,11 +1638,6 @@ class TrainingRunner:
             logger.info("Proceeding to train with:")
             logger.info(self.dataset.describe_train_summary_stats())
 
-            # Not sure about saving these anywhere other than memory
-            # for now.
-            model_loc = DataLocation('memory', key='classifier.pkl')
-            valresult_loc = DataLocation('memory', key='valresult.json')
-
             clf_type = 'MLP'
             num_classes = len(self.dataset.labels.ref.classes_set)
 
@@ -1675,20 +1670,14 @@ class TrainingRunner:
                 random_state=self.training_options.random_state,
             )
 
-            train_msg = TrainClassifierMsg(
-                job_token=f'experiment_run_{run_name}',
-                trainer=trainer,
-                nbr_epochs=self.training_options.epochs,
-                clf_type=clf_type,
-                labels=self.dataset.labels,
-                previous_model_locs=[],
-                model_loc=model_loc,
-                valresult_loc=valresult_loc,
-                feature_cache_dir=TrainClassifierMsg.FeatureCache.DISABLED,
-            )
-
+            # Train directly via the trainer — no pickle round-trip. pyspacer's
+            # train_classifier task only adds label preprocessing + a pickle
+            # store on top of this call; we keep the preprocessing and drop the
+            # store. previous_model_locs was always [], so pc_models is [].
+            labels = preprocess_labels(self.dataset.labels)
             with self.section_profiling("PySpacer training call"):
-                return_msg = train_classifier(train_msg)
+                clf_calibrated, val_results, return_msg = trainer(
+                    labels, self.training_options.epochs, [], clf_type)
 
             logger.info(
                 f"Train time (from return msg):"
@@ -1705,7 +1694,7 @@ class TrainingRunner:
                 f"Accuracy progression during training epochs:"
                 f" {ref_accs_str}")
 
-            return return_msg, model_loc, valresult_loc
+            return return_msg, clf_calibrated, val_results
         finally:
             if self.dataset is not None:
                 self.dataset.cleanup()
