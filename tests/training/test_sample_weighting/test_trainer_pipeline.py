@@ -1,10 +1,11 @@
 """TrainingRunner._compute_class_weights wiring test.
 
 Exercises the orchestration path that connects DatasetOptions.weighting
-through to the strategy registry. We bypass the real
-BenthicAttributeLibrary/GrowthFormLibrary by monkeypatching the module
-globals in train.py with fakes — those real classes hit the MERMAID
-API on construction, which is unsuitable for unit tests.
+through to compute_class_weights and the per-class log structure. We
+bypass the real BenthicAttributeLibrary/GrowthFormLibrary by
+monkeypatching the module globals in train.py with fakes — those real
+classes hit the MERMAID API on construction, which is unsuitable for
+unit tests.
 """
 from __future__ import annotations
 
@@ -96,7 +97,7 @@ class TrainerPipelineTest(unittest.TestCase):
         self.assertIsNone(weights)
         self.assertEqual(log, {"enabled": False})
 
-    def test_default_strategy_produces_weights_for_every_class(self):
+    def test_default_options_produce_weights_for_every_class(self):
         runner = self._make_runner(weighting=SampleWeightingOptions())
         counts = {
             combine_ba_gf("A1", "g1"): 100,
@@ -134,18 +135,6 @@ class TrainerPipelineTest(unittest.TestCase):
         self.assertIn("bagf_id", df.columns)
         self.assertIn("count", df.columns)
         self.assertIn("weight", df.columns)
-
-    def test_unknown_strategy_raises_with_helpful_message(self):
-        bad_opts = SampleWeightingOptions.__new__(SampleWeightingOptions)
-        # Bypass __post_init__ validation to stress the registry-side check.
-        bad_opts.enabled = True
-        bad_opts.strategy = "no_such_strategy"
-        bad_opts.alpha = 0.5
-        bad_opts.weight_ratio_cap = None
-        runner = self._make_runner(weighting=bad_opts)
-        labels = _fake_labels({combine_ba_gf("A1", "g1"): 100})
-        with self.assertRaisesRegex(ValueError, "Unknown weighting strategy"):
-            runner._compute_class_weights(labels)
 
 
 if __name__ == "__main__":

@@ -466,7 +466,7 @@ class DatasetOptions:
     Today's strategies:
       * SubsampleOptions(strategy='stratified', total_annotations=N)
         -- proportional subsample preserving class distribution.
-      * SubsampleOptions(strategy='balanced', target_per_class=K)
+      * SubsampleOptions(strategy='balanced', total_annotations=N)
         -- equalize counts per class (capped at available rows).
     See ``mermaid_classifier.training.subsample`` for the full list and
     instructions on adding new strategies.
@@ -498,16 +498,10 @@ class TrainingOptions:
     if ``early_stopping_patience`` is set and triggered, training stops
     earlier and the best-val_loss classifier is restored.
 
-    hidden_layer_sizes
-
-    Override the MLP architecture. Tuple of layer widths, e.g. (200, 100)
-    for a 2-hidden-layer net. None falls back to MermaidTrainer's
-    label-count heuristic. If set, learning_rate_init must also be set.
-
-    learning_rate_init
-
-    Override the MLP optimizer's initial learning rate. None falls back
-    to the heuristic. If set, hidden_layer_sizes must also be set.
+    The MLP architecture and learning rate are fixed at the production
+    values baked into ``MermaidTrainer`` (``hidden_layer_sizes=(500,
+    300, 100)`` @ ``learning_rate_init=1e-4``; see
+    docs/hidden-layer-experiments.md), so they are not configurable here.
 
     early_stopping_patience
 
@@ -520,21 +514,9 @@ class TrainingOptions:
     Recommended starting value: 3. Lower (1-2) is too jumpy given the
     natural epoch-to-epoch noise in val_loss; higher (>5) wastes wall
     time on epochs that are unlikely to recover.
-
-    random_state
-
-    Random seed forwarded to the underlying classifier
-    (``TorchMLPClassifier`` or ``SGDClassifier``). For the MLP path
-    this seeds both the numpy RNG used to shuffle batches and
-    ``torch.manual_seed`` for weight initialization. Default ``0``
-    replaces the previous behavior in which the MLP path passed no
-    seed at all (and was therefore non-deterministic across runs).
     """
     epochs: int = 10
-    hidden_layer_sizes: tuple[int, ...] | None = None
-    learning_rate_init: float | None = None
     early_stopping_patience: int | None = None
-    random_state: int = 0
 
 
 @dataclasses.dataclass
@@ -1659,11 +1641,8 @@ class TrainingRunner:
                 batch_size=batch_size,
                 on_epoch_end=self._on_epoch_end,
                 class_weight=class_weight,
-                hidden_layer_sizes=self.training_options.hidden_layer_sizes,
-                learning_rate_init=self.training_options.learning_rate_init,
                 early_stopping_patience=(
                     self.training_options.early_stopping_patience),
-                random_state=self.training_options.random_state,
             )
 
             train_msg = TrainClassifierMsg(
@@ -1728,8 +1707,6 @@ class TrainingRunner:
 
         weights = compute_class_weights(
             class_counts=class_counts,
-            ba_library=get_benthic_attribute_library(),
-            gf_library=get_growth_form_library(),
             options=opts,
         )
 
@@ -1836,16 +1813,11 @@ class MLflowTrainingRunner(TrainingRunner):
 
             training_options_to_log = dict(
                 epochs=self.training_options.epochs,
-                # str(...) — MLflow params accept only strings/numbers,
-                # not tuples. 'None' encodes "use heuristic" cases.
-                hidden_layer_sizes=str(self.training_options.hidden_layer_sizes),
-                learning_rate_init=self.training_options.learning_rate_init,
                 early_stopping_patience=(
                     self.training_options.early_stopping_patience
                     if self.training_options.early_stopping_patience
                     is not None else ''
                 ),
-                random_state=self.training_options.random_state,
             )
 
             mlflow.log_params(training_options_to_log)
@@ -2026,17 +1998,11 @@ class MLflowTrainingRunner(TrainingRunner):
                 model_name += f'-{self.alphanumeric_only_str(as_path.stem)}'
 
             if (subsample := self.dataset_options.subsample) is not None:
-                # e.g. -SubStratified400000 or -SubBalancedTPC5000
-                if subsample.target_per_class is not None:
-                    model_name += (
-                        f'-Sub{subsample.strategy.capitalize()}'
-                        f'TPC{subsample.target_per_class}'
-                    )
-                else:
-                    model_name += (
-                        f'-Sub{subsample.strategy.capitalize()}'
-                        f'{subsample.total_annotations}'
-                    )
+                # e.g. -SubStratified400000 or -SubBalanced1770000
+                model_name += (
+                    f'-Sub{subsample.strategy.capitalize()}'
+                    f'{subsample.total_annotations}'
+                )
 
         # There's a 62 character limit for the 'model package group name'
         # which is built from the model name. For example, it could be the
