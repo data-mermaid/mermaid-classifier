@@ -55,6 +55,10 @@ from mermaid_classifier.common.duckdb_utils import (
 from mermaid_classifier.pyspacer.metrics import (
     MetricsContext, MetricsCoordinator,
 )
+from mermaid_classifier.pyspacer.inference import (
+    export_artifact, load_predictor,
+)
+from mermaid_classifier.pyspacer.mlflow_model import log_artifact_model
 from mermaid_classifier.pyspacer.metrics._logging import (
     log_dataframe as _log_dataframe,
 )
@@ -1887,7 +1891,7 @@ class MLflowTrainingRunner(TrainingRunner):
             self.log_system_specs()
 
             # Here's the actual training and data prep.
-            return_msg, model_loc, valresult_loc = super().run(
+            return_msg, clf_calibrated, val_results = super().run(
                 run_name=run_name)
 
             # Weighting artifacts/metrics are stashed by the base run()
@@ -1898,49 +1902,71 @@ class MLflowTrainingRunner(TrainingRunner):
             profiles_df = pd.DataFrame(self.profiled_sections)
             self.log_dataframe(profiles_df, 'profiled_sections')
 
-            val_results = ValResults.load(valresult_loc)
+            # val_results now comes from the trainer in memory (no reload).
             mlflow.log_dict(val_results.serialize(), 'valresult.json')
 
-            clf = load_classifier(model_loc)
+            # Eval-the-artifact: export the deployable TorchScript artifact and
+            # evaluate THAT, so the logged metrics reflect what actually ships.
+            # The parity reference batch is the first val batch (real features,
+            # loaded the same way the metrics coordinator loads val data).
+            ref_batch = next(
+                iter(self.dataset.labels.val.load_data_in_batches()), None)
+            if ref_batch is None:
+                raise RuntimeError(
+                    "Val split yielded no feature batch; refusing to export an"
+                    " unverified artifact.")
+            ref_features = ref_batch[0]
 
             ba_library = get_benthic_attribute_library()
             gf_library = get_growth_form_library()
 
-            ctx = MetricsContext(
-                val_results=val_results,
-                ba_library=ba_library,
-                gf_library=gf_library,
-                format_func=self.format_metric,
-                dataset=self.dataset,
-                clf=clf,
-            )
+            with tempfile.TemporaryDirectory() as artifact_dir:
+                artifact_dir = Path(artifact_dir)
+                # Parity-gated export (ParityError if max|Δ| > 1e-6).
+                model_pt, _manifest, _max_diff = export_artifact(
+                    clf_calibrated, artifact_dir,
+                    reference_features=ref_features,
+                    config={'patch_size': 224})
+                model_json = artifact_dir / 'model.json'
+                # ManifestError on schema/class-count/input_dim mismatch.
+                predictor = load_predictor(model_pt, model_json)
 
-            coordinator = MetricsCoordinator(
-                ctx, duck_conn=self.dataset.duck_conn)
-            coordinator.compute_and_log_all()
+                ctx = MetricsContext(
+                    val_results=val_results,
+                    ba_library=ba_library,
+                    gf_library=gf_library,
+                    format_func=self.format_metric,
+                    dataset=self.dataset,
+                    clf=predictor,
+                )
 
-            # Accuracy and ref_accs come from pyspacer's return_msg,
-            # not our metrics module.
-            mlflow.log_metric(
-                'accuracy', self.format_metric(return_msg.acc))
-            ref_accs_dict = {
-                epoch: self.format_metric(acc)
-                for epoch, acc in enumerate(return_msg.ref_accs, 1)
-            }
-            mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
+                coordinator = MetricsCoordinator(
+                    ctx, duck_conn=self.dataset.duck_conn)
+                coordinator.compute_and_log_all()
 
-            # Save and register the trained model.
-            signature = mlflow.models.infer_signature(
-                params=training_options_to_log)
-            model_info = mlflow.sklearn.log_model(
-                sk_model=clf,
-                registered_model_name=model_name,
-                signature=signature,
-            )
+                # Accuracy and ref_accs come from pyspacer's return_msg,
+                # not our metrics module (training-progress, not artifact-based).
+                mlflow.log_metric(
+                    'accuracy', self.format_metric(return_msg.acc))
+                ref_accs_dict = {
+                    epoch: self.format_metric(acc)
+                    for epoch, acc in enumerate(return_msg.ref_accs, 1)
+                }
+                mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
+
+                # Store the deployable artifact (model.pt + model.json) as the
+                # registered model via the pyfunc shim — one loader everywhere.
+                signature = mlflow.models.infer_signature(
+                    params=training_options_to_log)
+                model_info = log_artifact_model(
+                    model_pt, model_json,
+                    registered_model_name=model_name,
+                    signature=signature,
+                )
 
         logger.info(f"Model ID: {model_info.model_id}")
 
-        return return_msg, model_loc
+        return return_msg, model_info
 
     def _on_epoch_end(self, metrics: dict):
         """Log per-epoch metrics to MLflow.
