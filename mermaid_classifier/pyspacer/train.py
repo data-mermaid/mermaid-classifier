@@ -28,9 +28,6 @@ from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
 from spacer.aws import get_s3_resource
 from spacer.data_classes import DataLocation, ImageLabels, ValResults
-from spacer.messages import TrainClassifierMsg
-from spacer.storage import load_classifier
-from spacer.tasks import train_classifier
 from spacer.task_utils import preprocess_labels, SplitMode
 
 from mermaid_classifier.pyspacer.settings import training_batch_size
