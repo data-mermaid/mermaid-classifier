@@ -20,6 +20,7 @@ import numpy as np
 from spacer.data_classes import DataLocation
 from spacer.extractors import EfficientNetExtractor
 from spacer.storage import load_image, storage_factory
+from spacer.task_utils import check_extract_inputs
 
 from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary, GrowthFormLibrary)
@@ -226,8 +227,8 @@ class AnnotationRun:
                 data_locations=dict(weights=weights_loc),
             )
             rowcols = list(annotations.keys())
+            check_extract_inputs(image, rowcols, self.image_loc.key)
             features, _ = extractor(image, rowcols)
-            print("Finished classifying")
 
             predictions_per_point = max(num_predictions_to_save, 1)
 
@@ -235,7 +236,7 @@ class AnnotationRun:
             labels = predictor.classes
             for row, column in rowcols:
                 proba = predictor.predict_proba(
-                    features.get_array((row, column)))[0]
+                    features.get_array((row, column))).tolist()[0]
                 top_predictions = sorted(
                     zip(labels, proba), key=itemgetter(1), reverse=True)
                 annotations[(row, column)] = [
@@ -244,6 +245,7 @@ class AnnotationRun:
                 scores[(row, column)] = [
                     score for label, score
                     in top_predictions[:predictions_per_point]]
+            print("Finished classifying")
 
         else:
 
