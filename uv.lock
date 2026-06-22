@@ -1589,6 +1589,7 @@ pyspacer = [
     { name = "pyspacer" },
     { name = "s3fs" },
     { name = "scikit-learn" },
+    { name = "torch" },
 ]
 
 [package.metadata]
@@ -1609,6 +1610,7 @@ requires-dist = [
     { name = "pyspacer", marker = "extra == 'pyspacer'", specifier = "==0.14.0" },
     { name = "s3fs", marker = "extra == 'pyspacer'" },
     { name = "scikit-learn", marker = "extra == 'pyspacer'" },
+    { name = "torch", marker = "extra == 'pyspacer'" },
 ]
 provides-extras = ["pyspacer", "jupyterlab"]
 
