@@ -50,18 +50,23 @@ class LogArtifactModelTest(unittest.TestCase):
             model_pt, _manifest, _ = export_artifact(model, str(d), X)
             model_json = d / "model.json"
 
-            # Local file-store tracking dir so the test needs no server.
-            tracking = d / "mlruns"
-            mlflow.set_tracking_uri(f"file://{tracking}")
-            mlflow.set_experiment("test-artifact-store")
-            with mlflow.start_run():
+            # sqlite tracking + an explicit local artifact dir: no server
+            # needed, and robust across MLflow versions (newer MLflow rejects
+            # file:// *tracking* stores; this also mirrors production's
+            # sqlite:///mlflow.db backend).
+            artifacts_root = d / "artifacts"
+            mlflow.set_tracking_uri(f"sqlite:///{d / 'mlflow.db'}")
+            exp_id = mlflow.create_experiment(
+                "test-artifact-store",
+                artifact_location=artifacts_root.as_uri())
+            with mlflow.start_run(experiment_id=exp_id):
                 info = log_artifact_model(
                     model_pt, model_json,
                     registered_model_name=None)
                 loaded = mlflow.pyfunc.load_model(info.model_uri)
 
             # Stored the deployable files, and NO classifier pickle.
-            artifact_files = [p.name for p in tracking.rglob("*")
+            artifact_files = [p.name for p in artifacts_root.rglob("*")
                               if p.is_file()]
             self.assertIn("model.pt", artifact_files)
             self.assertIn("model.json", artifact_files)
