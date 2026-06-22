@@ -11,13 +11,13 @@ from logging import getLogger
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
 from sklearn.linear_model import SGDClassifier
-from sklearn.metrics import log_loss as sklearn_log_loss
+from sklearn.metrics import accuracy_score, log_loss as sklearn_log_loss
 
 from spacer import config
 from spacer.data_classes import ImageLabels, ValResults
 from spacer.messages import TrainClassifierReturnMsg
 from spacer.train_classifier import ClassifierTrainer
-from spacer.train_utils import calc_acc, evaluate_classifier
+from spacer.train_utils import evaluate_classifier
 
 from mermaid_classifier.pyspacer.torch_classifier import TorchMLPClassifier
 
@@ -291,7 +291,7 @@ class MermaidTrainer(ClassifierTrainer):
         pc_accs = []
         for pc_model in pc_models:
             pc_gts, pc_ests, _ = evaluate_classifier(pc_model, labels.val)
-            pc_accs.append(calc_acc(pc_gts, pc_ests))
+            pc_accs.append(accuracy_score(pc_gts, pc_ests))
 
         val_results = ValResults(
             scores=val_scores,
@@ -301,7 +301,7 @@ class MermaidTrainer(ClassifierTrainer):
         )
 
         return_message = TrainClassifierReturnMsg(
-            acc=calc_acc(val_gts, val_ests),
+            acc=accuracy_score(val_gts, val_ests),
             pc_accs=pc_accs,
             ref_accs=ref_accs,
             runtime=time.time() - t0,
@@ -321,7 +321,7 @@ class MermaidTrainer(ClassifierTrainer):
         for x, y in labels.load_data_in_batches(batch_size=self.batch_size):
             pred.extend(clf.predict(x))
             gt.extend(y)
-        return calc_acc(gt, pred)
+        return accuracy_score(gt, pred)
 
     def _calc_acc_and_log_loss_batched(
         self,
@@ -349,10 +349,10 @@ class MermaidTrainer(ClassifierTrainer):
             gt.extend(y)
         proba = np.vstack(all_proba)
         # Argmax over class axis gives the predicted class index in
-        # clf.classes_ order; convert back to class label for calc_acc.
+        # clf.classes_ order; convert back to class label for accuracy_score.
         clf_classes = list(clf.classes_)
         pred = [clf_classes[i] for i in proba.argmax(axis=1)]
-        acc = calc_acc(gt, pred)
+        acc = accuracy_score(gt, pred)
         # log_loss with explicit labels= ensures column ordering matches
         # the proba matrix even if some classes are absent from gt.
         loss = float(sklearn_log_loss(gt, proba, labels=clf_classes))
