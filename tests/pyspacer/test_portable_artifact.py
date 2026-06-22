@@ -189,6 +189,17 @@ class LoadValidationTest(unittest.TestCase):
             with self.assertRaises(ManifestError):
                 load_predictor(model_pt, model_json)
 
+    def test_predictor_exposes_classes_alias_for_metrics(self):
+        from mermaid_classifier.pyspacer.inference import load_predictor
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, model_json, model, _X = self._export(d)
+            predictor = load_predictor(model_pt, model_json)
+            # Metrics code (metrics/_context.py, probability.py, ranking.py)
+            # reads clf.classes_; it must equal clf.classes and be non-empty.
+            self.assertEqual(predictor.classes_, predictor.classes)
+            self.assertEqual(predictor.classes_, model.classes_.tolist())
+            self.assertGreater(len(predictor.classes_), 0)
+
 
 import os
 

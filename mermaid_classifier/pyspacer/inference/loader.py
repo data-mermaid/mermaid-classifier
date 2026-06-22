@@ -19,6 +19,12 @@ class Predictor:
         self.classes = classes
         self.input_dim = input_dim
 
+    @property
+    def classes_(self):
+        """Alias for ``classes`` so a Predictor is a drop-in for the former
+        pickled classifier in metrics code that reads ``clf.classes_``."""
+        return self.classes
+
     def predict_proba(self, features) -> np.ndarray:
         arr = np.asarray(features, dtype=np.float32)
         if arr.ndim != 2 or arr.shape[1] != self.input_dim:
