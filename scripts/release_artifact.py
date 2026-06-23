@@ -9,16 +9,26 @@ Run: uv run python scripts/release_artifact.py --mlflow-model-id m-... --version
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
+import shutil
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import boto3
 from botocore.exceptions import ClientError
 
+from mermaid_classifier.pyspacer.annotation import resolve_classifier_artifact
 from mermaid_classifier.pyspacer.inference import (
     SCHEMA_VERSION, TASK_NAME, load_predictor,
 )
+
+DEFAULT_DEST_BUCKET = 'mermaid-config'
+DEFAULT_DEST_PREFIX = 'classifier'
+DEFAULT_WEIGHTS_URI = (
+    's3://mermaid-config/classifier/v1/efficientnet_weights.pt')
 
 _VERSION_RE = re.compile(r'^v\d+$')
 
@@ -108,3 +118,63 @@ def assemble_s3_layout(
 
     return {name: _uri(name)
             for name in ('model.pt', 'model.json', 'efficientnet.pt')}
+
+
+def _parse_args(argv):
+    p = argparse.ArgumentParser(description="Release a trained classifier as vN.")
+    p.add_argument('--mlflow-model-id', required=True)
+    p.add_argument('--version', required=True)
+    p.add_argument('--extractor-weights-uri', default=DEFAULT_WEIGHTS_URI)
+    p.add_argument('--dest-bucket', default=DEFAULT_DEST_BUCKET)
+    p.add_argument('--dest-prefix', default=DEFAULT_DEST_PREFIX)
+    return p.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = _parse_args(argv)
+    validate_version(args.version)
+
+    s3 = boto3.client('s3')
+
+    # Prechecks — all before any write, so a version folder is never partial.
+    weights_bucket, weights_key = parse_s3_uri(args.extractor_weights_uri)
+    if not s3_object_exists(s3, weights_bucket, weights_key):
+        sys.exit(f"extractor weights not found: {args.extractor_weights_uri}")
+
+    dest_model_pt_key = f"{args.dest_prefix}/{args.version}/model.pt"
+    if s3_object_exists(s3, args.dest_bucket, dest_model_pt_key):
+        sys.exit(
+            f"version {args.version} already exists at "
+            f"s3://{args.dest_bucket}/{dest_model_pt_key}; versions are "
+            f"immutable. Use a new version tag.")
+
+    # Fetch the parity-proven artifact by MLflow model ID (PR #64 resolver).
+    model_pt, model_json = resolve_classifier_artifact(args.mlflow_model_id)
+
+    # Release gate: load + manifest validation (no source-model re-parity).
+    validate_artifact(model_pt, model_json)
+
+    uris = assemble_s3_layout(
+        s3,
+        dest_bucket=args.dest_bucket,
+        dest_prefix=args.dest_prefix,
+        version=args.version,
+        model_pt=model_pt,
+        model_json=model_json,
+        weights_uri=args.extractor_weights_uri,
+    )
+
+    # Copy artifacts into CWD (fixed names) for the workflow to attach to the
+    # release (resolve_classifier_artifact returns temp-dir paths).
+    cwd = Path.cwd()
+    shutil.copy(model_pt, cwd / 'model.pt')
+    shutil.copy(model_json, cwd / 'model.json')
+
+    print(f"Released {args.version} from MLflow model {args.mlflow_model_id}")
+    for name, uri in uris.items():
+        print(f"  {name}: {uri}")
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

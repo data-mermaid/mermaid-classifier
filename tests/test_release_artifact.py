@@ -146,3 +146,58 @@ class AssembleLayoutTest(unittest.TestCase):
             CopySource={'Bucket': 'mermaid-config',
                         'Key': 'classifier/v1/efficientnet_weights.pt'},
         )
+
+
+import shutil
+
+
+class MainTest(unittest.TestCase):
+    def setUp(self):
+        # A real exported pair the fetch seam will "return".
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        from mermaid_classifier.pyspacer.inference import export_artifact
+        from pyspacer._calibrated_model_fixture import make_calibrated_model
+        model, X = make_calibrated_model()
+        model_pt, _m, _ = export_artifact(model, tmp, X)
+        self._pair = (Path(model_pt), tmp / 'model.json')
+        self.addCleanup(self._tmp.cleanup)
+
+    def _run(self, client, cwd):
+        argv = ['--mlflow-model-id', 'm-' + 'a' * 30, '--version', 'v9']
+        with mock.patch.object(ra.boto3, 'client', return_value=client), \
+             mock.patch.object(ra, 'resolve_classifier_artifact',
+                               return_value=self._pair), \
+             mock.patch.object(ra.Path, 'cwd', return_value=cwd):
+            return ra.main(argv)
+
+    def test_happy_path_uploads_and_emits(self):
+        client = mock.Mock()
+        # weights source exists (True), destination model.pt absent (404).
+        client.head_object.side_effect = [{}, _not_found_error()]
+        with tempfile.TemporaryDirectory() as cwd:
+            rc = self._run(client, Path(cwd))
+            self.assertEqual(rc, 0)
+            self.assertEqual(client.upload_file.call_count, 2)
+            client.copy_object.assert_called_once()
+            # Artifacts copied to CWD for the workflow to attach.
+            self.assertTrue((Path(cwd) / 'model.pt').is_file())
+            self.assertTrue((Path(cwd) / 'model.json').is_file())
+
+    def test_existing_version_fails_before_any_write(self):
+        client = mock.Mock()
+        # weights source exists (True), destination model.pt ALSO exists (True).
+        client.head_object.side_effect = [{}, {}]
+        with tempfile.TemporaryDirectory() as cwd:
+            with self.assertRaises(SystemExit):
+                self._run(client, Path(cwd))
+        client.upload_file.assert_not_called()
+        client.copy_object.assert_not_called()
+
+    def test_missing_weights_source_fails_before_any_write(self):
+        client = mock.Mock()
+        client.head_object.side_effect = [_not_found_error()]  # weights absent
+        with tempfile.TemporaryDirectory() as cwd:
+            with self.assertRaises(SystemExit):
+                self._run(client, Path(cwd))
+        client.upload_file.assert_not_called()
