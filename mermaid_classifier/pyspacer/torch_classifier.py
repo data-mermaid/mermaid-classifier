@@ -25,9 +25,6 @@ Differences from sklearn:
   - `activation` is fixed to ReLU.
   - `early_stopping` not implemented.
 
-Pickling: `_module` and `_optimizer` are serialised via `state_dict()`
-and rebuilt on unpickle so loaded classifiers remain callable without
-requiring the exact same torch internal object graph.
 """
 from __future__ import annotations
 
@@ -414,36 +411,3 @@ class TorchMLPClassifier:
             setattr(self, key, value)
         return self
 
-    # --- pickle support ---------------------------------------------------
-
-    def __getstate__(self) -> dict[str, Any]:
-        state = self.__dict__.copy()
-        module = state.pop("_module", None)
-        optimizer = state.pop("_optimizer", None)
-        if module is not None:
-            state["_module_state"] = {
-                k: v.detach().cpu() for k, v in module.state_dict().items()
-            }
-        if optimizer is not None:
-            state["_optimizer_state"] = optimizer.state_dict()
-        return state
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        module_state = state.pop("_module_state", None)
-        optimizer_state = state.pop("_optimizer_state", None)
-        self.__dict__.update(state)
-        # Backfill attributes added after the original release so old
-        # pickles unpickle cleanly. Add new defaults here as the class
-        # grows, rather than mutating __getstate__ to inject them.
-        self.__dict__.setdefault("class_weight", None)
-        if module_state is not None:
-            # Rebuild module using stored metadata; weights replaced below.
-            self._module = _MLPModule(
-                n_features_in=self.n_features_in_,
-                hidden_layer_sizes=self.hidden_layer_sizes,
-                n_outputs=len(self.classes_),
-            )
-            self._module.load_state_dict(module_state)
-        if optimizer_state is not None:
-            self._init_optimizer()
-            self._optimizer.load_state_dict(optimizer_state)

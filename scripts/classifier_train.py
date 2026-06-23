@@ -13,6 +13,12 @@ if credentials:
     if creds.token:
         os.environ['SPACER_AWS_SESSION_TOKEN'] = creds.token
 
+# Normalize Settings -> SPACER_*/MLFLOW_* env vars now (this used to be an import
+# side effect of mermaid_classifier.pyspacer). MLflowTrainingRunner.__init__ also
+# calls this; it is idempotent.
+from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
+set_env_vars_for_packages()
+
 from mermaid_classifier.pyspacer.train import (
         DatasetOptions, MLflowOptions, MLflowTrainingRunner, TrainingOptions)
 from mermaid_classifier.training.sample_weighting import (

@@ -16,7 +16,6 @@ _MIN_BATCH_SIZE = 5000
 
 
 def training_batch_size(
-    clf_type: str = 'MLP',
     num_classes: int = 300,
 ) -> tuple[int, float]:
     """
@@ -41,18 +40,14 @@ def training_batch_size(
     #   3. MLP forward/backward activation buffers per layer
     sklearn_copy_bytes = _FEATURE_BYTES  # worst-case full copy
 
-    if clf_type == 'MLP':
-        # MLP hidden_layer_sizes is (200, 100) for large datasets or
-        # (100,) for small ones; num_classes is the output layer.
-        # Use the larger architecture as a conservative estimate.
-        activation_units = 200 + 100 + num_classes
-        # sklearn's backprop holds both forward activations and backprop
-        # deltas (plus gradient buffers) per layer, so the per-sample
-        # activation memory is roughly double the forward-pass size.
-        activation_bytes = 2 * activation_units * _BYTES_PER_FLOAT
-    else:
-        # SGDClassifier has negligible internal buffers.
-        activation_bytes = 0
+    # MLP hidden_layer_sizes is (200, 100) for large datasets or
+    # (100,) for small ones; num_classes is the output layer. Use the
+    # larger architecture as a conservative estimate. sklearn's backprop
+    # holds both forward activations and backprop deltas (plus gradient
+    # buffers) per layer, so per-sample activation memory is roughly
+    # double the forward-pass size.
+    activation_units = 200 + 100 + num_classes
+    activation_bytes = 2 * activation_units * _BYTES_PER_FLOAT
 
     bytes_per_point = _FEATURE_BYTES + sklearn_copy_bytes + activation_bytes
 

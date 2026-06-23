@@ -6,22 +6,35 @@ and per-epoch MLflow callbacks.
 import copy
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from logging import getLogger
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
-from sklearn.linear_model import SGDClassifier
-from sklearn.metrics import log_loss as sklearn_log_loss
+from sklearn.metrics import accuracy_score, log_loss as sklearn_log_loss
 
-from spacer import config
 from spacer.data_classes import ImageLabels, ValResults
 from spacer.messages import TrainClassifierReturnMsg
 from spacer.train_classifier import ClassifierTrainer
-from spacer.train_utils import calc_acc, evaluate_classifier
+from spacer.train_utils import evaluate_classifier
 
 from mermaid_classifier.pyspacer.torch_classifier import TorchMLPClassifier
 
 logger = getLogger(__name__)
+
+
+@contextmanager
+def _log_entry_and_exit(name: str):
+    """Reproduces pyspacer's config.log_entry_and_exit DEBUG logging:
+    'Entering: <name>' on enter, 'Exiting: <name> after <s> seconds.'
+    on exit, timing the body."""
+    start_time = time.time()
+    logger.debug('Entering: %s', name)
+    try:
+        yield
+    finally:
+        logger.debug(
+            'Exiting: %s after %f seconds.', name, time.time() - start_time)
 
 
 class MermaidTrainer(ClassifierTrainer):
@@ -61,9 +74,7 @@ class MermaidTrainer(ClassifierTrainer):
         self.batch_size = batch_size
         self.on_epoch_end = on_epoch_end
         # Optional per-class loss weighting passed through to the
-        # underlying TorchMLPClassifier. Only used for clf_type='MLP'.
-        # The SGDClassifier branch ignores this (sklearn SGD has its own
-        # class_weight kwarg, but plumbing it would expand scope).
+        # underlying TorchMLPClassifier.
         self.class_weight = class_weight
         # Optional MLP architecture/lr overrides. When None, the MLP
         # branch falls back to the label-count heuristic below.
@@ -76,19 +87,16 @@ class MermaidTrainer(ClassifierTrainer):
         # and clf is restored to its best-val_loss state. The restored
         # clf is what gets calibrated and returned.
         self.early_stopping_patience = early_stopping_patience
-        # Forwarded to the underlying classifier on construction. For
-        # TorchMLPClassifier this seeds np.random.default_rng() and
-        # torch.manual_seed; for SGDClassifier it seeds sklearn's RNG.
-        # The MLP path historically passed no random_state, making it
-        # non-deterministic; this defaults to 0 to preserve the SGD
-        # path's prior behavior while closing the MLP gap.
+        # Forwarded to the underlying TorchMLPClassifier on construction;
+        # it seeds np.random.default_rng() and torch.manual_seed. Defaults
+        # to 0 so MLP weight initialization is deterministic across runs.
         self.random_state = random_state
         # Populated by __call__; readable by the runner for MLflow
         # logging. Pre-initialized so the runner never hits an
         # AttributeError when patience is None.
         self._early_stop_info: dict | None = None
 
-    def __call__(self, labels, nbr_epochs, pc_models, clf_type):
+    def __call__(self, labels, nbr_epochs, pc_models):
         logger.debug(
             f"Unique classes:"
             f" Train + Ref = {len(labels.ref.classes_set)},"
@@ -108,29 +116,22 @@ class MermaidTrainer(ClassifierTrainer):
         logger.debug(
             f"Batch size: {self.batch_size} labels")
 
-        assert clf_type in config.CLASSIFIER_TYPES
-
         classes_list = list(labels.ref.classes_set)
 
         # Initialize classifier and train
-        with config.log_entry_and_exit("training using " + clf_type):
-            if clf_type == 'MLP':
-                if self.hidden_layer_sizes is not None:
-                    hls, lr = self.hidden_layer_sizes, self.learning_rate_init
-                elif labels.train.label_count >= 50000:
-                    hls, lr = (200, 100), 1e-4
-                else:
-                    hls, lr = (100,), 1e-3
-                clf = TorchMLPClassifier(
-                    hidden_layer_sizes=hls,
-                    learning_rate_init=lr,
-                    class_weight=self.class_weight,
-                    random_state=self.random_state,
-                )
+        with _log_entry_and_exit("training MLP"):
+            if self.hidden_layer_sizes is not None:
+                hls, lr = self.hidden_layer_sizes, self.learning_rate_init
+            elif labels.train.label_count >= 50000:
+                hls, lr = (200, 100), 1e-4
             else:
-                clf = SGDClassifier(
-                    loss='log_loss', average=True,
-                    random_state=self.random_state)
+                hls, lr = (100,), 1e-3
+            clf = TorchMLPClassifier(
+                hidden_layer_sizes=hls,
+                learning_rate_init=lr,
+                class_weight=self.class_weight,
+                random_state=self.random_state,
+            )
 
             ref_accs = []
             t0 = time.time()
@@ -185,8 +186,7 @@ class MermaidTrainer(ClassifierTrainer):
                         # Snapshot the current clf state so we can
                         # restore it if a later epoch overfits. deepcopy
                         # is the safe path for sklearn-compatible
-                        # estimators with arbitrary internal state
-                        # (TorchMLPClassifier, SGDClassifier, etc.).
+                        # estimators with arbitrary internal state.
                         best_clf_snapshot = copy.deepcopy(clf)
                         epochs_since_best = 0
                     else:
@@ -278,7 +278,7 @@ class MermaidTrainer(ClassifierTrainer):
         # Calibration: stream ref data in batches — avoids loading full feature
         # vectors into memory. Only scalar prediction scores accumulate
         # (O(N * K) instead of O(N * 4096)).
-        with config.log_entry_and_exit("calibration"):
+        with _log_entry_and_exit("calibration"):
             clf_calibrated = self._calibrate_in_batches(clf, labels.ref)
 
         classes = clf_calibrated.classes_.tolist()
@@ -291,7 +291,7 @@ class MermaidTrainer(ClassifierTrainer):
         pc_accs = []
         for pc_model in pc_models:
             pc_gts, pc_ests, _ = evaluate_classifier(pc_model, labels.val)
-            pc_accs.append(calc_acc(pc_gts, pc_ests))
+            pc_accs.append(accuracy_score(pc_gts, pc_ests))
 
         val_results = ValResults(
             scores=val_scores,
@@ -301,7 +301,7 @@ class MermaidTrainer(ClassifierTrainer):
         )
 
         return_message = TrainClassifierReturnMsg(
-            acc=calc_acc(val_gts, val_ests),
+            acc=accuracy_score(val_gts, val_ests),
             pc_accs=pc_accs,
             ref_accs=ref_accs,
             runtime=time.time() - t0,
@@ -321,7 +321,7 @@ class MermaidTrainer(ClassifierTrainer):
         for x, y in labels.load_data_in_batches(batch_size=self.batch_size):
             pred.extend(clf.predict(x))
             gt.extend(y)
-        return calc_acc(gt, pred)
+        return accuracy_score(gt, pred)
 
     def _calc_acc_and_log_loss_batched(
         self,
@@ -349,10 +349,10 @@ class MermaidTrainer(ClassifierTrainer):
             gt.extend(y)
         proba = np.vstack(all_proba)
         # Argmax over class axis gives the predicted class index in
-        # clf.classes_ order; convert back to class label for calc_acc.
+        # clf.classes_ order; convert back to class label for accuracy_score.
         clf_classes = list(clf.classes_)
         pred = [clf_classes[i] for i in proba.argmax(axis=1)]
-        acc = calc_acc(gt, pred)
+        acc = accuracy_score(gt, pred)
         # log_loss with explicit labels= ensures column ordering matches
         # the proba matrix even if some classes are absent from gt.
         loss = float(sklearn_log_loss(gt, proba, labels=clf_classes))
@@ -380,21 +380,18 @@ class MermaidTrainer(ClassifierTrainer):
             x_arr = np.array(x_batch)
             y_arr = np.array(y_batch)
 
-            # Use the same response method sklearn uses internally:
-            # decision_function (preferred) or predict_proba (fallback).
-            # See CalibratedClassifierCV.fit() which calls
-            # _get_response_values with ["decision_function", "predict_proba"].
-            if hasattr(clf, 'decision_function'):
-                preds = clf.decision_function(x_arr)
-            else:
-                preds = clf.predict_proba(x_arr)
-            if preds.ndim == 1:
-                preds = preds.reshape(-1, 1)
-
+            # MLP calibrates from predict_proba. TorchMLPClassifier exposes
+            # no decision_function, and predict_proba always returns a 2-D
+            # (N, K) array. For binary classifiers, _fit_calibrator expects
+            # (N, 1) — just the positive-class column — matching sklearn's
+            # prefit calibration path. Multiclass keeps (N, K) as-is.
+            preds = clf.predict_proba(x_arr)
+            if len(clf.classes_) == 2:
+                preds = preds[:, 1:]
             all_preds.append(preds)
             all_y.append(y_arr)
 
-        predictions = np.vstack(all_preds)  # (N, K) or (N, 1)
+        predictions = np.vstack(all_preds)  # (N, K)
         y = np.concatenate(all_y)           # (N,)
 
         # _fit_calibrator is a private sklearn API used here for memory

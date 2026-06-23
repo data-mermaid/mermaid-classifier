@@ -20,7 +20,6 @@ This is found in `mermaid_classifier.pyspacer`.
 The `scripts/` directory holds command-line entry points that *drive* the package, as opposed to the importable `mermaid_classifier` library code described above. Each script is run with `python scripts/<name>.py` from the repo root (see the script's module docstring for arguments):
 
 - `classifier_train.py` — run a training job.
-- `evaluate_model.py` — evaluate a pre-trained model and log results to MLflow.
 - `generate_report.py` — render a self-contained HTML report from an MLflow run, using the Jinja2 template `report_template.html.j2`. This is currently the only way to generate an HTML report.
 
 ### Documentation
@@ -41,10 +40,13 @@ Some installation examples:
 | Result | Command |
 | - | - |
 | Utilities only | `pip install https://github.com/data-mermaid/mermaid-classifier.git` |
-| Utilities + PySpacer-based classification | `pip install https://github.com/data-mermaid/mermaid-classifier.git[pyspacer]` |
-| Utilities + PySpacer-based classification + JupyterLab support | `pip install https://github.com/data-mermaid/mermaid-classifier.git[pyspacer,jupyterlab]` |
+| Utilities + inference (load/run a trained classifier) | `pip install https://github.com/data-mermaid/mermaid-classifier.git[inference]` |
+| Utilities + full training pipeline | `pip install https://github.com/data-mermaid/mermaid-classifier.git[training]` |
+| Utilities + training + JupyterLab support | `pip install https://github.com/data-mermaid/mermaid-classifier.git[training,jupyterlab]` |
 | Utilities only, at non-main branch | `pip install "mermaid-classifier @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
-| Utilities + PySpacer-based classification + JupyterLab support, at non-main branch | `pip install "mermaid-classifier[pyspacer,jupyterlab] @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
+| Utilities + training + JupyterLab support, at non-main branch | `pip install "mermaid-classifier[training,jupyterlab] @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
+
+The `inference` extra is intentionally minimal (just `pyspacer`, which brings torch/torchvision/scikit-learn/Pillow/numpy/boto3) so serving/inference images stay light. `training` is a superset that adds MLflow, DuckDB, pandas, the settings layer, etc.
 
 To update your install, add `-U` after the word `install` in any of the above. However, if the package's version number has not been bumped up yet, you'll probably have to `pip uninstall mermaid-classifier` first, otherwise pip might think there is nothing to be updated.
 

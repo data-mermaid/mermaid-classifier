@@ -33,6 +33,7 @@ import yaml
 from jinja2 import Environment, FileSystemLoader
 from mlflow.tracking import MlflowClient
 
+from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
 from mermaid_classifier.pyspacer.utils import mlflow_connect
 
 logger = logging.getLogger(__name__)
@@ -410,6 +411,7 @@ def render_report(context: dict, output_path: Path):
 
 
 def main():
+    set_env_vars_for_packages()
     parser = argparse.ArgumentParser(
         description="Generate a self-contained HTML report from an MLflow run.")
     parser.add_argument(
