@@ -1,0 +1,68 @@
+name: Release classifier version
+
+on:
+  workflow_dispatch:
+    inputs:
+      mlflow_model_id:
+        description: 'MLflow model ID (m-...)'
+        required: true
+        type: string
+      version:
+        description: 'Version tag (vN, e.g. v3)'
+        required: true
+        type: string
+
+# contents: write to create the release/tag; id-token for AWS OIDC.
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    name: Export + S3 + GitHub release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      # The fetch path (resolve_classifier_artifact -> mlflow + boto3) needs the
+      # training stack; the minimal [inference] extra omits mlflow.
+      - name: Install package
+        run: uv sync --frozen --extra training
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_RELEASE_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Fail if release already exists (immutable versions)
+        run: |
+          if gh release view "${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "Release ${{ inputs.version }} already exists; versions are immutable." >&2
+            exit 1
+          fi
+
+      - name: Export, validate, and push to S3
+        run: |
+          uv run --no-sync python scripts/release_artifact.py \
+            --mlflow-model-id "${{ inputs.mlflow_model_id }}" \
+            --version "${{ inputs.version }}"
+
+      - name: Create GitHub release
+        run: |
+          gh release create "${{ inputs.version }}" model.pt model.json \
+            --title "Classifier ${{ inputs.version }}" \
+            --notes "Classifier release ${{ inputs.version }}.
+
+          - MLflow model: \`${{ inputs.mlflow_model_id }}\`
+          - Artifact: s3://mermaid-config/classifier/${{ inputs.version }}/ (model.pt, model.json, efficientnet.pt)"
