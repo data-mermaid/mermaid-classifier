@@ -34,7 +34,7 @@ COPY scripts /opt/ml/code/scripts
 # Pulls in pyspacer 0.14.0 (pinned in pyproject.toml) and its transitive
 # deps. pip will reconcile torch with whatever pyspacer needs.
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e ".[pyspacer]"
+    pip install --no-cache-dir -e ".[training]"
 
 COPY docker/jobs/features-entrypoint.sh /opt/ml/code/entrypoint.sh
 RUN chmod +x /opt/ml/code/entrypoint.sh

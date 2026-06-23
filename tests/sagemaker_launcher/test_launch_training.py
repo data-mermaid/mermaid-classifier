@@ -13,8 +13,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 # launch_training imports the SageMaker SDK at module level. That SDK is an
 # optional extra (`sagemaker`), deliberately excluded from the default test
-# install (`--extra pyspacer`), so skip this module entirely when it's absent.
-# Check `sagemaker.estimator` specifically: `sagemaker-mlflow` (a pyspacer-extra
+# install (`--extra training`), so skip this module entirely when it's absent.
+# Check `sagemaker.estimator` specifically: `sagemaker-mlflow` (a training-extra
 # dep) provides a partial `sagemaker` namespace without the full SDK.
 _HAS_SAGEMAKER = importlib.util.find_spec("sagemaker.estimator") is not None
 if _HAS_SAGEMAKER:

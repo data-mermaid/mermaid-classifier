@@ -297,7 +297,7 @@ carries the required `sagemaker-mlflow:*` grant on the App ARN, so the
 same profile used to launch training works for reading runs back.
 
 If you see `No module named sagemaker_mlflow`, run `uv sync` to install
-the plugin (it's already in `uv.lock` under the `pyspacer` extra). If
+the plugin (it's already in `uv.lock` under the `training` extra). If
 you see `AccessDeniedException` on `sagemaker-mlflow:CallMlflowApi`,
 your active profile is not the launcher role.
 
@@ -331,7 +331,7 @@ restarts from epoch zero. Use only for runs you're OK retrying.
 
    ```bash
    aws s3 sync s3://dev-datamermaid-sm-data/runs/<run-id>/config/ /tmp/repro/
-   SAGEMAKER_CONFIG_DIR=/tmp/repro uv run --extra pyspacer python scripts/sagemaker_train_entrypoint.py
+   SAGEMAKER_CONFIG_DIR=/tmp/repro uv run --extra training python scripts/sagemaker_train_entrypoint.py
    ```
 
    (This skips Docker; runs the entrypoint directly against your
