@@ -9,8 +9,14 @@ Run: uv run python scripts/release_artifact.py --mlflow-model-id m-... --version
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from urllib.parse import urlparse
+
+from mermaid_classifier.pyspacer.inference import (
+    SCHEMA_VERSION, TASK_NAME, load_predictor,
+)
 
 _VERSION_RE = re.compile(r'^v\d+$')
 
@@ -28,3 +34,30 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     if parsed.scheme != 's3' or not parsed.netloc or not parsed.path.strip('/'):
         raise ValueError(f"not an s3://bucket/key URI: {uri!r}")
     return parsed.netloc, parsed.path.lstrip('/')
+
+
+def validate_artifact(model_pt: Path, model_json: Path) -> dict:
+    """Re-validate the artifact at release time (the release "parity gate").
+
+    load_predictor raises ManifestError on schema_version / input_dim /
+    class-count mismatch. We then add the release-only checks load_predictor
+    does not make: task identity, non-empty classes, and provenance presence.
+    Returns the parsed manifest.
+    """
+    load_predictor(model_pt, model_json)  # ManifestError on graph/manifest skew
+    manifest = json.loads(Path(model_json).read_text())
+
+    if manifest.get('task') != TASK_NAME:
+        raise ValueError(
+            f"manifest task={manifest.get('task')!r} != {TASK_NAME!r}")
+    if not manifest.get('classes'):
+        raise ValueError("manifest has empty/missing 'classes'")
+    if not manifest.get('trained_with'):
+        raise ValueError("manifest missing 'trained_with' provenance")
+    # SCHEMA_VERSION is enforced by load_predictor; assert it stays referenced
+    # so a future loader change that drops the check is caught here too.
+    if manifest.get('schema_version') != SCHEMA_VERSION:
+        raise ValueError(
+            f"manifest schema_version={manifest.get('schema_version')!r}"
+            f" != {SCHEMA_VERSION}")
+    return manifest

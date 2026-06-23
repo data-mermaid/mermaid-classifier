@@ -1,7 +1,9 @@
 """Tests for scripts/release_artifact.py."""
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -34,3 +36,50 @@ class ParseS3UriTest(unittest.TestCase):
         for bad in ('https://x/y', '/local/path', 's3://', 'file.pt'):
             with self.assertRaises(ValueError, msg=bad):
                 ra.parse_s3_uri(bad)
+
+
+class ValidateArtifactTest(unittest.TestCase):
+    def _export(self, tmp):
+        """Export a real small artifact; return (model_pt, model_json)."""
+        from mermaid_classifier.pyspacer.inference import export_artifact
+        from pyspacer._calibrated_model_fixture import make_calibrated_model
+        model, X = make_calibrated_model()
+        model_pt, _manifest, _ = export_artifact(model, tmp, X)
+        return Path(model_pt), Path(tmp) / 'model.json'
+
+    def test_valid_artifact_returns_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_pt, model_json = self._export(tmp)
+            manifest = ra.validate_artifact(model_pt, model_json)
+            self.assertEqual(manifest['task'], 'pyspacer_mlp_classifier')
+            self.assertTrue(manifest['classes'])
+
+    def test_rejects_wrong_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_pt, model_json = self._export(tmp)
+            m = json.loads(model_json.read_text())
+            m['task'] = 'something_else'
+            model_json.write_text(json.dumps(m))
+            with self.assertRaises(ValueError):
+                ra.validate_artifact(model_pt, model_json)
+
+    def test_rejects_missing_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_pt, model_json = self._export(tmp)
+            m = json.loads(model_json.read_text())
+            del m['trained_with']
+            model_json.write_text(json.dumps(m))
+            with self.assertRaises(ValueError):
+                ra.validate_artifact(model_pt, model_json)
+
+    def test_rejects_bad_class_count(self):
+        # load_predictor probes the graph: a manifest claiming the wrong class
+        # count must raise (ManifestError is a subclass-agnostic failure here).
+        from mermaid_classifier.pyspacer.inference import ManifestError
+        with tempfile.TemporaryDirectory() as tmp:
+            model_pt, model_json = self._export(tmp)
+            m = json.loads(model_json.read_text())
+            m['classes'] = m['classes'][:-1]  # drop one -> count mismatch
+            model_json.write_text(json.dumps(m))
+            with self.assertRaises(ManifestError):
+                ra.validate_artifact(model_pt, model_json)
