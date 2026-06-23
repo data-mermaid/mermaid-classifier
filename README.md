@@ -20,7 +20,6 @@ This is found in `mermaid_classifier.pyspacer`.
 The `scripts/` directory holds command-line entry points that *drive* the package, as opposed to the importable `mermaid_classifier` library code described above. Each script is run with `python scripts/<name>.py` from the repo root (see the script's module docstring for arguments):
 
 - `classifier_train.py` — run a training job.
-- `evaluate_model.py` — evaluate a pre-trained model and log results to MLflow.
 - `generate_report.py` — render a self-contained HTML report from an MLflow run, using the Jinja2 template `report_template.html.j2`. This is currently the only way to generate an HTML report.
 
 ### Documentation

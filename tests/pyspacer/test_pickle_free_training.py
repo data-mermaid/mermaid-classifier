@@ -1,19 +1,18 @@
-"""Guards that the train/eval/store path stays free of the classifier pickle.
+"""Guards that mermaid-classifier stays free of the classifier pickle.
 
-If train.py or trainer.py re-imports pyspacer's classifier store/load/train
-glue, the pickle round-trip has crept back onto the critical path. Scoped to
-these two files: scripts/evaluate_model.py is intentionally still pickle-based
-(out of scope, tracked as #61) and must not trip this guard.
+If any module under ``mermaid_classifier/`` or ``scripts/`` re-imports
+pyspacer's classifier store/load/train glue, the pickle round-trip has crept
+back in. This covers the whole codebase: the train/eval/store path and the
+CLI scripts. (The last pickle consumer, ``scripts/evaluate_model.py``, was
+removed in #61.)
 """
 import ast
 import unittest
 from pathlib import Path
 
-# mermaid_classifier/pyspacer/ — two levels up from tests/pyspacer/.
-PYSPACER_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "mermaid_classifier" / "pyspacer"
-)
+# Repo root — two levels up from tests/pyspacer/.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCANNED_DIRS = (REPO_ROOT / "mermaid_classifier", REPO_ROOT / "scripts")
 
 FORBIDDEN = {"load_classifier", "train_classifier", "store_classifier",
              "TrainClassifierMsg"}
@@ -32,19 +31,14 @@ def _imported_names(source: str) -> set[str]:
 
 
 class PickleFreeTrainingTest(unittest.TestCase):
-    def test_train_py_does_not_import_pickle_glue(self):
-        source = (PYSPACER_DIR / "train.py").read_text()
-        offenders = FORBIDDEN & _imported_names(source)
-        self.assertEqual(
-            offenders, set(),
-            msg=f"train.py must not import {offenders} (pickle path)")
-
-    def test_trainer_py_does_not_import_pickle_glue(self):
-        source = (PYSPACER_DIR / "trainer.py").read_text()
-        offenders = FORBIDDEN & _imported_names(source)
-        self.assertEqual(
-            offenders, set(),
-            msg=f"trainer.py must not import {offenders} (pickle path)")
+    def test_no_classifier_pickle_glue_imported_anywhere(self):
+        for base in SCANNED_DIRS:
+            for path in base.rglob("*.py"):
+                offenders = FORBIDDEN & _imported_names(path.read_text())
+                self.assertEqual(
+                    offenders, set(),
+                    msg=f"{path.relative_to(REPO_ROOT)} must not import "
+                        f"{offenders} (pickle path)")
 
 
 if __name__ == "__main__":
