@@ -8,11 +8,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from botocore.exceptions import ClientError
+
 # Allow importing scripts/release_artifact.py (mirrors test_generate_training_config).
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / 'scripts'))
 
 import release_artifact as ra  # noqa: E402
+
+
+def _not_found_error():
+    return ClientError({'Error': {'Code': '404', 'Message': 'Not Found'}},
+                       'HeadObject')
 
 
 class VersionValidationTest(unittest.TestCase):
@@ -83,3 +90,59 @@ class ValidateArtifactTest(unittest.TestCase):
             model_json.write_text(json.dumps(m))
             with self.assertRaises(ManifestError):
                 ra.validate_artifact(model_pt, model_json)
+
+
+class S3ExistsTest(unittest.TestCase):
+    def test_true_when_head_succeeds(self):
+        client = mock.Mock()
+        client.head_object.return_value = {}
+        self.assertTrue(ra.s3_object_exists(client, 'b', 'k'))
+
+    def test_false_on_404(self):
+        client = mock.Mock()
+        client.head_object.side_effect = _not_found_error()
+        self.assertFalse(ra.s3_object_exists(client, 'b', 'k'))
+
+    def test_reraises_other_clienterror(self):
+        client = mock.Mock()
+        client.head_object.side_effect = ClientError(
+            {'Error': {'Code': 'AccessDenied'}}, 'HeadObject')
+        with self.assertRaises(ClientError):
+            ra.s3_object_exists(client, 'b', 'k')
+
+
+class AssembleLayoutTest(unittest.TestCase):
+    def test_uploads_pair_and_copies_weights(self):
+        client = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            mp = Path(tmp) / 'model.pt'
+            mp.write_bytes(b'pt')
+            mj = Path(tmp) / 'model.json'
+            mj.write_text('{}')
+            uris = ra.assemble_s3_layout(
+                client,
+                dest_bucket='mermaid-config',
+                dest_prefix='classifier',
+                version='v7',
+                model_pt=mp,
+                model_json=mj,
+                weights_uri='s3://mermaid-config/classifier/v1/efficientnet_weights.pt',
+            )
+
+        self.assertEqual(uris, {
+            'model.pt': 's3://mermaid-config/classifier/v7/model.pt',
+            'model.json': 's3://mermaid-config/classifier/v7/model.json',
+            'efficientnet.pt': 's3://mermaid-config/classifier/v7/efficientnet.pt',
+        })
+        # model.pt + model.json uploaded by file.
+        uploaded_keys = {c.kwargs.get('Key') or c.args[2]
+                         for c in client.upload_file.call_args_list}
+        self.assertEqual(uploaded_keys,
+                         {'classifier/v7/model.pt', 'classifier/v7/model.json'})
+        # efficientnet.pt is a server-side copy from the weights source.
+        client.copy_object.assert_called_once_with(
+            Bucket='mermaid-config',
+            Key='classifier/v7/efficientnet.pt',
+            CopySource={'Bucket': 'mermaid-config',
+                        'Key': 'classifier/v1/efficientnet_weights.pt'},
+        )

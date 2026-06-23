@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
+from botocore.exceptions import ClientError
+
 from mermaid_classifier.pyspacer.inference import (
     SCHEMA_VERSION, TASK_NAME, load_predictor,
 )
@@ -61,3 +63,48 @@ def validate_artifact(model_pt: Path, model_json: Path) -> dict:
             f"manifest schema_version={manifest.get('schema_version')!r}"
             f" != {SCHEMA_VERSION}")
     return manifest
+
+
+_NOT_FOUND_CODES = {'404', 'NoSuchKey', 'NotFound'}
+
+
+def s3_object_exists(s3_client, bucket: str, key: str) -> bool:
+    """True if the object exists; False on 404/NotFound; re-raise otherwise."""
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') in _NOT_FOUND_CODES:
+            return False
+        raise
+
+
+def assemble_s3_layout(
+    s3_client,
+    *,
+    dest_bucket: str,
+    dest_prefix: str,
+    version: str,
+    model_pt: Path,
+    model_json: Path,
+    weights_uri: str,
+) -> dict[str, str]:
+    """Upload model.pt + model.json and copy the extractor weights into
+    s3://<dest_bucket>/<dest_prefix>/<version>/. Returns {name: s3_uri}."""
+    base_key = f"{dest_prefix}/{version}"
+
+    def _uri(name: str) -> str:
+        return f"s3://{dest_bucket}/{base_key}/{name}"
+
+    for path, name in [(model_pt, 'model.pt'), (model_json, 'model.json')]:
+        s3_client.upload_file(str(path), dest_bucket, f"{base_key}/{name}")
+
+    src_bucket, src_key = parse_s3_uri(weights_uri)
+    s3_client.copy_object(
+        Bucket=dest_bucket,
+        Key=f"{base_key}/efficientnet.pt",
+        CopySource={'Bucket': src_bucket, 'Key': src_key},
+    )
+
+    return {name: _uri(name)
+            for name in ('model.pt', 'model.json', 'efficientnet.pt')}
