@@ -1,0 +1,36 @@
+# Launcher config for the full 1,370-source training run, built from the
+# train/sagemaker+shrink integration branch (#44 SageMaker launcher + #64
+# shrink-pyspacer stack).
+#
+# Reuses the dataset/training/mlflow blocks from
+# sagemaker/configs/coralnet_top108_full/training_config.yaml unchanged.
+# The ONLY difference from sagemaker/runs/coralnet-top108-full.yaml is
+# job.image: it points at a branch-specific tag so the container carries
+# the #64 code, not :training-latest (which is #44-only).
+#
+# Build & push that image first (from the repo root, on this branch):
+#   ACCOUNT=554812291621; REGION=us-east-1; TAG=training-shrink-merge
+#   IMAGE=${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/mermaid-classifier-jobs:${TAG}
+#   docker buildx build --platform linux/amd64 -t ${IMAGE} -f docker/jobs/training.Dockerfile .
+#   docker push ${IMAGE}
+#
+# Submit with:
+#   uv run python scripts/launch_training.py \
+#       --run-config sagemaker/runs/shrink-merge-top108-full.yaml \
+#       --config-dir sagemaker/configs/coralnet_top108_full/ \
+#       --mlflow-tracking-uri ${MLFLOW_ARN}
+#
+# Compute sizing matches coralnet-top108-full.yaml: ml.c5.9xlarge is
+# 'fast mode' (~2x faster than m5.4xlarge at ~2x $/hr); 36h cap leaves
+# headroom for the ~7.4M-annotation budget.
+
+job:
+  name_prefix: mermaid-classifier-shrink-merge-top108-full
+  image: mermaid-classifier-jobs:training-shrink-merge
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.c5.9xlarge
+  volume_gb: 400
+  max_runtime_hours: 36
+  env:
+    FEATURE_CACHE_DIR: /tmp/feature_cache
+    SPACER_EXTRACTORS_CACHE_DIR: /tmp/spacer_extractors

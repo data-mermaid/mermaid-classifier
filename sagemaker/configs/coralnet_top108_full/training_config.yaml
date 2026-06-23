@@ -14,7 +14,7 @@
 # TRAINING_INPUTS_PERCENT_MISSING_ALLOWED="5" tolerates this gap.
 
 dataset:
-  include_mermaid: false
+  include_mermaid: true
   coralnet_sources_csv: sources.csv
   drop_growthforms: false
   label_rollup_spec_csv: rollups.csv
@@ -40,8 +40,8 @@ training:
   random_state: 0
 
 mlflow:
-  experiment_name: coralnet-top108-full-1370sources
-  model_name: top108-full-v1
+  experiment_name: coralnet-top108-full-1370sources-shrink
+  model_name: top108-full-shrink-v1
 
 env:
   # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
