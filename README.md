@@ -85,6 +85,18 @@ Local env advantages over SageMaker:
 If you're on a local dev machine and accessing public S3 files, the `AWS_ANONYMOUS` setting may be useful.
 
 
+## Releasing a classifier version
+
+Trigger the **Release classifier version** workflow (`workflow_dispatch`) with the
+MLflow model ID and a `vN` tag. It fetches the trained `model.pt` + `model.json`,
+re-validates them (load + manifest gate), pushes
+`s3://mermaid-config/classifier/<vN>/{model.pt,model.json,efficientnet.pt}`, and cuts
+GitHub release `vN`. Versions are immutable — re-running an existing `vN` fails.
+
+Required repo secrets: `AWS_RELEASE_ROLE_ARN` (OIDC assume-role with read on the
+MLflow artifact store + read/write on `s3://mermaid-config/classifier/*`) and
+`MLFLOW_TRACKING_URI`.
+
 ## For developers
 
 Set up this project as an [editable install](https://pip.pypa.io/en/stable/topics/local-project-installs/): first git-clone this repo, then use `pip install -e <path to repo>`.
