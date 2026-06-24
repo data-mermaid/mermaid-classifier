@@ -27,8 +27,7 @@ from mermaid_classifier.pyspacer.inference import (
 
 DEFAULT_DEST_BUCKET = 'mermaid-config'
 DEFAULT_DEST_PREFIX = 'classifier'
-DEFAULT_WEIGHTS_URI = (
-    's3://mermaid-config/classifier/v1/efficientnet_weights.pt')
+DEFAULT_WEIGHTS_URI = 's3://mermaid-config/classifier/efficientnet.pt'
 
 _VERSION_RE = re.compile(r'^v\d+$')
 
