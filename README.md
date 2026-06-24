@@ -93,6 +93,11 @@ re-validates them (load + manifest gate), pushes
 `s3://mermaid-config/classifier/<vN>/{model.pt,model.json,efficientnet.pt}`, and cuts
 GitHub release `vN`. Versions are immutable — re-running an existing `vN` fails.
 
+- **Function image pairing (not a re-tag).** The inference image is model-agnostic
+  and versioned independently (mermaid-inference semver). When cutting model `vN`,
+  record in the GitHub release notes which function image version (`mermaid-inference-pyspacer:<semver>`)
+  the model was validated against. Do **not** tag the image with the model version.
+
 Required repo secrets: `AWS_RELEASE_ROLE_ARN` (OIDC assume-role with read on the
 MLflow artifact store + read/write on `s3://mermaid-config/classifier/*`) and
 `MLFLOW_TRACKING_URI`.
