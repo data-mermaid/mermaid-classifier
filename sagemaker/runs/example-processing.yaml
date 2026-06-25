@@ -1,0 +1,31 @@
+# Example launcher config for a sharded SageMaker ProcessingJob run
+# (feature extraction across N parallel workers).
+#
+# Submit with:
+#   uv run python scripts/launch_processing.py \
+#       --run-config sagemaker/runs/example-processing.yaml \
+#       --config-dir sagemaker/configs/example/
+#
+# The shard.items_from path is resolved relative to --config-dir;
+# items_column auto-detects the first column when omitted (the
+# example sources.csv has column 'id').
+
+job:
+  name_prefix: mermaid-features-example
+  image: mermaid-classifier-jobs:features-latest
+  entrypoint: scripts/build_feature_bucket.py
+  instance_type: ml.g5.xlarge
+  volume_gb: 100
+  max_runtime_hours: 4
+
+processing:
+  container_args:
+    - --target-bucket=2605-coralnet-public-sources
+    - --weights=s3://2605-coralnet-public-sources/efficientnet_weights.pt
+    - --device=cuda
+    - --no-aws-bootstrap
+    - --skip-existing
+  shard:
+    items_from: sources.csv
+    workers: 4
+    per_worker_arg: --source-ids

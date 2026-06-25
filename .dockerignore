@@ -1,0 +1,44 @@
+# Keep build context lean: exclude virtualenvs, caches, training
+# artifacts, MLflow runs, and notebooks. Everything outside this list is
+# COPYed into the image and bloats it.
+
+.venv
+.venv-*
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.mypy_cache
+.ruff_cache
+.pytest_cache
+
+# MLflow + training outputs (huge, not needed inside the worker).
+mlruns
+mlflow.db
+*.log
+build_feature_bucket_progress_*.jsonl
+build_feature_bucket_errors_*.csv
+
+# Reports + autoresearch.
+report_*.html
+autoresearch
+autoresearch.log
+
+# Tests aren't needed inside the worker image.
+tests
+
+# Legacy.
+v1
+
+# Local jupyter / IDE.
+.ipynb_checkpoints
+.idea
+.vscode
+
+.git
+.gitignore
+.dockerignore
+
+# Project-level docs and examples that aren't required at runtime.
+docs
+pyspacer_example

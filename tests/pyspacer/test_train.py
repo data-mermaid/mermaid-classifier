@@ -172,8 +172,16 @@ class ReadCoralNetDataTest(BaseTrainTest):
                 mock.patch.object(
                     CoralNetMermaidMapping, '_download_mapping',
                 ) as mock_download_mapping,
+                # read_coralnet_data uses S3FileSystem.exists to skip
+                # sources whose annotations.csv isn't in S3. The test
+                # serves its CSV from a local tempfile, so short-circuit
+                # that check.
+                mock.patch(
+                    'mermaid_classifier.pyspacer.train.S3FileSystem',
+                ) as mock_s3fs_cls,
             ):
                 mock_download_mapping.return_value = mapping
+                mock_s3fs_cls.return_value.exists.return_value = True
 
                 dataset.read_coralnet_data()
 

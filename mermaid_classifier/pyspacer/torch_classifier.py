@@ -31,6 +31,7 @@ requiring the exact same torch internal object graph.
 """
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -38,6 +39,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# Upper bound on the row-sum drift we expect from a softmax computed in
+# float32 then cast to float64. float32 eps ≈ 1.2e-7; even naive summation
+# over thousands of classes keeps |row_sum - 1| well under 1e-4. Anything
+# larger indicates a real numerical issue (extreme logits, NaN/Inf, or a
+# bypassed softmax) rather than rounding, and we surface it as a warning.
+_EXPECTED_FP_DRIFT_TOL = 1e-4
 
 
 class _MLPModule(nn.Module):
@@ -344,7 +353,28 @@ class TorchMLPClassifier:
         self._module.eval()
         with torch.no_grad():
             probs = F.softmax(self._module(torch.from_numpy(X_arr)), dim=1)
-        return probs.numpy().astype(np.float64)
+        probs_np = probs.numpy().astype(np.float64)
+        # Renormalize so each row sums to exactly 1.0 in float64.
+        # Softmax in float32 leaves rows summing to 1.0 ± ~1e-6 once
+        # cast to float64, which trips sklearn's tight float64 tolerance
+        # inside log_loss. Renormalizing is cheap (one division per row)
+        # and only changes the argmax in pathological near-tie cases.
+        row_sums = probs_np.sum(axis=1)
+        max_drift = float(np.max(np.abs(row_sums - 1.0)))
+        if max_drift > _EXPECTED_FP_DRIFT_TOL:
+            warnings.warn(
+                f"predict_proba row sums deviate from 1.0 by up to "
+                f"{max_drift:.2e}, exceeding the expected float32 "
+                f"softmax drift bound "
+                f"({_EXPECTED_FP_DRIFT_TOL:.0e}). Renormalizing anyway, "
+                f"but this likely indicates a numerical issue (extreme "
+                f"logits, NaN/Inf, or a bypassed softmax) rather than "
+                f"rounding.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        probs_np /= row_sums[:, np.newaxis]
+        return probs_np
 
     def predict_proba(self, X: np.ndarray | list) -> np.ndarray:
         return self._forward_probs(X)
@@ -406,6 +436,12 @@ class TorchMLPClassifier:
         # pickles unpickle cleanly. Add new defaults here as the class
         # grows, rather than mutating __getstate__ to inject them.
         self.__dict__.setdefault("class_weight", None)
+        # ``_class_weight_tensor`` is normally built on the first
+        # ``partial_fit`` call, but a pre-class_weight pickle is restored
+        # with ``_module`` already present, so that first-call branch is
+        # skipped. Backfill None here so resumed training reads a valid
+        # (no-weighting) tensor instead of hitting AttributeError.
+        self.__dict__.setdefault("_class_weight_tensor", None)
         if module_state is not None:
             # Rebuild module using stored metadata; weights replaced below.
             self._module = _MLPModule(

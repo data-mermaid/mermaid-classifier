@@ -22,6 +22,14 @@ Usage:
         --run-name "v1-beta-labels" \
         --model ../v1_beta_model/classifier_labels.pkl \
         --model-name "v1-beta-labels"
+
+    # Against a SageMaker Studio MLflow App (requires AWS_PROFILE active):
+    uv run python scripts/evaluate_model.py \
+        --valresult ../v1_beta_model/valresult.json \
+        --experiment "v1-beta-evaluation" \
+        --model ../v1_beta_model/classifier.pkl \
+        --model-name "v1-beta" \
+        --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2
 """
 import argparse
 import csv
@@ -134,6 +142,10 @@ def main():
         help="Path to class mapping CSV (columns: CoralFocus3Label, "
              "CoralFocus3_BaID, CoralFocus3_GfID). Maps CoralFocus3Label "
              "names to MERMAID BA::GF IDs. Requires --label-map.")
+    parser.add_argument(
+        "--mlflow-tracking-uri", default=None,
+        help=("Override MLflow tracking URI (e.g. a SageMaker MLflow App ARN). "
+              "Defaults to the MLFLOW_TRACKING_SERVER env var / .env value."))
     args = parser.parse_args()
 
     if args.model and not args.model_name:
@@ -189,7 +201,7 @@ def main():
 
     # 5. Connect to MLflow and create a run.
     logger.info("Connecting to MLflow...")
-    mlflow_connect()
+    mlflow_connect(tracking_uri=args.mlflow_tracking_uri)
     mlflow.set_experiment(args.experiment)
 
     with mlflow.start_run(run_name=args.run_name):
