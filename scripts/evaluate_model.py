@@ -48,6 +48,7 @@ from mermaid_classifier.common.benthic_attributes import (
     GrowthFormLibrary,
 )
 from mermaid_classifier.pyspacer.metrics import MetricsContext, MetricsCoordinator
+from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
 from mermaid_classifier.pyspacer.utils import mlflow_connect
 
 
@@ -113,6 +114,7 @@ def remap_classes(val_data: dict, label_map_path: str, class_map_path: str,
 
 
 def main():
+    set_env_vars_for_packages()
     parser = argparse.ArgumentParser(
         description="Evaluate validation results and log metrics to MLflow.")
     parser.add_argument(

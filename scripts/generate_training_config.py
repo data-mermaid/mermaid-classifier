@@ -42,6 +42,7 @@ from mermaid_classifier.common.benthic_attributes import (
     CoralNetMermaidMapping,
     GrowthFormLibrary,
 )
+from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT = REPO_ROOT.parent
@@ -561,6 +562,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    set_env_vars_for_packages()
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s %(levelname)s %(message)s')
     args = parse_args(argv)

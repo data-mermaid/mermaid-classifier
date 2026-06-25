@@ -58,7 +58,7 @@ from mermaid_classifier.pyspacer.metrics import (
 from mermaid_classifier.pyspacer.metrics._logging import (
     log_dataframe as _log_dataframe,
 )
-from mermaid_classifier.pyspacer.settings import settings
+from mermaid_classifier.pyspacer.settings import settings, set_env_vars_for_packages
 from mermaid_classifier.pyspacer.utils import (
     logging_config_for_script, mlflow_connect)
 from mermaid_classifier.training.sample_weighting import (
@@ -1670,6 +1670,11 @@ class TrainingRunner:
         dataset_options: DatasetOptions = None,
         training_options: TrainingOptions = None,
     ):
+        # Normalize Settings -> SPACER_*/MLFLOW_* env vars before any PySpacer
+        # or MLflow work. This used to run as an import side effect of
+        # mermaid_classifier.pyspacer; it now runs here (the programmatic entry
+        # point for all training) and in the scripts/ mains. Idempotent.
+        set_env_vars_for_packages()
         self.dataset_options = dataset_options or DatasetOptions()
         self.training_options = training_options or TrainingOptions()
 
@@ -1869,6 +1874,15 @@ class MLflowTrainingRunner(TrainingRunner):
         if MLFLOW_IMPORT_ERROR:
             # MLflow couldn't be imported.
             raise MLFLOW_IMPORT_ERROR
+
+        # Normalize Settings -> SPACER_*/MLFLOW_* env vars *before* the first
+        # mlflow_connect() below, which needs MLFLOW_HTTP_REQUEST_MAX_RETRIES to
+        # be set (otherwise a failed initial connection retries far more times
+        # than configured). This used to be set as an import side effect of
+        # mermaid_classifier.pyspacer; super().__init__() also calls it, but
+        # that runs after mlflow_connect(). Idempotent, so the double call is
+        # harmless.
+        set_env_vars_for_packages()
 
         time_taken = mlflow_connect()
         logger.info(f"Time to connect to MLflow tracking: {time_taken}")
