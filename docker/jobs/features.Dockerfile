@@ -1,16 +1,13 @@
 # Container for running scripts/build_feature_bucket.py as a SageMaker
-# Processing Job worker. One container per worker; the launcher
-# (scripts/launch_feature_extraction_sagemaker.py) submits N of these
-# in parallel against a sharded subset of source IDs.
+# Processing Job worker. Launched by scripts/launch_processing.py with
+# shard-based fan-out. Pushes to the mermaid-classifier-jobs ECR repo
+# under the `features-*` tag prefix.
 #
-# Base: official PyTorch image from Docker Hub. Ships CUDA, cuDNN,
-# Python 3.10, and torch -- everything we need for SageMaker
-# Processing Jobs to pull and run on a g5/g4dn instance. We deliberately
-# avoid the AWS SageMaker Deep Learning Containers (private ECR, requires
-# `aws ecr get-login-password` at build time, occasionally flaky to
-# reach from non-AWS networks). SageMaker Processing Jobs only require
-# the image to expose an executable entrypoint -- the DLC's
-# `sagemaker-training` framework is not used here.
+# Build from the mermaid-classifier/ directory:
+#   docker buildx build --platform linux/amd64 \
+#       -t <ECR_URI>:features-<tag> -f docker/jobs/features.Dockerfile .
+#
+# See docker/jobs/CLAUDE.md for the full build/push recipe.
 
 ARG BASE_IMAGE=pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
 
@@ -39,7 +36,7 @@ COPY scripts /opt/ml/code/scripts
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e ".[pyspacer]"
 
-COPY docker/feature_extraction/entrypoint.sh /opt/ml/code/entrypoint.sh
+COPY docker/jobs/features-entrypoint.sh /opt/ml/code/entrypoint.sh
 RUN chmod +x /opt/ml/code/entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1 \
