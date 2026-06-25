@@ -1875,6 +1875,15 @@ class MLflowTrainingRunner(TrainingRunner):
             # MLflow couldn't be imported.
             raise MLFLOW_IMPORT_ERROR
 
+        # Normalize Settings -> SPACER_*/MLFLOW_* env vars *before* the first
+        # mlflow_connect() below, which needs MLFLOW_HTTP_REQUEST_MAX_RETRIES to
+        # be set (otherwise a failed initial connection retries far more times
+        # than configured). This used to be set as an import side effect of
+        # mermaid_classifier.pyspacer; super().__init__() also calls it, but
+        # that runs after mlflow_connect(). Idempotent, so the double call is
+        # harmless.
+        set_env_vars_for_packages()
+
         time_taken = mlflow_connect()
         logger.info(f"Time to connect to MLflow tracking: {time_taken}")
 
