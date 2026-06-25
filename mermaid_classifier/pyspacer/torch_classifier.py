@@ -406,6 +406,12 @@ class TorchMLPClassifier:
         # pickles unpickle cleanly. Add new defaults here as the class
         # grows, rather than mutating __getstate__ to inject them.
         self.__dict__.setdefault("class_weight", None)
+        # ``_class_weight_tensor`` is normally built on the first
+        # ``partial_fit`` call, but a pre-class_weight pickle is restored
+        # with ``_module`` already present, so that first-call branch is
+        # skipped. Backfill None here so resumed training reads a valid
+        # (no-weighting) tensor instead of hitting AttributeError.
+        self.__dict__.setdefault("_class_weight_tensor", None)
         if module_state is not None:
             # Rebuild module using stored metadata; weights replaced below.
             self._module = _MLPModule(
