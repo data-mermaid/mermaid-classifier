@@ -14,7 +14,23 @@ if credentials:
         os.environ['SPACER_AWS_SESSION_TOKEN'] = creds.token
 
 from mermaid_classifier.pyspacer.train import (
-        DatasetOptions, MLflowOptions, MLflowTrainingRunner)
+        DatasetOptions, MLflowOptions, MLflowTrainingRunner, TrainingOptions)
+from mermaid_classifier.training.sample_weighting import (
+        SampleWeightingOptions)
+from mermaid_classifier.training.subsample import SubsampleOptions
+
+
+# Production recipe, validated on the 20-source / 80-class
+# tiela77_top100_min1k dataset (~1.77M annotations after rollup).
+# See docs/hidden-layer-experiments.md (architecture / training budget)
+# and docs/balancing-experiments.md (label balancing) for the underlying
+# experiments and observed metric tradeoffs.
+
+# Full-dataset annotation count after rollup + included-labels filter,
+# measured 2026-04-30. Used as the budget for `balanced` subsampling so
+# that classes smaller than the implied per-class target (~22K) are kept
+# in full while the few dominant classes are capped.
+FULL_DATA_TOTAL = 1_770_000
 
 
 if __name__ == "__main__":
@@ -22,11 +38,40 @@ if __name__ == "__main__":
         dataset_options=DatasetOptions(
             # Specifying False here means you're only training on CoralNet sources.
             include_mermaid=False,
-            coralnet_sources_csv='../sagemaker/sources/OldCoralNetSourcesToKeep.csv',
-            # label_rollup_spec_csv='../sagemaker/labels/ba_rollup_top_level.csv',
-            excluded_labels_csv='../sagemaker/labels/inspecific-top-level.csv',
+            coralnet_sources_csv='../sagemaker/configs/tiela77_top100_min1k/sources.csv',
+            label_rollup_spec_csv='../sagemaker/configs/tiela77_top100_min1k/rollups.csv',
+            included_labels_csv="../sagemaker/configs/tiela77_top100_min1k/included_labels.csv",
+            # Local-dev alternative for fast smoke runs (10 sources):
+            # coralnet_sources_csv='../sagemaker/sources/CoralNetSourcesFirst10.csv',
             drop_growthforms=False,
-            #annotation_limit=200000,
+            # Class-balanced subsampling. At full-data scale most of the
+            # 80 classes have fewer rows than total/num_classes, so the
+            # allocator mostly just caps the dominant classes (Turf
+            # algae, Sand, Porites, Bare substrate) while keeping the
+            # rest in full. ``min_per_class=200`` floors rare classes so
+            # they aren't dropped entirely. Realized subsample on the
+            # tiela77 dataset is ~457K rows.
+            subsample=SubsampleOptions(
+                strategy='balanced',
+                total_annotations=FULL_DATA_TOTAL,
+                min_per_class=200,
+            ),
+            # Sample weighting via the effective-number-of-samples
+            # formulation (the sole strategy after the balancing sweep).
+            # Pass None to disable weighting entirely.
+            weighting=SampleWeightingOptions(
+                weight_ratio_cap=5000.0,  # bound max:min ratio of weights
+            ),
+        ),
+        training_options=TrainingOptions(
+            # The MLP head architecture and learning rate are fixed at the
+            # production values inside MermaidTrainer (see
+            # docs/hidden-layer-experiments.md). ``epochs=40`` is a
+            # generous upper bound; ``early_stopping_patience=3`` against
+            # ``epoch/val_loss`` lets each run find its own minimum
+            # (typically epoch 14-29 on this data).
+            epochs=40,
+            early_stopping_patience=3,
         ),
         mlflow_options=MLflowOptions(
             experiment_name="pyspacer-beta-test",

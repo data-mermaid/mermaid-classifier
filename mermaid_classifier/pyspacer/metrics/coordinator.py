@@ -24,6 +24,7 @@ from mermaid_classifier.pyspacer.metrics.classification import (
     compute_precision_recall_f1,
 )
 from mermaid_classifier.pyspacer.metrics.cover import compute_cover
+from mermaid_classifier.pyspacer.metrics.per_source import compute_per_source
 from mermaid_classifier.pyspacer.metrics.probability import compute_probability
 from mermaid_classifier.pyspacer.metrics.ranking import compute_ranking
 from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
@@ -108,6 +109,7 @@ class MetricsCoordinator:
         # Need dataset:
         if self.ctx.dataset is not None:
             groups.append(('cover', compute_cover))
+            groups.append(('per_source', compute_per_source))
 
         # Need pre-computed probability matrix:
         if self.ctx.val_proba is not None:

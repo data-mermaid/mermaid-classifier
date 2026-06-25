@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Classifier Report — {{ metadata.experiment_name }} / {{ metadata.run_name }}</title>
+<title>{{ title }}</title>
 <style>
   :root {
     --blue-900: #1a365d;
@@ -252,7 +252,8 @@
   'per_class_cover_metrics_csv':'Per-Class Cover Metrics (CSV)',
   'per_category_log_loss_csv': 'Per-Category Log Loss (CSV)',
   'per_category_topk_csv':     'Per-Category Top-K Accuracy (CSV)',
-  'hierarchical_topk_csv':     'Hierarchical Top-K Results (CSV)'
+  'hierarchical_topk_csv':     'Hierarchical Top-K Results (CSV)',
+  'metrics_csv':               'Per-Source Validation Metrics (CSV)'
 } %}
 
 {# -- Extract ECE value for calibration caption -- #}
@@ -512,7 +513,8 @@
   'gf_confusion_png':         'Growth form confusion: predicted vs. true growth form.',
   'per_class_bias_png':       'Per-class cover bias — predicted minus true cover (%).',
   'per_category_log_loss_png':'Per-category log loss. Higher values = model is confidently wrong.',
-  'per_category_topk_png':    'Per-category Top-K accuracy curves.'
+  'per_category_topk_png':    'Per-category Top-K accuracy curves.',
+  'accuracy_by_source_png':   'Per-source validation accuracy and balanced accuracy. Sources ordered by validation annotation count (largest first).'
 } %}
 {# Set of figure keys that are confusion matrix images — constrained to max-height #}
 {% set matrix_figure_keys = ['frequencies_png', 'percents_png', 'top_level_confusion_png', 'gf_confusion_png'] %}

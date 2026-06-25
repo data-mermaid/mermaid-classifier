@@ -125,6 +125,14 @@ EVALUATION_SECTIONS = {
             ('taxonomic/gf_precision_recall_f1.csv', 'csv'),
         ],
     },
+    'per_source': {
+        'title': 'Per-Source Breakdown',
+        'optional': True,
+        'artifacts': [
+            ('per_source/accuracy_by_source.png', 'png'),
+            ('per_source/metrics.csv', 'csv'),
+        ],
+    },
 }
 
 ROOT_EVALUATION_ARTIFACTS = [
@@ -197,9 +205,14 @@ def _load_artifact(artifact_dir: Path, artifact_path: str, loader_key: str):
     if loader_key == 'png':
         return encode_png_as_base64(full_path)
     elif loader_key == 'csv':
-        if artifact_path == 'metrics_per_label.csv':
-            return load_csv_as_html_table(full_path, sort_by='f1_score', ascending=True)
-        return load_csv_as_html_table(full_path)
+        if full_path.stat().st_size == 0:
+            return None
+        try:
+            if artifact_path == 'metrics_per_label.csv':
+                return load_csv_as_html_table(full_path, sort_by='f1_score', ascending=True)
+            return load_csv_as_html_table(full_path)
+        except pd.errors.EmptyDataError:
+            return None
     elif loader_key == 'yaml':
         return load_yaml_file(full_path)
     else:
@@ -354,7 +367,7 @@ def build_template_context(
         title = (f"Classifier Report - {metadata['experiment_name']} - "
                  f"{metadata['run_name']}")
 
-    params = metadata.get('params', {})
+    params = metadata.get('params') or {}
     n_classes = params.get('num_classes', '')
     n_predictions = params.get('num_predictions', '')
 
@@ -369,7 +382,7 @@ def build_template_context(
         'has_training': artifacts['has_training'],
         'section_order': [
             'confusion_matrix', 'calibration', 'cover', 'probability',
-            'ranking', 'taxonomic',
+            'ranking', 'taxonomic', 'per_source',
         ],
         'n_classes': n_classes,
         'n_predictions': n_predictions,
