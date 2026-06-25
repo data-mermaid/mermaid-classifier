@@ -1,0 +1,23 @@
+# Example launcher config for a SageMaker TrainingJob run.
+#
+# Submit with:
+#   uv run python scripts/launch_training.py \
+#       --run-config sagemaker/runs/example-training.yaml \
+#       --config-dir sagemaker/configs/example/ \
+#       --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2
+#
+# The classifier-specific dataset/training/mlflow blocks live in
+# sagemaker/configs/example/training_config.yaml (mounted into the
+# container as /opt/ml/input/data/config/training_config.yaml).
+# This file describes ONLY the launcher's job:/training: blocks.
+
+job:
+  name_prefix: mermaid-classifier-example
+  image: mermaid-classifier-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.m5.4xlarge
+  volume_gb: 200
+  max_runtime_hours: 4
+  env:
+    FEATURE_CACHE_DIR: /tmp/feature_cache
+    SPACER_EXTRACTORS_CACHE_DIR: /tmp/spacer_extractors

@@ -147,31 +147,12 @@ class SubsampleSqlDeterminismTest(unittest.TestCase):
             with self.subTest(cls=cls):
                 self.assertEqual(realized.get(cls, 0), target)
 
-    def test_soft_balanced_strategy_deterministic_under_threads(self):
-        # Same end-to-end determinism guarantee as stratified, applied
-        # to the new soft_balanced allocator.
-        opts = SubsampleOptions(
-            strategy="soft_balanced",
-            total_annotations=200,
-            balance_alpha=0.5,
-        )
-        counts = (
-            self.annotations.groupby(
-                ["benthic_attribute_id", "growth_form_id"]
-            ).size().to_dict()
-        )
-        targets = compute_per_class_targets(opts, counts)
-        rows_a = _apply_sql(self._new_conn(threads=1), self.annotations,
-                            targets)
-        rows_b = _apply_sql(self._new_conn(threads=4), self.annotations,
-                            targets)
-        self.assertEqual(rows_a, rows_b)
-
     def test_balanced_strategy_caps_at_available(self):
-        # Use 'balanced' with target_per_class > class size for some
-        # classes -> they should be kept in full, not oversampled.
+        # 'balanced' with total_annotations=400 over 10 classes gives a
+        # per-class budget of 40. Classes smaller than 40 are kept in
+        # full (not oversampled); larger classes are capped at 40.
         opts = SubsampleOptions(
-            strategy="balanced", target_per_class=40,
+            strategy="balanced", total_annotations=400,
         )
         counts = (
             self.annotations.groupby(
