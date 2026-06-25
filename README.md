@@ -5,7 +5,7 @@ This Python repository enables data scientists to experiment with PySpacer-based
 
 ## Overview
 
-This project is set up as a Python package, and requires Python 3.10 or higher. Once you have the package installed in your Python environment, you can import anything from `mermaid_classifier` into your own Python modules, notebooks, etc.
+This project is set up as a Python package, and requires Python 3.12 or higher. Once you have the package installed in your Python environment, you can import anything from `mermaid_classifier` into your own Python modules, notebooks, etc.
 
 ### General utilities
 
