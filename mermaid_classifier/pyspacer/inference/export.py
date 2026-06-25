@@ -75,6 +75,9 @@ def export_artifact(
             # the inference package) doesn't pull in sklearn — the serve path
             # needs only torch/numpy.
             "sklearn": sklearn_version,
+            # Read via importlib.metadata (no heavy import); the serving runtime
+            # validates this against its installed pyspacer before scoring.
+            "pyspacer": _pkg_version("pyspacer"),
         },
     }
 

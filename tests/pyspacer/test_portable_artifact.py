@@ -83,6 +83,10 @@ class ExportTest(unittest.TestCase):
             self.assertEqual(manifest["config"], {"patch_size": 224})
             self.assertIn("torch", manifest["trained_with"])
             self.assertIn("sklearn", manifest["trained_with"])
+            # trained_with must record pyspacer so the serving runtime can verify
+            # feature-extraction compatibility.
+            from importlib.metadata import version
+            self.assertEqual(manifest["trained_with"]["pyspacer"], version("pyspacer"))
 
             on_disk = json.loads((Path(d) / "model.json").read_text())
             self.assertEqual(on_disk, manifest)
