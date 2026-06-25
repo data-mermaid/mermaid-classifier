@@ -38,6 +38,9 @@ pyspacer = [
     "s3fs",
     # pyspacer uses scikit-learn, but we also use it directly for metrics.
     "scikit-learn",
+    # torch is already a transitive dep via pyspacer, but we import it
+    # directly in torch_classifier.py so declare it here too.
+    "torch",
 ]
 jupyterlab = [
     "jupyterlab>=4.5.5",
