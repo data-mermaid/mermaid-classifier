@@ -36,12 +36,9 @@ class SubsampleConfig(BaseModel):
     # mermaid_classifier.training.subsample.options when adding a strategy.
     # Duplicated here as a Literal so this module avoids importing the
     # pyspacer subtree at load time.
-    strategy: Literal["stratified", "balanced", "soft_balanced"]
+    strategy: Literal["stratified", "balanced"]
     total_annotations: int | None = None
     min_per_class: int = 0
-    target_per_class: int | None = None
-    balance_alpha: float | None = None
-    seed: int = 0
 
     @field_validator("total_annotations")
     @classmethod
@@ -62,16 +59,7 @@ class WeightingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    strategy: str = "tree_balanced_ba_flat_gf"
-    alpha: float = 0.5
     weight_ratio_cap: float | None = None
-
-    @field_validator("alpha")
-    @classmethod
-    def _alpha_in_unit_interval(cls, v):
-        if not (0.0 <= v <= 1.0):
-            raise ValueError("alpha must be in [0, 1]")
-        return v
 
     @field_validator("weight_ratio_cap")
     @classmethod
@@ -118,11 +106,12 @@ class DatasetConfig(BaseModel):
 class TrainingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # The MLP architecture and learning rate are fixed at the production
+    # values baked into MermaidTrainer (hidden_layer_sizes=(500, 300,
+    # 100) @ learning_rate_init=1e-4; see docs/hidden-layer-experiments.md),
+    # so they are intentionally not exposed here.
     epochs: int = 10
-    hidden_layer_sizes: tuple[int, ...] | None = None
-    learning_rate_init: float | None = None
     early_stopping_patience: int | None = None
-    random_state: int = 0
 
 
 class MLflowConfig(BaseModel):
@@ -206,17 +195,12 @@ class TrainingRunConfig(BaseModel):
                 strategy=d.subsample.strategy,
                 total_annotations=d.subsample.total_annotations,
                 min_per_class=d.subsample.min_per_class,
-                target_per_class=d.subsample.target_per_class,
-                balance_alpha=d.subsample.balance_alpha,
-                seed=d.subsample.seed,
             )
 
         weighting = None
         if d.weighting is not None:
             weighting = SampleWeightingOptions(
                 enabled=d.weighting.enabled,
-                strategy=d.weighting.strategy,
-                alpha=d.weighting.alpha,
                 weight_ratio_cap=d.weighting.weight_ratio_cap,
             )
 
@@ -242,14 +226,7 @@ class TrainingRunConfig(BaseModel):
         t = self.training
         training_options = TrainingOptions(
             epochs=t.epochs,
-            hidden_layer_sizes=(
-                tuple(t.hidden_layer_sizes)
-                if t.hidden_layer_sizes is not None
-                else None
-            ),
-            learning_rate_init=t.learning_rate_init,
             early_stopping_patience=t.early_stopping_patience,
-            random_state=t.random_state,
         )
 
         m = self.mlflow

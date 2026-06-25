@@ -29,14 +29,11 @@ MINIMAL_YAML = textwrap.dedent("""
         total_annotations: 1000
         min_per_class: 10
       weighting:
-        strategy: effective_number
-        alpha: 0.5
+        enabled: true
+        weight_ratio_cap: 5000.0
     training:
       epochs: 5
-      hidden_layer_sizes: [200, 100]
-      learning_rate_init: 0.001
       early_stopping_patience: 3
-      random_state: 42
     mlflow:
       experiment_name: test-experiment
       model_name: TestModel
@@ -60,7 +57,7 @@ class LoadHappyPathTest(unittest.TestCase):
             config = TrainingRunConfig.from_yaml_path(path)
         self.assertTrue(config.dataset.include_mermaid)
         self.assertEqual(config.training.epochs, 5)
-        self.assertEqual(config.training.hidden_layer_sizes, (200, 100))
+        self.assertEqual(config.training.early_stopping_patience, 3)
         self.assertEqual(config.mlflow.experiment_name, "test-experiment")
         self.assertEqual(
             config.env["MLFLOW_TRACKING_SERVER"], "file:./mlruns")
@@ -95,15 +92,26 @@ class SubsampleStrategiesTest(unittest.TestCase):
         self.assertEqual(config.dataset.subsample.strategy, "stratified")
         self.assertEqual(config.dataset.subsample.total_annotations, 5000)
 
-    def test_soft_balanced_requires_balance_alpha(self):
+    def test_balanced_with_total_annotations_loads(self):
         config = self._load(textwrap.dedent("""\
               subsample:
-                strategy: soft_balanced
+                strategy: balanced
                 total_annotations: 5000
-                balance_alpha: 0.5
+                min_per_class: 50
         """))
-        self.assertEqual(config.dataset.subsample.strategy, "soft_balanced")
-        self.assertEqual(config.dataset.subsample.balance_alpha, 0.5)
+        self.assertEqual(config.dataset.subsample.strategy, "balanced")
+        self.assertEqual(config.dataset.subsample.min_per_class, 50)
+
+    def test_removed_subsample_strategy_rejected(self):
+        # soft_balanced was removed from the pipeline (the balancing
+        # experiments settled on 'balanced'); extra="forbid" rejects
+        # both the strategy and its old companion fields.
+        with self.assertRaises(ValidationError):
+            self._load(textwrap.dedent("""\
+                  subsample:
+                    strategy: soft_balanced
+                    total_annotations: 5000
+            """))
 
     def test_unknown_strategy_rejected(self):
         with self.assertRaises(ValidationError):
@@ -121,23 +129,31 @@ class WeightingTest(unittest.TestCase):
             path = _write(Path(td), MINIMAL_YAML)
             config = TrainingRunConfig.from_yaml_path(path)
         self.assertTrue(config.dataset.weighting.enabled)
-        self.assertEqual(
-            config.dataset.weighting.strategy, "effective_number")
-        self.assertEqual(config.dataset.weighting.alpha, 0.5)
+        self.assertEqual(config.dataset.weighting.weight_ratio_cap, 5000.0)
 
-    def test_weighting_default_strategy_is_tree_balanced(self):
-        """Bare WeightingConfig() should use tree_balanced_ba_flat_gf,
-        matching the default in mermaid_classifier.training.sample_weighting.options.
+    def test_weighting_defaults(self):
+        """Bare WeightingConfig() is enabled with no ratio cap. The
+        effective-number formulation (beta) is fixed in
+        mermaid_classifier.training.sample_weighting, so the only knobs
+        exposed here are `enabled` and `weight_ratio_cap`.
         """
         from mermaid_classifier.sagemaker.config import WeightingConfig
         w = WeightingConfig()
         self.assertTrue(w.enabled)
-        self.assertEqual(w.strategy, "tree_balanced_ba_flat_gf")
-        self.assertEqual(w.alpha, 0.5)
         self.assertIsNone(w.weight_ratio_cap)
 
-    def test_invalid_alpha_rejected(self):
-        bad_yaml = MINIMAL_YAML.replace("alpha: 0.5", "alpha: 1.5")
+    def test_removed_weighting_field_rejected(self):
+        # `strategy`/`alpha` were removed; extra="forbid" rejects them.
+        bad_yaml = MINIMAL_YAML.replace(
+            "weight_ratio_cap: 5000.0", "alpha: 0.5")
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), bad_yaml)
+            with self.assertRaises(ValidationError):
+                TrainingRunConfig.from_yaml_path(path)
+
+    def test_invalid_weight_ratio_cap_rejected(self):
+        bad_yaml = MINIMAL_YAML.replace(
+            "weight_ratio_cap: 5000.0", "weight_ratio_cap: 0.5")
         with TemporaryDirectory() as td:
             path = _write(Path(td), bad_yaml)
             with self.assertRaises(ValidationError):
@@ -221,7 +237,7 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertEqual(
             dataset.coralnet_sources_csv, str(tmp / "sources.csv"))
         self.assertEqual(training.epochs, 5)
-        self.assertEqual(training.hidden_layer_sizes, (200, 100))
+        self.assertEqual(training.early_stopping_patience, 3)
 
 
 class MLflowModelNameTest(unittest.TestCase):

@@ -2,12 +2,12 @@
 
 The real ``BenthicAttributeLibrary`` hits the MERMAID API on construction
 and is therefore unsuitable for unit tests. These fakes implement the
-minimal surface used by Strategy implementations:
+minimal surface the trainer wiring reads when the taxonomy-library
+accessors are monkeypatched:
 
   - ``by_id``: dict[ba_id] -> {'id', 'name', 'parent'}
   - ``get_ancestor_ids(ba_id)``: list[str], root-first
-  - ``GFLibrary.id_to_name`` / ``BALibrary.id_to_name``: optional, only
-    needed by trainer wiring (not Strategy code).
+  - ``GFLibrary.id_to_name`` / ``BALibrary.id_to_name``: id -> name.
 """
 from __future__ import annotations
 

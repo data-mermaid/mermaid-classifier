@@ -23,16 +23,11 @@ dataset:
     min_per_class: 200
   weighting:
     enabled: true
-    strategy: effective_number
-    alpha: 0.5
     weight_ratio_cap: 5000.0
 
 training:
   epochs: 40
-  hidden_layer_sizes: [500, 300, 100]
-  learning_rate_init: 0.0001
   early_stopping_patience: 3
-  random_state: 0
 
 mlflow:
   experiment_name: coralnet-top108-192best
