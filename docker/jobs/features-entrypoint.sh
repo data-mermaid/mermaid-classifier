@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # SageMaker Processing Job container entrypoint.
 #
-# The launcher (scripts/launch_feature_extraction_sagemaker.py) passes
+# The launcher (scripts/launch_processing.py) passes
 # build_feature_bucket.py's CLI args directly via SageMaker's
-# AppSpecification.ContainerArguments, which arrive here as "$@". We
-# just exec the script. The script's --aws-profile flag is passed as ""
-# by the launcher, telling its SSO bootstrap to fall through to the
-# default credential chain (i.e. the SageMaker task role).
+# AppSpecification.ContainerArguments, which arrive here as "$@" (the
+# run YAML's processing.container_args plus the sharded --source-ids).
+# We just exec the script. --no-aws-bootstrap is passed by the launcher,
+# telling the script's SSO bootstrap to fall through to the default
+# credential chain (i.e. the SageMaker task role).
 
 set -euo pipefail
 
