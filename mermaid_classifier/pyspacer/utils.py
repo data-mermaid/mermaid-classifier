@@ -42,8 +42,9 @@ def logging_config_for_script(name):
     return logging.getLogger(name)
 
 
-def mlflow_connect() -> timedelta:
-    mlflow.set_tracking_uri(uri=settings.mlflow_tracking_server)
+def mlflow_connect(tracking_uri: str | None = None) -> timedelta:
+    uri = tracking_uri or settings.mlflow_tracking_server
+    mlflow.set_tracking_uri(uri=uri)
 
     try:
         # Do something to test the server connection.

@@ -20,36 +20,15 @@ class OptionsValidationTest(unittest.TestCase):
         self.assertEqual(opts.strategy, "stratified")
         self.assertEqual(opts.total_annotations, 100)
         self.assertEqual(opts.min_per_class, 0)
-        self.assertIsNone(opts.target_per_class)
 
-    def test_balanced_with_target_per_class_valid(self):
-        opts = SubsampleOptions(strategy="balanced", target_per_class=50)
-        self.assertEqual(opts.strategy, "balanced")
-        self.assertEqual(opts.target_per_class, 50)
-
-    def test_balanced_with_total_only_valid(self):
+    def test_balanced_with_total_valid(self):
         opts = SubsampleOptions(strategy="balanced", total_annotations=100)
+        self.assertEqual(opts.strategy, "balanced")
         self.assertEqual(opts.total_annotations, 100)
 
-    def test_balanced_requires_one_budget(self):
+    def test_balanced_requires_total(self):
         with self.assertRaisesRegex(ValueError, "balanced"):
             SubsampleOptions(strategy="balanced")
-
-    def test_balanced_rejects_both_budgets(self):
-        with self.assertRaisesRegex(ValueError, "either"):
-            SubsampleOptions(
-                strategy="balanced",
-                total_annotations=100,
-                target_per_class=10,
-            )
-
-    def test_stratified_rejects_target_per_class(self):
-        with self.assertRaisesRegex(ValueError, "target_per_class"):
-            SubsampleOptions(
-                strategy="stratified",
-                total_annotations=100,
-                target_per_class=10,
-            )
 
     def test_unknown_strategy_rejected(self):
         with self.assertRaisesRegex(ValueError, "strategy"):
@@ -71,10 +50,6 @@ class OptionsValidationTest(unittest.TestCase):
                 min_per_class=-1,
             )
 
-    def test_zero_target_per_class_rejected(self):
-        with self.assertRaisesRegex(ValueError, "target_per_class"):
-            SubsampleOptions(strategy="balanced", target_per_class=0)
-
     def test_to_log_dict_shape(self):
         opts = SubsampleOptions(
             strategy="stratified",
@@ -86,99 +61,18 @@ class OptionsValidationTest(unittest.TestCase):
         self.assertEqual(d["subsample/strategy"], "stratified")
         self.assertEqual(d["subsample/total_annotations"], 400_000)
         self.assertEqual(d["subsample/min_per_class"], 5)
-        self.assertIsNone(d["subsample/target_per_class"])
-        self.assertIsNone(d["subsample/balance_alpha"])
-        # ``seed`` defaults to 0 and is logged for visibility even though
-        # the built-in allocators are deterministic by SQL ordering.
-        self.assertEqual(d["subsample/seed"], 0)
-
-    def test_to_log_dict_includes_explicit_seed(self):
-        opts = SubsampleOptions(
-            strategy="stratified",
-            total_annotations=400_000,
-            seed=42,
-        )
-        self.assertEqual(opts.to_log_dict()["subsample/seed"], 42)
+        # target_per_class / balance_alpha / seed were removed when the
+        # soft_balanced experiment was dropped.
+        self.assertNotIn("subsample/target_per_class", d)
+        self.assertNotIn("subsample/balance_alpha", d)
+        self.assertNotIn("subsample/seed", d)
 
     def test_strategies_constant_includes_known_strategies(self):
         # Sanity check that we don't accidentally drop a strategy from
         # the public constant.
         self.assertIn("stratified", SUBSAMPLE_STRATEGIES)
         self.assertIn("balanced", SUBSAMPLE_STRATEGIES)
-        self.assertIn("soft_balanced", SUBSAMPLE_STRATEGIES)
-
-
-class SoftBalancedOptionsTest(unittest.TestCase):
-    def test_soft_balanced_with_total_and_alpha_valid(self):
-        opts = SubsampleOptions(
-            strategy="soft_balanced",
-            total_annotations=100,
-            balance_alpha=0.5,
-        )
-        self.assertEqual(opts.strategy, "soft_balanced")
-        self.assertEqual(opts.total_annotations, 100)
-        self.assertEqual(opts.balance_alpha, 0.5)
-
-    def test_soft_balanced_requires_total_annotations(self):
-        with self.assertRaisesRegex(ValueError, "total_annotations"):
-            SubsampleOptions(strategy="soft_balanced", balance_alpha=0.5)
-
-    def test_soft_balanced_requires_balance_alpha(self):
-        with self.assertRaisesRegex(ValueError, "balance_alpha"):
-            SubsampleOptions(
-                strategy="soft_balanced", total_annotations=100,
-            )
-
-    def test_soft_balanced_alpha_below_zero_rejected(self):
-        with self.assertRaisesRegex(ValueError, "balance_alpha"):
-            SubsampleOptions(
-                strategy="soft_balanced",
-                total_annotations=100,
-                balance_alpha=-0.1,
-            )
-
-    def test_soft_balanced_alpha_above_one_rejected(self):
-        with self.assertRaisesRegex(ValueError, "balance_alpha"):
-            SubsampleOptions(
-                strategy="soft_balanced",
-                total_annotations=100,
-                balance_alpha=1.5,
-            )
-
-    def test_soft_balanced_rejects_target_per_class(self):
-        with self.assertRaisesRegex(ValueError, "target_per_class"):
-            SubsampleOptions(
-                strategy="soft_balanced",
-                total_annotations=100,
-                balance_alpha=0.5,
-                target_per_class=10,
-            )
-
-    def test_balance_alpha_rejected_for_stratified(self):
-        with self.assertRaisesRegex(ValueError, "balance_alpha"):
-            SubsampleOptions(
-                strategy="stratified",
-                total_annotations=100,
-                balance_alpha=0.5,
-            )
-
-    def test_balance_alpha_rejected_for_balanced(self):
-        with self.assertRaisesRegex(ValueError, "balance_alpha"):
-            SubsampleOptions(
-                strategy="balanced",
-                total_annotations=100,
-                balance_alpha=0.5,
-            )
-
-    def test_soft_balanced_to_log_dict_includes_alpha(self):
-        opts = SubsampleOptions(
-            strategy="soft_balanced",
-            total_annotations=100,
-            balance_alpha=0.25,
-        )
-        d = opts.to_log_dict()
-        self.assertEqual(d["subsample/strategy"], "soft_balanced")
-        self.assertEqual(d["subsample/balance_alpha"], 0.25)
+        self.assertNotIn("soft_balanced", SUBSAMPLE_STRATEGIES)
 
 
 if __name__ == "__main__":

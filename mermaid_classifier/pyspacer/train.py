@@ -75,10 +75,6 @@ from mermaid_classifier.training.subsample import (
 logger = logging_config_for_script('train')
 
 
-ba_library = get_benthic_attribute_library()
-gf_library = get_growth_form_library()
-
-
 class Sites(enum.Enum):
     CORALNET = 'coralnet'
     MERMAID = 'mermaid'
@@ -471,7 +467,7 @@ class DatasetOptions:
     Today's strategies:
       * SubsampleOptions(strategy='stratified', total_annotations=N)
         -- proportional subsample preserving class distribution.
-      * SubsampleOptions(strategy='balanced', target_per_class=K)
+      * SubsampleOptions(strategy='balanced', total_annotations=N)
         -- equalize counts per class (capped at available rows).
     See ``mermaid_classifier.training.subsample`` for the full list and
     instructions on adding new strategies.
@@ -503,16 +499,10 @@ class TrainingOptions:
     if ``early_stopping_patience`` is set and triggered, training stops
     earlier and the best-val_loss classifier is restored.
 
-    hidden_layer_sizes
-
-    Override the MLP architecture. Tuple of layer widths, e.g. (200, 100)
-    for a 2-hidden-layer net. None falls back to MermaidTrainer's
-    label-count heuristic. If set, learning_rate_init must also be set.
-
-    learning_rate_init
-
-    Override the MLP optimizer's initial learning rate. None falls back
-    to the heuristic. If set, hidden_layer_sizes must also be set.
+    The MLP architecture and learning rate are fixed at the production
+    values baked into ``MermaidTrainer`` (``hidden_layer_sizes=(500,
+    300, 100)`` @ ``learning_rate_init=1e-4``; see
+    docs/hidden-layer-experiments.md), so they are not configurable here.
 
     early_stopping_patience
 
@@ -525,21 +515,9 @@ class TrainingOptions:
     Recommended starting value: 3. Lower (1-2) is too jumpy given the
     natural epoch-to-epoch noise in val_loss; higher (>5) wastes wall
     time on epochs that are unlikely to recover.
-
-    random_state
-
-    Random seed forwarded to the underlying classifier
-    (``TorchMLPClassifier``). For the MLP path
-    this seeds both the numpy RNG used to shuffle batches and
-    ``torch.manual_seed`` for weight initialization. Default ``0``
-    replaces the previous behavior in which the MLP path passed no
-    seed at all (and was therefore non-deterministic across runs).
     """
     epochs: int = 10
-    hidden_layer_sizes: tuple[int, ...] | None = None
-    learning_rate_init: float | None = None
     early_stopping_patience: int | None = None
-    random_state: int = 0
 
 
 @dataclasses.dataclass
@@ -671,7 +649,20 @@ class TrainingDataset:
                 "No annotations from CoralNet or MERMAID, even before"
                 " label filtering.")
 
+        def _annotations_stats() -> tuple[int, int]:
+            # (annotation rows, distinct feature_vector i.e. unique images)
+            return self.duck_conn.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT feature_vector)"
+                " FROM annotations"
+            ).fetchone()
+
         with self.section_profiling("Rollups and filtering"):
+
+            ann_before, img_before = _annotations_stats()
+            logger.info(
+                "Before rollups/filtering: %s annotations, %s unique images",
+                f"{ann_before:,}", f"{img_before:,}",
+            )
 
             if options.drop_growthforms:
                 # Clear all annotations' growth forms.
@@ -687,11 +678,34 @@ class TrainingDataset:
                 duck_conn=self.duck_conn,
                 duck_table_name='annotations',
             )
+            ann_after_rollup, img_after_rollup = _annotations_stats()
+            logger.info(
+                "After rollups: %s annotations (-%s), %s unique images (-%s)",
+                f"{ann_after_rollup:,}",
+                f"{ann_before - ann_after_rollup:,}",
+                f"{img_after_rollup:,}",
+                f"{img_before - img_after_rollup:,}",
+            )
 
             # Filter out BAGFs we don't want.
             self.label_filter.filter_in_duckdb(
                 duck_conn=self.duck_conn,
                 duck_table_name='annotations',
+            )
+            ann_after_filter, img_after_filter = _annotations_stats()
+            logger.info(
+                "After included-labels filter: %s annotations (-%s),"
+                " %s unique images (-%s)",
+                f"{ann_after_filter:,}",
+                f"{ann_after_rollup - ann_after_filter:,}",
+                f"{img_after_filter:,}",
+                f"{img_after_rollup - img_after_filter:,}",
+            )
+            logger.info(
+                "Rollups+filter retained %.1f%% of annotations,"
+                " %.1f%% of unique images",
+                100.0 * ann_after_filter / max(ann_before, 1),
+                100.0 * img_after_filter / max(img_before, 1),
             )
 
         if options.subsample is not None:
@@ -910,7 +924,9 @@ class TrainingDataset:
 
     def read_coralnet_data(self):
         annotations_uri_list = []
+        missing_source_ids = []
 
+        s3 = S3FileSystem(anon=False)
         for source_id in self.cn_source_filter.source_id_list:
 
             # One row per point annotation,
@@ -919,7 +935,25 @@ class TrainingDataset:
                 coralnet_train_data_bucket=settings.coralnet_train_data_bucket,
                 source_id=source_id,
             )
+            # Some sources in the input source list may not have data laid
+            # out in S3 yet. Skip them with a log warning rather than letting
+            # DuckDB 404 on the whole batch.
+            if not s3.exists(annotations_uri.removeprefix("s3://")):
+                missing_source_ids.append(source_id)
+                continue
             annotations_uri_list.append(annotations_uri)
+
+        if missing_source_ids:
+            logger.warning(
+                "Skipping %d source(s) with no annotations.csv in S3: %s",
+                len(missing_source_ids), missing_source_ids,
+            )
+        if not annotations_uri_list:
+            raise RuntimeError(
+                "No CoralNet sources have annotations.csv in S3. "
+                "Check the source-list CSV against bucket "
+                f"'{settings.coralnet_train_data_bucket}'."
+            )
 
         if self.duckdb_annotations_table_exists():
             # Since CoralNet's data is not formatted to the open data
@@ -945,10 +979,29 @@ class TrainingDataset:
         #
         # CSV options:
         # https://duckdb.org/docs/stable/data/csv/overview#parameters
+        # union_by_name=true: CoralNet sources define their own image-metadata
+        # columns (Reef, Site, Transect, etc.) and the set varies per source.
+        # Without this, DuckDB requires identical schemas across all files in
+        # the list and fails when any column is missing in any source.
+        #
+        # all_varchar=true: user-defined columns can contain anything (a
+        # 'Plot_ID' column may be integers in 99% of rows and a test string
+        # like 'SM_TEST_01' in the rest). DuckDB's type inference samples
+        # only the first ~20k rows and crashes when later rows violate the
+        # inferred type. Read everything as text; columns we actually use
+        # (Row, Column, Image ID, Label ID) are cast explicitly downstream.
+        #
+        # quote='"', escape='"': force standard CSV quote handling. The
+        # auto-detector samples the first ~20k rows and may infer
+        # quote=None if those rows don't happen to contain quoted fields,
+        # then choke when later rows DO use quoting (e.g. site metadata
+        # like "Sheltered fringing reef, steep" with an embedded comma).
         self.duck_conn.execute(
             f"CREATE TABLE annotations AS"
             f" SELECT *"
-            f" FROM read_csv({annotations_uri_list}, filename = true)"
+            f" FROM read_csv({annotations_uri_list}, filename = true,"
+            f" union_by_name = true, all_varchar = true,"
+            f" quote = '\"', escape = '\"')"
         )
 
         # 1) Normalize the column names with the open data bucket parquet
@@ -968,13 +1021,15 @@ class TrainingDataset:
             f"CREATE OR REPLACE TABLE annotations AS"
             f" SELECT"
             # Fix the case of this column name to match open data bucket
-            # format.
-            f' "Row" AS row,'
+            # format. Row is read as VARCHAR (all_varchar=true on read_csv)
+            # but pyspacer expects pixel coordinates as integers.
+            f' CAST("Row" AS INTEGER) AS row,'
             # Make this column name match open data bucket format, and use
             # quotes to avoid keyword clashing. Be sure to wrap in double
             # quotes. Single quotes would get it interpreted as
-            # "give every row this constant string value".
-            f' "Column" AS col,'
+            # "give every row this constant string value". Cast to int for
+            # the same reason as the "Row" column above.
+            f' CAST("Column" AS INTEGER) AS col,'
             # Later we find it easier to assume these are text, not integers.
             # And quotes help again, this time since the name has spaces in it.
             f' CAST("Image ID" AS VARCHAR) AS image_id,'
@@ -989,6 +1044,11 @@ class TrainingDataset:
             f" 's' || project_id || '/features/i' || image_id"
             f"  || '.featurevector' AS feature_vector"
             f" FROM annotations"
+            # Drop rows with missing Image ID. With union_by_name +
+            # all_varchar, files missing this column (or individual rows
+            # without a value) come through as NULL, which propagates
+            # into feature_vector and crashes os.path.join downstream.
+            f" WHERE \"Image ID\" IS NOT NULL AND \"Image ID\" <> ''"
         )
 
         # Get project-level stats before applying any further filters.
@@ -1662,11 +1722,8 @@ class TrainingRunner:
                 batch_size=batch_size,
                 on_epoch_end=self._on_epoch_end,
                 class_weight=class_weight,
-                hidden_layer_sizes=self.training_options.hidden_layer_sizes,
-                learning_rate_init=self.training_options.learning_rate_init,
                 early_stopping_patience=(
                     self.training_options.early_stopping_patience),
-                random_state=self.training_options.random_state,
             )
 
             # Train directly via the trainer — no pickle round-trip. pyspacer's
@@ -1729,8 +1786,6 @@ class TrainingRunner:
 
         weights = compute_class_weights(
             class_counts=class_counts,
-            ba_library=get_benthic_attribute_library(),
-            gf_library=get_growth_form_library(),
             options=opts,
         )
 
@@ -1812,6 +1867,15 @@ class MLflowTrainingRunner(TrainingRunner):
             # MLflow couldn't be imported.
             raise MLFLOW_IMPORT_ERROR
 
+        # Normalize Settings -> SPACER_*/MLFLOW_* env vars *before* the first
+        # mlflow_connect() below, which needs MLFLOW_HTTP_REQUEST_MAX_RETRIES to
+        # be set (otherwise a failed initial connection retries far more times
+        # than configured). This used to be set as an import side effect of
+        # mermaid_classifier.pyspacer; super().__init__() also calls it, but
+        # that runs after mlflow_connect(). Idempotent, so the double call is
+        # harmless.
+        set_env_vars_for_packages()
+
         time_taken = mlflow_connect()
         logger.info(f"Time to connect to MLflow tracking: {time_taken}")
 
@@ -1837,16 +1901,11 @@ class MLflowTrainingRunner(TrainingRunner):
 
             training_options_to_log = dict(
                 epochs=self.training_options.epochs,
-                # str(...) — MLflow params accept only strings/numbers,
-                # not tuples. 'None' encodes "use heuristic" cases.
-                hidden_layer_sizes=str(self.training_options.hidden_layer_sizes),
-                learning_rate_init=self.training_options.learning_rate_init,
                 early_stopping_patience=(
                     self.training_options.early_stopping_patience
                     if self.training_options.early_stopping_patience
                     is not None else ''
                 ),
-                random_state=self.training_options.random_state,
             )
 
             mlflow.log_params(training_options_to_log)
@@ -2060,17 +2119,11 @@ class MLflowTrainingRunner(TrainingRunner):
                 model_name += f'-{self.alphanumeric_only_str(as_path.stem)}'
 
             if (subsample := self.dataset_options.subsample) is not None:
-                # e.g. -SubStratified400000 or -SubBalancedTPC5000
-                if subsample.target_per_class is not None:
-                    model_name += (
-                        f'-Sub{subsample.strategy.capitalize()}'
-                        f'TPC{subsample.target_per_class}'
-                    )
-                else:
-                    model_name += (
-                        f'-Sub{subsample.strategy.capitalize()}'
-                        f'{subsample.total_annotations}'
-                    )
+                # e.g. -SubStratified400000 or -SubBalanced1770000
+                model_name += (
+                    f'-Sub{subsample.strategy.capitalize()}'
+                    f'{subsample.total_annotations}'
+                )
 
         # There's a 62 character limit for the 'model package group name'
         # which is built from the model name. For example, it could be the

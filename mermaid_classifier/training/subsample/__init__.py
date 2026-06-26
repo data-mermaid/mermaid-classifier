@@ -8,7 +8,7 @@ rollup + included-labels filter and before the train/ref/val split.
 Public API:
     SubsampleOptions             -- configuration dataclass (lives on
                                     ``DatasetOptions.subsample``).
-    SUBSAMPLE_STRATEGIES         -- name -> allocator function lookup.
+    SUBSAMPLE_STRATEGIES         -- tuple of allowed strategy names.
     compute_per_class_targets    -- dispatch entry point used by the
                                     pipeline.
 
@@ -20,9 +20,8 @@ Extension points (see options.py and registry.py for details):
   pipeline reads ``opts.strategy`` and dispatches.
 * Class-balanced sampling (every class gets the same N rows, with
   rare classes capped at their available count) is already implemented
-  as ``strategy='balanced'`` -- pass either
-  ``total_annotations`` (split equally) or ``target_per_class`` (explicit
-  per-class budget).
+  as ``strategy='balanced'`` -- pass ``total_annotations`` (the budget
+  is split equally across classes).
 * Bootstrap oversampling for rare classes is intentionally NOT
   supported here. It needs a UNION-ALL pass over the source rows;
   add an ``oversample`` field to ``SubsampleOptions`` and a second

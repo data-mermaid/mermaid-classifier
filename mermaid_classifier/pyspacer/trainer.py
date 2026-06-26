@@ -54,17 +54,8 @@ class MermaidTrainer(ClassifierTrainer):
         batch_size: int,
         on_epoch_end: Callable[[dict], None] | None = None,
         class_weight: dict | None = None,
-        hidden_layer_sizes: tuple[int, ...] | None = None,
-        learning_rate_init: float | None = None,
         early_stopping_patience: int | None = None,
-        random_state: int = 0,
     ):
-        if (hidden_layer_sizes is None) != (learning_rate_init is None):
-            raise ValueError(
-                "hidden_layer_sizes and learning_rate_init must be"
-                " supplied together (or both omitted to use the"
-                " label-count heuristic)."
-            )
         if (early_stopping_patience is not None
                 and early_stopping_patience < 1):
             raise ValueError(
@@ -76,10 +67,6 @@ class MermaidTrainer(ClassifierTrainer):
         # Optional per-class loss weighting passed through to the
         # underlying TorchMLPClassifier.
         self.class_weight = class_weight
-        # Optional MLP architecture/lr overrides. When None, the MLP
-        # branch falls back to the label-count heuristic below.
-        self.hidden_layer_sizes = hidden_layer_sizes
-        self.learning_rate_init = learning_rate_init
         # Early stopping. None disables. When set: each epoch the val
         # loss is computed (already logged to MLflow); a deepcopy of
         # clf is taken on each new minimum; if val_loss fails to
@@ -87,10 +74,6 @@ class MermaidTrainer(ClassifierTrainer):
         # and clf is restored to its best-val_loss state. The restored
         # clf is what gets calibrated and returned.
         self.early_stopping_patience = early_stopping_patience
-        # Forwarded to the underlying TorchMLPClassifier on construction;
-        # it seeds np.random.default_rng() and torch.manual_seed. Defaults
-        # to 0 so MLP weight initialization is deterministic across runs.
-        self.random_state = random_state
         # Populated by __call__; readable by the runner for MLflow
         # logging. Pre-initialized so the runner never hits an
         # AttributeError when patience is None.
@@ -120,17 +103,14 @@ class MermaidTrainer(ClassifierTrainer):
 
         # Initialize classifier and train
         with _log_entry_and_exit("training MLP"):
-            if self.hidden_layer_sizes is not None:
-                hls, lr = self.hidden_layer_sizes, self.learning_rate_init
-            elif labels.train.label_count >= 50000:
-                hls, lr = (200, 100), 1e-4
-            else:
-                hls, lr = (100,), 1e-3
+            # Production MLP architecture from the hidden-layer
+            # experiments (see docs/hidden-layer-experiments.md).
+            # random_state=0 keeps weight init deterministic across runs.
             clf = TorchMLPClassifier(
-                hidden_layer_sizes=hls,
-                learning_rate_init=lr,
+                hidden_layer_sizes=(500, 300, 100),
+                learning_rate_init=1e-4,
                 class_weight=self.class_weight,
-                random_state=self.random_state,
+                random_state=0,
             )
 
             ref_accs = []

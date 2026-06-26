@@ -104,7 +104,8 @@ def _stratified(
         target = max(options.min_per_class, min(n, proportional))
         targets[cls] = target
 
-    return _trim_overshoot(targets, target_total, class_counts)
+    return _trim_overshoot(
+        targets, target_total, class_counts, options.min_per_class)
 
 
 def _balanced(
@@ -113,24 +114,19 @@ def _balanced(
 ) -> ClassTargets:
     """Equalize per-class counts.
 
-    If ``target_per_class`` is set, each class is capped at that value
-    (subject to ``min(target, n_c)``).
-    Otherwise the budget is ``total_annotations // num_classes``.
-    Both modes cap at the available class count -- no oversampling.
+    The budget is ``total_annotations // num_classes``, capped at the
+    available class count (no oversampling) and floored at
+    ``min_per_class``.
 
     The resulting subsample is "as balanced as the data allows": classes
     with fewer than the per-class target rows are kept in full; classes
     with more are trimmed to the target. To get strictly equal counts
-    you'd need bootstrap oversampling, which is not implemented (see
-    the ``oversample`` extension hook in options.py).
+    you'd need bootstrap oversampling, which is not implemented.
     """
-    if options.target_per_class is not None:
-        per = options.target_per_class
-    else:
-        target_total = options.total_annotations
-        assert target_total is not None  # validated in __post_init__
-        n_classes = len(class_counts)
-        per = target_total // n_classes if n_classes else 0
+    target_total = options.total_annotations
+    assert target_total is not None  # validated in __post_init__
+    n_classes = len(class_counts)
+    per = target_total // n_classes if n_classes else 0
 
     return {
         cls: max(options.min_per_class, min(n, per))
@@ -138,51 +134,11 @@ def _balanced(
     }
 
 
-def _soft_balanced(
-    options: SubsampleOptions,
-    class_counts: ClassCounts,
-) -> ClassTargets:
-    """Alpha-interpolated balancing: ``target_c proportional to n_c^(1-alpha)``.
-
-    With ``alpha=0`` this collapses to ``_stratified``; with ``alpha=1``
-    every class gets the same unnormalized weight (so the result mirrors
-    ``_balanced`` with ``total_annotations`` split equally). ``alpha=0.5``
-    is square-root sampling, common in long-tail literature.
-
-    Per-class targets are computed by:
-      1. Compute unnormalized weights ``w_c = n_c^(1 - alpha)``.
-      2. Allocate ``target_c = round(total_annotations * w_c / sum(w))``.
-      3. Cap at ``n_c`` (no oversampling) and floor at ``min_per_class``.
-      4. Pass through ``_trim_overshoot`` to absorb rounding.
-    """
-    target_total = options.total_annotations
-    alpha = options.balance_alpha
-    assert target_total is not None  # validated in __post_init__
-    assert alpha is not None  # validated in __post_init__
-
-    if not class_counts:
-        return {}
-
-    exponent = 1.0 - alpha
-    weights = {cls: (n ** exponent) if n > 0 else 0.0
-               for cls, n in class_counts.items()}
-    total_weight = sum(weights.values())
-    if total_weight == 0:
-        return {cls: 0 for cls in class_counts}
-
-    targets: ClassTargets = {}
-    for cls, n in class_counts.items():
-        proportional = round(target_total * weights[cls] / total_weight)
-        target = max(options.min_per_class, min(n, proportional))
-        targets[cls] = target
-
-    return _trim_overshoot(targets, target_total, class_counts)
-
-
 def _trim_overshoot(
     targets: ClassTargets,
     target_total: int,
     class_counts: ClassCounts,
+    min_per_class: int,
 ) -> ClassTargets:
     """Reduce per-class targets if rounding overshot the budget.
 
@@ -207,20 +163,14 @@ def _trim_overshoot(
         key=lambda cls: (-class_counts[cls], cls),
     )
     trimmed = dict(targets)
-    # We don't know what min_per_class was here without the options
-    # object, but trimmed[cls] is already >= min_per_class from the
-    # allocator (which applied the floor). So a safe lower bound to
-    # respect is the floor implied by the current value: we never go
-    # below the smaller of the current target and a hard zero. In
-    # practice trimming a few rows from the largest class never bumps
-    # against the floor, so this is fine.
+    # Never trim a class below ``min_per_class`` -- preserving the floor
+    # is more important than hitting ``target_total`` exactly. If every
+    # class is already at its floor, the residual overshoot is accepted
+    # and the subsample slightly exceeds the budget (documented above).
     for cls in order:
         if overshoot == 0:
             break
-        # Trim at most (current_target - 0) rows from this class; in
-        # the proportional-rounding case overshoot is at most ~ K/2
-        # where K = number of classes, so this loop is short.
-        room = trimmed[cls]
+        room = max(0, trimmed[cls] - min_per_class)
         delta = min(room, overshoot)
         trimmed[cls] -= delta
         overshoot -= delta
@@ -232,5 +182,4 @@ def _trim_overshoot(
 _ALLOCATORS: dict[str, Allocator] = {
     "stratified": _stratified,
     "balanced": _balanced,
-    "soft_balanced": _soft_balanced,
 }
