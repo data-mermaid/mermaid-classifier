@@ -17,46 +17,44 @@ This is found in `mermaid_classifier.pyspacer`.
 
 ### Scripts
 
-The `scripts/` directory holds command-line entry points that *drive* the package, as opposed to the importable `mermaid_classifier` library code described above. Each script is run with `python scripts/<name>.py` from the repo root (see the script's module docstring for arguments):
+The `scripts/` directory holds command-line entry points that *drive* the package, as opposed to the importable `mermaid_classifier` library code described above. Each script is run with `uv run python scripts/<name>.py` from the repo root (see the script's module docstring for arguments):
 
-- `classifier_train.py` — run a training job.
-- `generate_report.py` — render a self-contained HTML report from an MLflow run, using the Jinja2 template `report_template.html.j2`. This is currently the only way to generate an HTML report.
+- `classifier_train.py` — run a training job locally (the production recipe).
+- `generate_report.py` — render a self-contained HTML report from an MLflow run (uses `report_template.html.j2`).
+- `generate_training_config.py` — generate a training-config directory (CoralNet→MERMAID label mapping + rollup).
+- `build_feature_bucket.py` — build a CoralNet-layout feature-vector bucket for an updated source set (idempotent / resumable).
+- `extract_reference_features.py` — stack real EfficientNet feature vectors into a `.npy` for the TorchScript-vs-sklearn parity gate.
+- `launch_processing.py` — launch SageMaker ProcessingJob(s) for feature extraction (optional sharding).
+- `launch_training.py` — launch a SageMaker TrainingJob via an Estimator (script-agnostic wrapper).
+- `sagemaker_train_entrypoint.py` — SageMaker container entrypoint: reads YAML config → runs `MLflowTrainingRunner`.
+- `release_artifact.py` — release a trained MLflow classifier as immutable version `vN` to `s3://mermaid-config/classifier/<vN>/`.
+
+See docs/workflow.md for the order to run these in.
 
 ### Documentation
 
 See the [docs](docs) section for usage explanations.
-
-### v1 directory
-
-This is the work from MERMAID classifier version 1 which hasn't been incorporated into the current version yet.
 
 
 ## Installation
 
 ### Python package installation
 
-Some installation examples:
+This project uses [`uv`](https://docs.astral.sh/uv/). From a clone of the repo:
 
 | Result | Command |
 | - | - |
-| Utilities only | `pip install https://github.com/data-mermaid/mermaid-classifier.git` |
-| Utilities + inference (load/run a trained classifier) | `pip install https://github.com/data-mermaid/mermaid-classifier.git[inference]` |
-| Utilities + full training pipeline | `pip install https://github.com/data-mermaid/mermaid-classifier.git[training]` |
-| Utilities + training + JupyterLab support | `pip install https://github.com/data-mermaid/mermaid-classifier.git[training,jupyterlab]` |
-| Utilities only, at non-main branch | `pip install "mermaid-classifier @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
-| Utilities + training + JupyterLab support, at non-main branch | `pip install "mermaid-classifier[training,jupyterlab] @ git+https://github.com/data-mermaid/mermaid-classifier.git@my-branch-name"` |
+| Serving-only (load/run a trained classifier) | `uv sync --extra inference` |
+| Full training pipeline (superset of inference) | `uv sync --extra training` |
+| Exactly what CI installs (fails if `uv.lock` is stale) | `uv sync --frozen --extra training` |
 
-The `inference` extra is intentionally minimal (just `pyspacer`, which brings torch/torchvision/scikit-learn/Pillow/numpy/boto3) so serving/inference images stay light. `training` is a superset that adds MLflow, DuckDB, pandas, the settings layer, etc.
+The `inference` extra is intentionally minimal (just `pyspacer` + a pinned
+`scikit-learn`) so serving images stay light. `training` is a superset adding
+MLflow, DuckDB, pandas, the settings layer, etc. Add `--extra jupyterlab` for
+JupyterLab support.
 
-To update your install, add `-U` after the word `install` in any of the above. However, if the package's version number has not been bumped up yet, you'll probably have to `pip uninstall mermaid-classifier` first, otherwise pip might think there is nothing to be updated.
-
-If you're in a SageMaker JupyterLab space:
-
-- After you shut down the space and then start it again, you'll have to re-run pip installations.
-
-- Running the pip install command from a Terminal tab should work.
-
-- At the end of the install, you'll see a message "ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. ...". That's most likely related to SageMaker-preinstalled packages that this repo doesn't deal with, so it's most likely not a concern.
+To consume this package from another project, `pip install` the git URL with the
+extra you need, e.g. `pip install "mermaid-classifier[inference] @ git+https://github.com/data-mermaid/mermaid-classifier.git"`.
 
 ### Additional steps for PySpacer classifiers
 
