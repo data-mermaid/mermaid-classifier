@@ -1,15 +1,32 @@
 """Tests for the portable classifier artifact (model.pt + model.json)."""
+import json
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
+
+import numpy as np
+import torch
+
+from mermaid_classifier.pyspacer.inference import (
+    PARITY_PROVEN_SKLEARN,
+    SCHEMA_VERSION,
+    TASK_NAME,
+    ManifestError,
+    ParityError,
+    SklearnPinError,
+    export_artifact,
+    load_predictor,
+)
+from mermaid_classifier.pyspacer.inference.head import build_calibrated_head
+from pyspacer._calibrated_model_fixture import make_calibrated_model
 
 
 class ScaffoldTest(unittest.TestCase):
     def test_constants_and_exceptions_exported(self):
-        from mermaid_classifier.pyspacer.inference import (
-            SCHEMA_VERSION, TASK_NAME, ParityError, ManifestError,
-        )
         self.assertEqual(SCHEMA_VERSION, 1)
         self.assertEqual(TASK_NAME, "pyspacer_mlp_classifier")
         self.assertTrue(issubclass(ParityError, Exception))
@@ -29,17 +46,8 @@ class ScaffoldTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
 
-import numpy as np
-import torch
-
-from pyspacer._calibrated_model_fixture import make_calibrated_model
-
-
 class HeadParityTest(unittest.TestCase):
     def test_head_matches_source_predict_proba(self):
-        from mermaid_classifier.pyspacer.inference.head import (
-            build_calibrated_head,
-        )
         model, X = make_calibrated_model()
         head = build_calibrated_head(model)
         head.eval()
@@ -50,9 +58,6 @@ class HeadParityTest(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(got - expected))), 1e-6)
 
     def test_rows_sum_to_one(self):
-        from mermaid_classifier.pyspacer.inference.head import (
-            build_calibrated_head,
-        )
         model, X = make_calibrated_model()
         head = build_calibrated_head(model)
         head.eval()
@@ -61,14 +66,8 @@ class HeadParityTest(unittest.TestCase):
         np.testing.assert_allclose(got.sum(axis=1), 1.0, atol=1e-5)
 
 
-import json
-import tempfile
-from pathlib import Path
-
-
 class ExportTest(unittest.TestCase):
     def test_export_writes_pt_and_manifest_and_passes_parity(self):
-        from mermaid_classifier.pyspacer.inference import export_artifact
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
             model_pt, manifest, max_diff = export_artifact(model, d, X)
@@ -88,8 +87,6 @@ class ExportTest(unittest.TestCase):
             self.assertEqual(on_disk, manifest)
 
     def test_frozen_graph_reloads_and_matches_source(self):
-        import torch
-        from mermaid_classifier.pyspacer.inference import export_artifact
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
             model_pt, _, _ = export_artifact(model, d, X)
@@ -100,9 +97,6 @@ class ExportTest(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
 
     def test_parity_gate_raises_when_graph_diverges(self):
-        from mermaid_classifier.pyspacer.inference import (
-            export_artifact, ParityError,
-        )
         model, X = make_calibrated_model()
         # Force the gate to fire with an impossible tolerance: any non-negative max diff > -1.0 always raises.
         with tempfile.TemporaryDirectory() as d:
@@ -110,9 +104,6 @@ class ExportTest(unittest.TestCase):
                 export_artifact(model, d, X, tol=-1.0)
 
     def test_export_raises_when_sklearn_unpinned(self):
-        from mermaid_classifier.pyspacer.inference import (
-            export_artifact, SklearnPinError,
-        )
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
             # Patch the proven version to something the runner can't have, so
@@ -125,9 +116,6 @@ class ExportTest(unittest.TestCase):
                     export_artifact(model, d, X)
 
     def test_export_manifest_records_proven_sklearn(self):
-        from mermaid_classifier.pyspacer.inference import (
-            export_artifact, PARITY_PROVEN_SKLEARN,
-        )
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
             _, manifest, _ = export_artifact(model, d, X)
@@ -137,13 +125,11 @@ class ExportTest(unittest.TestCase):
 
 class LoadValidationTest(unittest.TestCase):
     def _export(self, d):
-        from mermaid_classifier.pyspacer.inference import export_artifact
         model, X = make_calibrated_model()
         model_pt, manifest, _ = export_artifact(model, d, X)
         return model_pt, Path(d) / "model.json", model, X
 
     def test_load_predictor_round_trip_matches_source(self):
-        from mermaid_classifier.pyspacer.inference import load_predictor
         with tempfile.TemporaryDirectory() as d:
             model_pt, model_json, model, X = self._export(d)
             predictor = load_predictor(model_pt, model_json)
@@ -154,9 +140,6 @@ class LoadValidationTest(unittest.TestCase):
                 float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
 
     def test_schema_version_mismatch_raises(self):
-        from mermaid_classifier.pyspacer.inference import (
-            load_predictor, ManifestError,
-        )
         with tempfile.TemporaryDirectory() as d:
             model_pt, model_json, _, _ = self._export(d)
             manifest = json.loads(Path(model_json).read_text())
@@ -166,9 +149,6 @@ class LoadValidationTest(unittest.TestCase):
                 load_predictor(model_pt, model_json)
 
     def test_class_count_mismatch_raises(self):
-        from mermaid_classifier.pyspacer.inference import (
-            load_predictor, ManifestError,
-        )
         with tempfile.TemporaryDirectory() as d:
             model_pt, model_json, _, _ = self._export(d)
             manifest = json.loads(Path(model_json).read_text())
@@ -178,9 +158,6 @@ class LoadValidationTest(unittest.TestCase):
                 load_predictor(model_pt, model_json)
 
     def test_input_dim_mismatch_raises(self):
-        from mermaid_classifier.pyspacer.inference import (
-            load_predictor, ManifestError,
-        )
         with tempfile.TemporaryDirectory() as d:
             model_pt, model_json, _, _ = self._export(d)
             manifest = json.loads(Path(model_json).read_text())
@@ -190,11 +167,10 @@ class LoadValidationTest(unittest.TestCase):
                 load_predictor(model_pt, model_json)
 
 
-import os
-
-
 class LiveModelParityTest(unittest.TestCase):
     def _load_live_model(self):
+        # spacer.storage pulls heavy S3 machinery only this env-gated test
+        # needs, so it stays a function-local import (deferred on purpose).
         from spacer.storage import storage_factory
         from spacer.data_classes import DataLocation
         from urllib.parse import urlparse
@@ -216,9 +192,6 @@ class LiveModelParityTest(unittest.TestCase):
         "set PORTABLE_ARTIFACT_LIVE_MODEL to run live-model parity",
     )
     def test_live_model_export_round_trip_within_tolerance(self):
-        from mermaid_classifier.pyspacer.inference import (
-            export_artifact, load_predictor,
-        )
         model = self._load_live_model()
         input_dim = int(model.calibrated_classifiers_[0].estimator.n_features_in_)
 
