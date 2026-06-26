@@ -35,9 +35,9 @@ class VersionValidationTest(unittest.TestCase):
 
 class ParseS3UriTest(unittest.TestCase):
     def test_parses_bucket_and_key(self):
-        bucket, key = ra.parse_s3_uri('s3://mermaid-config/classifier/v1/efficientnet_weights.pt')
+        bucket, key = ra.parse_s3_uri('s3://mermaid-config/classifier/efficientnet.pt')
         self.assertEqual(bucket, 'mermaid-config')
-        self.assertEqual(key, 'classifier/v1/efficientnet_weights.pt')
+        self.assertEqual(key, 'classifier/efficientnet.pt')
 
     def test_rejects_non_s3(self):
         for bad in ('https://x/y', '/local/path', 's3://', 'file.pt'):
@@ -126,7 +126,7 @@ class AssembleLayoutTest(unittest.TestCase):
                 version='v7',
                 model_pt=mp,
                 model_json=mj,
-                weights_uri='s3://mermaid-config/classifier/v1/efficientnet_weights.pt',
+                weights_uri='s3://mermaid-config/classifier/efficientnet.pt',
             )
 
         self.assertEqual(uris, {
@@ -144,11 +144,34 @@ class AssembleLayoutTest(unittest.TestCase):
             Bucket='mermaid-config',
             Key='classifier/v7/efficientnet.pt',
             CopySource={'Bucket': 'mermaid-config',
-                        'Key': 'classifier/v1/efficientnet_weights.pt'},
+                        'Key': 'classifier/efficientnet.pt'},
         )
 
+    def test_cleans_up_already_written_objects_on_failure(self):
+        # model.pt + model.json upload, then the weights copy fails: the two
+        # uploaded objects must be deleted so the partial prefix doesn't brick
+        # reruns of this version, and the original error must propagate.
+        client = mock.Mock()
+        client.copy_object.side_effect = RuntimeError('copy boom')
+        with tempfile.TemporaryDirectory() as tmp:
+            mp = Path(tmp) / 'model.pt'
+            mp.write_bytes(b'pt')
+            mj = Path(tmp) / 'model.json'
+            mj.write_text('{}')
+            with self.assertRaises(RuntimeError):
+                ra.assemble_s3_layout(
+                    client,
+                    dest_bucket='mermaid-config',
+                    dest_prefix='classifier',
+                    version='v7',
+                    model_pt=mp,
+                    model_json=mj,
+                    weights_uri='s3://mermaid-config/classifier/efficientnet.pt',
+                )
 
-import shutil
+        deleted_keys = {c.kwargs['Key'] for c in client.delete_object.call_args_list}
+        self.assertEqual(deleted_keys,
+                         {'classifier/v7/model.pt', 'classifier/v7/model.json'})
 
 
 class MainTest(unittest.TestCase):

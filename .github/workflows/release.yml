@@ -45,13 +45,33 @@ jobs:
           role-to-assume: ${{ secrets.AWS_RELEASE_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Fail if release already exists (immutable versions)
+      # A *published* release is the immutable commit point and blocks reruns.
+      # A leftover *draft* from a failed prior run is recoverable — reuse it.
+      - name: Fail if a published release already exists (immutable versions)
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "Release $VERSION already exists; versions are immutable." >&2
+          if [ "$(gh release view "$VERSION" --json isDraft -q .isDraft 2>/dev/null)" = "false" ]; then
+            echo "Published release $VERSION already exists; versions are immutable." >&2
             exit 1
+          fi
+
+      # Create the draft up front so the slow, immutable S3 push below happens
+      # while the release is still an unpublished, deletable draft. If gh fails
+      # later, you are left with an inspectable draft (never an orphaned S3
+      # prefix with no release). Idempotent: a draft from a prior run is reused.
+      - name: Create draft release
+        env:
+          MODEL_ID: ${{ inputs.mlflow_model_id }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release create "$VERSION" --draft \
+              --title "Classifier $VERSION" \
+              --notes "Classifier release $VERSION.
+
+          - MLflow model: \`$MODEL_ID\`
+          - Artifact: s3://mermaid-config/classifier/$VERSION/ (model.pt, model.json, efficientnet.pt)"
           fi
 
       - name: Export, validate, and push to S3
@@ -63,14 +83,11 @@ jobs:
             --mlflow-model-id "$MODEL_ID" \
             --version "$VERSION"
 
-      - name: Create GitHub release
+      # Publish only after S3 succeeds: attach the artifacts and flip the draft
+      # to a real release. --clobber keeps the asset upload idempotent on rerun.
+      - name: Attach artifacts and publish release
         env:
-          MODEL_ID: ${{ inputs.mlflow_model_id }}
           VERSION: ${{ inputs.version }}
         run: |
-          gh release create "$VERSION" model.pt model.json \
-            --title "Classifier $VERSION" \
-            --notes "Classifier release $VERSION.
-
-          - MLflow model: \`$MODEL_ID\`
-          - Artifact: s3://mermaid-config/classifier/$VERSION/ (model.pt, model.json, efficientnet.pt)"
+          gh release upload "$VERSION" model.pt model.json --clobber
+          gh release edit "$VERSION" --draft=false

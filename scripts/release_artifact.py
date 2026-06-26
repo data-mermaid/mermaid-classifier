@@ -105,15 +105,31 @@ def assemble_s3_layout(
     def _uri(name: str) -> str:
         return f"s3://{dest_bucket}/{base_key}/{name}"
 
-    for path, name in [(model_pt, 'model.pt'), (model_json, 'model.json')]:
-        s3_client.upload_file(str(path), dest_bucket, f"{base_key}/{name}")
+    # Best-effort cleanup of anything written if a later put/copy fails: a
+    # partial prefix (e.g. model.pt up, weights copy failed) would otherwise
+    # trip main()'s immutability precheck and permanently block reruns of vN.
+    written: list[str] = []
+    try:
+        for path, name in [(model_pt, 'model.pt'), (model_json, 'model.json')]:
+            key = f"{base_key}/{name}"
+            s3_client.upload_file(str(path), dest_bucket, key)
+            written.append(key)
 
-    src_bucket, src_key = parse_s3_uri(weights_uri)
-    s3_client.copy_object(
-        Bucket=dest_bucket,
-        Key=f"{base_key}/efficientnet.pt",
-        CopySource={'Bucket': src_bucket, 'Key': src_key},
-    )
+        src_bucket, src_key = parse_s3_uri(weights_uri)
+        weights_key = f"{base_key}/efficientnet.pt"
+        s3_client.copy_object(
+            Bucket=dest_bucket,
+            Key=weights_key,
+            CopySource={'Bucket': src_bucket, 'Key': src_key},
+        )
+        written.append(weights_key)
+    except Exception:
+        for key in written:
+            try:
+                s3_client.delete_object(Bucket=dest_bucket, Key=key)
+            except Exception:
+                pass  # cleanup is best-effort; surface the original failure
+        raise
 
     return {name: _uri(name)
             for name in ('model.pt', 'model.json', 'efficientnet.pt')}
