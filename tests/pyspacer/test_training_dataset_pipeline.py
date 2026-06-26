@@ -32,6 +32,7 @@ Sub-steps NOT characterized (with reason)
   MERMAID Parquet from S3 via DuckDB, which is impractical to run offline.
 """
 
+import shutil
 import tempfile
 import unittest
 from io import StringIO
@@ -57,10 +58,15 @@ _N_PER_CLASS = 10
 _BA_IDS = ["ba_a", "ba_b", "ba_c"]
 
 
-def _make_dataset() -> NoInitDataset:
-    """Return a NoInitDataset with all attributes needed by the pipeline methods."""
+def _make_dataset(test_case: unittest.TestCase) -> NoInitDataset:
+    """Return a NoInitDataset with all attributes needed by the pipeline methods.
+
+    The temp feature dir is removed via the test case's cleanup so the suite
+    stays hermetic and doesn't leak directories.
+    """
     dataset = NoInitDataset()
     dataset._feature_dir = tempfile.mkdtemp()
+    test_case.addCleanup(shutil.rmtree, dataset._feature_dir, ignore_errors=True)
     dataset.profiled_sections = []
     dataset._feature_path_to_s3_location = {}
     dataset.feature_loc_to_source = {}
@@ -107,7 +113,7 @@ class RollupStepTest(unittest.TestCase):
     def setUp(self):
         self.override = override_settings(aws_anonymous="True")
         self.override.__enter__()
-        self.dataset = _make_dataset()
+        self.dataset = _make_dataset(self)
         _seed_annotations(self.dataset)
 
     def tearDown(self):
@@ -157,7 +163,7 @@ class FilterStepTest(unittest.TestCase):
     def setUp(self):
         self.override = override_settings(aws_anonymous="True")
         self.override.__enter__()
-        self.dataset = _make_dataset()
+        self.dataset = _make_dataset(self)
         _seed_annotations(self.dataset)
 
     def tearDown(self):
@@ -197,7 +203,7 @@ class SubsampleStepTest(unittest.TestCase):
     def setUp(self):
         self.override = override_settings(aws_anonymous="True")
         self.override.__enter__()
-        self.dataset = _make_dataset()
+        self.dataset = _make_dataset(self)
         _seed_annotations(self.dataset)
 
     def tearDown(self):
@@ -262,7 +268,7 @@ class PrepAnnotationsTest(unittest.TestCase):
     def setUp(self):
         self.override = override_settings(aws_anonymous="True", download_max_workers=1)
         self.override.__enter__()
-        self.dataset = _make_dataset()
+        self.dataset = _make_dataset(self)
         _seed_annotations(self.dataset)
 
     def tearDown(self):
@@ -327,7 +333,7 @@ class AddTrainingSetNamesTest(unittest.TestCase):
     def setUp(self):
         self.override = override_settings(aws_anonymous="True", download_max_workers=1)
         self.override.__enter__()
-        self.dataset = _make_dataset()
+        self.dataset = _make_dataset(self)
         _seed_annotations(self.dataset)
 
     def tearDown(self):
