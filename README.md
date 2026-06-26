@@ -111,6 +111,25 @@ Set up this project as an [editable install](https://pip.pypa.io/en/stable/topic
 
 These can be run by, for example, changing the working directory to `tests` and then running `python -m unittest`.
 
+### Linting, formatting & type checking
+
+These are enforced on every PR by `.github/workflows/lint.yml` (alongside the
+unittest workflow in `tests.yml`); both must pass to merge. There are no
+pre-commit hooks — a forgotten local check simply fails the PR.
+
+Run the checks locally with the `lint` dependency group:
+
+    uv run --group lint ruff check .          # lint
+    uv run --group lint ruff format .         # auto-format
+    uv run --group lint ruff format --check . # CI's format gate (no writes)
+    uv run --group lint basedpyright          # type check
+
+basedpyright runs in strict mode over `mermaid_classifier/` + `scripts/`, with
+the "unknown type" rules that fire on untyped third-party libraries
+(torch/pyspacer/duckdb/mlflow/sklearn) disabled — see `[tool.basedpyright]` in
+`pyproject.toml`. `tests/` are linted and formatted but not type-checked; the
+legacy `v1/` directory is excluded from all checks.
+
 ### Design notes
 
 This project is set up as a Python package with a [flat project layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/).
