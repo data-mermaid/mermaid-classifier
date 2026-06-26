@@ -1,6 +1,7 @@
 """
 Get/generate and show annotations for a specified image.
 """
+import atexit
 from collections import defaultdict
 import csv
 from io import BytesIO, StringIO
@@ -8,6 +9,8 @@ from operator import itemgetter
 import os
 from pathlib import Path
 import re
+import shutil
+import tempfile
 from urllib.parse import urlparse
 import urllib.request
 
@@ -18,9 +21,8 @@ import mlflow
 import numpy as np
 from spacer.data_classes import DataLocation
 from spacer.extractors import EfficientNetExtractor
-from spacer.messages import ClassifyImageMsg
 from spacer.storage import load_image, storage_factory
-from spacer.tasks import classify_image
+from spacer.task_utils import check_extract_inputs
 
 from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary, GrowthFormLibrary)
@@ -30,6 +32,7 @@ from mermaid_classifier.common.plots import (
     plot_point_markers,
     PointMarker,
 )
+from mermaid_classifier.pyspacer.inference import load_predictor
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import mlflow_connect
 
@@ -42,14 +45,58 @@ from mermaid_classifier.pyspacer.utils import mlflow_connect
 MLFLOW_MODEL_ID_REGEX = re.compile(r'm-[a-f0-9]{30,32}')
 
 
-def mlflow_model_id_to_pkl_uri(model_id: str) -> str:
+def mlflow_model_id_to_artifact_uris(model_id: str) -> tuple[str, str]:
 
     time_taken = mlflow_connect()
     print(f"Time to connect to MLflow tracking: {time_taken}")
 
-    model_filename = 'model.pkl'
     logged_model = mlflow.get_logged_model(model_id)
-    return logged_model.artifact_location + '/' + model_filename
+    base = logged_model.artifact_location
+    # #57's log_artifact_model logs model_pt/model_json as pyfunc artifacts,
+    # which MLflow stores under the model's artifacts/ subdirectory.
+    return f'{base}/artifacts/model.pt', f'{base}/artifacts/model.json'
+
+
+def _download_pair_to_tempdir(
+    pt_loc: DataLocation, json_loc: DataLocation,
+) -> tuple[Path, Path]:
+    """Download an S3 model.pt + model.json pair into one temp dir."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix='clf_artifact_'))
+    # mkdtemp() isn't auto-cleaned, and the pair must outlive this call (the
+    # caller loads them immediately after), so reclaim the dir at process exit.
+    atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
+    paths = []
+    for loc, name in [(pt_loc, 'model.pt'), (json_loc, 'model.json')]:
+        storage = storage_factory(loc.storage_type, loc.bucket_name)
+        stream = storage.load(loc.key)
+        dest = tmp_dir / name
+        # getbuffer() writes the stream's bytes without an extra full copy.
+        dest.write_bytes(stream.getbuffer())
+        paths.append(dest)
+    return paths[0], paths[1]
+
+
+def resolve_classifier_artifact(location: str) -> tuple[Path, Path]:
+    """Resolve a classifier location to local (model.pt, model.json) paths.
+
+    Accepts an MLflow model ID (m-...), an S3 directory URI, or a local
+    directory. The S3/filesystem forms point at the *directory* containing
+    model.pt + model.json (migrated from the old single-pickle meaning).
+    """
+    if MLFLOW_MODEL_ID_REGEX.fullmatch(location):
+        pt_uri, json_uri = mlflow_model_id_to_artifact_uris(location)
+        local_pt = mlflow.artifacts.download_artifacts(artifact_uri=pt_uri)
+        local_json = mlflow.artifacts.download_artifacts(artifact_uri=json_uri)
+        return Path(local_pt), Path(local_json)
+
+    # Directory mode: S3 URI or local filesystem directory.
+    base = location.rstrip('/')
+    pt_loc = AnnotationRun.parse_location_str(f'{base}/model.pt')
+    json_loc = AnnotationRun.parse_location_str(f'{base}/model.json')
+
+    if pt_loc.storage_type == 's3':
+        return _download_pair_to_tempdir(pt_loc, json_loc)
+    return Path(pt_loc.key), Path(json_loc.key)
 
 
 class AnnotationRun:
@@ -162,11 +209,7 @@ class AnnotationRun:
             self.image_loc = self.get_coralnet_image(image_id)
             auto_plot_title = f"CoralNet image {image_id}"
 
-        classifier_loc = self.parse_location_str(
-            classifier,
-            is_classifier=True,
-        )
-        if classifier_loc:
+        if classifier:
             auto_plot_title += f"\nClassified by: {classifier}"
         else:
             auto_plot_title += f"\nAnnotations from CSV file"
@@ -175,39 +218,44 @@ class AnnotationRun:
 
         weights_loc = self.parse_location_str(weights_location)
 
-        if classifier_loc:
+        if classifier:
 
-            # Classify with pyspacer
+            # Classify with the portable artifact: extract features with
+            # pyspacer's EfficientNet extractor, then predict with the loaded
+            # TorchScript head (no classifier pickle, no pyspacer classify call).
 
-            message = ClassifyImageMsg(
-                job_token=f'{image}_classify',
-                image_loc=self.image_loc,
-                extractor=EfficientNetExtractor(
-                    data_locations=dict(weights=weights_loc),
-                ),
-                rowcols=[rowcol for rowcol in annotations.keys()],
-                classifier_loc=classifier_loc,
+            model_pt, model_json = resolve_classifier_artifact(classifier)
+            predictor = load_predictor(model_pt, model_json)
+
+            print("Extracting features and classifying...")
+            loaded_image = load_image(self.image_loc)
+            extractor = EfficientNetExtractor(
+                data_locations=dict(weights=weights_loc),
             )
-
-            print("Running classify_image()...")
-            return_message = classify_image(message)
-            print("Finished classifying")
+            rowcols = list(annotations.keys())
+            check_extract_inputs(loaded_image, rowcols, self.image_loc.key)
+            features, _ = extractor(loaded_image, rowcols)
 
             predictions_per_point = max(num_predictions_to_save, 1)
 
-            # Get top label(s) and score(s) for each point
-            labels = return_message.classes
-            for i, (row, column, msg_scores) in enumerate(
-                return_message.scores
-            ):
-                top_predictions = sorted(
-                    zip(labels, msg_scores), key=itemgetter(1), reverse=True)
-                annotations[(row, column)] = [
-                    label for label, score
-                    in top_predictions[:predictions_per_point]]
-                scores[(row, column)] = [
-                    score for label, score
-                    in top_predictions[:predictions_per_point]]
+            # Get top label(s) and score(s) for each point. predict_proba
+            # takes an (N, input_dim) batch, so classify every point in one
+            # call instead of once per point.
+            labels = predictor.classes
+            if rowcols:
+                feature_batch = np.vstack(
+                    [features.get_array(rowcol) for rowcol in rowcols])
+                proba_batch = predictor.predict_proba(feature_batch).tolist()
+                for (row, column), proba in zip(rowcols, proba_batch):
+                    top_predictions = sorted(
+                        zip(labels, proba), key=itemgetter(1), reverse=True)
+                    annotations[(row, column)] = [
+                        label for label, score
+                        in top_predictions[:predictions_per_point]]
+                    scores[(row, column)] = [
+                        score for label, score
+                        in top_predictions[:predictions_per_point]]
+            print("Finished classifying")
 
         else:
 
@@ -255,20 +303,10 @@ class AnnotationRun:
                 self.label_ids_to_names[bagf_id] = name
 
     @staticmethod
-    def parse_location_str(
-        location: str, is_classifier: bool = False,
-    ) -> DataLocation:
+    def parse_location_str(location: str) -> DataLocation:
 
         if not location:
             return None
-
-        if is_classifier:
-            match = MLFLOW_MODEL_ID_REGEX.fullmatch(location)
-            if match:
-                # MLflow registered model ID.
-                # This'll require the tracking server to be running.
-                model_id = location
-                location = mlflow_model_id_to_pkl_uri(model_id)
 
         # Now we may or may not have an MLflow-proxied URI
         # beginning with `mlflow-artifacts:/`.

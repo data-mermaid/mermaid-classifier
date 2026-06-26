@@ -5,7 +5,7 @@ This Python repository enables data scientists to experiment with PySpacer-based
 
 ## Overview
 
-This project is set up as a Python package, and requires Python 3.10 or higher. Once you have the package installed in your Python environment, you can import anything from `mermaid_classifier` into your own Python modules, notebooks, etc.
+This project is set up as a Python package, and requires Python 3.12 or higher. Once you have the package installed in your Python environment, you can import anything from `mermaid_classifier` into your own Python modules, notebooks, etc.
 
 ### General utilities
 
@@ -20,7 +20,6 @@ This is found in `mermaid_classifier.pyspacer`.
 The `scripts/` directory holds command-line entry points that *drive* the package, as opposed to the importable `mermaid_classifier` library code described above. Each script is run with `python scripts/<name>.py` from the repo root (see the script's module docstring for arguments):
 
 - `classifier_train.py` — run a training job.
-- `evaluate_model.py` — evaluate a pre-trained model and log results to MLflow.
 - `generate_report.py` — render a self-contained HTML report from an MLflow run, using the Jinja2 template `report_template.html.j2`. This is currently the only way to generate an HTML report.
 
 ### Documentation
@@ -85,6 +84,23 @@ Local env advantages over SageMaker:
 
 If you're on a local dev machine and accessing public S3 files, the `AWS_ANONYMOUS` setting may be useful.
 
+
+## Releasing a classifier version
+
+Trigger the **Release classifier version** workflow (`workflow_dispatch`) with the
+MLflow model ID and a `vN` tag. It fetches the trained `model.pt` + `model.json`,
+re-validates them (load + manifest gate), pushes
+`s3://mermaid-config/classifier/<vN>/{model.pt,model.json,efficientnet.pt}`, and cuts
+GitHub release `vN`. Versions are immutable — re-running an existing `vN` fails.
+
+- **Function image pairing (not a re-tag).** The inference image is model-agnostic
+  and versioned independently (mermaid-inference semver). When cutting model `vN`,
+  record in the GitHub release notes which function image version (`mermaid-inference-pyspacer:<semver>`)
+  the model was validated against. Do **not** tag the image with the model version.
+
+Required repo secrets: `AWS_RELEASE_ROLE_ARN` (OIDC assume-role with read on the
+MLflow artifact store + read/write on `s3://mermaid-config/classifier/*`) and
+`MLFLOW_TRACKING_URI`.
 
 ## For developers
 

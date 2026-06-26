@@ -273,8 +273,7 @@ aws sagemaker describe-training-job \
 `scripts/generate_report.py` produces a self-contained HTML report from
 any MLflow run. To point it at the SageMaker MLflow App (rather than
 the default local `sqlite:///mlflow.db` in `.env`), pass the App ARN
-via `--mlflow-tracking-uri`. The same flag exists on
-`scripts/evaluate_model.py`.
+via `--mlflow-tracking-uri`.
 
 ```bash
 aws sso login --profile wcs-sso
