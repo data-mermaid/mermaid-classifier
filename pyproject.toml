@@ -85,5 +85,39 @@ explicit = true
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["v1"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mermaid_classifier"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.basedpyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+include = ["mermaid_classifier", "scripts"]
+exclude = ["v1", "tests", "**/.venv", "**/__pycache__"]
+reportMissingTypeStubs = false
+# Disable the basedpyright-only aggressive tier layered on top of upstream
+# pyright "strict" — too noisy for a torch/numpy/duckdb/mlflow codebase.
+# (See design doc; signed off as out of scope.)
+reportAny = false
+reportExplicitAny = false
+reportUnusedCallResult = false
+reportImplicitStringConcatenation = false
+reportUnusedParameter = false
+
 [dependency-groups]
 sagemaker = []
+lint = [
+    "ruff",
+    "basedpyright",
+]
