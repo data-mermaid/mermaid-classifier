@@ -128,26 +128,6 @@ def duckdb_transform_column(
     )
 
 
-def duckdb_replace_value_in_column(
-    duck_conn: duckdb.DuckDBPyConnection,
-    duck_table_name: str,
-    column_name: str,
-    old_value: str | None,
-    new_value: str | None,
-):
-    """
-    Replace old_value with new_value in the column_name column.
-    """
-    where_predicate = "IS NULL" if old_value is None else f"= '{old_value}'"
-    new_value_sql = "NULL" if new_value is None else f"'{new_value}'"
-
-    duck_conn.execute(
-        f"UPDATE {duck_table_name}"
-        f" SET {column_name} = {new_value_sql}"
-        f" WHERE {column_name} {where_predicate}"
-    )
-
-
 def duckdb_add_column(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
