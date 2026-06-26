@@ -1,6 +1,7 @@
 """Orchestrates all metric groups and handles MLflow logging."""
 
 import logging
+import sys
 
 import duckdb
 import matplotlib.pyplot as plt
@@ -17,17 +18,36 @@ from mermaid_classifier.pyspacer.metrics._taxonomy_helpers import (
     build_ba_paths,
     build_ba_to_top,
 )
-from mermaid_classifier.pyspacer.metrics.calibration import compute_calibration
-from mermaid_classifier.pyspacer.metrics.classification import (
-    compute_balanced_accuracy_mcc,
-    compute_confusion_matrices,
-    compute_precision_recall_f1,
+
+# The compute_* names below are used indirectly: _get_metric_groups() resolves
+# them from this module's namespace at call time (sys.modules[__name__]) so
+# that test mocks targeting coordinator.<func_name> are honoured.
+# mock.patch replaces names in the module __dict__; the sys.modules lookup sees
+# those replacements, injecting failures into the correct call site.
+from mermaid_classifier.pyspacer.metrics.calibration import (
+    compute_calibration,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
-from mermaid_classifier.pyspacer.metrics.cover import compute_cover
-from mermaid_classifier.pyspacer.metrics.per_source import compute_per_source
-from mermaid_classifier.pyspacer.metrics.probability import compute_probability
-from mermaid_classifier.pyspacer.metrics.ranking import compute_ranking
-from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
+from mermaid_classifier.pyspacer.metrics.classification import (
+    compute_balanced_accuracy_mcc,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    compute_confusion_matrices,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    compute_precision_recall_f1,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
+from mermaid_classifier.pyspacer.metrics.cover import (
+    compute_cover,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
+from mermaid_classifier.pyspacer.metrics.per_source import (
+    compute_per_source,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
+from mermaid_classifier.pyspacer.metrics.probability import (
+    compute_probability,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
+from mermaid_classifier.pyspacer.metrics.ranking import (
+    compute_ranking,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
+from mermaid_classifier.pyspacer.metrics.registry import METRIC_GROUPS, MetricGroupFunc
+from mermaid_classifier.pyspacer.metrics.taxonomic import (
+    compute_taxonomic,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,30 +111,25 @@ class MetricsCoordinator:
                 exc_info=True,
             )
 
-    def _get_metric_groups(self):
+    def _get_metric_groups(self) -> list[tuple[str, MetricGroupFunc]]:
         """Return ordered list of (name, func).
 
         Skip groups whose required inputs aren't available.
+
+        Functions are resolved through this module's namespace at call time
+        so that test mocks targeting coordinator.<func_name> are honoured.
+        mock.patch replaces names in the module __dict__; sys.modules lookup
+        sees those replacements.
         """
-        # Always available (only need ValResults + libraries):
-        groups = [
-            ("confusion_matrices", compute_confusion_matrices),
-            ("precision_recall_f1", compute_precision_recall_f1),
-            ("balanced_accuracy_mcc", compute_balanced_accuracy_mcc),
-            ("taxonomic", compute_taxonomic),
-            ("calibration", compute_calibration),
-        ]
-
-        # Need dataset:
-        if self.ctx.dataset is not None:
-            groups.append(("cover", compute_cover))
-            groups.append(("per_source", compute_per_source))
-
-        # Need pre-computed probability matrix:
-        if self.ctx.val_proba is not None:
-            groups.append(("probability", compute_probability))
-            groups.append(("ranking", compute_ranking))
-
+        mod = sys.modules[__name__]
+        groups: list[tuple[str, MetricGroupFunc]] = []
+        for spec in METRIC_GROUPS:
+            if spec.requires_dataset and self.ctx.dataset is None:
+                continue
+            if spec.requires_val_proba and self.ctx.val_proba is None:
+                continue
+            func: MetricGroupFunc = getattr(mod, spec.func.__name__)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            groups.append((spec.name, func))
         return groups
 
     def _log_result(self, result: MetricGroupResult):
