@@ -1695,7 +1695,6 @@ class TrainingRunner:
             logger.info("Proceeding to train with:")
             logger.info(self.dataset.describe_train_summary_stats())
 
-            clf_type = 'MLP'
             num_classes = len(self.dataset.labels.ref.classes_set)
 
             if settings.spacer_batch_size is not None:
@@ -1704,12 +1703,11 @@ class TrainingRunner:
                     f"Batch size: {batch_size} (from SPACER_BATCH_SIZE)")
             else:
                 batch_size, available_gb = training_batch_size(
-                    clf_type=clf_type, num_classes=num_classes)
+                    num_classes=num_classes)
                 logger.info(
                     f"Batch size: {batch_size}"
                     f" (auto, based on {available_gb:.1f} GB"
-                    f" available memory, {num_classes} classes,"
-                    f" clf_type={clf_type})")
+                    f" available memory, {num_classes} classes)")
 
             class_weight, weighting_log = self._compute_class_weights(
                 self.dataset.labels,
@@ -1731,7 +1729,7 @@ class TrainingRunner:
             labels = preprocess_labels(self.dataset.labels)
             with self.section_profiling("PySpacer training call"):
                 clf_calibrated, val_results, return_msg = trainer(
-                    labels, self.training_options.epochs, [], clf_type)
+                    labels, self.training_options.epochs, [])
 
             logger.info(
                 f"Train time (from return msg):"

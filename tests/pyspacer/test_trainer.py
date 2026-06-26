@@ -8,14 +8,16 @@ Covers two distinct features of MermaidTrainer:
     populates _early_stop_info under a scripted val_loss schedule.
 """
 
+import ast
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import SGDClassifier
 from sklearn.neural_network import MLPClassifier
 
+import mermaid_classifier.pyspacer.trainer as trainer_module
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
 
@@ -42,7 +44,7 @@ class CalibrateInBatchesTest(unittest.TestCase):
     calibration to CalibratedClassifierCV(cv='prefit').fit().
     """
 
-    def _train_and_calibrate_both_ways(self, clf_type, n_classes):
+    def _train_and_calibrate_both_ways(self, n_classes):
         """
         Helper: create synthetic data, train a classifier, calibrate
         with both the old (standard) and new (batched) approaches,
@@ -77,20 +79,15 @@ class CalibrateInBatchesTest(unittest.TestCase):
         X_train, X_ref = X[:split], X[split:]
         y_train, y_ref = y[:split], y[split:]
 
-        # Train base classifier using partial_fit (same as production)
-        if clf_type == 'MLP':
-            # Pin random_state so weight initialization is deterministic
-            # across runs (SGDClassifier below already does). Without it the
-            # MLP seeds from NumPy's OS-entropy global RNG, so the trained
-            # weights — and the cross-BLAS FP drift they produce — vary every
-            # run, making the calibration-equivalence comparison flaky on
-            # Linux CI.
-            clf = MLPClassifier(
-                hidden_layer_sizes=(20,), learning_rate_init=1e-3,
-                random_state=0)
-        else:
-            clf = SGDClassifier(
-                loss='log_loss', average=True, random_state=0)
+        # Train base classifier using partial_fit (same as production).
+        # Pin random_state so weight initialization is deterministic across
+        # runs. Without it the MLP seeds from NumPy's OS-entropy global RNG,
+        # so the trained weights — and the cross-BLAS FP drift they produce —
+        # vary every run, making the calibration-equivalence comparison flaky
+        # on Linux CI.
+        clf = MLPClassifier(
+            hidden_layer_sizes=(20,), learning_rate_init=1e-3,
+            random_state=0)
         clf.partial_fit(X_train, y_train, classes=classes)
 
         # Standard calibration (current approach)
@@ -104,19 +101,14 @@ class CalibrateInBatchesTest(unittest.TestCase):
 
         return clf_standard, clf_batched, X_ref
 
-    def test_sgd_multiclass_calibration_equivalence(self):
-        """SGDClassifier with 5 classes: batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('SGD', 5)
-        self._assert_calibration_equivalent(std, batched, X)
-
     def test_mlp_multiclass_calibration_equivalence(self):
         """MLPClassifier with 5 classes: batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('MLP', 5)
+        std, batched, X = self._train_and_calibrate_both_ways(5)
         self._assert_calibration_equivalent(std, batched, X)
 
-    def test_sgd_binary_calibration_equivalence(self):
-        """SGDClassifier with 2 classes (binary edge case): batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways('SGD', 2)
+    def test_mlp_binary_calibration_equivalence(self):
+        """MLPClassifier with 2 classes (binary edge case): batch == standard."""
+        std, batched, X = self._train_and_calibrate_both_ways(2)
         self._assert_calibration_equivalent(std, batched, X)
 
     def _assert_calibration_equivalent(self, clf_std, clf_batched, X_test):
@@ -197,8 +189,8 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
 
     We script val_loss via a subclass that overrides
     `_calc_acc_and_log_loss_batched` to return values from a queue,
-    and use a small synthetic dataset that the SGDClassifier path can
-    chew through quickly. Each test scripts a different val_loss
+    and use a small synthetic dataset that a real TorchMLPClassifier
+    can chew through quickly. Each test scripts a different val_loss
     pattern (monotone-down, V-shape, plateau-then-rise) and asserts
     the right epoch is the stopping/best epoch.
     """
@@ -286,8 +278,7 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
             on_epoch_end=lambda m: captured.append(dict(m)),
             early_stopping_patience=patience,
         )
-        # clf_type='LR' -> SGDClassifier path; cheaper to fit than MLP.
-        trainer(labels, nbr_epochs=n_epochs, pc_models=[], clf_type='LR')
+        trainer(labels, nbr_epochs=n_epochs, pc_models=[])
         return trainer, captured
 
     def test_no_patience_runs_full_budget(self):
@@ -360,3 +351,49 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         self.assertIn('final_epoch', captured[-1])
         self.assertIn('best_val_epoch', captured[-1])
         self.assertIn('best_val_loss', captured[-1])
+
+
+class TrainerCleanupGuardTest(unittest.TestCase):
+    """Guard against reintroducing the removed SGD/clf_type path or the
+    no-benefit pyspacer imports into trainer.py (#58)."""
+
+    def setUp(self):
+        self.source = Path(trainer_module.__file__).read_text()
+
+    def test_no_sgd_or_clf_type_references(self):
+        for token in ('SGDClassifier', 'clf_type'):
+            self.assertNotIn(
+                token, self.source,
+                f"{token} should not reappear in trainer.py")
+
+    def test_no_dead_pyspacer_imports(self):
+        # Walk the actual import nodes (not substrings) so equivalent
+        # import styles -- e.g. `import spacer.config as config` -- can't
+        # slip past the guard.
+        offenders = []
+        for node in ast.walk(ast.parse(self.source)):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    # `import spacer.config[.x]` in any aliased form
+                    if (alias.name == 'spacer.config'
+                            or alias.name.startswith('spacer.config.')):
+                        offenders.append(f"import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ''
+                names = {alias.name for alias in node.names}
+                # `from spacer import config`
+                if module == 'spacer' and 'config' in names:
+                    offenders.append("from spacer import config")
+                # `from spacer.config[.x] import ...`
+                if (module == 'spacer.config'
+                        or module.startswith('spacer.config.')):
+                    offenders.append(f"from {module} import ...")
+                # `from spacer.train_utils import calc_acc`
+                if module == 'spacer.train_utils' and 'calc_acc' in names:
+                    offenders.append(
+                        "from spacer.train_utils import calc_acc")
+        self.assertEqual(
+            offenders, [],
+            "trainer.py should not re-import spacer.config or the dead"
+            f" calc_acc helper (use sklearn.metrics.accuracy_score); found:"
+            f" {offenders}")
