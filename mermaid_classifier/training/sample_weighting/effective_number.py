@@ -1,7 +1,7 @@
 """Effective-number-of-samples class weighting (Cui et al. 2019).
 
 This is the sole sample-weighting strategy. The balancing experiments
-(see ``docs/balancing-experiments.md``) found that balancing the input
+(see ``docs/research/balancing-experiments.md``) found that balancing the input
 distribution via subsampling (``training/subsample``) dominated the
 choice of weighting strategy, so the other strategies explored during
 experimentation (``tree_balanced``, ``leaf_inverse``, ``decomposed``)

@@ -494,7 +494,7 @@ class TrainingOptions:
     The MLP architecture and learning rate are fixed at the production
     values baked into ``MermaidTrainer`` (``hidden_layer_sizes=(500,
     300, 100)`` @ ``learning_rate_init=1e-4``; see
-    docs/hidden-layer-experiments.md), so they are not configurable here.
+    docs/research/hidden-layer-experiments.md), so they are not configurable here.
 
     early_stopping_patience
 

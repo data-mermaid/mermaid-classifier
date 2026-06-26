@@ -48,8 +48,8 @@ from mermaid_classifier.training.subsample import SubsampleOptions
 
 # Production recipe, validated on the 20-source / 80-class
 # tiela77_top100_min1k dataset (~1.77M annotations after rollup).
-# See docs/hidden-layer-experiments.md (architecture / training budget)
-# and docs/balancing-experiments.md (label balancing) for the underlying
+# See docs/research/hidden-layer-experiments.md (architecture / training budget)
+# and docs/research/balancing-experiments.md (label balancing) for the underlying
 # experiments and observed metric tradeoffs.
 
 # Full-dataset annotation count after rollup + included-labels filter,
@@ -92,7 +92,7 @@ if __name__ == "__main__":
         training_options=TrainingOptions(
             # The MLP head architecture and learning rate are fixed at the
             # production values inside MermaidTrainer (see
-            # docs/hidden-layer-experiments.md). ``epochs=40`` is a
+            # docs/research/hidden-layer-experiments.md). ``epochs=40`` is a
             # generous upper bound; ``early_stopping_patience=3`` against
             # ``epoch/val_loss`` lets each run find its own minimum
             # (typically epoch 14-29 on this data).
