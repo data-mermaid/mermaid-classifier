@@ -26,11 +26,13 @@ Most steps have both a local path and a SageMaker path:
 
 **When:** Whenever you need a new or updated CoralNet→MERMAID label-mapping
 directory (rollup CSV + included-labels CSV). Run this once per taxonomy
-revision; the output directory is checked into `sagemaker/configs/` and
-referenced by downstream scripts.
+revision, writing the output into an in-repo config directory so it can be
+committed and referenced by downstream scripts. Pass `--output-dir` explicitly
+— the default points outside this repo (at the surrounding workspace).
 
 ```bash
-uv run python scripts/generate_training_config.py
+uv run python scripts/generate_training_config.py \
+    --output-dir sagemaker/configs/<config-name>
 ```
 
 ---

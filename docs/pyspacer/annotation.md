@@ -79,15 +79,6 @@ annotation_run.show()
 ```
 
 
-### JupyterLab: interactive matplotlib
-
-If you're in JupyterLab, you need to have interactive matplotlib working to have
-pan, zoom, and save controls on annotation plots. After pip-installing `ipympl`,
-you must [hard-refresh](https://www.howtogeek.com/672607/how-to-hard-refresh-your-web-browser-to-bypass-your-cache/)
-the browser tab that has the JupyterLab space open. (This also applies to other
-annotation-viewing code snippets.)
-
-
 ## More available parameters
 
 For more details, browse [annotation.py](../../mermaid_classifier/pyspacer/annotation.py) for the start of the `__init__()` method of the `AnnotationRun` class, where the parameters are listed and explained in comments.
