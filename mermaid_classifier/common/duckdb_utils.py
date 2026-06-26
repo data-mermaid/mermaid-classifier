@@ -128,26 +128,6 @@ def duckdb_transform_column(
     )
 
 
-def duckdb_replace_value_in_column(
-    duck_conn: duckdb.DuckDBPyConnection,
-    duck_table_name: str,
-    column_name: str,
-    old_value: str | None,
-    new_value: str | None,
-):
-    """
-    Replace old_value with new_value in the column_name column.
-    """
-    where_predicate = "IS NULL" if old_value is None else f"= '{old_value}'"
-    new_value_sql = "NULL" if new_value is None else f"'{new_value}'"
-
-    duck_conn.execute(
-        f"UPDATE {duck_table_name}"
-        f" SET {column_name} = {new_value_sql}"
-        f" WHERE {column_name} {where_predicate}"
-    )
-
-
 def duckdb_add_column(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
@@ -227,15 +207,6 @@ def duckdb_batched_rows(
         if dataframe.shape[0] == 0:
             # Empty dataframe; no more chunks left.
             break
-
-        # Some ways to inspect the pandas dataframe in a debugger:
-        # dataframe
-        # dataframe.columns    # Column names
-        # dataframe.iloc[0]    # First row
-        # set([row['growth_form_name']
-        #     for _index, row in dataframe.iterrows()])
-        # [(row['row'], row['col']) for _index, row in dataframe.iterrows()
-        #  if row['image_id'] == '0032dba6-8357-42e2-bace-988f99032286']
 
         for _index, row in dataframe.iterrows():
             # With this generator behavior, the chunkifying detail

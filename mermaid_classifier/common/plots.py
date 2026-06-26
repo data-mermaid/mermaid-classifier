@@ -1,4 +1,3 @@
-import colorsys
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -167,21 +166,3 @@ def plot_legend(
         title=title,
         **position_kwargs,
     )
-
-
-def adjust_lightness(rgba: tuple[float, float, float, float], l_factor: float) -> list[float]:
-    """
-    Adjust lightness of a matplotlib rgba color.
-    https://stackoverflow.com/a/60562502
-    """
-    r, g, b, a = rgba
-    h, lightness, s = colorsys.rgb_to_hls(r, g, b)
-    new_rgb = colorsys.hls_to_rgb(h, min(1.0, lightness * l_factor), s=s)
-    return [*new_rgb, a]
-
-
-def adjust_saturation(rgba: tuple[float, float, float, float], s_factor: float) -> list[float]:
-    r, g, b, a = rgba
-    h, lightness, s = colorsys.rgb_to_hls(r, g, b)
-    new_rgb = colorsys.hls_to_rgb(h, lightness, s=min(1.0, s * s_factor))
-    return [*new_rgb, a]
