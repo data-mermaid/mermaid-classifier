@@ -1625,6 +1625,7 @@ dependencies = [
 [package.optional-dependencies]
 inference = [
     { name = "pyspacer" },
+    { name = "scikit-learn" },
 ]
 jupyterlab = [
     { name = "ipympl" },
@@ -1676,7 +1677,8 @@ requires-dist = [
     { name = "s3fs", marker = "extra == 'training'" },
     { name = "sagemaker", marker = "extra == 'sagemaker'", specifier = ">=2.0,<3.0" },
     { name = "sagemaker-mlflow", marker = "extra == 'training'" },
-    { name = "scikit-learn", marker = "extra == 'training'" },
+    { name = "scikit-learn", marker = "extra == 'inference'", specifier = "==1.5.2" },
+    { name = "scikit-learn", marker = "extra == 'training'", specifier = "==1.5.2" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'training'", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'training'" },
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'training'", index = "https://download.pytorch.org/whl/cpu" },
