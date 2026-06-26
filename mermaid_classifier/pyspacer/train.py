@@ -16,21 +16,14 @@ import time
 import typing
 
 import duckdb
-try:
-    import mlflow
-    MLFLOW_IMPORT_ERROR = None
-except ImportError as err:
-    MLFLOW_IMPORT_ERROR = err
+import mlflow
+from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
-from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
 from spacer.aws import get_s3_resource
-from spacer.data_classes import DataLocation, ImageLabels, ValResults
-from spacer.messages import TrainClassifierMsg
-from spacer.storage import load_classifier
-from spacer.tasks import train_classifier
+from spacer.data_classes import DataLocation, ImageLabels
 from spacer.task_utils import preprocess_labels, SplitMode
 
 from mermaid_classifier.pyspacer.settings import training_batch_size
@@ -55,6 +48,10 @@ from mermaid_classifier.common.duckdb_utils import (
 from mermaid_classifier.pyspacer.metrics import (
     MetricsContext, MetricsCoordinator,
 )
+from mermaid_classifier.pyspacer.inference import (
+    export_artifact, load_predictor,
+)
+from mermaid_classifier.pyspacer.mlflow_model import log_artifact_model
 from mermaid_classifier.pyspacer.metrics._logging import (
     log_dataframe as _log_dataframe,
 )
@@ -1678,7 +1675,7 @@ class TrainingRunner:
         self.dataset_options = dataset_options or DatasetOptions()
         self.training_options = training_options or TrainingOptions()
 
-    def run(self, run_name: str | None = None):
+    def run(self, run_name: str | None = None, cleanup_dataset: bool = True):
         if run_name is None:
             run_name = self.current_time_str()
         logger.info(f"Run: {run_name}")
@@ -1697,11 +1694,6 @@ class TrainingRunner:
 
             logger.info("Proceeding to train with:")
             logger.info(self.dataset.describe_train_summary_stats())
-
-            # Not sure about saving these anywhere other than memory
-            # for now.
-            model_loc = DataLocation('memory', key='classifier.pkl')
-            valresult_loc = DataLocation('memory', key='valresult.json')
 
             clf_type = 'MLP'
             num_classes = len(self.dataset.labels.ref.classes_set)
@@ -1732,20 +1724,14 @@ class TrainingRunner:
                     self.training_options.early_stopping_patience),
             )
 
-            train_msg = TrainClassifierMsg(
-                job_token=f'experiment_run_{run_name}',
-                trainer=trainer,
-                nbr_epochs=self.training_options.epochs,
-                clf_type=clf_type,
-                labels=self.dataset.labels,
-                previous_model_locs=[],
-                model_loc=model_loc,
-                valresult_loc=valresult_loc,
-                feature_cache_dir=TrainClassifierMsg.FeatureCache.DISABLED,
-            )
-
+            # Train directly via the trainer — no pickle round-trip. pyspacer's
+            # train_classifier task only adds label preprocessing + a pickle
+            # store on top of this call; we keep the preprocessing and drop the
+            # store. previous_model_locs was always [], so pc_models is [].
+            labels = preprocess_labels(self.dataset.labels)
             with self.section_profiling("PySpacer training call"):
-                return_msg = train_classifier(train_msg)
+                clf_calibrated, val_results, return_msg = trainer(
+                    labels, self.training_options.epochs, [], clf_type)
 
             logger.info(
                 f"Train time (from return msg):"
@@ -1762,9 +1748,13 @@ class TrainingRunner:
                 f"Accuracy progression during training epochs:"
                 f" {ref_accs_str}")
 
-            return return_msg, model_loc, valresult_loc
+            return return_msg, clf_calibrated, val_results
         finally:
-            if self.dataset is not None:
+            # When cleanup_dataset is False, the caller (MLflowTrainingRunner
+            # .run) keeps the dataset's downloaded val features alive past this
+            # method so it can eval the exported artifact against them, and is
+            # responsible for cleanup afterward.
+            if cleanup_dataset and self.dataset is not None:
                 self.dataset.cleanup()
 
     def _on_epoch_end(self, metrics: dict):
@@ -1871,10 +1861,6 @@ class MLflowTrainingRunner(TrainingRunner):
         mlflow_options: MLflowOptions = None,
         **kwargs
     ):
-        if MLFLOW_IMPORT_ERROR:
-            # MLflow couldn't be imported.
-            raise MLFLOW_IMPORT_ERROR
-
         # Normalize Settings -> SPACER_*/MLFLOW_* env vars *before* the first
         # mlflow_connect() below, which needs MLFLOW_HTTP_REQUEST_MAX_RETRIES to
         # be set (otherwise a failed initial connection retries far more times
@@ -1956,61 +1942,94 @@ class MLflowTrainingRunner(TrainingRunner):
 
             self.log_system_specs()
 
-            # Here's the actual training and data prep.
-            return_msg, model_loc, valresult_loc = super().run(
-                run_name=run_name)
+            # Here's the actual training and data prep. cleanup_dataset=False
+            # keeps the downloaded val features alive so we can eval the
+            # exported artifact against them below; the finally cleans up.
+            try:
+                return_msg, clf_calibrated, val_results = super().run(
+                    run_name=run_name, cleanup_dataset=False)
 
-            # Weighting artifacts/metrics are stashed by the base run()
-            # via _compute_class_weights. Log them now.
-            self._log_weighting_artifacts()
-            self._log_subsample_audit()
+                # Weighting artifacts/metrics are stashed by the base run()
+                # via _compute_class_weights. Log them now.
+                self._log_weighting_artifacts()
+                self._log_subsample_audit()
 
-            profiles_df = pd.DataFrame(self.profiled_sections)
-            self.log_dataframe(profiles_df, 'profiled_sections')
+                profiles_df = pd.DataFrame(self.profiled_sections)
+                self.log_dataframe(profiles_df, 'profiled_sections')
 
-            val_results = ValResults.load(valresult_loc)
-            mlflow.log_dict(val_results.serialize(), 'valresult.json')
+                # val_results now comes from the trainer in memory (no reload).
+                mlflow.log_dict(val_results.serialize(), 'valresult.json')
 
-            clf = load_classifier(model_loc)
+                # Eval-the-artifact: export the deployable TorchScript artifact
+                # and evaluate THAT, so the logged metrics reflect what actually
+                # ships. The parity reference batch is the first val batch (real
+                # features, loaded the same way the coordinator loads val data).
+                ref_batch = next(
+                    iter(self.dataset.labels.val.load_data_in_batches()), None)
+                if ref_batch is None:
+                    raise RuntimeError(
+                        "Val split yielded no feature batch; refusing to export"
+                        " an unverified artifact.")
+                # load_data_in_batches yields zip(*pairs); unpacking gives a
+                # (features, labels) pair of tuples, same as the metrics
+                # coordinator consumes. We only need the feature vectors.
+                ref_features, _ref_labels = ref_batch
 
-            ba_library = get_benthic_attribute_library()
-            gf_library = get_growth_form_library()
+                ba_library = get_benthic_attribute_library()
+                gf_library = get_growth_form_library()
 
-            ctx = MetricsContext(
-                val_results=val_results,
-                ba_library=ba_library,
-                gf_library=gf_library,
-                format_func=self.format_metric,
-                dataset=self.dataset,
-                clf=clf,
-            )
+                with tempfile.TemporaryDirectory() as artifact_dir:
+                    artifact_dir = Path(artifact_dir)
+                    # Parity-gated export (ParityError if max|Δ| > 1e-6).
+                    model_pt, _manifest, _max_diff = export_artifact(
+                        clf_calibrated, artifact_dir,
+                        reference_features=ref_features,
+                        config={'patch_size': 224})
+                    model_json = artifact_dir / 'model.json'
+                    # ManifestError on schema/class-count/input_dim mismatch.
+                    predictor = load_predictor(model_pt, model_json)
 
-            coordinator = MetricsCoordinator(
-                ctx, duck_conn=self.dataset.duck_conn)
-            coordinator.compute_and_log_all()
+                    ctx = MetricsContext(
+                        val_results=val_results,
+                        ba_library=ba_library,
+                        gf_library=gf_library,
+                        format_func=self.format_metric,
+                        dataset=self.dataset,
+                        clf=predictor,
+                    )
 
-            # Accuracy and ref_accs come from pyspacer's return_msg,
-            # not our metrics module.
-            mlflow.log_metric(
-                'accuracy', self.format_metric(return_msg.acc))
-            ref_accs_dict = {
-                epoch: self.format_metric(acc)
-                for epoch, acc in enumerate(return_msg.ref_accs, 1)
-            }
-            mlflow.log_dict(ref_accs_dict, 'epoch_ref_accuracies.yaml')
+                    coordinator = MetricsCoordinator(
+                        ctx, duck_conn=self.dataset.duck_conn)
+                    coordinator.compute_and_log_all()
 
-            # Save and register the trained model.
-            signature = mlflow.models.infer_signature(
-                params=training_options_to_log)
-            model_info = mlflow.sklearn.log_model(
-                sk_model=clf,
-                registered_model_name=model_name,
-                signature=signature,
-            )
+                    # Accuracy and ref_accs come from pyspacer's return_msg, not
+                    # our metrics module (training-progress, not artifact-based).
+                    mlflow.log_metric(
+                        'accuracy', self.format_metric(return_msg.acc))
+                    ref_accs_dict = {
+                        epoch: self.format_metric(acc)
+                        for epoch, acc in enumerate(return_msg.ref_accs, 1)
+                    }
+                    mlflow.log_dict(
+                        ref_accs_dict, 'epoch_ref_accuracies.yaml')
+
+                    # Store the deployable artifact (model.pt + model.json) as
+                    # the registered model via the pyfunc shim — one loader
+                    # everywhere.
+                    signature = mlflow.models.infer_signature(
+                        params=training_options_to_log)
+                    model_info = log_artifact_model(
+                        model_pt, model_json,
+                        registered_model_name=model_name,
+                        signature=signature,
+                    )
+            finally:
+                if getattr(self, "dataset", None) is not None:
+                    self.dataset.cleanup()
 
         logger.info(f"Model ID: {model_info.model_id}")
 
-        return return_msg, model_loc
+        return return_msg, model_info
 
     def _on_epoch_end(self, metrics: dict):
         """Log per-epoch metrics to MLflow.
