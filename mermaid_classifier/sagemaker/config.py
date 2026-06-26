@@ -60,12 +60,12 @@ class WeightingConfig(BaseModel):
     enabled: bool = True
     weight_ratio_cap: float | None = None
 
-    @field_validator("weight_ratio_cap")
-    @classmethod
-    def _cap_at_least_one(cls, v: float | None) -> float | None:
-        if v is not None and v < 1.0:
-            raise ValueError("weight_ratio_cap must be None or >= 1.0")
-        return v
+    @model_validator(mode="after")
+    def _validate_via_options(self) -> WeightingConfig:
+        from mermaid_classifier.training.sample_weighting import SampleWeightingOptions
+
+        SampleWeightingOptions(enabled=self.enabled, weight_ratio_cap=self.weight_ratio_cap)
+        return self
 
 
 class DatasetConfig(BaseModel):
