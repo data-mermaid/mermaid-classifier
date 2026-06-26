@@ -20,7 +20,8 @@ def top_level_ancestor(ba_id: str, ba_library: BenthicAttributeLibrary) -> str:
 
 
 def build_ba_to_top(
-    classes: list[str], ba_library: BenthicAttributeLibrary,
+    classes: list[str],
+    ba_library: BenthicAttributeLibrary,
 ) -> dict[str, str]:
     """Map each BA ID (extracted from BAGF class IDs) to its top-level ancestor."""
     ba_to_top: dict[str, str] = {}
@@ -32,7 +33,8 @@ def build_ba_to_top(
 
 
 def build_ba_paths(
-    classes: list[str], ba_library: BenthicAttributeLibrary,
+    classes: list[str],
+    ba_library: BenthicAttributeLibrary,
 ) -> dict[str, list[str]]:
     """Map each BA ID to its root-to-leaf path [root, ..., parent, self]."""
     ba_paths: dict[str, list[str]] = {}
@@ -44,7 +46,9 @@ def build_ba_paths(
 
 
 def find_lca(
-    ba_a: str, ba_b: str, ba_paths: dict[str, list[str]],
+    ba_a: str,
+    ba_b: str,
+    ba_paths: dict[str, list[str]],
 ) -> str | None:
     """Walk both root-to-leaf paths in parallel, return last matching node.
 
@@ -53,7 +57,7 @@ def find_lca(
     path_a = ba_paths[ba_a]
     path_b = ba_paths[ba_b]
     lca = None
-    for a, b in zip(path_a, path_b):
+    for a, b in zip(path_a, path_b, strict=False):
         if a == b:
             lca = a
         else:
@@ -105,10 +109,12 @@ def group_by_top_level(
     for top_ba_id, indices in category_indices.items():
         if len(indices) < min_samples:
             continue
-        groups.append({
-            'top_ba_id': top_ba_id,
-            'name': ba_library.id_to_name(top_ba_id),
-            'indices': indices,
-            'n_samples': len(indices),
-        })
+        groups.append(
+            {
+                "top_ba_id": top_ba_id,
+                "name": ba_library.id_to_name(top_ba_id),
+                "indices": indices,
+                "n_samples": len(indices),
+            }
+        )
     return groups

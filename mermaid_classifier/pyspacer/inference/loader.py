@@ -1,5 +1,6 @@
 """load_predictor: serve-time loader for the portable artifact, with loud
 load-time validation of the graph against its manifest."""
+
 from __future__ import annotations
 
 import json
@@ -28,9 +29,7 @@ class Predictor:
     def predict_proba(self, features) -> np.ndarray:
         arr = np.asarray(features, dtype=np.float32)
         if arr.ndim != 2 or arr.shape[1] != self.input_dim:
-            raise ValueError(
-                f"features must be (N, {self.input_dim}); got {arr.shape}."
-            )
+            raise ValueError(f"features must be (N, {self.input_dim}); got {arr.shape}.")
         with torch.no_grad():
             return self._graph(torch.from_numpy(arr)).numpy().astype(np.float64)
 
@@ -63,8 +62,7 @@ def load_predictor(model_pt_path, model_json_path) -> Predictor:
             probe = graph(torch.zeros(1, input_dim, dtype=torch.float32))
     except Exception as exc:  # noqa: BLE001 - re-raise loudly as ManifestError
         raise ManifestError(
-            f"graph rejects input_dim={input_dim} declared in model.json:"
-            f" {exc}"
+            f"graph rejects input_dim={input_dim} declared in model.json: {exc}"
         ) from exc
 
     if probe.shape[1] != len(classes):

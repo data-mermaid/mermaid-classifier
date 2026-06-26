@@ -28,15 +28,15 @@ The pipeline call site (``TrainingDataset._apply_subsample``) does not
 need to change when a strategy is added; it routes through
 ``compute_per_class_targets``.
 """
+
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from mermaid_classifier.training.subsample.options import (
     SUBSAMPLE_STRATEGIES,
     SubsampleOptions,
 )
-
 
 # Class identifier used by allocators and the SQL apply step.
 # A (benthic_attribute_id, growth_form_id) tuple matches the columns
@@ -96,7 +96,7 @@ def _stratified(
 
     grand_total = sum(class_counts.values())
     if grand_total == 0:
-        return {cls: 0 for cls in class_counts}
+        return dict.fromkeys(class_counts, 0)
 
     targets: ClassTargets = {}
     for cls, n in class_counts.items():
@@ -104,8 +104,7 @@ def _stratified(
         target = max(options.min_per_class, min(n, proportional))
         targets[cls] = target
 
-    return _trim_overshoot(
-        targets, target_total, class_counts, options.min_per_class)
+    return _trim_overshoot(targets, target_total, class_counts, options.min_per_class)
 
 
 def _balanced(
@@ -128,10 +127,7 @@ def _balanced(
     n_classes = len(class_counts)
     per = target_total // n_classes if n_classes else 0
 
-    return {
-        cls: max(options.min_per_class, min(n, per))
-        for cls, n in class_counts.items()
-    }
+    return {cls: max(options.min_per_class, min(n, per)) for cls, n in class_counts.items()}
 
 
 def _trim_overshoot(

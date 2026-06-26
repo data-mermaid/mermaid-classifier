@@ -8,6 +8,7 @@ These verify that:
     bit-for-bit (regression guard for "off by default = no behavior change").
   - A class assigned weight=0 has its gradient signal nulled.
 """
+
 from __future__ import annotations
 
 import unittest
@@ -33,8 +34,7 @@ def _make_imbalanced_dataset(seed: int = 0):
 class TorchClassifierWeightTest(unittest.TestCase):
     def test_default_no_class_weight(self):
         X, y = _make_imbalanced_dataset(seed=1)
-        clf = TorchMLPClassifier(
-            hidden_layer_sizes=(8,), max_iter=3, random_state=0)
+        clf = TorchMLPClassifier(hidden_layer_sizes=(8,), max_iter=3, random_state=0)
         clf.fit(X, y)
         # No class_weight → tensor is None.
         self.assertIsNone(clf._class_weight_tensor)
@@ -42,15 +42,16 @@ class TorchClassifierWeightTest(unittest.TestCase):
     def test_class_weight_tensor_in_classes_order(self):
         X, y = _make_imbalanced_dataset(seed=2)
         clf = TorchMLPClassifier(
-            hidden_layer_sizes=(8,), max_iter=2, random_state=0,
+            hidden_layer_sizes=(8,),
+            max_iter=2,
+            random_state=0,
             class_weight={"a": 1.0, "b": 5.0, "c": 25.0},
         )
         clf.fit(X, y)
         self.assertIsNotNone(clf._class_weight_tensor)
         # classes_ is sorted alphabetically -> ["a", "b", "c"]
         self.assertEqual(list(clf.classes_), ["a", "b", "c"])
-        np.testing.assert_allclose(
-            clf._class_weight_tensor.numpy(), [1.0, 5.0, 25.0])
+        np.testing.assert_allclose(clf._class_weight_tensor.numpy(), [1.0, 5.0, 25.0])
 
     def test_weighted_vs_unweighted_loss_differs(self):
         # On imbalanced data, applying inverse-frequency-style weights
@@ -59,17 +60,17 @@ class TorchClassifierWeightTest(unittest.TestCase):
         # Larger weights on rare classes.
         weights = {"a": 1.0, "b": 2.0, "c": 20.0}
 
-        baseline = TorchMLPClassifier(
-            hidden_layer_sizes=(8,), max_iter=5, random_state=42)
+        baseline = TorchMLPClassifier(hidden_layer_sizes=(8,), max_iter=5, random_state=42)
         baseline.fit(X, y)
 
         weighted = TorchMLPClassifier(
-            hidden_layer_sizes=(8,), max_iter=5, random_state=42,
-            class_weight=weights)
+            hidden_layer_sizes=(8,), max_iter=5, random_state=42, class_weight=weights
+        )
         weighted.fit(X, y)
 
         self.assertNotAlmostEqual(
-            baseline.loss_curve_[-1], weighted.loss_curve_[-1],
+            baseline.loss_curve_[-1],
+            weighted.loss_curve_[-1],
             places=5,
         )
 
@@ -84,20 +85,23 @@ class TorchClassifierWeightTest(unittest.TestCase):
 
         weights = {"a": 1.0, "b": 1.0, "c": 0.0}
         clf = TorchMLPClassifier(
-            hidden_layer_sizes=(8,), max_iter=10, random_state=42,
+            hidden_layer_sizes=(8,),
+            max_iter=10,
+            random_state=42,
             class_weight=weights,
         )
         clf.fit(X, y)
         # The class 'c' index in classes_:
         c_idx = list(clf.classes_).index("c")
         # weight tensor entry for 'c' must be exactly zero.
-        self.assertEqual(
-            float(clf._class_weight_tensor[c_idx]), 0.0)
+        self.assertEqual(float(clf._class_weight_tensor[c_idx]), 0.0)
 
     def test_missing_weight_for_class_raises(self):
         X, y = _make_imbalanced_dataset(seed=5)
         clf = TorchMLPClassifier(
-            hidden_layer_sizes=(4,), max_iter=1, random_state=0,
+            hidden_layer_sizes=(4,),
+            max_iter=1,
+            random_state=0,
             class_weight={"a": 1.0, "b": 1.0},  # missing 'c'
         )
         with self.assertRaisesRegex(ValueError, "class_weight is missing"):
@@ -106,7 +110,9 @@ class TorchClassifierWeightTest(unittest.TestCase):
     def test_negative_weight_rejected(self):
         X, y = _make_imbalanced_dataset(seed=6)
         clf = TorchMLPClassifier(
-            hidden_layer_sizes=(4,), max_iter=1, random_state=0,
+            hidden_layer_sizes=(4,),
+            max_iter=1,
+            random_state=0,
             class_weight={"a": 1.0, "b": -2.0, "c": 1.0},
         )
         with self.assertRaisesRegex(ValueError, "negative"):
@@ -118,20 +124,16 @@ class TorchClassifierWeightTest(unittest.TestCase):
         # detect any silent regression by re-implementing the unweighted
         # CE inline and comparing on a single batch.
         X, y = _make_imbalanced_dataset(seed=7)
-        clf = TorchMLPClassifier(
-            hidden_layer_sizes=(4,), max_iter=1, random_state=0)
+        clf = TorchMLPClassifier(hidden_layer_sizes=(4,), max_iter=1, random_state=0)
         clf.fit(X[:20], y[:20])  # just to set up classes_ and module
         # Forward a batch and compare CE with weight=None vs no kwarg.
         clf._module.eval()
         with torch.no_grad():
             x_t = torch.from_numpy(X[:20].astype(np.float32))
-            y_idx = torch.from_numpy(
-                np.searchsorted(clf.classes_, y[:20]).astype(np.int64))
+            y_idx = torch.from_numpy(np.searchsorted(clf.classes_, y[:20]).astype(np.int64))
             logits = clf._module(x_t)
-            ce_kwarg = torch.nn.functional.cross_entropy(
-                logits, y_idx, weight=None)
-            ce_no_kwarg = torch.nn.functional.cross_entropy(
-                logits, y_idx)
+            ce_kwarg = torch.nn.functional.cross_entropy(logits, y_idx, weight=None)
+            ce_no_kwarg = torch.nn.functional.cross_entropy(logits, y_idx)
         self.assertTrue(torch.equal(ce_kwarg, ce_no_kwarg))
 
 

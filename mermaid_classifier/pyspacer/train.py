@@ -2,36 +2,34 @@
 Train a classifier using feature vectors and annotations
 provided on S3.
 """
+
 import concurrent.futures
-from contextlib import contextmanager
 import dataclasses
-from datetime import datetime, timedelta
 import enum
-from io import StringIO
 import os
-from pathlib import Path
 import re
 import tempfile
 import time
 import typing
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from io import StringIO
+from pathlib import Path
 
 import duckdb
 import mlflow
-from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 import pandas as pd
 import psutil
+from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 from s3fs.core import S3FileSystem
-from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
 from spacer.aws import get_s3_resource
 from spacer.data_classes import DataLocation, ImageLabels
-from spacer.task_utils import preprocess_labels, SplitMode
+from spacer.task_utils import SplitMode, preprocess_labels
 
-from mermaid_classifier.pyspacer.settings import training_batch_size
-from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
-    combine_ba_gf,
     CoralNetMermaidMapping,
+    combine_ba_gf,
     get_benthic_attribute_library,
     get_growth_form_library,
     split_ba_gf,
@@ -45,19 +43,26 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
-from mermaid_classifier.pyspacer.metrics import (
-    MetricsContext, MetricsCoordinator,
-)
 from mermaid_classifier.pyspacer.inference import (
-    export_artifact, load_predictor,
+    export_artifact,
+    load_predictor,
 )
-from mermaid_classifier.pyspacer.mlflow_model import log_artifact_model
+from mermaid_classifier.pyspacer.metrics import (
+    MetricsContext,
+    MetricsCoordinator,
+)
 from mermaid_classifier.pyspacer.metrics._logging import (
     log_dataframe as _log_dataframe,
 )
-from mermaid_classifier.pyspacer.settings import settings, set_env_vars_for_packages
-from mermaid_classifier.pyspacer.utils import (
-    logging_config_for_script, mlflow_connect)
+from mermaid_classifier.pyspacer.mlflow_model import log_artifact_model
+from mermaid_classifier.pyspacer.settings import (
+    set_env_vars_for_packages,
+    settings,
+    training_batch_size,
+)
+from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
+from mermaid_classifier.pyspacer.trainer import MermaidTrainer
+from mermaid_classifier.pyspacer.utils import logging_config_for_script, mlflow_connect
 from mermaid_classifier.training.sample_weighting import (
     SampleWeightingOptions,
     compute_class_weights,
@@ -67,13 +72,12 @@ from mermaid_classifier.training.subsample import (
     compute_per_class_targets,
 )
 
-
-logger = logging_config_for_script('train')
+logger = logging_config_for_script("train")
 
 
 class Sites(enum.Enum):
-    CORALNET = 'coralnet'
-    MERMAID = 'mermaid'
+    CORALNET = "coralnet"
+    MERMAID = "mermaid"
 
 
 @contextmanager
@@ -89,18 +93,18 @@ def section_profiling(profiled_sections: list[dict], section_name: str):
     yield
 
     seconds_elapsed = time.perf_counter() - start_time
-    section_profile = dict(
+    section_profile = {
         # Name for this section of code.
-        name=section_name,
+        "name": section_name,
         # Number of seconds.
-        seconds=format(seconds_elapsed, '.1f'),
+        "seconds": format(seconds_elapsed, ".1f"),
         # Hours, minutes, seconds, ns.
-        hms=str(timedelta(seconds=seconds_elapsed)),
+        "hms": str(timedelta(seconds=seconds_elapsed)),
         # Date and time, to see if the sections we've chosen skip any
         # substantial time blocks that we should also be monitoring.
-        approx_start=approx_start_date.strftime('%b %d %H:%M:%S'),
-        memory_usage_at_end=f'{psutil.virtual_memory().percent}%',
-    )
+        "approx_start": approx_start_date.strftime("%b %d %H:%M:%S"),
+        "memory_usage_at_end": f"{psutil.virtual_memory().percent}%",
+    }
     profiled_sections.append(section_profile)
 
     logger.debug(
@@ -129,13 +133,10 @@ def download_features_parallel(
     if total == 0:
         return set()
 
-    logger.info(
-        f"Downloading {total} feature vectors"
-        f" with {max_workers} workers...")
+    logger.info(f"Downloading {total} feature vectors with {max_workers} workers...")
 
     # Pre-create all unique parent directories.
-    unique_dirs = {os.path.dirname(local_path)
-                   for local_path in s3_keys.values()}
+    unique_dirs = {os.path.dirname(local_path) for local_path in s3_keys.values()}
     for d in unique_dirs:
         os.makedirs(d, exist_ok=True)
 
@@ -147,32 +148,24 @@ def download_features_parallel(
         if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
             return
         s3 = get_s3_resource()
-        part_path = local_path + '.part'
+        part_path = local_path + ".part"
         s3.Object(bucket, key).download_file(part_path)
         os.rename(part_path, local_path)
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=max_workers
-    ) as executor:
-        futures = {
-            executor.submit(_download, item): item
-            for item in s3_keys.items()
-        }
-        for i, future in enumerate(
-            concurrent.futures.as_completed(futures), 1
-        ):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_download, item): item for item in s3_keys.items()}
+        for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
             (bucket, key), local_path = futures[future]
             try:
                 future.result()
                 succeeded += 1
             except Exception as e:
                 failed.add((bucket, key))
-                logger.warning(
-                    f"Failed to download s3://{bucket}/{key}: {e}")
+                logger.warning(f"Failed to download s3://{bucket}/{key}: {e}")
             if i % 1000 == 0 or i == total:
                 logger.info(
-                    f"Download progress: {i}/{total}"
-                    f" ({succeeded} ok, {len(failed)} failed)")
+                    f"Download progress: {i}/{total} ({succeeded} ok, {len(failed)} failed)"
+                )
 
     return failed
 
@@ -182,9 +175,10 @@ class LabelFilter(CsvSpec):
     A CSV-defined spec which says what benthic attribute + growth form
     combos to include in, or exclude from, training data.
     """
+
     column_specs = [
-        ColumnSpec(name='ba_id', allow_blank=False),
-        ColumnSpec(name='gf_id'),
+        ColumnSpec(name="ba_id", allow_blank=False),
+        ColumnSpec(name="gf_id"),
     ]
 
     def __init__(self, csv_file: typing.TextIO, inclusion: bool = True):
@@ -196,22 +190,21 @@ class LabelFilter(CsvSpec):
 
     def per_row_init_action(self, row):
         # Ensure absent values are just '', not '' or None.
-        self.bagf_set.add((row['ba_id'], row.get('gf_id') or ''))
+        self.bagf_set.add((row["ba_id"], row.get("gf_id") or ""))
 
     def accepts_bagf(self, bagf_id: str):
         ba_id, gf_id = split_ba_gf(bagf_id)
 
         if self.inclusion:
             return (ba_id, gf_id) in self.bagf_set
-        else:
-            return (ba_id, gf_id) not in self.bagf_set
+        return (ba_id, gf_id) not in self.bagf_set
 
     def filter_in_duckdb(
         self,
         duck_conn: duckdb.DuckDBPyConnection,
         duck_table_name: str,
-        ba_id_column_name: str = 'benthic_attribute_id',
-        gf_id_column_name: str = 'growth_form_id',
+        ba_id_column_name: str = "benthic_attribute_id",
+        gf_id_column_name: str = "growth_form_id",
     ):
         """
         Filter down the rows in the given DuckDB table, based on the
@@ -235,14 +228,12 @@ class LabelFilter(CsvSpec):
         duckdb_filter_on_column(
             duck_conn=duck_conn,
             duck_table_name=duck_table_name,
-            column_name='bagf_id',
+            column_name="bagf_id",
             inclusion_func=self.accepts_bagf,
         )
 
         # Don't need the combined BAGF column anymore.
-        duck_conn.execute(
-            f"ALTER TABLE {duck_table_name} DROP bagf_id"
-        )
+        duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP bagf_id")
 
 
 class LabelRollupSpec(CsvSpec):
@@ -250,22 +241,23 @@ class LabelRollupSpec(CsvSpec):
     A CSV-defined spec which says what BA+GF combos to roll up to
     what other BA+GF combos.
     """
+
     column_specs = [
-        ColumnSpec(name='from_ba_id', allow_blank=False),
-        ColumnSpec(name='from_gf_id'),
-        ColumnSpec(name='to_ba_id', allow_blank=False),
-        ColumnSpec(name='to_gf_id'),
+        ColumnSpec(name="from_ba_id", allow_blank=False),
+        ColumnSpec(name="from_gf_id"),
+        ColumnSpec(name="to_ba_id", allow_blank=False),
+        ColumnSpec(name="to_gf_id"),
     ]
 
     def __init__(self, *args, **kwargs):
-        self.lookup = dict()
+        self.lookup = {}
 
         super().__init__(*args, **kwargs)
 
     def per_row_init_action(self, row):
         # Ensure absent values are just '', not '' or None.
-        key = (row['from_ba_id'], row.get('from_gf_id') or '')
-        value = (row['to_ba_id'], row.get('to_gf_id') or '')
+        key = (row["from_ba_id"], row.get("from_gf_id") or "")
+        value = (row["to_ba_id"], row.get("to_gf_id") or "")
         self.lookup[key] = value
 
     def roll_up(self, bagf_id: str) -> str:
@@ -282,8 +274,8 @@ class LabelRollupSpec(CsvSpec):
         self,
         duck_conn: duckdb.DuckDBPyConnection,
         duck_table_name: str,
-        ba_id_column_name: str = 'benthic_attribute_id',
-        gf_id_column_name: str = 'growth_form_id',
+        ba_id_column_name: str = "benthic_attribute_id",
+        gf_id_column_name: str = "growth_form_id",
     ):
         """
         Roll up the BA IDs and GF IDs in the given DuckDB table,
@@ -307,7 +299,7 @@ class LabelRollupSpec(CsvSpec):
         duckdb_transform_column(
             duck_conn=duck_conn,
             duck_table_name=duck_table_name,
-            column_name='bagf_id',
+            column_name="bagf_id",
             transform_func=self.roll_up,
         )
 
@@ -337,15 +329,12 @@ class LabelRollupSpec(CsvSpec):
         )
 
         # Don't need the combined BAGF column anymore.
-        duck_conn.execute(
-            f"ALTER TABLE {duck_table_name} DROP bagf_id"
-        )
+        duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP bagf_id")
 
 
 class CNSourceFilter(CsvSpec):
-
     column_specs = [
-        ColumnSpec(name='id', allow_blank=False),
+        ColumnSpec(name="id", allow_blank=False),
     ]
 
     source_id_list: list[str]
@@ -360,7 +349,7 @@ class CNSourceFilter(CsvSpec):
         super().__init__(csv_file=csv_file)
 
     def per_row_init_action(self, row):
-        self.source_id_list.append(row['id'])
+        self.source_id_list.append(row["id"])
 
     def is_empty(self):
         return len(self.source_id_list) == 0
@@ -371,6 +360,7 @@ class Artifacts:
     Namespace to make it easier to track artifacts that we're
     logging later.
     """
+
     ba_counts: pd.DataFrame
     bagf_counts: pd.DataFrame
     coralnet_label_mapping: pd.DataFrame
@@ -468,6 +458,7 @@ class DatasetOptions:
     See ``mermaid_classifier.training.subsample`` for the full list and
     instructions on adding new strategies.
     """
+
     include_mermaid: bool = True
     coralnet_sources_csv: str = None
     drop_growthforms: bool = False
@@ -512,6 +503,7 @@ class TrainingOptions:
     natural epoch-to-epoch noise in val_loss; higher (>5) wastes wall
     time on epochs that are unlikely to recover.
     """
+
     epochs: int = 10
     early_stopping_patience: int | None = None
 
@@ -546,13 +538,13 @@ class MLflowOptions:
     'i456': log annotations from CoralNet image of ID 456
     <not specified>: log nothing extra
     """
+
     experiment_name: str | None = settings.mlflow_default_experiment_name
     model_name: str | None = None
     extra_annotations_to_log: str | None = None
 
 
 class TrainingDataset:
-
     def __init__(self, options: DatasetOptions):
 
         self.options = options
@@ -568,8 +560,7 @@ class TrainingDataset:
             self._feature_dir = settings.feature_cache_dir
             self._feature_temp_dir = None
         else:
-            self._feature_temp_dir = tempfile.TemporaryDirectory(
-                prefix='mermaid_features_')
+            self._feature_temp_dir = tempfile.TemporaryDirectory(prefix="mermaid_features_")
             self._feature_dir = self._feature_temp_dir.name
         # Maps a downloaded feature vector's local path (used as the key of
         # the filesystem DataLocations in self.labels) back to its original
@@ -577,41 +568,34 @@ class TrainingDataset:
         # this to match the labels to the annotations table.
         self._feature_path_to_s3_location: dict[str, tuple[str, str]] = {}
 
-
-
         if options.coralnet_sources_csv:
             with open(options.coralnet_sources_csv) as csv_f:
                 self.cn_source_filter = CNSourceFilter(csv_f)
         else:
             # Empty set of CoralNet sources.
-            self.cn_source_filter = CNSourceFilter(StringIO(''))
+            self.cn_source_filter = CNSourceFilter(StringIO(""))
 
         if options.label_rollup_spec_csv:
             with open(options.label_rollup_spec_csv) as csv_f:
                 self.rollup_spec = LabelRollupSpec(csv_f)
         else:
             # Empty rollup-targets set, meaning nothing gets rolled up.
-            self.rollup_spec = LabelRollupSpec(StringIO(''))
+            self.rollup_spec = LabelRollupSpec(StringIO(""))
 
         if options.included_labels_csv and options.excluded_labels_csv:
-            raise ValueError(
-                "Specify one of included labels or"
-                " excluded labels, but not both.")
+            raise ValueError("Specify one of included labels or excluded labels, but not both.")
 
         if options.included_labels_csv:
             with open(options.included_labels_csv) as csv_f:
-                self.label_filter = LabelFilter(
-                    csv_f, inclusion=True)
+                self.label_filter = LabelFilter(csv_f, inclusion=True)
         elif options.excluded_labels_csv:
             with open(options.excluded_labels_csv) as csv_f:
-                self.label_filter = LabelFilter(
-                    csv_f, inclusion=False)
+                self.label_filter = LabelFilter(csv_f, inclusion=False)
         else:
             # No inclusion or exclusion set specified means we accept
             # all labels.
             # In other words, an empty exclusion set.
-            self.label_filter = LabelFilter(
-                StringIO(''), inclusion=False)
+            self.label_filter = LabelFilter(StringIO(""), inclusion=False)
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
@@ -622,9 +606,7 @@ class TrainingDataset:
         )
         self._duck_conn = None
 
-        self.feature_loc_to_source: dict[
-            DataLocation, tuple[str, str]
-        ] = {}
+        self.feature_loc_to_source: dict[DataLocation, tuple[str, str]] = {}
 
         if not self.cn_source_filter.is_empty():
             with self.section_profiling("Reading CoralNet annotations"):
@@ -642,37 +624,36 @@ class TrainingDataset:
         # Now this should have annotations populated.
         if not self.duckdb_annotations_table_exists():
             raise ValueError(
-                "No annotations from CoralNet or MERMAID, even before"
-                " label filtering.")
+                "No annotations from CoralNet or MERMAID, even before label filtering."
+            )
 
         def _annotations_stats() -> tuple[int, int]:
             # (annotation rows, distinct feature_vector i.e. unique images)
             return self.duck_conn.execute(
-                "SELECT COUNT(*), COUNT(DISTINCT feature_vector)"
-                " FROM annotations"
+                "SELECT COUNT(*), COUNT(DISTINCT feature_vector) FROM annotations"
             ).fetchone()
 
         with self.section_profiling("Rollups and filtering"):
-
             ann_before, img_before = _annotations_stats()
             logger.info(
                 "Before rollups/filtering: %s annotations, %s unique images",
-                f"{ann_before:,}", f"{img_before:,}",
+                f"{ann_before:,}",
+                f"{img_before:,}",
             )
 
             if options.drop_growthforms:
                 # Clear all annotations' growth forms.
                 duckdb_transform_column(
                     duck_conn=self.duck_conn,
-                    duck_table_name='annotations',
-                    column_name='growth_form_id',
-                    transform_func=lambda x: '',
+                    duck_table_name="annotations",
+                    column_name="growth_form_id",
+                    transform_func=lambda x: "",
                 )
 
             # Roll up BAGFs.
             self.rollup_spec.roll_up_in_duckdb(
                 duck_conn=self.duck_conn,
-                duck_table_name='annotations',
+                duck_table_name="annotations",
             )
             ann_after_rollup, img_after_rollup = _annotations_stats()
             logger.info(
@@ -686,20 +667,18 @@ class TrainingDataset:
             # Filter out BAGFs we don't want.
             self.label_filter.filter_in_duckdb(
                 duck_conn=self.duck_conn,
-                duck_table_name='annotations',
+                duck_table_name="annotations",
             )
             ann_after_filter, img_after_filter = _annotations_stats()
             logger.info(
-                "After included-labels filter: %s annotations (-%s),"
-                " %s unique images (-%s)",
+                "After included-labels filter: %s annotations (-%s), %s unique images (-%s)",
                 f"{ann_after_filter:,}",
                 f"{ann_after_rollup - ann_after_filter:,}",
                 f"{img_after_filter:,}",
                 f"{img_after_rollup - img_after_filter:,}",
             )
             logger.info(
-                "Rollups+filter retained %.1f%% of annotations,"
-                " %.1f%% of unique images",
+                "Rollups+filter retained %.1f%% of annotations, %.1f%% of unique images",
                 100.0 * ann_after_filter / max(ann_before, 1),
                 100.0 * img_after_filter / max(img_before, 1),
             )
@@ -716,11 +695,7 @@ class TrainingDataset:
             with self.section_profiling("Detecting missing feature vectors"):
                 # First, get the paths present in S3 (this can take a while).
                 mermaid_bucket = settings.mermaid_train_data_bucket
-                mermaid_full_paths_in_s3 = set(
-                    self.s3.find(
-                        path=f's3://{mermaid_bucket}/mermaid/'
-                    )
-                )
+                mermaid_full_paths_in_s3 = set(self.s3.find(path=f"s3://{mermaid_bucket}/mermaid/"))
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(mermaid_full_paths_in_s3)
 
@@ -730,8 +705,6 @@ class TrainingDataset:
             self.add_training_set_names()
 
         self.set_train_summary_stats()
-
-
 
     def _apply_subsample(self, opts: SubsampleOptions) -> None:
         """Deterministic per-class subsampling of the annotations table.
@@ -775,13 +748,10 @@ class TrainingDataset:
             " GROUP BY benthic_attribute_id, growth_form_id"
             " ORDER BY benthic_attribute_id, growth_form_id"
         ).fetchall()
-        class_counts: dict[tuple[str, str], int] = {
-            (ba, gf): n for ba, gf, n in rows
-        }
+        class_counts: dict[tuple[str, str], int] = {(ba, gf): n for ba, gf, n in rows}
 
         if not class_counts:
-            logger.warning(
-                "Subsampling skipped: annotations table is empty.")
+            logger.warning("Subsampling skipped: annotations table is empty.")
             return
 
         # Step 2: dispatch to the strategy registry.
@@ -793,14 +763,14 @@ class TrainingDataset:
         targets_df = pd.DataFrame(
             [
                 {
-                    'benthic_attribute_id': ba,
-                    'growth_form_id': gf,
-                    'target_n': int(n),
+                    "benthic_attribute_id": ba,
+                    "growth_form_id": gf,
+                    "target_n": int(n),
                 }
                 for (ba, gf), n in targets.items()
             ]
         )
-        self.duck_conn.register('_subsample_targets', targets_df)
+        self.duck_conn.register("_subsample_targets", targets_df)
         try:
             # The (site, project_id, image_id, row, col) tuple is
             # unique per annotation in this schema (CoralNet and
@@ -826,7 +796,7 @@ class TrainingDataset:
                 " WHERE n._rn <= t.target_n"
             )
         finally:
-            self.duck_conn.unregister('_subsample_targets')
+            self.duck_conn.unregister("_subsample_targets")
 
         # Step 4: log realized per-class counts. This is the after-the-
         # fact audit trail: lets us confirm in MLflow that two parallel
@@ -839,20 +809,22 @@ class TrainingDataset:
         ).fetchall()
         realized_by_cls = {(ba, gf): n for ba, gf, n in realized_rows}
 
-        per_class_audit = pd.DataFrame([
-            {
-                'benthic_attribute_id': ba,
-                'growth_form_id': gf,
-                'pre_count': class_counts[(ba, gf)],
-                'target_n': targets.get((ba, gf), 0),
-                'realized_n': realized_by_cls.get((ba, gf), 0),
-            }
-            for (ba, gf) in sorted(class_counts)
-        ])
+        per_class_audit = pd.DataFrame(
+            [
+                {
+                    "benthic_attribute_id": ba,
+                    "growth_form_id": gf,
+                    "pre_count": class_counts[(ba, gf)],
+                    "target_n": targets.get((ba, gf), 0),
+                    "realized_n": realized_by_cls.get((ba, gf), 0),
+                }
+                for (ba, gf) in sorted(class_counts)
+            ]
+        )
         # Stash on self; logged to MLflow by the runner alongside the
         # other dataset artifacts.
         self._subsample_audit_df = per_class_audit
-        realized_total = int(per_class_audit['realized_n'].sum())
+        realized_total = int(per_class_audit["realized_n"].sum())
         self._subsample_realized_total = realized_total
         logger.info(
             f"Subsample applied: strategy={opts.strategy!r},"
@@ -881,14 +853,13 @@ class TrainingDataset:
             # INSERT INTO ... BY NAME ... means that we don't have to match
             # the column order of the existing table.
             # https://duckdb.org/docs/stable/sql/statements/insert#insert-into--by-name
-            query_start = f"INSERT INTO annotations BY NAME"
+            query_start = "INSERT INTO annotations BY NAME"
         else:
             # Didn't read any CoralNet data, so we have to create
             # the annotations table.
-            query_start = f"CREATE TABLE annotations AS"
+            query_start = "CREATE TABLE annotations AS"
         self.duck_conn.execute(
-            query_start +
-            f" SELECT"
+            query_start + f" SELECT"
             f"  image_id, row, col,"
             f"  benthic_attribute_id, growth_form_id,"
             f" '{Sites.MERMAID.value}' AS site,"
@@ -901,20 +872,22 @@ class TrainingDataset:
 
         # Get project-level stats before applying any further filters.
         self.artifacts.mermaid_project_stats = self.compute_project_stats(
-            site=Sites.MERMAID.value, has_training_sets=False)
+            site=Sites.MERMAID.value, has_training_sets=False
+        )
 
         # For growth forms, we get '' from the CoralNet-MERMAID
         # mapping, but the string 'None' from the MERMAID annotations
         # parquet.
         # Normalize the latter to ''.
         def transform_func(gf_id):
-            if gf_id == 'None':
-                return ''
+            if gf_id == "None":
+                return ""
             return gf_id
+
         duckdb_transform_column(
             duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            column_name='growth_form_id',
+            duck_table_name="annotations",
+            column_name="growth_form_id",
             transform_func=transform_func,
         )
 
@@ -924,7 +897,6 @@ class TrainingDataset:
 
         s3 = S3FileSystem(anon=False)
         for source_id in self.cn_source_filter.source_id_list:
-
             # One row per point annotation,
             # with columns including Image ID, Row, Column, Label ID
             annotations_uri = settings.coralnet_annotations_csv_pattern.format(
@@ -942,7 +914,8 @@ class TrainingDataset:
         if missing_source_ids:
             logger.warning(
                 "Skipping %d source(s) with no annotations.csv in S3: %s",
-                len(missing_source_ids), missing_source_ids,
+                len(missing_source_ids),
+                missing_source_ids,
             )
         if not annotations_uri_list:
             raise RuntimeError(
@@ -961,8 +934,8 @@ class TrainingDataset:
             # format, reading in CN, and transforming back to open data
             # format.
             raise RuntimeError(
-                "Due to format technicalities, CoralNet data must be read"
-                " in before MERMAID data.")
+                "Due to format technicalities, CoralNet data must be read in before MERMAID data."
+            )
 
         # Read each selected source's annotations-CSV into a single
         # DuckDB table.
@@ -1044,12 +1017,13 @@ class TrainingDataset:
             # all_varchar, files missing this column (or individual rows
             # without a value) come through as NULL, which propagates
             # into feature_vector and crashes os.path.join downstream.
-            f" WHERE \"Image ID\" IS NOT NULL AND \"Image ID\" <> ''"
+            f' WHERE "Image ID" IS NOT NULL AND "Image ID" <> \'\''
         )
 
         # Get project-level stats before applying any further filters.
         self.artifacts.coralnet_project_stats = self.compute_project_stats(
-            site=Sites.CORALNET.value, has_training_sets=False)
+            site=Sites.CORALNET.value, has_training_sets=False
+        )
 
         label_mapping = CoralNetMermaidMapping()
         self.artifacts.coralnet_label_mapping = label_mapping.get_dataframe()
@@ -1061,23 +1035,26 @@ class TrainingDataset:
                 return None
             entry = label_mapping[label]
             return entry.benthic_attribute_id
+
         duckdb_add_column(
             duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            base_column_name='label_id',
-            new_column_name='benthic_attribute_id',
+            duck_table_name="annotations",
+            base_column_name="label_id",
+            new_column_name="benthic_attribute_id",
             base_to_new_func=label_to_ba,
         )
+
         def label_to_gf(label):
             if label not in label_mapping:
                 return None
             entry = label_mapping[label]
             return entry.growth_form_id
+
         duckdb_add_column(
             duck_conn=self.duck_conn,
-            duck_table_name='annotations',
-            base_column_name='label_id',
-            new_column_name='growth_form_id',
+            duck_table_name="annotations",
+            base_column_name="label_id",
+            new_column_name="growth_form_id",
             base_to_new_func=label_to_gf,
         )
 
@@ -1099,15 +1076,12 @@ class TrainingDataset:
         ).fetch_df()
 
         # Then filter out those rows before moving on.
-        self.duck_conn.execute(
-            "DELETE FROM annotations WHERE benthic_attribute_id IS NULL"
-        )
+        self.duck_conn.execute("DELETE FROM annotations WHERE benthic_attribute_id IS NULL")
 
     def duckdb_annotations_table_exists(self) -> bool:
         # https://duckdb.org/docs/stable/sql/meta/information_schema
         table_query_result = self.duck_conn.execute(
-            f"SELECT * FROM information_schema.tables"
-            f" WHERE table_name = 'annotations'"
+            "SELECT * FROM information_schema.tables WHERE table_name = 'annotations'"
         ).fetchall()
 
         # Result should be [] if doesn't exist, which 'bools' to False.
@@ -1117,21 +1091,17 @@ class TrainingDataset:
 
         # Build the annotation data's full feature paths, in DuckDB.
         self.duck_conn.execute(
-            f"CREATE OR REPLACE TABLE annotations AS"
-            f" SELECT *,"
-            f"  bucket || '/' || feature_vector AS feature_full"
-            f" FROM annotations"
+            "CREATE OR REPLACE TABLE annotations AS"
+            " SELECT *,"
+            "  bucket || '/' || feature_vector AS feature_full"
+            " FROM annotations"
         )
 
         with (
-            duckdb_temp_table_name(self.duck_conn)
-            as anno_features_table_name,
-            duckdb_temp_table_name(self.duck_conn)
-            as s3_features_table_name,
-            duckdb_temp_table_name(self.duck_conn)
-            as missing_features_table_name,
+            duckdb_temp_table_name(self.duck_conn) as anno_features_table_name,
+            duckdb_temp_table_name(self.duck_conn) as s3_features_table_name,
+            duckdb_temp_table_name(self.duck_conn) as missing_features_table_name,
         ):
-
             # Get the annotation data's unique feature paths into a table.
             self.duck_conn.execute(
                 f"CREATE TABLE {anno_features_table_name} AS"
@@ -1140,11 +1110,9 @@ class TrainingDataset:
             )
 
             # Get the S3 feature paths into another table.
-            s3_paths_df = pd.DataFrame(
-                {'feature_full': list(mermaid_full_paths_in_s3)})
+            s3_paths_df = pd.DataFrame({"feature_full": list(mermaid_full_paths_in_s3)})  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
             self.duck_conn.execute(
-                f"CREATE TEMP TABLE {s3_features_table_name}"
-                f" AS SELECT * FROM s3_paths_df"
+                f"CREATE TEMP TABLE {s3_features_table_name} AS SELECT * FROM s3_paths_df"
             )
 
             in_annotations_count = self.duck_conn.execute(
@@ -1168,8 +1136,7 @@ class TrainingDataset:
             ).fetchall()[0][0]
 
             result_tuples = self.duck_conn.execute(
-                f"SELECT feature_full FROM {missing_features_table_name}"
-                f" LIMIT 3"
+                f"SELECT feature_full FROM {missing_features_table_name} LIMIT 3"
             ).fetchall()
             missing_examples = [tup[0] for tup in result_tuples]
 
@@ -1186,15 +1153,12 @@ class TrainingDataset:
             )
 
         # Don't need the feature_full column anymore.
-        self.duck_conn.execute(
-            f"ALTER TABLE annotations DROP feature_full"
-        )
+        self.duck_conn.execute("ALTER TABLE annotations DROP feature_full")
 
         # Abort if too many are missing.
         examples_str = "\n".join(missing_examples)
         missing_threshold = (
-            in_annotations_count
-            * settings.training_inputs_percent_missing_allowed / 100
+            in_annotations_count * settings.training_inputs_percent_missing_allowed / 100
         )
         if missing_count > missing_threshold:
             raise RuntimeError(
@@ -1212,16 +1176,16 @@ class TrainingDataset:
                 f"Skipping {missing_count} feature vector(s) because"
                 f" the files aren't in S3."
                 f" Example(s):"
-                f"\n{examples_str}")
+                f"\n{examples_str}"
+            )
 
     def prep_annotations_for_pyspacer(self):
 
         with self.section_profiling("Collecting feature paths"):
-
             annotations_by_image = duckdb_grouped_rows(
                 duck_conn=self.duck_conn,
-                duck_table_name='annotations',
-                grouping_column_names=['bucket', 'feature_vector'],
+                duck_table_name="annotations",
+                grouping_column_names=["bucket", "feature_vector"],
             )
 
             # First pass: collect annotations and unique S3 keys.
@@ -1231,59 +1195,53 @@ class TrainingDataset:
             image_data = []
 
             for rows in annotations_by_image:
-
                 # Here, in one loop iteration, we're given all the
                 # annotation rows for a single image.
                 first_row = rows[0]
-                bucket = first_row['bucket']
-                feature_bucket_path = first_row['feature_vector']
-                site = first_row['site']
-                project_id = first_row['project_id']
+                bucket = first_row["bucket"]
+                feature_bucket_path = first_row["feature_vector"]
+                site = first_row["site"]
+                project_id = first_row["project_id"]
 
                 image_annotations = []
 
                 # One annotation per row.
                 for row in rows:
-
-                    bagf = combine_ba_gf(
-                        row['benthic_attribute_id'], row['growth_form_id'])
+                    bagf = combine_ba_gf(row["benthic_attribute_id"], row["growth_form_id"])
 
                     annotation = (
-                        int(row['row']),
-                        int(row['col']),
+                        int(row["row"]),
+                        int(row["col"]),
                         bagf,
                     )
                     image_annotations.append(annotation)
 
                 s3_key = (bucket, feature_bucket_path)
                 if s3_key not in s3_keys:
-                    local_path = os.path.join(
-                        tmp_root, bucket, feature_bucket_path)
+                    local_path = os.path.join(tmp_root, bucket, feature_bucket_path)
                     s3_keys[s3_key] = local_path
                     # Remember how to get back from the local download path
                     # to the original S3 location, for add_training_set_names.
                     self._feature_path_to_s3_location[local_path] = s3_key
 
                 image_data.append(
-                    (bucket, feature_bucket_path, site, project_id,
-                     image_annotations))
+                    (bucket, feature_bucket_path, site, project_id, image_annotations)
+                )
 
         # Parallel download of all feature vectors from S3.
         with self.section_profiling("Downloading feature vectors"):
             failed_keys = download_features_parallel(
-                s3_keys, max_workers=settings.download_max_workers)
+                s3_keys, max_workers=settings.download_max_workers
+            )
 
         if failed_keys:
-            logger.warning(
-                f"{len(failed_keys)} feature vector download(s) failed.")
+            logger.warning(f"{len(failed_keys)} feature vector download(s) failed.")
 
         with self.section_profiling("Building PySpacer labels"):
-
             # Build ImageLabels with filesystem DataLocations.
             labels_data = ImageLabels()
 
-            for (bucket, feature_bucket_path, site, project_id,
-                 image_annotations) in image_data:
+            for bucket, feature_bucket_path, site, project_id, image_annotations in image_data:
                 # Skip images whose feature file failed to download.
                 if (bucket, feature_bucket_path) in failed_keys:
                     continue
@@ -1291,7 +1249,7 @@ class TrainingDataset:
                 local_path = s3_keys[(bucket, feature_bucket_path)]
 
                 feature_loc = DataLocation(
-                    storage_type='filesystem',
+                    storage_type="filesystem",
                     key=local_path,
                 )
                 labels_data.add_image(feature_loc, image_annotations)
@@ -1322,11 +1280,11 @@ class TrainingDataset:
             # from S3.
             # https://duckdb.org/docs/stable/core_extensions/httpfs/overview
             try:
-                self._duck_conn.load_extension('httpfs')
+                self._duck_conn.load_extension("httpfs")
             except duckdb.IOException:
                 # Extension not installed yet.
-                self._duck_conn.install_extension('httpfs')
-                self._duck_conn.load_extension('httpfs')
+                self._duck_conn.install_extension("httpfs")
+                self._duck_conn.load_extension("httpfs")
 
             # Configure region and auth, if present.
             # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api
@@ -1335,7 +1293,7 @@ class TrainingDataset:
             # `SET s3_region = 'us-east-1'`:
             # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api_legacy_authentication
 
-            if settings.aws_anonymous == 'False':
+            if settings.aws_anonymous == "False":
                 if settings.aws_key_id:
                     # Manual provision of a key.
                     query = (
@@ -1346,17 +1304,11 @@ class TrainingDataset:
                         f" SECRET '{settings.aws_secret}',"
                     )
                     if settings.aws_session_token:
-                        query += (
-                            f" SESSION_TOKEN '{settings.aws_session_token}',"
-                        )
+                        query += f" SESSION_TOKEN '{settings.aws_session_token}',"
                 else:
                     # The credential_chain provider allows automatically
                     # fetching AWS credentials, like through the IMDS.
-                    query = (
-                        f"CREATE OR REPLACE SECRET secret ("
-                        f" TYPE s3,"
-                        f" PROVIDER credential_chain,"
-                    )
+                    query = "CREATE OR REPLACE SECRET secret ( TYPE s3, PROVIDER credential_chain,"
                 query += f" REGION '{settings.aws_region}')"
 
                 self._duck_conn.execute(query)
@@ -1364,15 +1316,9 @@ class TrainingDataset:
         return self._duck_conn
 
     def compute_project_stats(self, site=None, has_training_sets=False):
-        if site is None:
-            where_clause = ""
-        else:
-            where_clause = f"WHERE site = '{site}'"
+        where_clause = "" if site is None else f"WHERE site = '{site}'"
 
-        counts_sql = (
-            " count(DISTINCT image_id) AS num_images,"
-            " count(*) AS num_annotations"
-        )
+        counts_sql = " count(DISTINCT image_id) AS num_images, count(*) AS num_annotations"
         if has_training_sets:
             counts_sql += (
                 ","
@@ -1400,16 +1346,15 @@ class TrainingDataset:
         This will add a training_set column to the annotations table.
         """
         training_sets = [
-            ('train', self.labels.train),
-            ('ref', self.labels.ref),
-            ('val', self.labels.val),
+            ("train", self.labels.train),
+            ("ref", self.labels.ref),
+            ("val", self.labels.val),
         ]
         # Higher means fewer DuckDB operations; lower might reduce
         # memory usage.
         batch_size = 50000
 
         with duckdb_temp_table_name(self.duck_conn) as temp_table_name:
-
             # The columns here besides training_set are the ones that should
             # uniquely identify a particular annotation.
             self.duck_conn.execute(
@@ -1424,15 +1369,12 @@ class TrainingDataset:
             for set_name, training_set in training_sets:
                 values_batch: list[tuple] = []
 
-                for feature_loc, row, col in (
-                    self.generate_training_set_annotations(training_set)
-                ):
+                for feature_loc, row, col in self.generate_training_set_annotations(training_set):
                     # feature_loc is a filesystem DataLocation whose key is a
                     # local download path; map it back to the original S3
                     # (bucket, feature_vector) so it matches the annotations
                     # table's join columns.
-                    bucket, feature_vector = (
-                        self._feature_path_to_s3_location[feature_loc.key])
+                    bucket, feature_vector = self._feature_path_to_s3_location[feature_loc.key]
                     tup = (
                         bucket,
                         feature_vector,
@@ -1443,14 +1385,12 @@ class TrainingDataset:
                     values_batch.append(tup)
 
                     if len(values_batch) > batch_size:
-                        self._add_tuples_to_table(
-                            temp_table_name, values_batch)
+                        self._add_tuples_to_table(temp_table_name, values_batch)
                         values_batch = []
 
                 if len(values_batch) > 0:
                     # Last batch
-                    self._add_tuples_to_table(
-                        temp_table_name, values_batch)
+                    self._add_tuples_to_table(temp_table_name, values_batch)
 
             # Join annotations with the temp table to add the training_set info.
             #
@@ -1466,14 +1406,12 @@ class TrainingDataset:
             )
 
     def _add_tuples_to_table(self, table_name, tuples: list[tuple]):
-        df = pd.DataFrame.from_records(tuples)
-        self.duck_conn.execute(
-            f"INSERT INTO {table_name} SELECT * FROM df"
-        )
+        df = pd.DataFrame.from_records(tuples)  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+        self.duck_conn.execute(f"INSERT INTO {table_name} SELECT * FROM df")
 
     @staticmethod
     def generate_training_set_annotations(training_set: ImageLabels):
-        for feature_loc in training_set.keys():
+        for feature_loc in training_set.keys():  # noqa: SIM118 — ImageLabels.keys() is not a plain dict; __iter__ differs
             image_annotations = training_set[feature_loc]
             for row, col, _ in image_annotations:
                 yield feature_loc, row, col
@@ -1496,9 +1434,9 @@ class TrainingDataset:
         # Add BA names alongside the IDs for readability.
         duckdb_add_column(
             duck_conn=self.duck_conn,
-            duck_table_name='ba_counts',
-            base_column_name='benthic_attribute_id',
-            new_column_name='benthic_attribute_name',
+            duck_table_name="ba_counts",
+            base_column_name="benthic_attribute_id",
+            new_column_name="benthic_attribute_name",
             base_to_new_func=get_benthic_attribute_library().id_to_name,
         )
         # Sort by total annotation count, and reorder columns
@@ -1535,17 +1473,17 @@ class TrainingDataset:
         # Add BA names for readability.
         duckdb_add_column(
             duck_conn=self.duck_conn,
-            duck_table_name='bagf_counts',
-            base_column_name='benthic_attribute_id',
-            new_column_name='benthic_attribute_name',
+            duck_table_name="bagf_counts",
+            base_column_name="benthic_attribute_id",
+            new_column_name="benthic_attribute_name",
             base_to_new_func=get_benthic_attribute_library().id_to_name,
         )
         # Add GF names for readability.
         duckdb_add_column(
             duck_conn=self.duck_conn,
-            duck_table_name='bagf_counts',
-            base_column_name='growth_form_id',
-            new_column_name='growth_form_name',
+            duck_table_name="bagf_counts",
+            base_column_name="growth_form_id",
+            new_column_name="growth_form_name",
             base_to_new_func=get_growth_form_library().id_to_name,
         )
         # Sort by annotation count, and reorder columns
@@ -1568,10 +1506,7 @@ class TrainingDataset:
 
         # Overall counts.
         counts = self.duck_conn.execute(
-            "SELECT"
-            " count(*),"
-            " count(DISTINCT image_id)"
-            " FROM annotations"
+            "SELECT count(*), count(DISTINCT image_id) FROM annotations"
         ).fetchall()[0]
         total_annotations = counts[0]
         num_of_images = counts[1]
@@ -1596,18 +1531,18 @@ class TrainingDataset:
         bas_dropped = num_of_bas - non_dropped_bas
         bagfs_dropped = num_of_bagfs - non_dropped_bagfs
 
-        self.artifacts.train_summary_stats = dict(
-            annotations=total_annotations,
-            annotations_train=self.labels.train.label_count,
-            annotations_ref=self.labels.ref.label_count,
-            annotations_val=self.labels.val.label_count,
-            annotations_dropped=annotations_dropped,
-            images=num_of_images,
-            bas=num_of_bas,
-            bas_dropped=bas_dropped,
-            bagfs=num_of_bagfs,
-            bagfs_dropped=bagfs_dropped,
-        )
+        self.artifacts.train_summary_stats = {
+            "annotations": total_annotations,
+            "annotations_train": self.labels.train.label_count,
+            "annotations_ref": self.labels.ref.label_count,
+            "annotations_val": self.labels.val.label_count,
+            "annotations_dropped": annotations_dropped,
+            "images": num_of_images,
+            "bas": num_of_bas,
+            "bas_dropped": bas_dropped,
+            "bagfs": num_of_bagfs,
+            "bagfs_dropped": bagfs_dropped,
+        }
 
     def describe_train_summary_stats(self):
         return (
@@ -1620,21 +1555,22 @@ class TrainingDataset:
             " Representation: {bas} BAs and"
             " {bagfs} BA-GF combos"
             " (dropped: {bas_dropped} BAs, {bagfs_dropped} BA-GFs).".format(
-                **self.artifacts.train_summary_stats)
+                **self.artifacts.train_summary_stats
+            )
         )
 
     def get_annotations(self, log_spec: str):
 
-        if log_spec == 'all':
+        if log_spec == "all":
             query = "SELECT * FROM annotations"
-        elif match := re.fullmatch(r's(\d+)', log_spec):
+        elif match := re.fullmatch(r"s(\d+)", log_spec):
             cn_source_id = match.groups()[0]
             query = (
                 f"SELECT * FROM annotations"
                 f" WHERE site = '{Sites.CORALNET.value}'"
                 f" AND project_id = '{cn_source_id}'"
             )
-        elif match := re.fullmatch(r'i(\d+)', log_spec):
+        elif match := re.fullmatch(r"i(\d+)", log_spec):
             cn_image_id = match.groups()[0]
             query = (
                 f"SELECT * FROM annotations"
@@ -1642,8 +1578,7 @@ class TrainingDataset:
                 f" AND image_id = '{cn_image_id}'"
             )
         else:
-            raise ValueError(
-                f"Unsupported annotations log spec: {log_spec}")
+            raise ValueError(f"Unsupported annotations log spec: {log_spec}")
 
         return self.duck_conn.execute(query).fetch_df()
 
@@ -1659,6 +1594,7 @@ class TrainingRunner:
     It could also be extended to support tracking software other than
     MLflow.
     """
+
     dataset: TrainingDataset = None
     profiled_sections: list[dict]
 
@@ -1699,15 +1635,14 @@ class TrainingRunner:
 
             if settings.spacer_batch_size is not None:
                 batch_size = settings.spacer_batch_size
-                logger.info(
-                    f"Batch size: {batch_size} (from SPACER_BATCH_SIZE)")
+                logger.info(f"Batch size: {batch_size} (from SPACER_BATCH_SIZE)")
             else:
-                batch_size, available_gb = training_batch_size(
-                    num_classes=num_classes)
+                batch_size, available_gb = training_batch_size(num_classes=num_classes)
                 logger.info(
                     f"Batch size: {batch_size}"
                     f" (auto, based on {available_gb:.1f} GB"
-                    f" available memory, {num_classes} classes)")
+                    f" available memory, {num_classes} classes)"
+                )
 
             class_weight, weighting_log = self._compute_class_weights(
                 self.dataset.labels,
@@ -1718,8 +1653,7 @@ class TrainingRunner:
                 batch_size=batch_size,
                 on_epoch_end=self._on_epoch_end,
                 class_weight=class_weight,
-                early_stopping_patience=(
-                    self.training_options.early_stopping_patience),
+                early_stopping_patience=(self.training_options.early_stopping_patience),
             )
 
             # Train directly via the trainer — no pickle round-trip. pyspacer's
@@ -1729,22 +1663,15 @@ class TrainingRunner:
             labels = preprocess_labels(self.dataset.labels)
             with self.section_profiling("PySpacer training call"):
                 clf_calibrated, val_results, return_msg = trainer(
-                    labels, self.training_options.epochs, [])
+                    labels, self.training_options.epochs, []
+                )
 
-            logger.info(
-                f"Train time (from return msg):"
-                f" {return_msg.runtime:.1f} s")
+            logger.info(f"Train time (from return msg): {return_msg.runtime:.1f} s")
 
-            logger.info(
-                f"New model's accuracy:"
-                f" {self.format_metric(return_msg.acc)}")
+            logger.info(f"New model's accuracy: {self.format_metric(return_msg.acc)}")
 
-            ref_accs_str = ", ".join(
-                [str(self.format_metric(acc))
-                 for acc in return_msg.ref_accs])
-            logger.debug(
-                f"Accuracy progression during training epochs:"
-                f" {ref_accs_str}")
+            ref_accs_str = ", ".join([str(self.format_metric(acc)) for acc in return_msg.ref_accs])
+            logger.debug(f"Accuracy progression during training epochs: {ref_accs_str}")
 
             return return_msg, clf_calibrated, val_results
         finally:
@@ -1791,41 +1718,44 @@ class TrainingRunner:
         # spread for the kept (post-transform) class set.
         rows = []
         for cls, count in class_counts.items():
-            rows.append(dict(
-                bagf_id=cls,
-                count=int(count),
-                weight=float(weights.get(cls, 0.0)),
-            ))
+            rows.append(
+                {
+                    "bagf_id": cls,
+                    "count": int(count),
+                    "weight": float(weights.get(cls, 0.0)),
+                }
+            )
         per_class_df = pd.DataFrame(rows)
 
         # Summary stats over the weights produced for the kept class set.
         weight_series = per_class_df["weight"]
         if len(weight_series) > 0 and weight_series.max() > 0:
-            summary = dict(
-                weight_mean=float(weight_series.mean()),
-                weight_median=float(weight_series.median()),
-                weight_p5=float(weight_series.quantile(0.05)),
-                weight_p95=float(weight_series.quantile(0.95)),
-                weight_max_min_ratio=float(
-                    weight_series.max() / max(weight_series.min(), 1e-12)),
-                n_classes=int(len(per_class_df)),
-            )
+            summary = {
+                "weight_mean": float(weight_series.mean()),
+                "weight_median": float(weight_series.median()),
+                "weight_p5": float(weight_series.quantile(0.05)),
+                "weight_p95": float(weight_series.quantile(0.95)),
+                "weight_max_min_ratio": float(
+                    weight_series.max() / max(weight_series.min(), 1e-12)
+                ),
+                "n_classes": int(len(per_class_df)),
+            }
         else:
-            summary = dict(
-                weight_mean=0.0,
-                weight_median=0.0,
-                weight_p5=0.0,
-                weight_p95=0.0,
-                weight_max_min_ratio=0.0,
-                n_classes=int(len(per_class_df)),
-            )
+            summary = {
+                "weight_mean": 0.0,
+                "weight_median": 0.0,
+                "weight_p5": 0.0,
+                "weight_p95": 0.0,
+                "weight_max_min_ratio": 0.0,
+                "n_classes": int(len(per_class_df)),
+            }
 
-        return weights, dict(
-            enabled=True,
-            options=opts,
-            per_class_df=per_class_df,
-            summary=summary,
-        )
+        return weights, {
+            "enabled": True,
+            "options": opts,
+            "per_class_df": per_class_df,
+            "summary": summary,
+        }
 
     def log_dataset_artifacts(self):
         """
@@ -1842,7 +1772,7 @@ class TrainingRunner:
     @staticmethod
     def current_time_str():
         current_time = datetime.now()
-        return current_time.strftime('%Y%m%dT%H%M%S')
+        return current_time.strftime("%Y%m%dT%H%M%S")
 
     @staticmethod
     def format_metric(metric: float):
@@ -1852,13 +1782,7 @@ class TrainingRunner:
 
 
 class MLflowTrainingRunner(TrainingRunner):
-
-    def __init__(
-        self,
-        *args,
-        mlflow_options: MLflowOptions = None,
-        **kwargs
-    ):
+    def __init__(self, *args, mlflow_options: MLflowOptions = None, **kwargs):
         # Normalize Settings -> SPACER_*/MLFLOW_* env vars *before* the first
         # mlflow_connect() below, which needs MLFLOW_HTTP_REQUEST_MAX_RETRIES to
         # be set (otherwise a failed initial connection retries far more times
@@ -1878,43 +1802,46 @@ class MLflowTrainingRunner(TrainingRunner):
 
         model_name = self._get_model_name()
         if run_name is None:
-            run_name = f'{model_name}-{self.current_time_str()}'
+            run_name = f"{model_name}-{self.current_time_str()}"
 
         logger.info(f"Experiment: {self.mlflow_options.experiment_name}")
         mlflow.enable_system_metrics_logging()
         mlflow.set_experiment(self.mlflow_options.experiment_name)
 
         with mlflow.start_run(run_name=run_name):
-
             # Add swap monitoring to MLflow's system metrics polling loop.
             run_id = mlflow.active_run().info.run_id
             if run_id in run_id_to_system_metrics_monitor:
                 run_id_to_system_metrics_monitor[run_id].monitors.append(SwapMonitor())
 
-            training_options_to_log = dict(
-                epochs=self.training_options.epochs,
-                early_stopping_patience=(
+            training_options_to_log = {
+                "epochs": self.training_options.epochs,
+                "early_stopping_patience": (
                     self.training_options.early_stopping_patience
-                    if self.training_options.early_stopping_patience
-                    is not None else ''
+                    if self.training_options.early_stopping_patience is not None
+                    else ""
                 ),
-            )
+            }
 
             mlflow.log_params(training_options_to_log)
 
-            dataset_options_to_log = dict(
-                include_mermaid=self.dataset_options.include_mermaid,
-                coralnet_sources_csv=os.path.basename(
-                    self.dataset_options.coralnet_sources_csv or ''),
-                drop_growthforms=self.dataset_options.drop_growthforms,
-                label_rollup_spec_csv=os.path.basename(
-                    self.dataset_options.label_rollup_spec_csv or ''),
-                excluded_labels_csv=os.path.basename(
-                    self.dataset_options.excluded_labels_csv or ''),
-                included_labels_csv=os.path.basename(
-                    self.dataset_options.included_labels_csv or ''),
-                ref_val_ratios=str(self.dataset_options.ref_val_ratios),
-            )
+            dataset_options_to_log = {
+                "include_mermaid": self.dataset_options.include_mermaid,
+                "coralnet_sources_csv": os.path.basename(
+                    self.dataset_options.coralnet_sources_csv or ""
+                ),
+                "drop_growthforms": self.dataset_options.drop_growthforms,
+                "label_rollup_spec_csv": os.path.basename(
+                    self.dataset_options.label_rollup_spec_csv or ""
+                ),
+                "excluded_labels_csv": os.path.basename(
+                    self.dataset_options.excluded_labels_csv or ""
+                ),
+                "included_labels_csv": os.path.basename(
+                    self.dataset_options.included_labels_csv or ""
+                ),
+                "ref_val_ratios": str(self.dataset_options.ref_val_ratios),
+            }
             mlflow.log_params(dataset_options_to_log)
 
             # Subsample params: logged before training so they show up
@@ -1922,9 +1849,7 @@ class MLflowTrainingRunner(TrainingRunner):
             # run later fails. Per-class realized counts are logged as
             # an artifact after dataset prep (see _log_subsample_audit).
             if self.dataset_options.subsample is not None:
-                mlflow.log_params(
-                    self.dataset_options.subsample.to_log_dict()
-                )
+                mlflow.log_params(self.dataset_options.subsample.to_log_dict())
             else:
                 mlflow.log_params({"subsample/enabled": False})
 
@@ -1932,9 +1857,7 @@ class MLflowTrainingRunner(TrainingRunner):
             # show up alongside dataset/training params even if the
             # training run later fails.
             if self.dataset_options.weighting is not None:
-                mlflow.log_params(
-                    self.dataset_options.weighting.to_log_dict()
-                )
+                mlflow.log_params(self.dataset_options.weighting.to_log_dict())
             else:
                 mlflow.log_params({"weighting/enabled": False})
 
@@ -1945,7 +1868,8 @@ class MLflowTrainingRunner(TrainingRunner):
             # exported artifact against them below; the finally cleans up.
             try:
                 return_msg, clf_calibrated, val_results = super().run(
-                    run_name=run_name, cleanup_dataset=False)
+                    run_name=run_name, cleanup_dataset=False
+                )
 
                 # Weighting artifacts/metrics are stashed by the base run()
                 # via _compute_class_weights. Log them now.
@@ -1953,21 +1877,21 @@ class MLflowTrainingRunner(TrainingRunner):
                 self._log_subsample_audit()
 
                 profiles_df = pd.DataFrame(self.profiled_sections)
-                self.log_dataframe(profiles_df, 'profiled_sections')
+                self.log_dataframe(profiles_df, "profiled_sections")
 
                 # val_results now comes from the trainer in memory (no reload).
-                mlflow.log_dict(val_results.serialize(), 'valresult.json')
+                mlflow.log_dict(val_results.serialize(), "valresult.json")
 
                 # Eval-the-artifact: export the deployable TorchScript artifact
                 # and evaluate THAT, so the logged metrics reflect what actually
                 # ships. The parity reference batch is the first val batch (real
                 # features, loaded the same way the coordinator loads val data).
-                ref_batch = next(
-                    iter(self.dataset.labels.val.load_data_in_batches()), None)
+                ref_batch = next(iter(self.dataset.labels.val.load_data_in_batches()), None)
                 if ref_batch is None:
                     raise RuntimeError(
                         "Val split yielded no feature batch; refusing to export"
-                        " an unverified artifact.")
+                        " an unverified artifact."
+                    )
                 # load_data_in_batches yields zip(*pairs); unpacking gives a
                 # (features, labels) pair of tuples, same as the metrics
                 # coordinator consumes. We only need the feature vectors.
@@ -1980,10 +1904,12 @@ class MLflowTrainingRunner(TrainingRunner):
                     artifact_dir = Path(artifact_dir)
                     # Parity-gated export (ParityError if max|Δ| > 1e-6).
                     model_pt, _manifest, _max_diff = export_artifact(
-                        clf_calibrated, artifact_dir,
+                        clf_calibrated,
+                        artifact_dir,
                         reference_features=ref_features,
-                        config={'patch_size': 224})
-                    model_json = artifact_dir / 'model.json'
+                        config={"patch_size": 224},
+                    )
+                    model_json = artifact_dir / "model.json"
                     # ManifestError on schema/class-count/input_dim mismatch.
                     predictor = load_predictor(model_pt, model_json)
 
@@ -1996,28 +1922,25 @@ class MLflowTrainingRunner(TrainingRunner):
                         clf=predictor,
                     )
 
-                    coordinator = MetricsCoordinator(
-                        ctx, duck_conn=self.dataset.duck_conn)
+                    coordinator = MetricsCoordinator(ctx, duck_conn=self.dataset.duck_conn)
                     coordinator.compute_and_log_all()
 
                     # Accuracy and ref_accs come from pyspacer's return_msg, not
                     # our metrics module (training-progress, not artifact-based).
-                    mlflow.log_metric(
-                        'accuracy', self.format_metric(return_msg.acc))
+                    mlflow.log_metric("accuracy", self.format_metric(return_msg.acc))
                     ref_accs_dict = {
                         epoch: self.format_metric(acc)
                         for epoch, acc in enumerate(return_msg.ref_accs, 1)
                     }
-                    mlflow.log_dict(
-                        ref_accs_dict, 'epoch_ref_accuracies.yaml')
+                    mlflow.log_dict(ref_accs_dict, "epoch_ref_accuracies.yaml")
 
                     # Store the deployable artifact (model.pt + model.json) as
                     # the registered model via the pyfunc shim — one loader
                     # everywhere.
-                    signature = mlflow.models.infer_signature(
-                        params=training_options_to_log)
+                    signature = mlflow.models.infer_signature(params=training_options_to_log)
                     model_info = log_artifact_model(
-                        model_pt, model_json,
+                        model_pt,
+                        model_json,
                         registered_model_name=model_name,
                         signature=signature,
                     )
@@ -2045,39 +1968,31 @@ class MLflowTrainingRunner(TrainingRunner):
         easy to query post-hoc.
         """
         step = metrics["epoch"]
-        mlflow.log_metric(
-            "epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
+        mlflow.log_metric("epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
         if metrics.get("val_accuracy") is not None:
-            mlflow.log_metric(
-                "epoch/val_accuracy", metrics["val_accuracy"], step=step)
+            mlflow.log_metric("epoch/val_accuracy", metrics["val_accuracy"], step=step)
         if metrics.get("val_loss") is not None:
-            mlflow.log_metric(
-                "epoch/val_loss", metrics["val_loss"], step=step)
+            mlflow.log_metric("epoch/val_loss", metrics["val_loss"], step=step)
         if metrics["training_loss"] is not None:
-            mlflow.log_metric(
-                "epoch/training_loss", metrics["training_loss"], step=step)
-        mlflow.log_metric(
-            "epoch/cumulative_seconds",
-            metrics["cumulative_seconds"], step=step)
+            mlflow.log_metric("epoch/training_loss", metrics["training_loss"], step=step)
+        mlflow.log_metric("epoch/cumulative_seconds", metrics["cumulative_seconds"], step=step)
 
         # One-shot early-stopping summary (only present on the final
         # epoch). Logged as scalar metrics with no step so they appear
         # alongside the other run-level numbers.
         if metrics.get("final_epoch") is not None:
+            mlflow.log_metric("early_stop/final_epoch", float(metrics["final_epoch"]), step=0)
             mlflow.log_metric(
-                "early_stop/final_epoch",
-                float(metrics["final_epoch"]), step=0)
-            mlflow.log_metric(
-                "early_stop/triggered",
-                float(bool(metrics.get("early_stopped"))), step=0)
+                "early_stop/triggered", float(bool(metrics.get("early_stopped"))), step=0
+            )
             if metrics.get("best_val_epoch") is not None:
                 mlflow.log_metric(
-                    "early_stop/best_val_epoch",
-                    float(metrics["best_val_epoch"]), step=0)
+                    "early_stop/best_val_epoch", float(metrics["best_val_epoch"]), step=0
+                )
             if metrics.get("best_val_loss") is not None:
                 mlflow.log_metric(
-                    "early_stop/best_val_loss",
-                    float(metrics["best_val_loss"]), step=0)
+                    "early_stop/best_val_loss", float(metrics["best_val_loss"]), step=0
+                )
 
     def _get_model_name(self):
         """
@@ -2088,34 +2003,29 @@ class MLflowTrainingRunner(TrainingRunner):
         the 'inner' one.
         """
         if self.mlflow_options.model_name is not None:
-
             model_name = self.mlflow_options.model_name
 
         else:
-
             if self.dataset_options.included_labels_csv:
                 as_path = Path(self.dataset_options.included_labels_csv)
-                model_name = f'Include{self.alphanumeric_only_str(as_path.stem)}'
+                model_name = f"Include{self.alphanumeric_only_str(as_path.stem)}"
             elif self.dataset_options.excluded_labels_csv:
                 as_path = Path(self.dataset_options.excluded_labels_csv)
-                model_name = f'Exclude{self.alphanumeric_only_str(as_path.stem)}'
+                model_name = f"Exclude{self.alphanumeric_only_str(as_path.stem)}"
             else:
-                model_name = 'AllLabels'
+                model_name = "AllLabels"
 
             if self.dataset_options.label_rollup_spec_csv:
                 as_path = Path(self.dataset_options.label_rollup_spec_csv)
-                model_name += f'-Rollup{self.alphanumeric_only_str(as_path.stem)}'
+                model_name += f"-Rollup{self.alphanumeric_only_str(as_path.stem)}"
 
             if self.dataset_options.coralnet_sources_csv:
                 as_path = Path(self.dataset_options.coralnet_sources_csv)
-                model_name += f'-{self.alphanumeric_only_str(as_path.stem)}'
+                model_name += f"-{self.alphanumeric_only_str(as_path.stem)}"
 
             if (subsample := self.dataset_options.subsample) is not None:
                 # e.g. -SubStratified400000 or -SubBalanced1770000
-                model_name += (
-                    f'-Sub{subsample.strategy.capitalize()}'
-                    f'{subsample.total_annotations}'
-                )
+                model_name += f"-Sub{subsample.strategy.capitalize()}{subsample.total_annotations}"
 
         # There's a 62 character limit for the 'model package group name'
         # which is built from the model name. For example, it could be the
@@ -2129,7 +2039,7 @@ class MLflowTrainingRunner(TrainingRunner):
         """
         Return a version of s which has the non-alphanumeric chars removed.
         """
-        return ''.join([char for char in s if char.isalnum()])
+        return "".join([char for char in s if char.isalnum()])
 
     def _log_weighting_artifacts(self) -> None:
         """Log per-class weight artifacts and summary metrics gathered by
@@ -2139,11 +2049,11 @@ class MLflowTrainingRunner(TrainingRunner):
         DataFrame with human-readable BA and GF names from the same
         libraries the rest of the runner uses for taxonomy resolution.
         """
-        weighting_log = getattr(self, '_weighting_log', None)
-        if not weighting_log or not weighting_log.get('enabled'):
+        weighting_log = getattr(self, "_weighting_log", None)
+        if not weighting_log or not weighting_log.get("enabled"):
             return
 
-        df = weighting_log['per_class_df'].copy()
+        df = weighting_log["per_class_df"].copy()
 
         # Decorate with BA/GF names. Defensive: if any label fails to
         # parse, leave the name columns blank rather than failing the run.
@@ -2152,28 +2062,39 @@ class MLflowTrainingRunner(TrainingRunner):
 
         def _decorate(row):
             try:
-                ba_id, gf_id = split_ba_gf(row['bagf_id'])
-                ba_name = ba_library.id_to_name(ba_id) if ba_id else ''
-                gf_name = gf_library.id_to_name(gf_id) if gf_id else ''
+                ba_id, gf_id = split_ba_gf(row["bagf_id"])
+                ba_name = ba_library.id_to_name(ba_id) if ba_id else ""
+                gf_name = gf_library.id_to_name(gf_id) if gf_id else ""
             except Exception:
-                ba_id, gf_id, ba_name, gf_name = '', '', '', ''
-            return pd.Series(dict(
-                ba_id=ba_id, gf_id=gf_id,
-                ba_name=ba_name, gf_name=gf_name,
-            ))
+                ba_id, gf_id, ba_name, gf_name = "", "", "", ""
+            return pd.Series(
+                {
+                    "ba_id": ba_id,
+                    "gf_id": gf_id,
+                    "ba_name": ba_name,
+                    "gf_name": gf_name,
+                }
+            )
 
         decorated = df.apply(_decorate, axis=1)
         df = pd.concat([df, decorated], axis=1)
-        df = df[[
-            'bagf_id', 'ba_id', 'ba_name', 'gf_id', 'gf_name',
-            'count', 'weight',
-        ]].sort_values('weight', ascending=False)
+        df = df[
+            [
+                "bagf_id",
+                "ba_id",
+                "ba_name",
+                "gf_id",
+                "gf_name",
+                "count",
+                "weight",
+            ]
+        ].sort_values("weight", ascending=False)
 
-        self.log_dataframe(df, 'weighting/per_class_weights')
+        self.log_dataframe(df, "weighting/per_class_weights")
 
-        summary = weighting_log['summary']
+        summary = weighting_log["summary"]
         for k, v in summary.items():
-            mlflow.log_metric(f'weighting/{k}', float(v), step=0)
+            mlflow.log_metric(f"weighting/{k}", float(v), step=0)
 
     def _log_subsample_audit(self) -> None:
         """Log the per-class audit CSV and a single realized-total metric
@@ -2187,7 +2108,7 @@ class MLflowTrainingRunner(TrainingRunner):
         ``stratification_level``, the same audit covers it without
         changes here.
         """
-        df = getattr(self.dataset, '_subsample_audit_df', None)
+        df = getattr(self.dataset, "_subsample_audit_df", None)
         if df is None:
             return
         # Decorate with human-readable names so the CSV is self-contained.
@@ -2196,28 +2117,37 @@ class MLflowTrainingRunner(TrainingRunner):
 
         def _decorate(row):
             try:
-                ba_name = ba_library.id_to_name(row['benthic_attribute_id']) \
-                    if row['benthic_attribute_id'] else ''
-                gf_name = gf_library.id_to_name(row['growth_form_id']) \
-                    if row['growth_form_id'] else ''
+                ba_name = (
+                    ba_library.id_to_name(row["benthic_attribute_id"])
+                    if row["benthic_attribute_id"]
+                    else ""
+                )
+                gf_name = (
+                    gf_library.id_to_name(row["growth_form_id"]) if row["growth_form_id"] else ""
+                )
             except Exception:
-                ba_name, gf_name = '', ''
-            return pd.Series({'ba_name': ba_name, 'gf_name': gf_name})
+                ba_name, gf_name = "", ""
+            return pd.Series({"ba_name": ba_name, "gf_name": gf_name})
 
         if not df.empty:
             decorated = df.apply(_decorate, axis=1)
             out = pd.concat([df, decorated], axis=1)
-            out = out[[
-                'benthic_attribute_id', 'ba_name',
-                'growth_form_id', 'gf_name',
-                'pre_count', 'target_n', 'realized_n',
-            ]].sort_values('realized_n', ascending=False)
-            self.log_dataframe(out, 'subsample/per_class_counts')
+            out = out[
+                [
+                    "benthic_attribute_id",
+                    "ba_name",
+                    "growth_form_id",
+                    "gf_name",
+                    "pre_count",
+                    "target_n",
+                    "realized_n",
+                ]
+            ].sort_values("realized_n", ascending=False)
+            self.log_dataframe(out, "subsample/per_class_counts")
 
-        realized = getattr(self.dataset, '_subsample_realized_total', None)
+        realized = getattr(self.dataset, "_subsample_realized_total", None)
         if realized is not None:
-            mlflow.log_metric('subsample/realized_total', float(realized),
-                              step=0)
+            mlflow.log_metric("subsample/realized_total", float(realized), step=0)
 
     @staticmethod
     def _existing_ancestor(path: str) -> str:
@@ -2226,20 +2156,20 @@ class MLflowTrainingRunner(TrainingRunner):
         while not os.path.exists(p):
             parent = os.path.dirname(p)
             if parent == p:
-                return '/'
+                return "/"
             p = parent
         return p
 
     def log_system_specs(self):
         mlflow.log_dict(
-            dict(
-                total_ram_gb=psutil.virtual_memory().total / 10**9,
-                free_storage_gb=psutil.disk_usage(
-                    self._existing_ancestor(
-                        settings.feature_cache_dir or '/')
-                ).free / 10**9,
-            ),
-            'system_specs.yaml',
+            {
+                "total_ram_gb": psutil.virtual_memory().total / 10**9,
+                "free_storage_gb": psutil.disk_usage(
+                    self._existing_ancestor(settings.feature_cache_dir or "/")
+                ).free
+                / 10**9,
+            },
+            "system_specs.yaml",
         )
 
     def log_dataset_artifacts(self):
@@ -2250,63 +2180,57 @@ class MLflowTrainingRunner(TrainingRunner):
 
         artifacts = self.dataset.artifacts
 
-        mlflow.log_text(
-            self.dataset.cn_source_filter.csv_text,
-            'coralnet_sources_included.csv')
+        mlflow.log_text(self.dataset.cn_source_filter.csv_text, "coralnet_sources_included.csv")
 
         if self.dataset.label_filter.inclusion:
-            csv_filename = 'labels_included.csv'
+            csv_filename = "labels_included.csv"
         else:
-            csv_filename = 'labels_excluded.csv'
-        mlflow.log_text(
-            self.dataset.label_filter.csv_text, csv_filename)
+            csv_filename = "labels_excluded.csv"
+        mlflow.log_text(self.dataset.label_filter.csv_text, csv_filename)
 
-        mlflow.log_text(
-            self.dataset.rollup_spec.csv_text, 'rollup_spec.csv')
+        mlflow.log_text(self.dataset.rollup_spec.csv_text, "rollup_spec.csv")
 
         # Number of images and annotations from each CN source and from
         # MERMAID.
         # First, before filtering (this is what's present in S3).
         # https://pandas.pydata.org/docs/reference/api/pandas.concat.html
         self.log_dataframe(
-            pd.concat([
-                artifacts.mermaid_project_stats,
-                artifacts.coralnet_project_stats,
-            ]),
-            'project_stats_raw')
+            pd.concat(
+                [
+                    artifacts.mermaid_project_stats,
+                    artifacts.coralnet_project_stats,
+                ]
+            ),
+            "project_stats_raw",
+        )
         # And here, after filtering (this is what training actually gets).
         self.log_dataframe(
-            self.dataset.compute_project_stats(has_training_sets=True),
-            'project_stats_train_data')
+            self.dataset.compute_project_stats(has_training_sets=True), "project_stats_train_data"
+        )
 
-        mlflow.log_dict(
-            artifacts.train_summary_stats, 'train_summary.yaml')
+        mlflow.log_dict(artifacts.train_summary_stats, "train_summary.yaml")
 
-        self.log_dataframe(artifacts.ba_counts, 'ba_counts')
-        self.log_dataframe(artifacts.bagf_counts, 'bagf_counts')
+        self.log_dataframe(artifacts.ba_counts, "ba_counts")
+        self.log_dataframe(artifacts.bagf_counts, "bagf_counts")
 
         if not self.dataset.cn_source_filter.is_empty():
             # These only apply if CoralNet data is included.
-            self.log_dataframe(
-                artifacts.coralnet_label_mapping,
-                'coralnet_label_mapping')
-            self.log_dataframe(
-                artifacts.unmapped_labels,
-                'unmapped_labels')
+            self.log_dataframe(artifacts.coralnet_label_mapping, "coralnet_label_mapping")
+            self.log_dataframe(artifacts.unmapped_labels, "unmapped_labels")
 
         # Log extra annotations, if specified.
         if self.mlflow_options.extra_annotations_to_log is not None:
             log_spec = self.mlflow_options.extra_annotations_to_log.lower()
             df = self.dataset.get_annotations(log_spec)
 
-            self.log_dataframe(df, f'annotations_{log_spec}')
+            self.log_dataframe(df, f"annotations_{log_spec}")
 
         # Always log the validation split annotations so others can
         # independently re-evaluate the model.
         val_annotations_df = self.dataset.duck_conn.execute(
             "SELECT * FROM annotations WHERE training_set = 'val'"
         ).fetch_df()
-        self.log_dataframe(val_annotations_df, 'annotations_val')
+        self.log_dataframe(val_annotations_df, "annotations_val")
 
     def log_dataframe(self, df, filestem):
         """

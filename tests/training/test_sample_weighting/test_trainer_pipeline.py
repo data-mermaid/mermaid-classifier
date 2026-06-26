@@ -7,6 +7,7 @@ monkeypatching the module globals in train.py with fakes — those real
 classes hit the MERMAID API on construction, which is unsuitable for
 unit tests.
 """
+
 from __future__ import annotations
 
 import types
@@ -20,7 +21,8 @@ from mermaid_classifier.training.sample_weighting import (
 )
 
 from .fakes import (
-    FakeGFLibrary, small_tree,
+    FakeGFLibrary,
+    small_tree,
 )
 
 
@@ -42,13 +44,15 @@ class TrainerPipelineTest(unittest.TestCase):
     def setUpClass(cls):
         # Import train.py with the MERMAID API singletons patched out.
         # This avoids any network call at import time.
-        with mock.patch(
-            "mermaid_classifier.common.benthic_attributes."
-            "BenthicAttributeLibrary",
-            return_value=small_tree(),
-        ), mock.patch(
-            "mermaid_classifier.common.benthic_attributes.GrowthFormLibrary",
-            return_value=FakeGFLibrary({"g1": "GF1", "g2": "GF2"}),
+        with (
+            mock.patch(
+                "mermaid_classifier.common.benthic_attributes.BenthicAttributeLibrary",
+                return_value=small_tree(),
+            ),
+            mock.patch(
+                "mermaid_classifier.common.benthic_attributes.GrowthFormLibrary",
+                return_value=FakeGFLibrary({"g1": "GF1", "g2": "GF2"}),
+            ),
         ):
             from mermaid_classifier.pyspacer import train as train_mod
         cls.train_mod = train_mod
@@ -61,12 +65,8 @@ class TrainerPipelineTest(unittest.TestCase):
         fake_ba = small_tree()
         fake_gf = FakeGFLibrary({"g1": "GF1", "g2": "GF2"})
         self._patches = [
-            mock.patch.object(
-                self.train_mod, "get_benthic_attribute_library",
-                lambda: fake_ba),
-            mock.patch.object(
-                self.train_mod, "get_growth_form_library",
-                lambda: fake_gf),
+            mock.patch.object(self.train_mod, "get_benthic_attribute_library", lambda: fake_ba),
+            mock.patch.object(self.train_mod, "get_growth_form_library", lambda: fake_gf),
         ]
         for p in self._patches:
             p.start()
@@ -90,8 +90,7 @@ class TrainerPipelineTest(unittest.TestCase):
         self.assertEqual(log, {"enabled": False})
 
     def test_weighting_disabled_skips_computation(self):
-        runner = self._make_runner(
-            weighting=SampleWeightingOptions(enabled=False))
+        runner = self._make_runner(weighting=SampleWeightingOptions(enabled=False))
         labels = _fake_labels({combine_ba_gf("A1", "g1"): 100})
         weights, log = runner._compute_class_weights(labels)
         self.assertIsNone(weights)
@@ -110,8 +109,7 @@ class TrainerPipelineTest(unittest.TestCase):
         self.assertIsNotNone(weights)
         self.assertEqual(set(weights), set(counts))
         for label, w in weights.items():
-            self.assertGreater(
-                w, 0.0, f"weight for {label!r} should be positive")
+            self.assertGreater(w, 0.0, f"weight for {label!r} should be positive")
         self.assertTrue(log["enabled"])
 
     def test_log_structure_contains_required_summary_keys(self):
@@ -124,8 +122,12 @@ class TrainerPipelineTest(unittest.TestCase):
         self.assertIn("per_class_df", log)
         self.assertIn("summary", log)
         for key in (
-            "weight_mean", "weight_median", "weight_p5", "weight_p95",
-            "weight_max_min_ratio", "n_classes",
+            "weight_mean",
+            "weight_median",
+            "weight_p5",
+            "weight_p95",
+            "weight_max_min_ratio",
+            "n_classes",
         ):
             self.assertIn(key, log["summary"])
         # Per-class DataFrame no longer carries a rare_action column —

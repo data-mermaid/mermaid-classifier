@@ -10,6 +10,7 @@ config.py). Both schemas read the same YAML file independently with
 See `mermaid-api/iac/sagemaker-launcher-convention.md` for the schema
 authority.
 """
+
 from __future__ import annotations
 
 from typing import Literal
@@ -106,7 +107,9 @@ def parse_run_config(
     data = yaml.safe_load(yaml_text)
     if not isinstance(data, dict):
         from pydantic import ValidationError
+
         raise ValidationError.from_exception_data(
-            "RunConfig", [{"type": "model_type", "loc": (), "input": data}])
+            "RunConfig", [{"type": "model_type", "loc": (), "input": data}]
+        )
     model = RunConfig if strict else _LooseRunConfig
     return model.model_validate(data)

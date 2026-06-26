@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta
 import logging
+from datetime import datetime, timedelta
 
 import mlflow
 
@@ -11,34 +11,36 @@ def logging_config_for_script(name):
     Call this to set up a logging config that prints info messages,
     and file-logs info and debug messages.
     """
-    logging.config.dictConfig({
-        'version': 1,
-        'formatters': {
-            'default': {
-                'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            }
-        },
-        'handlers': {
-            'console': {
-                'level': 'INFO',
-                'class': 'logging.StreamHandler',
-                'stream': 'ext://sys.stdout',
+    logging.config.dictConfig(
+        {
+            "version": 1,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                }
             },
-            'file': {
-                'level': 'DEBUG',
-                'class': 'logging.FileHandler',
-                'filename': f'{name}.log',
-                # Clear logs of the previous run
-                'mode': 'w',
+            "handlers": {
+                "console": {
+                    "level": "INFO",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                },
+                "file": {
+                    "level": "DEBUG",
+                    "class": "logging.FileHandler",
+                    "filename": f"{name}.log",
+                    # Clear logs of the previous run
+                    "mode": "w",
+                },
             },
-        },
-        'loggers': {
-            name: {
-                'handlers': ['console', 'file'],
-                'level': 'DEBUG',
-            }
-        },
-    })
+            "loggers": {
+                name: {
+                    "handlers": ["console", "file"],
+                    "level": "DEBUG",
+                }
+            },
+        }
+    )
     return logging.getLogger(name)
 
 
@@ -58,10 +60,10 @@ def mlflow_connect(tracking_uri: str | None = None) -> timedelta:
             raise RuntimeError(
                 "Could not connect to the MLflow tracking server."
                 " Is the tracking server up and running?"
-            )
+            ) from e
         # If it's some other kind of MlflowException, just re-raise
         # for debugging purposes.
-        raise e
+        raise
 
     time_after_connect = datetime.now()
     # Return the time taken to connect.

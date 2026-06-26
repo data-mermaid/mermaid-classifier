@@ -2,6 +2,7 @@
 balanced accuracy, and Matthews Correlation Coefficient."""
 
 from collections import Counter
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,6 +22,12 @@ from mermaid_classifier.pyspacer.metrics._results import (
     MetricGroupResult,
     ScalarMetric,
 )
+
+if TYPE_CHECKING:
+    from mermaid_classifier.common.benthic_attributes import (
+        BenthicAttributeLibrary,
+        GrowthFormLibrary,
+    )
 
 
 def _hierarchical_class_order(val_results: ValResults) -> list[int]:
@@ -49,15 +56,15 @@ def _hierarchical_class_order(val_results: ValResults) -> list[int]:
     dist_matrix = (dist_matrix + dist_matrix.T) / 2
 
     condensed = squareform(dist_matrix, checks=False)
-    Z = linkage(condensed, method='average')
+    Z = linkage(condensed, method="average")
     return list(leaves_list(Z))
 
 
 def _build_confusion_matrix(
     val_results: ValResults,
     normalize: bool,
-    ba_library: 'BenthicAttributeLibrary',
-    gf_library: 'GrowthFormLibrary',
+    ba_library: "BenthicAttributeLibrary",
+    gf_library: "GrowthFormLibrary",
     class_order: list[int],
 ) -> tuple[pd.DataFrame, plt.Figure]:
     """Build a confusion matrix DataFrame and matplotlib Figure.
@@ -68,7 +75,7 @@ def _build_confusion_matrix(
         y_true=val_results.gt,
         y_pred=val_results.est,
         labels=range(len(val_results.classes)),
-        normalize='true' if normalize else None,
+        normalize="true" if normalize else None,
     )
 
     if normalize:
@@ -79,13 +86,12 @@ def _build_confusion_matrix(
     matrix = matrix[np.ix_(class_order, class_order)]
 
     bagf_names = [
-        ba_library.bagf_id_to_name(
-            val_results.classes[class_index], gf_library)
+        ba_library.bagf_id_to_name(val_results.classes[class_index], gf_library)
         for class_index in class_order
     ]
 
     df = pd.DataFrame(data=matrix, columns=bagf_names)
-    df.insert(loc=0, column='-', value=bagf_names)
+    df.insert(loc=0, column="-", value=bagf_names)
 
     num_labels = len(bagf_names)
     fig_size = max(12, num_labels * 0.6)
@@ -93,26 +99,27 @@ def _build_confusion_matrix(
     try:
         # Matplotlib visualization of the confusion matrix.
         display = sklearn.metrics.ConfusionMatrixDisplay(
-            confusion_matrix=matrix, display_labels=bagf_names)
+            confusion_matrix=matrix, display_labels=bagf_names
+        )
         display.plot(
             ax=ax,
-            cmap='Blues',
+            cmap="Blues",
             # Prevent "100" displaying as "1e+02".
-            values_format='d',
+            values_format="d",
             # A color legend feels unnecessary here.
             colorbar=False,
         )
 
         # Move x-axis labels to the top.
-        ax.xaxis.set_label_position('top')
-        ax.xaxis.set_ticks_position('top')
+        ax.xaxis.set_label_position("top")
+        ax.xaxis.set_ticks_position("top")
         # Rotate x-axis tick labels to prevent their texts from overlapping.
         label_font_size = max(8, min(12, 150 / num_labels))
         plt.setp(
             ax.get_xticklabels(),
             rotation=45,
-            ha='left',
-            rotation_mode='anchor',
+            ha="left",
+            rotation_mode="anchor",
             fontsize=label_font_size,
         )
         # Match y-axis labels' font size with the x axis.
@@ -137,22 +144,23 @@ def compute_confusion_matrices(ctx: MetricsContext) -> MetricGroupResult:
     class_order = _hierarchical_class_order(ctx.val_results)
 
     for normalize, filestem in [
-        (False, 'confusion_matrix/frequencies'),
-        (True, 'confusion_matrix/percents'),
+        (False, "confusion_matrix/frequencies"),
+        (True, "confusion_matrix/percents"),
     ]:
         try:
             df, fig = _build_confusion_matrix(
-                ctx.val_results, normalize, ctx.ba_library, ctx.gf_library,
+                ctx.val_results,
+                normalize,
+                ctx.ba_library,
+                ctx.gf_library,
                 class_order,
             )
         except Exception:
             for fig_result in result.figures:
                 plt.close(fig_result.fig)
             raise
-        result.dataframes.append(
-            DataFrameResult(df=df, artifact_path=filestem))
-        result.figures.append(
-            FigureResult(fig=fig, artifact_path=filestem + '.png'))
+        result.dataframes.append(DataFrameResult(df=df, artifact_path=filestem))
+        result.figures.append(FigureResult(fig=fig, artifact_path=filestem + ".png"))
 
     return result
 
@@ -163,14 +171,14 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
 
     # Convert the valresults to a pandas dataframe.
 
-    actual_annotations = pd.Categorical(
-        [val_results.classes[i] for i in val_results.gt])
-    predicted_annotations = pd.Categorical(
-        [val_results.classes[i] for i in val_results.est])
-    annotations_df = pd.DataFrame({
-        'actual': actual_annotations,
-        'predicted': predicted_annotations,
-    })
+    actual_annotations = pd.Categorical([val_results.classes[i] for i in val_results.gt])
+    predicted_annotations = pd.Categorical([val_results.classes[i] for i in val_results.est])
+    annotations_df = pd.DataFrame(
+        {
+            "actual": actual_annotations,
+            "predicted": predicted_annotations,
+        }
+    )
 
     # Precision, recall, F1: per label
 
@@ -178,15 +186,14 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
     label_counts = Counter(val_results.classes[i] for i in val_results.gt)
 
     for label in val_results.classes:
-
         precision = sklearn.metrics.precision_score(
-            annotations_df['actual'],
-            annotations_df['predicted'],
+            annotations_df["actual"],
+            annotations_df["predicted"],
             # This makes it produce single-label metrics.
             labels=[label],
             # For single-label, micro and macro are the same, so it doesn't
             # matter which we pass in for `average`.
-            average='micro',
+            average="micro",
             # If any label is lacking true positives and false positives,
             # or true positives and false negatives, either precision or
             # recall may have zero in the denominator of the calculation.
@@ -194,10 +201,10 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
             zero_division=0.0,
         )
         recall = sklearn.metrics.recall_score(
-            annotations_df['actual'],
-            annotations_df['predicted'],
+            annotations_df["actual"],
+            annotations_df["predicted"],
             labels=[label],
-            average='micro',
+            average="micro",
             zero_division=0.0,
         )
 
@@ -207,18 +214,20 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
         else:
             f1_score = 2 * (precision * recall) / (precision + recall)
 
-        per_label_metrics.append(dict(
-            bagf_name=ctx.ba_library.bagf_id_to_name(label, ctx.gf_library),
-            precision=ctx.format_func(precision),
-            recall=ctx.format_func(recall),
-            f1_score=ctx.format_func(f1_score),
-            n_samples=int(label_counts.get(label, 0)),
-            bagf_id=label,
-        ))
+        per_label_metrics.append(
+            {
+                "bagf_name": ctx.ba_library.bagf_id_to_name(label, ctx.gf_library),
+                "precision": ctx.format_func(precision),
+                "recall": ctx.format_func(recall),
+                "f1_score": ctx.format_func(f1_score),
+                "n_samples": int(label_counts.get(label, 0)),
+                "bagf_id": label,
+            }
+        )
 
     # Precision, recall, F1: overall
 
-    overall_metrics = dict()
+    overall_metrics = {}
 
     # average='macro' calculates precision for each class and then averages
     # them, treating all classes equally irrespective of their frequency
@@ -230,25 +239,22 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
     precision = sklearn.metrics.precision_score(
         actual_annotations,
         predicted_annotations,
-        average='macro',
+        average="macro",
         zero_division=0.0,
     )
     recall = sklearn.metrics.recall_score(
         actual_annotations,
         predicted_annotations,
-        average='macro',
+        average="macro",
         zero_division=0.0,
     )
-    if (precision + recall) > 0:
-        f1_score = 2 * (precision * recall) / (precision + recall)
-    else:
-        f1_score = 0.0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
 
-    overall_metrics |= dict(
-        precision_macro=ctx.format_func(precision),
-        recall_macro=ctx.format_func(recall),
-        f1_macro=ctx.format_func(f1_score),
-    )
+    overall_metrics |= {
+        "precision_macro": ctx.format_func(precision),
+        "recall_macro": ctx.format_func(recall),
+        "f1_macro": ctx.format_func(f1_score),
+    }
 
     # Build result
 
@@ -260,13 +266,11 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
 
     # Per-label metrics as a DataFrame artifact.
     result.dataframes.append(
-        DataFrameResult(
-            df=pd.DataFrame(per_label_metrics),
-            artifact_path='metrics_per_label'))
+        DataFrameResult(df=pd.DataFrame(per_label_metrics), artifact_path="metrics_per_label")
+    )
 
     # Overall metrics as a dict artifact.
-    result.dicts.append(
-        DictResult(data=overall_metrics, artifact_path='metrics_overall.yaml'))
+    result.dicts.append(DictResult(data=overall_metrics, artifact_path="metrics_overall.yaml"))
 
     return result
 
@@ -281,17 +285,12 @@ def compute_balanced_accuracy_mcc(ctx: MetricsContext) -> MetricGroupResult:
     gt_labels = [ctx.val_results.classes[i] for i in ctx.val_results.gt]
     est_labels = [ctx.val_results.classes[i] for i in ctx.val_results.est]
 
-    balanced_acc = sklearn.metrics.balanced_accuracy_score(
-        gt_labels, est_labels)
+    balanced_acc = sklearn.metrics.balanced_accuracy_score(gt_labels, est_labels)
     mcc = sklearn.metrics.matthews_corrcoef(gt_labels, est_labels)
 
     return MetricGroupResult(
         scalars=[
-            ScalarMetric(
-                name='balanced_accuracy',
-                value=ctx.format_func(balanced_acc)),
-            ScalarMetric(
-                name='mcc',
-                value=ctx.format_func(mcc)),
+            ScalarMetric(name="balanced_accuracy", value=ctx.format_func(balanced_acc)),
+            ScalarMetric(name="mcc", value=ctx.format_func(mcc)),
         ],
     )

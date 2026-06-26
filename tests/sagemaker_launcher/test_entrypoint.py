@@ -12,28 +12,26 @@ imports or hit AWS. Tests verify:
   * an exception in runner.run propagates to sys.exit(1) with the
     traceback in log output
 """
+
 from __future__ import annotations
 
 import importlib.util
 import io
 import logging
 import os
-import sys
 import textwrap
 import unittest
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ENTRYPOINT_PATH = REPO_ROOT / "scripts" / "sagemaker_train_entrypoint.py"
 
 
 def _load_entrypoint():
-    spec = importlib.util.spec_from_file_location(
-        "sagemaker_train_entrypoint", ENTRYPOINT_PATH)
+    spec = importlib.util.spec_from_file_location("sagemaker_train_entrypoint", ENTRYPOINT_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -65,33 +63,35 @@ def _config_dir():
         tmp = Path(td)
         (tmp / "training_config.yaml").write_text(MINIMAL_YAML)
         (tmp / "sources.csv").write_text("id\n123\n")
-        (tmp / "rollups.csv").write_text(
-            "from_ba_id,from_gf_id,to_ba_id,to_gf_id\n")
+        (tmp / "rollups.csv").write_text("from_ba_id,from_gf_id,to_ba_id,to_gf_id\n")
         (tmp / "included_labels.csv").write_text("ba_id,gf_id\n")
         yield tmp
 
 
 class EntrypointHappyPathTest(unittest.TestCase):
-
     def setUp(self):
         # Wipe env vars the entrypoint will set so we can detect them.
         for key in (
-            "MLFLOW_TRACKING_SERVER", "WEIGHTS_LOCATION",
+            "MLFLOW_TRACKING_SERVER",
+            "WEIGHTS_LOCATION",
         ):
             os.environ.pop(key, None)
         self.module = _load_entrypoint()
 
     def test_main_runs_runner_once_with_built_options(self):
-        with _config_dir() as cfg_dir:
-            with patch.object(
-                self.module, "_resolve_runner_factory"
-            ) as get_factory:
-                fake_runner = MagicMock()
-                factory = MagicMock(return_value=fake_runner)
-                get_factory.return_value = factory
-                self.module.main([
-                    "--config-dir", str(cfg_dir),
-                ])
+        with (
+            _config_dir() as cfg_dir,
+            patch.object(self.module, "_resolve_runner_factory") as get_factory,
+        ):
+            fake_runner = MagicMock()
+            factory = MagicMock(return_value=fake_runner)
+            get_factory.return_value = factory
+            self.module.main(
+                [
+                    "--config-dir",
+                    str(cfg_dir),
+                ]
+            )
         factory.assert_called_once()
         fake_runner.run.assert_called_once_with()
 
@@ -100,13 +100,13 @@ class EntrypointHappyPathTest(unittest.TestCase):
             observed = {}
 
             def factory(*args, **kwargs):
-                observed["mlflow"] = os.environ.get(
-                    "MLFLOW_TRACKING_SERVER")
+                observed["mlflow"] = os.environ.get("MLFLOW_TRACKING_SERVER")
                 observed["weights"] = os.environ.get("WEIGHTS_LOCATION")
                 return MagicMock()
 
             with patch.object(
-                self.module, "_resolve_runner_factory",
+                self.module,
+                "_resolve_runner_factory",
                 return_value=factory,
             ):
                 self.module.main(["--config-dir", str(cfg_dir)])
@@ -121,12 +121,15 @@ class EntrypointHappyPathTest(unittest.TestCase):
         root.addHandler(handler)
         root.setLevel(logging.INFO)
         try:
-            with _config_dir() as cfg_dir:
-                with patch.object(
-                    self.module, "_resolve_runner_factory",
+            with (
+                _config_dir() as cfg_dir,
+                patch.object(
+                    self.module,
+                    "_resolve_runner_factory",
                     return_value=lambda *a, **kw: MagicMock(),
-                ):
-                    self.module.main(["--config-dir", str(cfg_dir)])
+                ),
+            ):
+                self.module.main(["--config-dir", str(cfg_dir)])
         finally:
             root.removeHandler(handler)
         log_text = buf.getvalue()
@@ -141,31 +144,32 @@ class EntrypointHappyPathTest(unittest.TestCase):
                     indices.append(i)
                     break
             else:
-                self.fail(
-                    f"Missing ENTER marker for stage '{stage}' in log:\n"
-                    f"{log_text}")
+                self.fail(f"Missing ENTER marker for stage '{stage}' in log:\n{log_text}")
         self.assertEqual(
-            indices, sorted(indices),
-            "Stage ENTER markers appeared out of order. The env-before-"
-            "pyspacer-import contract relies on apply_env preceding "
-            "build_options preceding runner_run. Got indices: %s for "
-            "stages %s" % (indices, stage_names),
+            indices,
+            sorted(indices),
+            f"Stage ENTER markers appeared out of order. The env-before-"
+            f"pyspacer-import contract relies on apply_env preceding "
+            f"build_options preceding runner_run. Got indices: {indices} for "
+            f"stages {stage_names}",
         )
 
 
 class EntrypointFailureTest(unittest.TestCase):
-
     def test_runner_exception_exits_nonzero(self):
         module = _load_entrypoint()
         with _config_dir() as cfg_dir:
             fake_runner = MagicMock()
             fake_runner.run.side_effect = RuntimeError("boom")
-            with patch.object(
-                module, "_resolve_runner_factory",
-                return_value=lambda *a, **kw: fake_runner,
+            with (
+                patch.object(
+                    module,
+                    "_resolve_runner_factory",
+                    return_value=lambda *a, **kw: fake_runner,
+                ),
+                self.assertRaises(SystemExit) as cm,
             ):
-                with self.assertRaises(SystemExit) as cm:
-                    module.main(["--config-dir", str(cfg_dir)])
+                module.main(["--config-dir", str(cfg_dir)])
         self.assertEqual(cm.exception.code, 1)
 
 

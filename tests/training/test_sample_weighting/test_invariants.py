@@ -1,4 +1,5 @@
 """Invariants for compute_class_weights (effective-number weighting)."""
+
 from __future__ import annotations
 
 import math
@@ -36,8 +37,7 @@ class WeightInvariantsTest(unittest.TestCase):
     def test_no_zero_weights(self):
         weights = compute_class_weights(self.counts, SampleWeightingOptions())
         for label, w in weights.items():
-            self.assertGreater(
-                w, 0.0, f"weight for {label!r} is non-positive: {w!r}")
+            self.assertGreater(w, 0.0, f"weight for {label!r} is non-positive: {w!r}")
 
     def test_deterministic(self):
         opts = SampleWeightingOptions()
@@ -50,21 +50,18 @@ class WeightInvariantsTest(unittest.TestCase):
             )
 
     def test_disabled_returns_empty(self):
-        weights = compute_class_weights(
-            self.counts, SampleWeightingOptions(enabled=False))
+        weights = compute_class_weights(self.counts, SampleWeightingOptions(enabled=False))
         self.assertEqual(weights, {})
 
     def test_empty_counts_returns_empty(self):
-        self.assertEqual(
-            compute_class_weights({}, SampleWeightingOptions()), {})
+        self.assertEqual(compute_class_weights({}, SampleWeightingOptions()), {})
 
     def test_weight_ratio_cap_bounds_weight_spread(self):
         # weight_ratio_cap=R must ensure max/min <= R. Weights are
         # universally positive, so the cap applies to the full set.
         cap = 5.0
         tol = 1e-9
-        weights = compute_class_weights(
-            self.counts, SampleWeightingOptions(weight_ratio_cap=cap))
+        weights = compute_class_weights(self.counts, SampleWeightingOptions(weight_ratio_cap=cap))
         self.assertGreaterEqual(len(weights), 2)
         ws = list(weights.values())
         self.assertLessEqual(max(ws) / min(ws), cap + tol)

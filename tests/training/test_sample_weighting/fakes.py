@@ -9,6 +9,7 @@ accessors are monkeypatched:
   - ``get_ancestor_ids(ba_id)``: list[str], root-first
   - ``GFLibrary.id_to_name`` / ``BALibrary.id_to_name``: id -> name.
 """
+
 from __future__ import annotations
 
 
@@ -61,15 +62,15 @@ class FakeGFLibrary:
 def small_tree() -> FakeBALibrary:
     """A small canonical tree used by several tests:
 
-        root (None)
-         |- A
-         |   |- A1
-         |   |- A2
-         |- B
-         |   |- B1
-         |- C   (single-child chain to test depth collapse)
-         |   |- C1
-         |       |- C1a
+    root (None)
+     |- A
+     |   |- A1
+     |   |- A2
+     |- B
+     |   |- B1
+     |- C   (single-child chain to test depth collapse)
+     |   |- C1
+     |       |- C1a
     """
     edges: list[tuple[str, str | None]] = [
         ("A", None),

@@ -1,4 +1,5 @@
 """SampleWeightingOptions dataclass with eager validation."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -28,8 +29,7 @@ class SampleWeightingOptions:
     def __post_init__(self) -> None:
         if self.weight_ratio_cap is not None and self.weight_ratio_cap < 1.0:
             raise ValueError(
-                f"weight_ratio_cap must be None or >= 1.0,"
-                f" got {self.weight_ratio_cap!r}"
+                f"weight_ratio_cap must be None or >= 1.0, got {self.weight_ratio_cap!r}"
             )
 
     def to_log_dict(self) -> dict[str, object]:

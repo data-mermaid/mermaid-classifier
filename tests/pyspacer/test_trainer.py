@@ -62,13 +62,15 @@ class CalibrateInBatchesTest(unittest.TestCase):
         n_samples = 500
         n_features = 50
         n_per_class = n_samples // n_classes
-        classes = [f'class_{i}' for i in range(n_classes)]
+        classes = [f"class_{i}" for i in range(n_classes)]
 
         centroids = rng.randn(n_classes, n_features).astype(np.float32) * 3.0
-        X = np.vstack([
-            centroids[i] + rng.randn(n_per_class, n_features).astype(np.float32)
-            for i in range(n_classes)
-        ])
+        X = np.vstack(
+            [
+                centroids[i] + rng.randn(n_per_class, n_features).astype(np.float32)
+                for i in range(n_classes)
+            ]
+        )
         y = np.array([cls for cls in classes for _ in range(n_per_class)])
 
         # Shuffle so train/ref split isn't class-stratified by half.
@@ -85,9 +87,7 @@ class CalibrateInBatchesTest(unittest.TestCase):
         # so the trained weights — and the cross-BLAS FP drift they produce —
         # vary every run, making the calibration-equivalence comparison flaky
         # on Linux CI.
-        clf = MLPClassifier(
-            hidden_layer_sizes=(20,), learning_rate_init=1e-3,
-            random_state=0)
+        clf = MLPClassifier(hidden_layer_sizes=(20,), learning_rate_init=1e-3, random_state=0)
         clf.partial_fit(X_train, y_train, classes=classes)
 
         # Standard calibration (current approach)
@@ -127,16 +127,23 @@ class CalibrateInBatchesTest(unittest.TestCase):
         for cc_std, cc_batch in zip(
             clf_std.calibrated_classifiers_,
             clf_batched.calibrated_classifiers_,
+            strict=False,
         ):
-            for cal_std, cal_batch in zip(
-                cc_std.calibrators, cc_batch.calibrators
-            ):
+            for cal_std, cal_batch in zip(cc_std.calibrators, cc_batch.calibrators, strict=False):
                 np.testing.assert_allclose(
-                    cal_std.a_, cal_batch.a_, rtol=1e-3, atol=5e-3,
-                    err_msg="Sigmoid parameter 'a' differs")
+                    cal_std.a_,
+                    cal_batch.a_,
+                    rtol=1e-3,
+                    atol=5e-3,
+                    err_msg="Sigmoid parameter 'a' differs",
+                )
                 np.testing.assert_allclose(
-                    cal_std.b_, cal_batch.b_, rtol=1e-3, atol=5e-3,
-                    err_msg="Sigmoid parameter 'b' differs")
+                    cal_std.b_,
+                    cal_batch.b_,
+                    rtol=1e-3,
+                    atol=5e-3,
+                    err_msg="Sigmoid parameter 'b' differs",
+                )
 
         # Compare predict_proba outputs — the actual API surface.
         # Even if sigmoid params differ at the solver-tolerance level,
@@ -152,15 +159,15 @@ class CalibrateInBatchesTest(unittest.TestCase):
         proba_std = clf_std.predict_proba(X_test)
         proba_batch = clf_batched.predict_proba(X_test)
         np.testing.assert_allclose(
-            proba_std, proba_batch, rtol=3e-3, atol=2e-4,
-            err_msg="predict_proba outputs differ")
+            proba_std, proba_batch, rtol=3e-3, atol=2e-4, err_msg="predict_proba outputs differ"
+        )
 
         # Verify PySpacer compatibility attributes
         self.assertIsInstance(clf_batched, CalibratedClassifierCV)
-        self.assertEqual(clf_batched.cv, 'prefit')
-        self.assertTrue(hasattr(clf_batched, 'calibrated_classifiers_'))
-        self.assertTrue(hasattr(clf_batched, 'classes_'))
-        self.assertTrue(hasattr(clf_batched, 'estimator'))
+        self.assertEqual(clf_batched.cv, "prefit")
+        self.assertTrue(hasattr(clf_batched, "calibrated_classifiers_"))
+        self.assertTrue(hasattr(clf_batched, "classes_"))
+        self.assertTrue(hasattr(clf_batched, "estimator"))
 
 
 class EarlyStoppingConstructorTest(unittest.TestCase):
@@ -207,7 +214,7 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         """
         rng = np.random.RandomState(seed)
         n_features = 16
-        classes = ['c0', 'c1', 'c2']
+        classes = ["c0", "c1", "c2"]
 
         def _make_split(n):
             X = rng.randn(n, n_features).astype(np.float32)
@@ -231,6 +238,7 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
                     x_batch = [X[j] for j in range(i, end)]
                     y_batch = list(y[i:end])
                     yield x_batch, y_batch
+
             obj.load_data_in_batches = gen
             return obj
 
@@ -259,12 +267,11 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
                 super().__init__(*a, **kw)
                 self_._scripted_remaining = list(schedule)
 
-            def _calc_acc_and_log_loss_batched(
-                self_, clf, labels, classes_list):
+            def _calc_acc_and_log_loss_batched(self_, clf, labels, classes_list):
                 if not self_._scripted_remaining:
                     raise AssertionError(
-                        "val_loss schedule exhausted; trainer ran for"
-                        " more epochs than expected")
+                        "val_loss schedule exhausted; trainer ran for more epochs than expected"
+                    )
                 loss = self_._scripted_remaining.pop(0)
                 return 0.5, float(loss)
 
@@ -288,12 +295,12 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         trainer, captured = self._run(schedule, patience=None, n_epochs=5)
         self.assertEqual(len(captured), 5)
         info = trainer._early_stop_info
-        self.assertFalse(info['enabled'])
-        self.assertEqual(info['stop_reason'], 'budget_exhausted')
-        self.assertEqual(info['final_epoch'], 5)
+        self.assertFalse(info["enabled"])
+        self.assertEqual(info["stop_reason"], "budget_exhausted")
+        self.assertEqual(info["final_epoch"], 5)
         # When ES is off, no snapshot is kept.
-        self.assertIsNone(info['best_val_epoch'])
-        self.assertIsNone(info['best_val_loss'])
+        self.assertIsNone(info["best_val_epoch"])
+        self.assertIsNone(info["best_val_loss"])
 
     def test_monotone_down_no_stop(self):
         """patience=2 + always-improving val_loss: no early stop."""
@@ -301,12 +308,12 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         trainer, captured = self._run(schedule, patience=2, n_epochs=5)
         self.assertEqual(len(captured), 5)
         info = trainer._early_stop_info
-        self.assertTrue(info['enabled'])
-        self.assertEqual(info['stop_reason'], 'budget_exhausted')
-        self.assertEqual(info['final_epoch'], 5)
+        self.assertTrue(info["enabled"])
+        self.assertEqual(info["stop_reason"], "budget_exhausted")
+        self.assertEqual(info["final_epoch"], 5)
         # Best is the last epoch (5).
-        self.assertEqual(info['best_val_epoch'], 5)
-        self.assertAlmostEqual(info['best_val_loss'], 0.6)
+        self.assertEqual(info["best_val_epoch"], 5)
+        self.assertAlmostEqual(info["best_val_loss"], 0.6)
 
     def test_v_shape_triggers_after_patience(self):
         """val_loss minimum at epoch 3, then rises for patience+ epochs.
@@ -316,27 +323,27 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         schedule = [1.0, 0.9, 0.8, 0.85, 0.9, 1.0, 1.1]  # extras unused
         trainer, captured = self._run(schedule, patience=2, n_epochs=10)
         info = trainer._early_stop_info
-        self.assertTrue(info['enabled'])
-        self.assertEqual(info['stop_reason'], 'early_stopping')
+        self.assertTrue(info["enabled"])
+        self.assertEqual(info["stop_reason"], "early_stopping")
         # Trained 5 epochs total: 3 to best + 2 patience = stop @ epoch 5.
-        self.assertEqual(info['final_epoch'], 5)
-        self.assertEqual(info['best_val_epoch'], 3)
-        self.assertAlmostEqual(info['best_val_loss'], 0.8)
+        self.assertEqual(info["final_epoch"], 5)
+        self.assertEqual(info["best_val_epoch"], 3)
+        self.assertAlmostEqual(info["best_val_loss"], 0.8)
         # Five callback events fired (one per epoch run).
         self.assertEqual(len(captured), 5)
         # Final-epoch callback carries the summary fields.
-        self.assertTrue(captured[-1]['early_stopped'])
-        self.assertEqual(captured[-1]['final_epoch'], 5)
-        self.assertEqual(captured[-1]['best_val_epoch'], 3)
+        self.assertTrue(captured[-1]["early_stopped"])
+        self.assertEqual(captured[-1]["final_epoch"], 5)
+        self.assertEqual(captured[-1]["best_val_epoch"], 3)
 
     def test_patience_one_immediate_stop_on_first_regression(self):
         """patience=1: stops the very first epoch val_loss doesn't improve."""
         schedule = [1.0, 0.5, 0.6]  # best=ep2, regress at ep3 -> stop
         trainer, captured = self._run(schedule, patience=1, n_epochs=10)
         info = trainer._early_stop_info
-        self.assertEqual(info['stop_reason'], 'early_stopping')
-        self.assertEqual(info['final_epoch'], 3)
-        self.assertEqual(info['best_val_epoch'], 2)
+        self.assertEqual(info["stop_reason"], "early_stopping")
+        self.assertEqual(info["final_epoch"], 3)
+        self.assertEqual(info["best_val_epoch"], 2)
 
     def test_summary_only_on_final_epoch(self):
         """early_stopped/best_val_epoch fields only on the last epoch."""
@@ -344,13 +351,13 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         trainer, captured = self._run(schedule, patience=2, n_epochs=10)
         # Non-final epochs MUST NOT have the summary fields.
         for cb in captured[:-1]:
-            self.assertNotIn('early_stopped', cb)
-            self.assertNotIn('final_epoch', cb)
+            self.assertNotIn("early_stopped", cb)
+            self.assertNotIn("final_epoch", cb)
         # Final epoch DOES have them.
-        self.assertIn('early_stopped', captured[-1])
-        self.assertIn('final_epoch', captured[-1])
-        self.assertIn('best_val_epoch', captured[-1])
-        self.assertIn('best_val_loss', captured[-1])
+        self.assertIn("early_stopped", captured[-1])
+        self.assertIn("final_epoch", captured[-1])
+        self.assertIn("best_val_epoch", captured[-1])
+        self.assertIn("best_val_loss", captured[-1])
 
 
 class TrainerCleanupGuardTest(unittest.TestCase):
@@ -361,10 +368,8 @@ class TrainerCleanupGuardTest(unittest.TestCase):
         self.source = Path(trainer_module.__file__).read_text()
 
     def test_no_sgd_or_clf_type_references(self):
-        for token in ('SGDClassifier', 'clf_type'):
-            self.assertNotIn(
-                token, self.source,
-                f"{token} should not reappear in trainer.py")
+        for token in ("SGDClassifier", "clf_type"):
+            self.assertNotIn(token, self.source, f"{token} should not reappear in trainer.py")
 
     def test_no_dead_pyspacer_imports(self):
         # Walk the actual import nodes (not substrings) so equivalent
@@ -375,25 +380,24 @@ class TrainerCleanupGuardTest(unittest.TestCase):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     # `import spacer.config[.x]` in any aliased form
-                    if (alias.name == 'spacer.config'
-                            or alias.name.startswith('spacer.config.')):
+                    if alias.name == "spacer.config" or alias.name.startswith("spacer.config."):
                         offenders.append(f"import {alias.name}")
             elif isinstance(node, ast.ImportFrom):
-                module = node.module or ''
+                module = node.module or ""
                 names = {alias.name for alias in node.names}
                 # `from spacer import config`
-                if module == 'spacer' and 'config' in names:
+                if module == "spacer" and "config" in names:
                     offenders.append("from spacer import config")
                 # `from spacer.config[.x] import ...`
-                if (module == 'spacer.config'
-                        or module.startswith('spacer.config.')):
+                if module == "spacer.config" or module.startswith("spacer.config."):
                     offenders.append(f"from {module} import ...")
                 # `from spacer.train_utils import calc_acc`
-                if module == 'spacer.train_utils' and 'calc_acc' in names:
-                    offenders.append(
-                        "from spacer.train_utils import calc_acc")
+                if module == "spacer.train_utils" and "calc_acc" in names:
+                    offenders.append("from spacer.train_utils import calc_acc")
         self.assertEqual(
-            offenders, [],
+            offenders,
+            [],
             "trainer.py should not re-import spacer.config or the dead"
             f" calc_acc helper (use sklearn.metrics.accuracy_score); found:"
-            f" {offenders}")
+            f" {offenders}",
+        )

@@ -4,7 +4,6 @@ from typing import Literal
 import psutil
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # EfficientNet feature vector dimensionality (4096 floats).
 _FEATURE_DIM = 4096
 # Bytes per float64 element (numpy / sklearn default).
@@ -71,10 +70,11 @@ class Settings(BaseSettings):
     Though none of the settings are 100% strictly required, some are
     needed in common cases.
     """
+
     # ML inputs
 
-    coralnet_train_data_bucket: str = 'coral-reef-training'
-    mermaid_train_data_bucket: str = 'coral-reef-training'
+    coralnet_train_data_bucket: str = "coral-reef-training"
+    mermaid_train_data_bucket: str = "coral-reef-training"
     # Annotation file paths/patterns require settings to be overrideable
     # for unit tests, because these files are read in with DuckDB,
     # and DuckDB is not easy (if even possible) to use with Python
@@ -83,16 +83,14 @@ class Settings(BaseSettings):
         # The placeholders get filled in with a format() call during use.
         # Custom patterns don't HAVE to include the placeholders.
         # They just get used if they're present.
-        's3://{coralnet_train_data_bucket}'
-        '/s{source_id}/annotations.csv'
+        "s3://{coralnet_train_data_bucket}/s{source_id}/annotations.csv"
     )
     mermaid_annotations_parquet_pattern: str = (
-        's3://{mermaid_train_data_bucket}'
-        '/mermaid/mermaid_confirmed_annotations.parquet'
+        "s3://{mermaid_train_data_bucket}/mermaid/mermaid_confirmed_annotations.parquet"
     )
     weights_location: str | None = None
-    aws_region: str = 'us-east-1'
-    aws_anonymous: Literal['False', 'True'] = 'False'
+    aws_region: str = "us-east-1"
+    aws_anonymous: Literal["False", "True"] = "False"
     aws_key_id: str | None = None
     aws_secret: str | None = None
     aws_session_token: str | None = None
@@ -112,8 +110,7 @@ class Settings(BaseSettings):
     mlflow_http_request_max_retries: str | None = None
     mlflow_default_experiment_name: str | None = None
 
-    model_config = SettingsConfigDict(
-        env_file='.env', env_file_encoding='utf-8')
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
 settings = Settings()
@@ -125,28 +122,28 @@ def set_env_vars_for_packages():
     configured with .env, rather than having to be manually set as
     env vars.
     """
-    setting_to_env_name = dict(
+    setting_to_env_name = {
         # Filesystem directory to use for caching extractor weights that
         # were downloaded from S3 or from a URL.
         # This is required if loading weights from such a source.
-        spacer_extractors_cache_dir='SPACER_EXTRACTORS_CACHE_DIR',
-        aws_region='SPACER_AWS_REGION',
+        "spacer_extractors_cache_dir": "SPACER_EXTRACTORS_CACHE_DIR",
+        "aws_region": "SPACER_AWS_REGION",
         # If True, AWS is accessed without any credentials, which can
         # simplify setup while still allowing access to public S3 files.
-        aws_anonymous='SPACER_AWS_ANONYMOUS',
+        "aws_anonymous": "SPACER_AWS_ANONYMOUS",
         # Accessing private AWS data is most easily done by using the
         # instance metadata service within AWS, but here are other
         # ways. For example, log into AWS with SSO, choose a role to view
         # a temporary key+secret+token for, and plug those 3 values in.
-        aws_key_id='SPACER_AWS_ACCESS_KEY_ID',
-        aws_secret='SPACER_AWS_SECRET_ACCESS_KEY',
-        aws_session_token='SPACER_AWS_SESSION_TOKEN',
+        "aws_key_id": "SPACER_AWS_ACCESS_KEY_ID",
+        "aws_secret": "SPACER_AWS_SECRET_ACCESS_KEY",
+        "aws_session_token": "SPACER_AWS_SESSION_TOKEN",
         # When retrieving or saving models, this is the number of
         # exponential-backoff retries that MLflow will attempt when it's
         # having trouble connecting.
         # Default 7, but that takes forever; 2 is recommended.
-        mlflow_http_request_max_retries='MLFLOW_HTTP_REQUEST_MAX_RETRIES',
-    )
+        "mlflow_http_request_max_retries": "MLFLOW_HTTP_REQUEST_MAX_RETRIES",
+    }
     for setting_name, env_var_name in setting_to_env_name.items():
         var_value = getattr(settings, setting_name)
         if var_value:
@@ -160,4 +157,4 @@ def set_env_vars_for_packages():
     # trainer.py, the ref set no longer needs to fit in memory at once,
     # so we set this to a very large value to let ref_val_ratios alone
     # determine the ref set size.
-    os.environ['SPACER_TRAINING_BATCH_LABEL_COUNT'] = str(2**31 - 1)
+    os.environ["SPACER_TRAINING_BATCH_LABEL_COUNT"] = str(2**31 - 1)

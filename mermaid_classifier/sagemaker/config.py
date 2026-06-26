@@ -11,6 +11,7 @@ and ONLY THEN import pyspacer.
 `build_options()` performs the heavy imports lazily inside the method
 so callers can sequence env-var application correctly.
 """
+
 from __future__ import annotations
 
 import re
@@ -19,7 +20,6 @@ from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 
 # Mirrors the MLflow registered-model name regex enforced by the
 # SageMaker MLflow registry. Validating at config load fails the job
@@ -87,20 +87,16 @@ class DatasetConfig(BaseModel):
     weighting: WeightingConfig | None = None
 
     def coralnet_sources_csv_path(self, base: Path) -> Path | None:
-        return None if self.coralnet_sources_csv is None \
-            else base / self.coralnet_sources_csv
+        return None if self.coralnet_sources_csv is None else base / self.coralnet_sources_csv
 
     def label_rollup_spec_csv_path(self, base: Path) -> Path | None:
-        return None if self.label_rollup_spec_csv is None \
-            else base / self.label_rollup_spec_csv
+        return None if self.label_rollup_spec_csv is None else base / self.label_rollup_spec_csv
 
     def included_labels_csv_path(self, base: Path) -> Path | None:
-        return None if self.included_labels_csv is None \
-            else base / self.included_labels_csv
+        return None if self.included_labels_csv is None else base / self.included_labels_csv
 
     def excluded_labels_csv_path(self, base: Path) -> Path | None:
-        return None if self.excluded_labels_csv is None \
-            else base / self.excluded_labels_csv
+        return None if self.excluded_labels_csv is None else base / self.excluded_labels_csv
 
 
 class TrainingConfig(BaseModel):
@@ -128,9 +124,7 @@ class MLflowConfig(BaseModel):
             return v
         if not _MLFLOW_MODEL_NAME_RE.fullmatch(v):
             bad = sorted({c for c in v if not (c.isalnum() or c == "-")})
-            disallowed = (
-                f" Disallowed characters in value: {bad!r}." if bad else ""
-            )
+            disallowed = f" Disallowed characters in value: {bad!r}." if bad else ""
             raise ValueError(
                 f"model_name {v!r} is not a legal MLflow registered-model "
                 f"name. Required pattern: "
@@ -145,6 +139,7 @@ class MLflowConfig(BaseModel):
 
 class TrainingRunConfig(BaseModel):
     """Top-level schema for `training_config.yaml`."""
+
     model_config = ConfigDict(extra="forbid")
 
     dataset: DatasetConfig
@@ -155,7 +150,7 @@ class TrainingRunConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
-    def from_yaml_path(cls, path: str | Path) -> "TrainingRunConfig":
+    def from_yaml_path(cls, path: str | Path) -> TrainingRunConfig:
         text = Path(path).read_text()
         raw = yaml.safe_load(text) or {}
         return cls.model_validate(raw)
@@ -166,6 +161,7 @@ class TrainingRunConfig(BaseModel):
         Call this BEFORE importing mermaid_classifier.pyspacer.*.
         """
         import os
+
         for key, value in self.env.items():
             os.environ[key] = str(value)
 
@@ -180,12 +176,14 @@ class TrainingRunConfig(BaseModel):
         (DatasetOptions, TrainingOptions, MLflowOptions)
         """
         from mermaid_classifier.pyspacer.train import (
-            DatasetOptions, MLflowOptions, TrainingOptions,
+            DatasetOptions,
+            MLflowOptions,
+            TrainingOptions,
         )
-        from mermaid_classifier.training.subsample import SubsampleOptions
         from mermaid_classifier.training.sample_weighting import (
             SampleWeightingOptions,
         )
+        from mermaid_classifier.training.subsample import SubsampleOptions
 
         d = self.dataset
 
@@ -209,15 +207,11 @@ class TrainingRunConfig(BaseModel):
 
         dataset_options = DatasetOptions(
             include_mermaid=d.include_mermaid,
-            coralnet_sources_csv=_resolve(
-                d.coralnet_sources_csv_path(config_dir)),
+            coralnet_sources_csv=_resolve(d.coralnet_sources_csv_path(config_dir)),
             drop_growthforms=d.drop_growthforms,
-            label_rollup_spec_csv=_resolve(
-                d.label_rollup_spec_csv_path(config_dir)),
-            included_labels_csv=_resolve(
-                d.included_labels_csv_path(config_dir)),
-            excluded_labels_csv=_resolve(
-                d.excluded_labels_csv_path(config_dir)),
+            label_rollup_spec_csv=_resolve(d.label_rollup_spec_csv_path(config_dir)),
+            included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),
+            excluded_labels_csv=_resolve(d.excluded_labels_csv_path(config_dir)),
             ref_val_ratios=tuple(d.ref_val_ratios),
             subsample=subsample,
             weighting=weighting,

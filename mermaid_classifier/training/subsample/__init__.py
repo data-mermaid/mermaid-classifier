@@ -27,6 +27,7 @@ Extension points (see options.py and registry.py for details):
   add an ``oversample`` field to ``SubsampleOptions`` and a second
   SQL pass when that becomes a requirement.
 """
+
 from mermaid_classifier.training.subsample.options import SubsampleOptions
 from mermaid_classifier.training.subsample.registry import (
     SUBSAMPLE_STRATEGIES,

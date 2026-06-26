@@ -1,5 +1,6 @@
 """export_artifact: freeze the calibrated head to TorchScript, parity-gate it
 against the source model, and write the generated manifest."""
+
 from __future__ import annotations
 
 import json
@@ -10,7 +11,11 @@ import numpy as np
 import torch
 
 from mermaid_classifier.pyspacer.inference import (
-    SCHEMA_VERSION, TASK_NAME, PARITY_PROVEN_SKLEARN, ParityError, SklearnPinError,
+    PARITY_PROVEN_SKLEARN,
+    SCHEMA_VERSION,
+    TASK_NAME,
+    ParityError,
+    SklearnPinError,
 )
 from mermaid_classifier.pyspacer.inference.head import build_calibrated_head
 

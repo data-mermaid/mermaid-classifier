@@ -1,4 +1,5 @@
 """SampleWeightingOptions validation tests."""
+
 from __future__ import annotations
 
 import unittest
@@ -34,8 +35,7 @@ class OptionsValidationTest(unittest.TestCase):
 
     def test_to_log_dict_includes_weight_ratio_cap_when_set(self):
         opts = SampleWeightingOptions(weight_ratio_cap=10.0)
-        self.assertEqual(
-            opts.to_log_dict()["weighting/weight_ratio_cap"], 10.0)
+        self.assertEqual(opts.to_log_dict()["weighting/weight_ratio_cap"], 10.0)
 
 
 if __name__ == "__main__":

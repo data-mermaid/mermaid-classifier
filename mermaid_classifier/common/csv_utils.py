@@ -39,6 +39,7 @@ class CsvSpec(abc.ABC):
     - per_item_init_action(): This base class's __init__() will call
       this method for every row in the CSV.
     """
+
     column_specs: list[ColumnSpec]
 
     def __init__(self, csv_file: typing.TextIO):
@@ -56,7 +57,7 @@ class CsvSpec(abc.ABC):
             self.csv_dataframe = pd.DataFrame()
             return
 
-        csv_filename = getattr(csv_file, 'name', "<File-like obj>")
+        csv_filename = getattr(csv_file, "name", "<File-like obj>")
 
         column_names = []
 
@@ -65,9 +66,7 @@ class CsvSpec(abc.ABC):
                 if column_spec.name in self.csv_dataframe.columns:
                     column_name = column_spec.name
                 else:
-                    raise ValueError(
-                        f"{csv_filename}: must have the column"
-                        f" {column_spec.name}")
+                    raise ValueError(f"{csv_filename}: must have the column {column_spec.name}")
             else:
                 # List of str
                 column_name = None
@@ -78,20 +77,18 @@ class CsvSpec(abc.ABC):
                 if column_name is None:
                     candidates_str = ", ".join(column_spec.name)
                     raise ValueError(
-                        f"{csv_filename}: must have at least"
-                        f" one of these columns: {candidates_str}")
+                        f"{csv_filename}: must have at least one of these columns: {candidates_str}"
+                    )
             column_names.append(column_name)
 
         for row_i, (_, row) in enumerate(self.csv_dataframe.iterrows()):
-            values = dict()
-            for spec, name in zip(self.column_specs, column_names):
+            values = {}
+            for spec, name in zip(self.column_specs, column_names, strict=False):
                 # Ensure absent values are None, not ''.
                 value = row.get(name) or None
 
                 if not spec.allow_blank and not value:
-                    raise ValueError(
-                        f"{csv_filename}:"
-                        f"{name} not found in row {row_i + 1}")
+                    raise ValueError(f"{csv_filename}:{name} not found in row {row_i + 1}")
 
                 values[name] = value
 

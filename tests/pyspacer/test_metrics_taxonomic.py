@@ -7,7 +7,12 @@ import matplotlib.pyplot as plt
 from mermaid_classifier.pyspacer.metrics._context import MetricsContext
 from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
-from pyspacer.metrics_test_helpers import MockBALibrary, MockGFLibrary, make_val_results, format_metric
+from pyspacer.metrics_test_helpers import (
+    MockBALibrary,
+    MockGFLibrary,
+    format_metric,
+    make_val_results,
+)
 
 
 def _make_ctx(gt_indices, est_indices, classes, gf_library=None):
@@ -29,17 +34,16 @@ class ErrorAttributionTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1, 2, 3],
             est_indices=[0, 1, 2, 3],
-            classes=['A1::', 'A2::', 'B1::', 'B2::'],
+            classes=["A1::", "A2::", "B1::", "B2::"],
         )
         result = compute_taxonomic(ctx)
 
         scalars = {s.name: s.value for s in result.scalars}
-        self.assertEqual(scalars['cross_branch_error_rate'], 0.0)
-        self.assertEqual(scalars['within_branch_error_rate'], 0.0)
+        self.assertEqual(scalars["cross_branch_error_rate"], 0.0)
+        self.assertEqual(scalars["within_branch_error_rate"], 0.0)
 
         attribution_dfs = [
-            dr for dr in result.dataframes
-            if dr.artifact_path == 'taxonomic/error_attribution'
+            dr for dr in result.dataframes if dr.artifact_path == "taxonomic/error_attribution"
         ]
         self.assertEqual(len(attribution_dfs), 1)
         self.assertEqual(len(attribution_dfs[0].df), 0)
@@ -52,12 +56,12 @@ class ErrorAttributionTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 0, 0],
             est_indices=[2, 2, 2, 2],
-            classes=['A1::', 'A2::', 'B1::', 'B2::'],
+            classes=["A1::", "A2::", "B1::", "B2::"],
         )
         result = compute_taxonomic(ctx)
 
         scalars = {s.name: s.value for s in result.scalars}
-        self.assertGreater(scalars['cross_branch_error_rate'], 0.0)
+        self.assertGreater(scalars["cross_branch_error_rate"], 0.0)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
@@ -67,12 +71,12 @@ class ErrorAttributionTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 0, 0],
             est_indices=[1, 1, 1, 1],
-            classes=['A1::', 'A2::', 'B1::', 'B2::'],
+            classes=["A1::", "A2::", "B1::", "B2::"],
         )
         result = compute_taxonomic(ctx)
 
         scalars = {s.name: s.value for s in result.scalars}
-        self.assertGreater(scalars['within_branch_error_rate'], 0.0)
+        self.assertGreater(scalars["within_branch_error_rate"], 0.0)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
@@ -86,15 +90,15 @@ class TopLevelConfusionTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1, 2, 3],
             est_indices=[0, 1, 2, 3],
-            classes=['A1::', 'A2::', 'B1::', 'B2::'],
+            classes=["A1::", "A2::", "B1::", "B2::"],
         )
         result = compute_taxonomic(ctx)
 
         df_paths = {dr.artifact_path for dr in result.dataframes}
         fig_paths = {fr.artifact_path for fr in result.figures}
 
-        self.assertIn('taxonomic/top_level_confusions', df_paths)
-        self.assertIn('taxonomic/top_level_confusion.png', fig_paths)
+        self.assertIn("taxonomic/top_level_confusions", df_paths)
+        self.assertIn("taxonomic/top_level_confusion.png", fig_paths)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
@@ -105,13 +109,12 @@ class TopLevelConfusionTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 0, 0],
             est_indices=[1, 1, 1, 1],
-            classes=['A1::', 'A2::', 'B1::', 'B2::'],
+            classes=["A1::", "A2::", "B1::", "B2::"],
         )
         result = compute_taxonomic(ctx)
 
         top_level_dfs = [
-            dr for dr in result.dataframes
-            if dr.artifact_path == 'taxonomic/top_level_confusions'
+            dr for dr in result.dataframes if dr.artifact_path == "taxonomic/top_level_confusions"
         ]
         self.assertEqual(len(top_level_dfs), 1)
         df = top_level_dfs[0].df
@@ -121,8 +124,9 @@ class TopLevelConfusionTest(unittest.TestCase):
         if len(df) > 0:
             for _, row in df.iterrows():
                 self.assertEqual(
-                    row['true_top_level'], row['pred_top_level'],
-                    msg='Expected no cross-branch top-level confusions',
+                    row["true_top_level"],
+                    row["pred_top_level"],
+                    msg="Expected no cross-branch top-level confusions",
                 )
 
         for fig_result in result.figures:
@@ -138,13 +142,13 @@ class GrowthFormDifferentiationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1, 0, 1],
             est_indices=[0, 1, 1, 0],
-            classes=['A1::gf1', 'A1::gf2'],
+            classes=["A1::gf1", "A1::gf2"],
         )
         result = compute_taxonomic(ctx)
 
         scalars = {s.name: s.value for s in result.scalars}
-        self.assertIn('gf_accuracy_gf_relevant', scalars)
-        self.assertIn('within_ba_gf_accuracy', scalars)
+        self.assertIn("gf_accuracy_gf_relevant", scalars)
+        self.assertIn("within_ba_gf_accuracy", scalars)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
@@ -154,12 +158,12 @@ class GrowthFormDifferentiationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1, 2, 3],
             est_indices=[0, 1, 2, 3],
-            classes=['A1::', 'A2::', 'B1::', 'B2::'],
+            classes=["A1::", "A2::", "B1::", "B2::"],
         )
         result = compute_taxonomic(ctx)
 
         scalars = {s.name: s.value for s in result.scalars}
-        self.assertEqual(scalars['gf_accuracy_gf_relevant'], 0.0)
+        self.assertEqual(scalars["gf_accuracy_gf_relevant"], 0.0)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
@@ -169,25 +173,25 @@ class ComputeTaxonomicIntegrationTest(unittest.TestCase):
     """Integration tests verifying compute_taxonomic returns all expected
     artifacts."""
 
-    _CLASSES = ['A1::', 'A2::', 'B1::', 'B2::']
+    _CLASSES = ["A1::", "A2::", "B1::", "B2::"]
 
     _EXPECTED_SCALARS = {
-        'cross_branch_error_rate',
-        'within_branch_error_rate',
-        'gf_accuracy_gf_relevant',
-        'within_ba_gf_accuracy',
+        "cross_branch_error_rate",
+        "within_branch_error_rate",
+        "gf_accuracy_gf_relevant",
+        "within_ba_gf_accuracy",
     }
 
     _EXPECTED_DATAFRAMES = {
-        'taxonomic/error_attribution',
-        'taxonomic/top_level_confusions',
-        'taxonomic/gf_precision_recall_f1',
+        "taxonomic/error_attribution",
+        "taxonomic/top_level_confusions",
+        "taxonomic/gf_precision_recall_f1",
     }
 
     _EXPECTED_FIGURES = {
-        'taxonomic/error_attribution.png',
-        'taxonomic/top_level_confusion.png',
-        'taxonomic/gf_confusion.png',
+        "taxonomic/error_attribution.png",
+        "taxonomic/top_level_confusion.png",
+        "taxonomic/gf_confusion.png",
     }
 
     def test_returns_all_expected_artifacts(self):
@@ -195,7 +199,7 @@ class ComputeTaxonomicIntegrationTest(unittest.TestCase):
         and figures."""
         # Use classes with growth forms and imperfect predictions so that
         # error attribution and GF differentiation figures are generated.
-        classes = ['A1::gf1', 'A2::gf2', 'B1::', 'B2::']
+        classes = ["A1::gf1", "A2::gf2", "B1::", "B2::"]
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1, 2, 2, 3, 3],
             est_indices=[0, 1, 1, 0, 2, 3, 3, 2],
@@ -208,19 +212,19 @@ class ComputeTaxonomicIntegrationTest(unittest.TestCase):
 
         scalar_names = {s.name for s in result.scalars}
         for expected in self._EXPECTED_SCALARS:
-            self.assertIn(expected, scalar_names, msg=f'Missing scalar: {expected}')
+            self.assertIn(expected, scalar_names, msg=f"Missing scalar: {expected}")
 
         df_paths = {dr.artifact_path for dr in result.dataframes}
         for expected in self._EXPECTED_DATAFRAMES:
-            self.assertIn(expected, df_paths, msg=f'Missing dataframe: {expected}')
+            self.assertIn(expected, df_paths, msg=f"Missing dataframe: {expected}")
 
         fig_paths = {fr.artifact_path for fr in result.figures}
         for expected in self._EXPECTED_FIGURES:
-            self.assertIn(expected, fig_paths, msg=f'Missing figure: {expected}')
+            self.assertIn(expected, fig_paths, msg=f"Missing figure: {expected}")
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

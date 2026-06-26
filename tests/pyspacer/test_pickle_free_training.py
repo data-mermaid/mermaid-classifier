@@ -6,6 +6,7 @@ back in. This covers the whole codebase: the train/eval/store path and the
 CLI scripts. (The last pickle consumer, ``scripts/evaluate_model.py``, was
 removed in #61.)
 """
+
 import ast
 import unittest
 from pathlib import Path
@@ -17,8 +18,7 @@ SCANNED_DIRS = (REPO_ROOT / "mermaid_classifier", REPO_ROOT / "scripts")
 # Pickle-glue symbols that must never reach the train/eval/store path,
 # whether imported by name (``from spacer.storage import load_classifier``)
 # or reached as an attribute (``import spacer.storage as s; s.load_classifier``).
-FORBIDDEN = {"load_classifier", "train_classifier", "store_classifier",
-             "TrainClassifierMsg"}
+FORBIDDEN = {"load_classifier", "train_classifier", "store_classifier", "TrainClassifierMsg"}
 
 # Whole modules whose only purpose on this path is the pickle glue. Importing
 # them at all is a re-entry signal, even before any use.
@@ -44,11 +44,10 @@ def _glue_references(source: str) -> set[str]:
             for alias in node.names:
                 if alias.name in FORBIDDEN or alias.name in FORBIDDEN_MODULES:
                     offenders.add(alias.name)
-        elif isinstance(node, ast.Attribute):
+        elif isinstance(node, ast.Attribute) and node.attr in FORBIDDEN:
             # e.g. ``storage.load_classifier`` or
             # ``spacer.storage.store_classifier``.
-            if node.attr in FORBIDDEN:
-                offenders.add(node.attr)
+            offenders.add(node.attr)
     return offenders
 
 
@@ -58,9 +57,11 @@ class PickleFreeTrainingTest(unittest.TestCase):
             for path in base.rglob("*.py"):
                 offenders = _glue_references(path.read_text())
                 self.assertEqual(
-                    offenders, set(),
+                    offenders,
+                    set(),
                     msg=f"{path.relative_to(REPO_ROOT)} must not reference "
-                        f"{offenders} (pickle path)")
+                    f"{offenders} (pickle path)",
+                )
 
 
 if __name__ == "__main__":

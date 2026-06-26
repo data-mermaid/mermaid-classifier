@@ -9,6 +9,7 @@ This module imports ``mlflow`` and therefore lives train-side, NOT in
 ``mermaid_classifier.pyspacer.inference`` (which must stay mlflow-free so the
 ``[inference]`` dependency split holds).
 """
+
 from __future__ import annotations
 
 import mlflow

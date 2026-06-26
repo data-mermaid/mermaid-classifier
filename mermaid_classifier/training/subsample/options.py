@@ -25,10 +25,10 @@ Adding a new strategy is a two-step process:
 
 The pipeline (``TrainingDataset._apply_subsample``) doesn't change.
 """
+
 from __future__ import annotations
 
 import dataclasses
-
 
 # Authoritative list of strategy names. Kept in this module so it can
 # be imported without touching the registry (avoids circular imports
@@ -73,32 +73,21 @@ class SubsampleOptions:
     def __post_init__(self) -> None:
         if self.strategy not in SUBSAMPLE_STRATEGIES:
             raise ValueError(
-                f"strategy must be one of {SUBSAMPLE_STRATEGIES},"
-                f" got {self.strategy!r}"
+                f"strategy must be one of {SUBSAMPLE_STRATEGIES}, got {self.strategy!r}"
             )
-        if (self.total_annotations is not None
-                and self.total_annotations <= 0):
+        if self.total_annotations is not None and self.total_annotations <= 0:
             raise ValueError(
-                f"total_annotations must be > 0 or None,"
-                f" got {self.total_annotations!r}"
+                f"total_annotations must be > 0 or None, got {self.total_annotations!r}"
             )
         if self.min_per_class < 0:
-            raise ValueError(
-                f"min_per_class must be >= 0,"
-                f" got {self.min_per_class!r}"
-            )
+            raise ValueError(f"min_per_class must be >= 0, got {self.min_per_class!r}")
 
-        if self.strategy == "stratified":
-            if self.total_annotations is None:
-                raise ValueError(
-                    "strategy='stratified' requires total_annotations"
-                )
-        elif self.strategy == "balanced":
-            if self.total_annotations is None:
-                raise ValueError(
-                    "strategy='balanced' requires total_annotations"
-                    " (split equally across classes)"
-                )
+        if self.strategy == "stratified" and self.total_annotations is None:
+            raise ValueError("strategy='stratified' requires total_annotations")
+        if self.strategy == "balanced" and self.total_annotations is None:
+            raise ValueError(
+                "strategy='balanced' requires total_annotations (split equally across classes)"
+            )
 
     def to_log_dict(self) -> dict[str, object]:
         """Flat dict suitable for ``mlflow.log_params``.

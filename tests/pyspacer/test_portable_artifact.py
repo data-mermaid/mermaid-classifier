@@ -1,4 +1,5 @@
 """Tests for the portable classifier artifact (model.pt + model.json)."""
+
 import json
 import os
 import subprocess
@@ -41,7 +42,9 @@ class ScaffoldTest(unittest.TestCase):
             "raise SystemExit(1 if mod in sys.modules else 0)\n"
         )
         result = subprocess.run(
-            [sys.executable, "-c", child], capture_output=True, text=True,
+            [sys.executable, "-c", child],
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
@@ -85,6 +88,7 @@ class ExportTest(unittest.TestCase):
             # trained_with must record pyspacer so the serving runtime can verify
             # feature-extraction compatibility.
             from importlib.metadata import version
+
             self.assertEqual(manifest["trained_with"]["pyspacer"], version("pyspacer"))
 
             on_disk = json.loads((Path(d) / "model.json").read_text())
@@ -103,28 +107,28 @@ class ExportTest(unittest.TestCase):
     def test_parity_gate_raises_when_graph_diverges(self):
         model, X = make_calibrated_model()
         # Force the gate to fire with an impossible tolerance: any non-negative max diff > -1.0 always raises.
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(ParityError):
-                export_artifact(model, d, X, tol=-1.0)
+        with tempfile.TemporaryDirectory() as d, self.assertRaises(ParityError):
+            export_artifact(model, d, X, tol=-1.0)
 
     def test_export_raises_when_sklearn_unpinned(self):
         model, X = make_calibrated_model()
-        with tempfile.TemporaryDirectory() as d:
+        with (
+            tempfile.TemporaryDirectory() as d,
+            mock.patch(
+                "mermaid_classifier.pyspacer.inference.export.PARITY_PROVEN_SKLEARN",
+                "0.0.0-never",
+            ),
+            self.assertRaises(SklearnPinError),
+        ):
             # Patch the proven version to something the runner can't have, so
             # the installed sklearn is guaranteed to differ.
-            with mock.patch(
-                "mermaid_classifier.pyspacer.inference.export"
-                ".PARITY_PROVEN_SKLEARN", "0.0.0-never",
-            ):
-                with self.assertRaises(SklearnPinError):
-                    export_artifact(model, d, X)
+            export_artifact(model, d, X)
 
     def test_export_manifest_records_proven_sklearn(self):
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
             _, manifest, _ = export_artifact(model, d, X)
-        self.assertEqual(manifest["trained_with"]["sklearn"],
-                         PARITY_PROVEN_SKLEARN)
+        self.assertEqual(manifest["trained_with"]["sklearn"], PARITY_PROVEN_SKLEARN)
 
 
 class LoadValidationTest(unittest.TestCase):
@@ -140,8 +144,7 @@ class LoadValidationTest(unittest.TestCase):
             self.assertEqual(predictor.classes, model.classes_.tolist())
             self.assertEqual(predictor.input_dim, X.shape[1])
             got = predictor.predict_proba(X)
-            self.assertLess(
-                float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
+            self.assertLess(float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
 
     def test_schema_version_mismatch_raises(self):
         with tempfile.TemporaryDirectory() as d:
@@ -172,6 +175,7 @@ class LoadValidationTest(unittest.TestCase):
 
     def test_predictor_exposes_classes_alias_for_metrics(self):
         from mermaid_classifier.pyspacer.inference import load_predictor
+
         with tempfile.TemporaryDirectory() as d:
             model_pt, model_json, model, _X = self._export(d)
             predictor = load_predictor(model_pt, model_json)
@@ -186,16 +190,16 @@ class LiveModelParityTest(unittest.TestCase):
     def _load_live_model(self):
         # spacer.storage pulls heavy S3 machinery only this env-gated test
         # needs, so it stays a function-local import (deferred on purpose).
-        from spacer.storage import storage_factory
-        from spacer.data_classes import DataLocation
-        from urllib.parse import urlparse
         import pickle
+        from urllib.parse import urlparse
+
+        from spacer.data_classes import DataLocation
+        from spacer.storage import storage_factory
 
         loc = os.environ["PORTABLE_ARTIFACT_LIVE_MODEL"]
         uri = urlparse(loc)
         if uri.scheme == "s3":
-            data_loc = DataLocation(
-                "s3", bucket_name=uri.netloc, key=uri.path.strip("/"))
+            data_loc = DataLocation("s3", bucket_name=uri.netloc, key=uri.path.strip("/"))
         else:
             data_loc = DataLocation("filesystem", key=loc)
         storage = storage_factory(data_loc.storage_type, data_loc.bucket_name)
@@ -228,8 +232,7 @@ class LiveModelParityTest(unittest.TestCase):
         X = np.load(feats_path).astype(np.float32)
         if X.ndim != 2 or X.shape[1] != input_dim:
             self.fail(
-                f"real features must be (N, {input_dim}) to match the live"
-                f" model; got {X.shape}."
+                f"real features must be (N, {input_dim}) to match the live model; got {X.shape}."
             )
 
         with tempfile.TemporaryDirectory() as d:
@@ -239,8 +242,7 @@ class LiveModelParityTest(unittest.TestCase):
             self.assertEqual(manifest["classes"], model.classes_.tolist())
             predictor = load_predictor(model_pt, Path(d) / "model.json")
             got = predictor.predict_proba(X)
-        self.assertLess(
-            float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
+        self.assertLess(float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
 
 
 if __name__ == "__main__":

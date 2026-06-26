@@ -94,6 +94,13 @@ extend-exclude = ["v1"]
 select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# AWS-bootstrap code must run before mermaid_classifier imports (settings read env at import time)
+"scripts/build_feature_bucket.py" = ["E402"]
+"scripts/classifier_train.py" = ["E402"]
+# sys.path manipulation to import from scripts/ must precede the import itself
+"tests/sagemaker_launcher/test_launch_processing.py" = ["E402"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["mermaid_classifier"]
 

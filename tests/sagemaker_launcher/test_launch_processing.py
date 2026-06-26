@@ -1,4 +1,5 @@
 """Tests for scripts.launch_processing (mermaid-classifier)."""
+
 from __future__ import annotations
 
 import csv
@@ -63,6 +64,7 @@ class BuildProcessingRequestTest(unittest.TestCase):
     def test_request_shape_no_shard(self, mock_dt):
         mock_dt.now.return_value.strftime.return_value = "20260525T120000Z"
         from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+
         cfg = parse_run_config(
             """
 job:
@@ -77,23 +79,29 @@ processing:
     - --target-bucket=2605-coralnet-public-sources
     - --skip-existing
 """,
-            kind="processing", strict=True)
+            kind="processing",
+            strict=True,
+        )
         req = lp.build_processing_request(
-            cfg=cfg, run_id="mermaid-features-20260525T120000Z",
-            worker_idx=0, worker_items=None)
+            cfg=cfg, run_id="mermaid-features-20260525T120000Z", worker_idx=0, worker_items=None
+        )
         self.assertEqual(req["ProcessingJobName"], "mermaid-features-20260525T120000Z-0")
         self.assertEqual(req["RoleArn"], "arn:aws:iam::554812291621:role/dev-sm-execution-role")
         self.assertEqual(
             req["AppSpecification"]["ImageUri"],
-            "554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-jobs:features-latest")
+            "554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-jobs:features-latest",
+        )
         self.assertIn("--skip-existing", req["AppSpecification"]["ContainerArguments"])
-        self.assertEqual(req["ProcessingResources"]["ClusterConfig"]["InstanceType"], "ml.g5.xlarge")
+        self.assertEqual(
+            req["ProcessingResources"]["ClusterConfig"]["InstanceType"], "ml.g5.xlarge"
+        )
         self.assertEqual(req["StoppingCondition"]["MaxRuntimeInSeconds"], 12 * 3600)
 
     @patch("launch_processing.datetime")
     def test_request_shape_with_shard(self, mock_dt):
         mock_dt.now.return_value.strftime.return_value = "20260525T120000Z"
         from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+
         cfg = parse_run_config(
             """
 job:
@@ -111,10 +119,15 @@ processing:
     workers: 4
     per_worker_arg: --source-ids
 """,
-            kind="processing", strict=True)
+            kind="processing",
+            strict=True,
+        )
         req = lp.build_processing_request(
-            cfg=cfg, run_id="mermaid-features-20260525T120000Z",
-            worker_idx=2, worker_items=["1", "5", "9"])
+            cfg=cfg,
+            run_id="mermaid-features-20260525T120000Z",
+            worker_idx=2,
+            worker_items=["1", "5", "9"],
+        )
         args = req["AppSpecification"]["ContainerArguments"]
         self.assertIn("--source-ids", args)
         idx = args.index("--source-ids")

@@ -9,6 +9,7 @@ on identical data.
 
 All data is synthetic and small so the full suite runs in seconds.
 """
+
 from __future__ import annotations
 
 import pickle
@@ -19,7 +20,6 @@ import numpy as np
 from sklearn.neural_network import MLPClassifier
 
 from mermaid_classifier.pyspacer.torch_classifier import TorchMLPClassifier
-
 
 # Seed convention: distinct offsets give independent-but-deterministic RNG
 # streams so the data-generation order never correlates with the training
@@ -89,8 +89,7 @@ def train_via_partial_fit(
         X_shuf, y_shuf = X[order], y[order]
         for start in range(0, n, chunk_size):
             end = min(start + chunk_size, n)
-            clf.partial_fit(X_shuf[start:end], y_shuf[start:end],
-                            classes=classes)
+            clf.partial_fit(X_shuf[start:end], y_shuf[start:end], classes=classes)
 
 
 class MLPBenchmarkBase:
@@ -114,18 +113,23 @@ class MLPBenchmarkBase:
     @classmethod
     def setUpClass(cls):  # type: ignore[override]
         X_all, y_all = make_gaussian_clusters(
-            n_per_class=(N_TRAIN + N_VAL) // N_CLASSES, seed=SEED,
+            n_per_class=(N_TRAIN + N_VAL) // N_CLASSES,
+            seed=SEED,
         )
-        cls.X_train, cls.y_train, cls.X_val, cls.y_val = train_val_split(
-            X_all, y_all, n_val=N_VAL)
+        cls.X_train, cls.y_train, cls.X_val, cls.y_val = train_val_split(X_all, y_all, n_val=N_VAL)
         cls.classes_list = sorted(np.unique(y_all).tolist())
 
     def _train(self, clf):
         rng = np.random.RandomState(SEED + 1)  # training-shuffle stream
         t0 = time.time()
         train_via_partial_fit(
-            clf, self.X_train, self.y_train, self.classes_list,
-            epochs=EPOCHS, chunk_size=PARTIAL_FIT_BATCH, rng=rng,
+            clf,
+            self.X_train,
+            self.y_train,
+            self.classes_list,
+            epochs=EPOCHS,
+            chunk_size=PARTIAL_FIT_BATCH,
+            rng=rng,
         )
         return time.time() - t0
 
@@ -138,9 +142,7 @@ class MLPBenchmarkBase:
         preds = clf.predict(self.X_train)
         acc = float(np.mean(preds == self.y_train))
         self.assertGreater(
-            acc, 0.85,
-            f"Training accuracy {acc:.3f} below threshold 0.85"
-            f" for {type(clf).__name__}"
+            acc, 0.85, f"Training accuracy {acc:.3f} below threshold 0.85 for {type(clf).__name__}"
         )
 
     def test_generalises_to_validation(self):
@@ -150,9 +152,9 @@ class MLPBenchmarkBase:
         preds = clf.predict(self.X_val)
         acc = float(np.mean(preds == self.y_val))
         self.assertGreater(
-            acc, 0.80,
-            f"Validation accuracy {acc:.3f} below threshold 0.80"
-            f" for {type(clf).__name__}"
+            acc,
+            0.80,
+            f"Validation accuracy {acc:.3f} below threshold 0.80 for {type(clf).__name__}",
         )
 
     def test_predict_proba_shape_and_normalisation(self):
@@ -160,8 +162,7 @@ class MLPBenchmarkBase:
         self._train(clf)
         probs = clf.predict_proba(self.X_val)
         self.assertEqual(probs.shape, (N_VAL, N_CLASSES))
-        np.testing.assert_allclose(
-            probs.sum(axis=1), np.ones(N_VAL), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(probs.sum(axis=1), np.ones(N_VAL), rtol=1e-5, atol=1e-5)
         self.assertTrue((probs >= 0).all())
         self.assertTrue((probs <= 1).all())
 
@@ -177,10 +178,7 @@ class MLPBenchmarkBase:
     def test_loss_curve_available_and_finite(self):
         clf = self._make_classifier()
         self._train(clf)
-        self.assertTrue(
-            hasattr(clf, "loss_curve_"),
-            f"{type(clf).__name__} missing loss_curve_"
-        )
+        self.assertTrue(hasattr(clf, "loss_curve_"), f"{type(clf).__name__} missing loss_curve_")
         self.assertGreater(len(clf.loss_curve_), 0)
         self.assertTrue(all(np.isfinite(clf.loss_curve_)))
         # Loss should trend downward — the first recorded loss should be
@@ -207,8 +205,7 @@ class MLPBenchmarkBase:
         probs_after = clf2.predict_proba(self.X_val)
 
         np.testing.assert_array_equal(preds_before, preds_after)
-        np.testing.assert_allclose(probs_before, probs_after,
-                                   rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(probs_before, probs_after, rtol=1e-5, atol=1e-6)
 
     def test_partial_fit_accumulates_across_calls(self):
         """Multiple small partial_fit calls should still converge."""
@@ -216,14 +213,19 @@ class MLPBenchmarkBase:
         rng = np.random.RandomState(SEED + 2)  # tiny-chunk shuffle stream
         # Deliberately tiny chunks: tests the incremental-fit contract.
         train_via_partial_fit(
-            clf, self.X_train, self.y_train, self.classes_list,
-            epochs=EPOCHS, chunk_size=50, rng=rng,
+            clf,
+            self.X_train,
+            self.y_train,
+            self.classes_list,
+            epochs=EPOCHS,
+            chunk_size=50,
+            rng=rng,
         )
         acc = float(np.mean(clf.predict(self.X_val) == self.y_val))
         self.assertGreater(
-            acc, 0.75,
-            f"Incremental partial_fit accuracy {acc:.3f} below 0.75"
-            f" for {type(clf).__name__}"
+            acc,
+            0.75,
+            f"Incremental partial_fit accuracy {acc:.3f} below 0.75 for {type(clf).__name__}",
         )
 
     def test_decision_function_or_predict_proba_usable_for_calibration(self):
@@ -287,10 +289,10 @@ class MLPParityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):  # type: ignore[override]
         X_all, y_all = make_gaussian_clusters(
-            n_per_class=(N_TRAIN + N_VAL) // N_CLASSES, seed=SEED,
+            n_per_class=(N_TRAIN + N_VAL) // N_CLASSES,
+            seed=SEED,
         )
-        cls.X_train, cls.y_train, cls.X_val, cls.y_val = train_val_split(
-            X_all, y_all, n_val=N_VAL)
+        cls.X_train, cls.y_train, cls.X_val, cls.y_val = train_val_split(X_all, y_all, n_val=N_VAL)
         cls.classes_list = sorted(np.unique(y_all).tolist())
 
     def _train_both(self):
@@ -307,8 +309,13 @@ class MLPParityTest(unittest.TestCase):
         for clf in (sk, tr):
             rng = np.random.RandomState(SEED + 1)  # training-shuffle stream
             train_via_partial_fit(
-                clf, self.X_train, self.y_train, self.classes_list,
-                epochs=EPOCHS, chunk_size=PARTIAL_FIT_BATCH, rng=rng,
+                clf,
+                self.X_train,
+                self.y_train,
+                self.classes_list,
+                epochs=EPOCHS,
+                chunk_size=PARTIAL_FIT_BATCH,
+                rng=rng,
             )
         return sk, tr
 
@@ -318,9 +325,9 @@ class MLPParityTest(unittest.TestCase):
         sk_acc = float(np.mean(sk.predict(self.X_val) == self.y_val))
         tr_acc = float(np.mean(tr.predict(self.X_val) == self.y_val))
         self.assertGreaterEqual(
-            tr_acc, sk_acc - 0.05,
-            f"Torch {tr_acc:.3f} vs sklearn {sk_acc:.3f} —"
-            f" torch must be within 5% of sklearn."
+            tr_acc,
+            sk_acc - 0.05,
+            f"Torch {tr_acc:.3f} vs sklearn {sk_acc:.3f} — torch must be within 5% of sklearn.",
         )
 
     def test_torch_training_accuracy_within_tolerance(self):
@@ -328,8 +335,7 @@ class MLPParityTest(unittest.TestCase):
         sk_acc = float(np.mean(sk.predict(self.X_train) == self.y_train))
         tr_acc = float(np.mean(tr.predict(self.X_train) == self.y_train))
         self.assertGreaterEqual(
-            tr_acc, sk_acc - 0.05,
-            f"Torch train {tr_acc:.3f} vs sklearn {sk_acc:.3f}"
+            tr_acc, sk_acc - 0.05, f"Torch train {tr_acc:.3f} vs sklearn {sk_acc:.3f}"
         )
 
     def test_torch_predict_proba_distribution_close(self):
@@ -340,9 +346,9 @@ class MLPParityTest(unittest.TestCase):
         tr_argmax = np.argmax(tr.predict_proba(self.X_val), axis=1)
         agreement = float(np.mean(sk_argmax == tr_argmax))
         self.assertGreater(
-            agreement, 0.85,
-            f"Torch and sklearn argmax agree on only {agreement:.3f} of"
-            f" validation samples."
+            agreement,
+            0.85,
+            f"Torch and sklearn argmax agree on only {agreement:.3f} of validation samples.",
         )
 
     def test_predict_proba_values_close_to_sklearn(self):
@@ -361,9 +367,10 @@ class MLPParityTest(unittest.TestCase):
         # BLAS/framework numerical drift across environments.
         mean_abs_diff = float(np.mean(np.abs(sk_probs - tr_probs)))
         self.assertLess(
-            mean_abs_diff, 1e-2,
+            mean_abs_diff,
+            1e-2,
             f"Mean abs difference between torch and sklearn predict_proba"
-            f" is {mean_abs_diff:.4f} (> 1e-2)."
+            f" is {mean_abs_diff:.4f} (> 1e-2).",
         )
 
     def test_calibrated_predict_proba_close_to_sklearn(self):
@@ -392,9 +399,10 @@ class MLPParityTest(unittest.TestCase):
         self.assertEqual(sk_probs.shape, tr_probs.shape)
         mean_abs_diff = float(np.mean(np.abs(sk_probs - tr_probs)))
         self.assertLess(
-            mean_abs_diff, 1e-2,
+            mean_abs_diff,
+            1e-2,
             f"Mean abs difference between torch and sklearn calibrated"
-            f" predict_proba is {mean_abs_diff:.4f} (> 1e-2)."
+            f" predict_proba is {mean_abs_diff:.4f} (> 1e-2).",
         )
 
 
@@ -411,18 +419,17 @@ class BatchingEquivalenceTest(unittest.TestCase):
     def setUpClass(cls):
         rng = np.random.RandomState(SEED)
         cls.X = rng.randn(500, 16).astype(np.float32)
-        cls.y = np.array(
-            ["a", "b", "c"] * 166 + ["a", "b"], dtype=object)
+        cls.y = np.array(["a", "b", "c"] * 166 + ["a", "b"], dtype=object)
         cls.classes = ["a", "b", "c"]
 
     def _make_pair(self):
         """Same hyperparameters on both sides."""
-        kw = dict(
-            hidden_layer_sizes=(16,),
-            learning_rate_init=1e-3,
-            batch_size="auto",
-            random_state=SEED,
-        )
+        kw = {
+            "hidden_layer_sizes": (16,),
+            "learning_rate_init": 1e-3,
+            "batch_size": "auto",
+            "random_state": SEED,
+        }
         return MLPClassifier(**kw), TorchMLPClassifier(**kw)
 
     def test_one_partial_fit_call_appends_one_loss_entry(self):
@@ -432,15 +439,15 @@ class BatchingEquivalenceTest(unittest.TestCase):
         for clf in (sk, tr):
             clf.partial_fit(self.X, self.y, classes=self.classes)
             self.assertEqual(
-                len(clf.loss_curve_), 1,
-                f"{type(clf).__name__}: expected 1 entry, got"
-                f" {len(clf.loss_curve_)}"
+                len(clf.loss_curve_),
+                1,
+                f"{type(clf).__name__}: expected 1 entry, got {len(clf.loss_curve_)}",
             )
             clf.partial_fit(self.X, self.y)
             self.assertEqual(
-                len(clf.loss_curve_), 2,
-                f"{type(clf).__name__}: expected 2 entries, got"
-                f" {len(clf.loss_curve_)}"
+                len(clf.loss_curve_),
+                2,
+                f"{type(clf).__name__}: expected 2 entries, got {len(clf.loss_curve_)}",
             )
 
     def test_n_iter_increments_by_one_per_partial_fit(self):
@@ -474,11 +481,11 @@ class BatchingEquivalenceTest(unittest.TestCase):
 
     def test_explicit_batch_size_is_clipped_to_n_samples(self):
         """batch_size=128 on 50-sample input clips to 50 in both."""
-        kw = dict(
-            hidden_layer_sizes=(8,),
-            batch_size=128,
-            random_state=SEED,
-        )
+        kw = {
+            "hidden_layer_sizes": (8,),
+            "batch_size": 128,
+            "random_state": SEED,
+        }
         sk = MLPClassifier(**kw)
         tr = TorchMLPClassifier(**kw)
         sk.partial_fit(self.X[:50], self.y[:50], classes=self.classes)
@@ -505,19 +512,15 @@ class BatchingEquivalenceTest(unittest.TestCase):
         step_count = tr._optimizer.state[first_param]["step"]
         # PyTorch stores step as either a tensor or a python int depending
         # on version; normalise.
-        step_int = int(step_count.item()) if hasattr(step_count, "item") \
-            else int(step_count)
+        step_int = int(step_count.item()) if hasattr(step_count, "item") else int(step_count)
         self.assertEqual(
-            step_int, 5,
-            f"Expected 5 Adam steps for 500 samples at batch_size=100,"
-            f" got {step_int}"
+            step_int, 5, f"Expected 5 Adam steps for 500 samples at batch_size=100, got {step_int}"
         )
 
         # Second partial_fit call → 5 more steps (cumulative 10).
         tr.partial_fit(self.X[:500], self.y[:500])
         step_count = tr._optimizer.state[first_param]["step"]
-        step_int = int(step_count.item()) if hasattr(step_count, "item") \
-            else int(step_count)
+        step_int = int(step_count.item()) if hasattr(step_count, "item") else int(step_count)
         self.assertEqual(step_int, 10)
 
     def test_partial_fit_on_smaller_than_batch_size_is_one_step(self):
@@ -530,8 +533,7 @@ class BatchingEquivalenceTest(unittest.TestCase):
         tr.partial_fit(self.X[:50], self.y[:50], classes=self.classes)
         first_param = next(iter(tr._module.parameters()))
         step_count = tr._optimizer.state[first_param]["step"]
-        step_int = int(step_count.item()) if hasattr(step_count, "item") \
-            else int(step_count)
+        step_int = int(step_count.item()) if hasattr(step_count, "item") else int(step_count)
         self.assertEqual(step_int, 1)
 
     def test_loss_curve_records_regularised_loss_trend(self):
@@ -550,17 +552,21 @@ class BatchingEquivalenceTest(unittest.TestCase):
         sklearn contract — and our torch version honours it by re-seeding
         from random_state inside each partial_fit call."""
         tr1 = TorchMLPClassifier(
-            hidden_layer_sizes=(8,), random_state=SEED,
+            hidden_layer_sizes=(8,),
+            random_state=SEED,
         )
         tr2 = TorchMLPClassifier(
-            hidden_layer_sizes=(8,), random_state=SEED,
+            hidden_layer_sizes=(8,),
+            random_state=SEED,
         )
         for _ in range(5):
             tr1.partial_fit(self.X, self.y, classes=self.classes)
             tr2.partial_fit(self.X, self.y, classes=self.classes)
         np.testing.assert_allclose(
-            tr1.loss_curve_, tr2.loss_curve_, rtol=1e-6,
-            err_msg="Same random_state must yield identical loss curves"
+            tr1.loss_curve_,
+            tr2.loss_curve_,
+            rtol=1e-6,
+            err_msg="Same random_state must yield identical loss curves",
         )
 
 
@@ -578,10 +584,10 @@ class TorchMLPIntegratesWithCalibratedClassifierCVTest(unittest.TestCase):
         from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
         X_all, y_all = make_gaussian_clusters(
-            n_per_class=(N_TRAIN + N_VAL) // N_CLASSES, seed=SEED,
+            n_per_class=(N_TRAIN + N_VAL) // N_CLASSES,
+            seed=SEED,
         )
-        X_train, y_train, X_val, y_val = train_val_split(
-            X_all, y_all, n_val=N_VAL)
+        X_train, y_train, X_val, y_val = train_val_split(X_all, y_all, n_val=N_VAL)
         classes_list = sorted(np.unique(y_all).tolist())
 
         clf = TorchMLPClassifier(
@@ -591,11 +597,17 @@ class TorchMLPIntegratesWithCalibratedClassifierCVTest(unittest.TestCase):
         )
         rng = np.random.RandomState(SEED + 1)  # training-shuffle stream
         train_via_partial_fit(
-            clf, X_train, y_train, classes_list,
-            epochs=EPOCHS, chunk_size=PARTIAL_FIT_BATCH, rng=rng,
+            clf,
+            X_train,
+            y_train,
+            classes_list,
+            epochs=EPOCHS,
+            chunk_size=PARTIAL_FIT_BATCH,
+            rng=rng,
         )
 
         mock_labels = mock.Mock()
+
         def batch_generator(batch_size=100):
             for i in range(0, len(X_train), batch_size):
                 end = min(i + batch_size, len(X_train))
@@ -603,6 +615,7 @@ class TorchMLPIntegratesWithCalibratedClassifierCVTest(unittest.TestCase):
                     [X_train[j] for j in range(i, end)],
                     [y_train[j] for j in range(i, end)],
                 )
+
         mock_labels.load_data_in_batches = batch_generator
 
         trainer = MermaidTrainer(batch_size=100)
@@ -616,19 +629,14 @@ class TorchMLPIntegratesWithCalibratedClassifierCVTest(unittest.TestCase):
         probs = calibrated.predict_proba(X_val)
         preds = calibrated.predict(X_val)
         self.assertEqual(probs.shape, (N_VAL, N_CLASSES))
-        np.testing.assert_allclose(
-            probs.sum(axis=1), np.ones(N_VAL), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(probs.sum(axis=1), np.ones(N_VAL), rtol=1e-5, atol=1e-5)
         acc = float(np.mean(preds == y_val))
-        self.assertGreater(
-            acc, 0.80,
-            f"Calibrated TorchMLP val accuracy {acc:.3f} below 0.80"
-        )
+        self.assertGreater(acc, 0.80, f"Calibrated TorchMLP val accuracy {acc:.3f} below 0.80")
 
         # Full pickle round-trip of the calibrated artifact — this is
         # exactly what spacer.storage.store_classifier serialises.
         restored = pickle.loads(pickle.dumps(calibrated))
-        np.testing.assert_allclose(
-            restored.predict_proba(X_val), probs, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(restored.predict_proba(X_val), probs, rtol=1e-5, atol=1e-6)
         np.testing.assert_array_equal(restored.predict(X_val), preds)
 
 
