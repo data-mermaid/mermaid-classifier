@@ -1,0 +1,53 @@
+# In-container training config consumed by scripts/sagemaker_train_entrypoint.py.
+#
+# This file is mounted at /opt/ml/input/data/config/training_config.yaml
+# inside the SageMaker container. The launcher (scripts/launch_training.py)
+# uploads the parent dir as the `config` input channel. The launcher's
+# own per-run YAML (sagemaker/runs/example-training.yaml) describes only
+# the SageMaker job shape; classifier-specific dataset/training/mlflow
+# settings live here.
+#
+# CSV paths are resolved as siblings of THIS file. Bare filenames only.
+
+dataset:
+  include_mermaid: false
+  # 2-source fixture; replace with your sources.csv for real runs.
+  coralnet_sources_csv: sources.csv
+  drop_growthforms: false
+  label_rollup_spec_csv: rollups.csv
+  included_labels_csv: included_labels.csv
+  ref_val_ratios: [0.1, 0.1]
+  # Subsample. Strategies: 'stratified', 'balanced'.
+  # Keep this section out (set to null) to disable subsampling entirely.
+  subsample:
+    strategy: balanced
+    total_annotations: 1000
+    min_per_class: 10
+  # Sample weighting (effective-number-of-samples; beta is fixed in
+  # mermaid_classifier.training.sample_weighting). Remove the block (or
+  # set enabled: false) to disable.
+  weighting:
+    enabled: true
+    weight_ratio_cap: 5000.0
+
+training:
+  epochs: 1
+  # The MLP architecture and learning rate are fixed at MermaidTrainer's
+  # production values, so only epochs and early stopping are configurable.
+  early_stopping_patience: 3
+
+mlflow:
+  experiment_name: example-smoke-test
+  model_name: ExampleModel
+  # annotations_to_log: all  # Uncomment to log all annotations as an artifact.
+
+# Env vars applied BEFORE importing mermaid_classifier. Keep secrets
+# out of this file; commit only non-sensitive values. The launcher
+# overrides MLFLOW_TRACKING_SERVER from its --mlflow-tracking-uri
+# flag, so the value here is just a placeholder for local smoke runs.
+env:
+  MLFLOW_TRACKING_SERVER: file:./mlruns
+  WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
+  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
+  MERMAID_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
+  MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

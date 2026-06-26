@@ -40,13 +40,13 @@ def training_batch_size(
     #   3. MLP forward/backward activation buffers per layer
     sklearn_copy_bytes = _FEATURE_BYTES  # worst-case full copy
 
-    # MLP hidden_layer_sizes is (200, 100) for large datasets or
-    # (100,) for small ones; num_classes is the output layer. Use the
-    # larger architecture as a conservative estimate. sklearn's backprop
-    # holds both forward activations and backprop deltas (plus gradient
-    # buffers) per layer, so per-sample activation memory is roughly
-    # double the forward-pass size.
-    activation_units = 200 + 100 + num_classes
+    # MLP hidden_layer_sizes is fixed at the production (500, 300, 100)
+    # architecture (see MermaidTrainer / docs/hidden-layer-experiments.md);
+    # num_classes is the output layer. sklearn's backprop holds both
+    # forward activations and backprop deltas (plus gradient buffers) per
+    # layer, so per-sample activation memory is roughly double the
+    # forward-pass size.
+    activation_units = 500 + 300 + 100 + num_classes
     activation_bytes = 2 * activation_units * _BYTES_PER_FLOAT
 
     bytes_per_point = _FEATURE_BYTES + sklearn_copy_bytes + activation_bytes

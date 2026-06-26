@@ -8,6 +8,7 @@ Covers two distinct features of MermaidTrainer:
     populates _early_stop_info under a scripted val_loss schedule.
 """
 
+import ast
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -366,10 +367,33 @@ class TrainerCleanupGuardTest(unittest.TestCase):
                 f"{token} should not reappear in trainer.py")
 
     def test_no_dead_pyspacer_imports(self):
-        self.assertNotIn(
-            'from spacer import config', self.source,
-            "trainer.py should not re-import spacer.config")
-        # Guard against re-importing the dead calc_acc function from pyspacer
-        self.assertNotIn(
-            'from spacer.train_utils import calc_acc', self.source,
-            "trainer.py should use sklearn.metrics.accuracy_score")
+        # Walk the actual import nodes (not substrings) so equivalent
+        # import styles -- e.g. `import spacer.config as config` -- can't
+        # slip past the guard.
+        offenders = []
+        for node in ast.walk(ast.parse(self.source)):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    # `import spacer.config[.x]` in any aliased form
+                    if (alias.name == 'spacer.config'
+                            or alias.name.startswith('spacer.config.')):
+                        offenders.append(f"import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ''
+                names = {alias.name for alias in node.names}
+                # `from spacer import config`
+                if module == 'spacer' and 'config' in names:
+                    offenders.append("from spacer import config")
+                # `from spacer.config[.x] import ...`
+                if (module == 'spacer.config'
+                        or module.startswith('spacer.config.')):
+                    offenders.append(f"from {module} import ...")
+                # `from spacer.train_utils import calc_acc`
+                if module == 'spacer.train_utils' and 'calc_acc' in names:
+                    offenders.append(
+                        "from spacer.train_utils import calc_acc")
+        self.assertEqual(
+            offenders, [],
+            "trainer.py should not re-import spacer.config or the dead"
+            f" calc_acc helper (use sklearn.metrics.accuracy_score); found:"
+            f" {offenders}")
