@@ -62,26 +62,20 @@ if __name__ == "__main__":
                 total_annotations=FULL_DATA_TOTAL,
                 min_per_class=200,
             ),
-            # Sample weighting. Anchor of the balancing sweep; remained
-            # the default after subsampling was added on top of it.
-            # Other registered strategies: tree_balanced_ba_flat_gf
-            # (currently unsafe -- see docs/balancing-experiments.md
-            # finding #5), leaf_inverse, decomposed. Pass None to
-            # disable weighting entirely.
+            # Sample weighting via the effective-number-of-samples
+            # formulation (the sole strategy after the balancing sweep).
+            # Pass None to disable weighting entirely.
             weighting=SampleWeightingOptions(
-                strategy='effective_number',
-                alpha=0.5,
                 weight_ratio_cap=5000.0,  # bound max:min ratio of weights
             ),
         ),
         training_options=TrainingOptions(
-            # MLP head architecture and learning rate from the
-            # hidden-layer experiments. ``epochs=40`` is a generous
-            # upper bound; ``early_stopping_patience=3`` against
+            # The MLP head architecture and learning rate are fixed at the
+            # production values inside MermaidTrainer (see
+            # docs/hidden-layer-experiments.md). ``epochs=40`` is a
+            # generous upper bound; ``early_stopping_patience=3`` against
             # ``epoch/val_loss`` lets each run find its own minimum
             # (typically epoch 14-29 on this data).
-            hidden_layer_sizes=(500, 300, 100),
-            learning_rate_init=1e-4,
             epochs=40,
             early_stopping_patience=3,
         ),

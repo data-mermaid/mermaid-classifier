@@ -21,6 +21,12 @@ from sklearn.neural_network import MLPClassifier
 from mermaid_classifier.pyspacer.torch_classifier import TorchMLPClassifier
 
 
+# Seed convention: distinct offsets give independent-but-deterministic RNG
+# streams so the data-generation order never correlates with the training
+# shuffle order.
+#   SEED      -> dataset generation (make_gaussian_clusters)
+#   SEED + 1  -> standard training shuffle (train_via_partial_fit)
+#   SEED + 2  -> tiny-chunk incremental-fit shuffle
 SEED = 42
 N_CLASSES = 5
 N_FEATURES = 32
@@ -92,6 +98,13 @@ class MLPBenchmarkBase:
 
     Subclasses implement `_make_classifier()` returning an untrained
     sklearn-compatible MLP classifier instance.
+
+    The accuracy thresholds in these tests (0.85 / 0.80 / 0.75) are
+    deliberately-loose sanity floors that answer "can this implementation
+    learn at all?" on the easy, well-separated synthetic task — set well
+    below the ~95%+ both classifiers might actually reach, to avoid flakiness.
+    They are NOT parity bounds; the direct sklearn-vs-torch head-to-head
+    comparison lives in `MLPParityTest`.
     """
 
     # Subclasses override.
@@ -108,7 +121,7 @@ class MLPBenchmarkBase:
         cls.classes_list = sorted(np.unique(y_all).tolist())
 
     def _train(self, clf):
-        rng = np.random.RandomState(SEED + 1)
+        rng = np.random.RandomState(SEED + 1)  # training-shuffle stream
         t0 = time.time()
         train_via_partial_fit(
             clf, self.X_train, self.y_train, self.classes_list,
@@ -200,7 +213,7 @@ class MLPBenchmarkBase:
     def test_partial_fit_accumulates_across_calls(self):
         """Multiple small partial_fit calls should still converge."""
         clf = self._make_classifier()
-        rng = np.random.RandomState(SEED + 2)
+        rng = np.random.RandomState(SEED + 2)  # tiny-chunk shuffle stream
         # Deliberately tiny chunks: tests the incremental-fit contract.
         train_via_partial_fit(
             clf, self.X_train, self.y_train, self.classes_list,
@@ -270,7 +283,7 @@ class MLPParityTest(unittest.TestCase):
             random_state=SEED,
         )
         for clf in (sk, tr):
-            rng = np.random.RandomState(SEED + 1)
+            rng = np.random.RandomState(SEED + 1)  # training-shuffle stream
             train_via_partial_fit(
                 clf, self.X_train, self.y_train, self.classes_list,
                 epochs=EPOCHS, chunk_size=PARTIAL_FIT_BATCH, rng=rng,
@@ -308,6 +321,58 @@ class MLPParityTest(unittest.TestCase):
             agreement, 0.85,
             f"Torch and sklearn argmax agree on only {agreement:.3f} of"
             f" validation samples."
+        )
+
+    def test_predict_proba_values_close_to_sklearn(self):
+        """Raw predict_proba *values* (not just argmax) should track sklearn.
+
+        Exact equality is impossible — weight init and Adam internals
+        differ — so we compare the full probability matrices with a
+        tolerance on the mean absolute difference per probability entry.
+        """
+        sk, tr = self._train_both()
+        sk_probs = sk.predict_proba(self.X_val)
+        tr_probs = tr.predict_proba(self.X_val)
+        self.assertEqual(sk_probs.shape, tr_probs.shape)
+        # On this task the two implementations agree to ~1e-6; 1e-2 is a
+        # meaningful "within 1% on average" bound with wide headroom for
+        # BLAS/framework numerical drift across environments.
+        mean_abs_diff = float(np.mean(np.abs(sk_probs - tr_probs)))
+        self.assertLess(
+            mean_abs_diff, 1e-2,
+            f"Mean abs difference between torch and sklearn predict_proba"
+            f" is {mean_abs_diff:.4f} (> 1e-2)."
+        )
+
+    def test_calibrated_predict_proba_close_to_sklearn(self):
+        """Post-calibration probabilities should track between both.
+
+        Wraps each (prefit) base estimator in the same
+        CalibratedClassifierCV(cv='prefit') path pyspacer uses, calibrates
+        both on an identical held-out split, and compares the calibrated
+        probability matrices within tolerance.
+        """
+        from sklearn.calibration import CalibratedClassifierCV
+
+        sk, tr = self._train_both()
+
+        # Calibrate on the first half of val, compare on the second half,
+        # so calibration and evaluation use disjoint data.
+        n_cal = N_VAL // 2
+        X_cal, y_cal = self.X_val[:n_cal], self.y_val[:n_cal]
+        X_eval = self.X_val[n_cal:]
+
+        sk_cal = CalibratedClassifierCV(sk, cv="prefit").fit(X_cal, y_cal)
+        tr_cal = CalibratedClassifierCV(tr, cv="prefit").fit(X_cal, y_cal)
+
+        sk_probs = sk_cal.predict_proba(X_eval)
+        tr_probs = tr_cal.predict_proba(X_eval)
+        self.assertEqual(sk_probs.shape, tr_probs.shape)
+        mean_abs_diff = float(np.mean(np.abs(sk_probs - tr_probs)))
+        self.assertLess(
+            mean_abs_diff, 1e-2,
+            f"Mean abs difference between torch and sklearn calibrated"
+            f" predict_proba is {mean_abs_diff:.4f} (> 1e-2)."
         )
 
 
@@ -502,7 +567,7 @@ class TorchMLPIntegratesWithCalibratedClassifierCVTest(unittest.TestCase):
             learning_rate_init=LR,
             random_state=SEED,
         )
-        rng = np.random.RandomState(SEED + 1)
+        rng = np.random.RandomState(SEED + 1)  # training-shuffle stream
         train_via_partial_fit(
             clf, X_train, y_train, classes_list,
             epochs=EPOCHS, chunk_size=PARTIAL_FIT_BATCH, rng=rng,

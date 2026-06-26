@@ -14,6 +14,7 @@ Iteration order matches `compute_cover` (`cover.py:46-50`): walk
 contiguous in `val_results.gt`/`val_results.est`.
 """
 
+import warnings
 from collections import Counter
 
 import matplotlib.pyplot as plt
@@ -97,7 +98,22 @@ def compute_per_source(ctx: MetricsContext) -> MetricGroupResult:
         accuracies.append(accuracy)
 
         try:
-            balanced_acc = float(balanced_accuracy_score(gt_s, est_s))
+            # Sources with a single class in their val slice are
+            # degenerate but not wrong (balanced_accuracy == accuracy
+            # in that case). sklearn warns about the (1,1) confusion
+            # matrix produced inside balanced_accuracy_score; silence
+            # just that exact message so other UserWarnings still
+            # surface.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=(
+                        "A single label was found in 'y_true' and "
+                        "'y_pred'"
+                    ),
+                    category=UserWarning,
+                )
+                balanced_acc = float(balanced_accuracy_score(gt_s, est_s))
         except ValueError:
             balanced_acc = float('nan')
 

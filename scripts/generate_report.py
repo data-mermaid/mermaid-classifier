@@ -13,6 +13,12 @@ Usage:
         --run-id 19e53cf4c2704d08adaaac3e74d925fe \
         --title "Training Run - 160 Sources" \
         --output report.html
+
+    # Against a SageMaker Studio MLflow App (requires AWS_PROFILE active):
+    uv run python scripts/generate_report.py \
+        --run-id 70ad001e58c1442681e9221ed6a06a9d \
+        --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2 \
+        --output report.html
 """
 import argparse
 import base64
@@ -417,6 +423,10 @@ def main():
     parser.add_argument(
         "--title", default=None,
         help="Custom report title (default: auto-generated from experiment/run)")
+    parser.add_argument(
+        "--mlflow-tracking-uri", default=None,
+        help=("Override MLflow tracking URI (e.g. a SageMaker MLflow App ARN). "
+              "Defaults to the MLFLOW_TRACKING_SERVER env var / .env value."))
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -425,7 +435,7 @@ def main():
     )
 
     # Connect to MLflow.
-    connect_time = mlflow_connect()
+    connect_time = mlflow_connect(tracking_uri=args.mlflow_tracking_uri)
     logger.info(f"Connected to MLflow in {connect_time}")
 
     # Fetch run data.
