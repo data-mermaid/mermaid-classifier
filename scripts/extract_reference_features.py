@@ -23,6 +23,7 @@ Then run the live gate:
 from __future__ import annotations
 
 import argparse
+from typing import Any
 from urllib.parse import urlparse
 
 import numpy as np
@@ -46,7 +47,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    vectors: list[list[float]] = []
+    vectors: list[Any] = []
     for loc in args.features:
         feats = ImageFeatures.load(_data_location(loc))
         for pf in feats.point_features:

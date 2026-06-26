@@ -51,8 +51,10 @@ class MetricsCoordinator:
             logger.warning("Metrics skipped: context validation failed", exc_info=True)
             return
 
-        self.ctx.ba_to_top = build_ba_to_top(self.ctx.val_results.classes, self.ctx.ba_library)
-        self.ctx.ba_paths = build_ba_paths(self.ctx.val_results.classes, self.ctx.ba_library)
+        # val_results.classes is list[LabelId] (int|str); MERMAID always uses str.
+        classes_str: list[str] = self.ctx.val_results.classes  # pyright: ignore[reportAssignmentType]
+        self.ctx.ba_to_top = build_ba_to_top(classes_str, self.ctx.ba_library)
+        self.ctx.ba_paths = build_ba_paths(classes_str, self.ctx.ba_library)
 
         if self.ctx.clf is not None and self.ctx.dataset is not None:
             self._precompute_probabilities()
@@ -72,6 +74,9 @@ class MetricsCoordinator:
         val_proba being None).
         """
         try:
+            assert (
+                self.ctx.dataset is not None
+            )  # guarded by caller: only called when dataset is not None
             all_proba = []
             all_gt = []
             for batch_x, batch_y in self.ctx.dataset.labels.val.load_data_in_batches():
@@ -119,7 +124,7 @@ class MetricsCoordinator:
             # associate them with the model, and its dedup-on-conflict filter
             # can't recognize an already-logged NaN (NaN != NaN), so it retries
             # the insert and crashes on the metrics UNIQUE constraint.
-            if scalar.value is None or np.isnan(scalar.value):
+            if np.isnan(scalar.value):
                 logger.warning(
                     "Skipping metric %r with non-finite value %r", scalar.name, scalar.value
                 )

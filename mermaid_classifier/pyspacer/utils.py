@@ -1,12 +1,14 @@
 import logging
+import logging.config
 from datetime import datetime, timedelta
 
 import mlflow
+from mlflow.exceptions import MlflowException
 
 from mermaid_classifier.pyspacer.settings import settings
 
 
-def logging_config_for_script(name):
+def logging_config_for_script(name: str) -> logging.Logger:
     """
     Call this to set up a logging config that prints info messages,
     and file-logs info and debug messages.
@@ -46,13 +48,14 @@ def logging_config_for_script(name):
 
 def mlflow_connect(tracking_uri: str | None = None) -> timedelta:
     uri = tracking_uri or settings.mlflow_tracking_server
-    mlflow.set_tracking_uri(uri=uri)
+    if uri is not None:
+        mlflow.set_tracking_uri(uri=uri)
 
     try:
         # Do something to test the server connection.
         time_before_connect = datetime.now()
         mlflow.search_experiments(max_results=1)
-    except mlflow.exceptions.MlflowException as e:
+    except MlflowException as e:
         # Note that this may take a long time to reach
         # unless you set MLFLOW_HTTP_REQUEST_MAX_RETRIES to
         # a low number.

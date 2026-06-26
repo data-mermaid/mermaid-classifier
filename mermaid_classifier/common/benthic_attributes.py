@@ -75,17 +75,17 @@ class BenthicAttributeLibrary:
             self.by_name[result["name"]] = result
             self.by_parent[result["parent"]].append(result)
 
-    def id_to_name(self, ba_id):
+    def id_to_name(self, ba_id: str) -> str:
         if ba_id == "":
             return ""
         return self.by_id[ba_id]["name"]
 
-    def name_to_id(self, ba_name):
+    def name_to_id(self, ba_name: str) -> str:
         if ba_name == "":
             return ""
         return self.by_name[ba_name]["id"]
 
-    def bagf_id_to_name(self, bagf_id, gf_library):
+    def bagf_id_to_name(self, bagf_id: str, gf_library: "GrowthFormLibrary") -> str:
         ba_id, gf_id = split_ba_gf(bagf_id)
         ba_name = self.by_id[ba_id]["name"]
         if gf_id == "":
@@ -94,7 +94,7 @@ class BenthicAttributeLibrary:
             return ba_name
         return BAGF_SEP.join([ba_name, gf_library.by_id[gf_id]])
 
-    def get_ancestor_ids(self, ba_id):
+    def get_ancestor_ids(self, ba_id: str) -> list[str]:
         """
         Get ancestor IDs, ordered earliest (closest to root) first.
         """
@@ -103,7 +103,7 @@ class BenthicAttributeLibrary:
             return []
         return self.get_ancestor_ids(parent) + [parent]
 
-    def get_descendants(self, ba_id):
+    def get_descendants(self, ba_id: str | None) -> list[dict[str, object]]:
         """
         Get descendants as a list that's ordered by parent, with parents
         being in a depth-first-search order.
@@ -130,13 +130,16 @@ class GrowthFormLibrary:
     def __init__(self):
         download_response = urllib.request.urlopen("https://api.datamermaid.org/v1/choices/")
         response_json = json.loads(download_response.read())
+        data = None
         for item in response_json:
             if item["name"] == "growthforms":
                 data = item["data"]
                 break
+        if data is None:
+            raise ValueError("'growthforms' not found in /v1/choices/ response")
         self.by_id = {gf["id"]: gf["name"] for gf in data}
 
-    def id_to_name(self, gf_id):
+    def id_to_name(self, gf_id: str) -> str:
         if gf_id == "":
             return ""
         return self.by_id[gf_id]
@@ -197,15 +200,15 @@ class CoralNetMermaidMapping:
 
     def __init__(
         self,
-        mapping_endpoint="https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
+        mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
     ):
-        self._mapping = None
+        self._mapping: dict[str, LabelMappingEntry] | None = None
         self._endpoint = mapping_endpoint
 
-    def __contains__(self, cn_label_id):
+    def __contains__(self, cn_label_id: str) -> bool:
         return cn_label_id in self.mapping
 
-    def __getitem__(self, cn_label_id):
+    def __getitem__(self, cn_label_id: str) -> LabelMappingEntry:
         try:
             return self.mapping[cn_label_id]
         except KeyError as e:
@@ -213,13 +216,14 @@ class CoralNetMermaidMapping:
                 f"{e} - Make sure you're passing the CoralNet label ID (not name), as a string (not int)."
             ) from e
 
-    def get_dataframe(self):
+    def get_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame(self.mapping.values())
 
     @property
-    def mapping(self):
+    def mapping(self) -> dict[str, LabelMappingEntry]:
         if self._mapping is None:
             self._load_mapping()
+        assert self._mapping is not None  # invariant: _load_mapping sets _mapping
         return self._mapping
 
     def _load_mapping(self):
@@ -278,7 +282,7 @@ def output_ba_csvs():
             if result["parent"] is None:
                 parent_name = None
             else:
-                parent_name = benthic_attrs.id_to_name(result["parent"])
+                parent_name = benthic_attrs.id_to_name(str(result["parent"]))
             writer.writerow(
                 {
                     "name": result["name"],

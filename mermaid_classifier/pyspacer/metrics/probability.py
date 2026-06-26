@@ -27,6 +27,9 @@ from mermaid_classifier.pyspacer.metrics._taxonomy_helpers import (
 
 def compute_probability(ctx: MetricsContext) -> MetricGroupResult:
     """Compute probability-based metrics: log loss overall + per-category."""
+    # Both are pre-computed by coordinator; it only calls this when val_proba is not None.
+    assert ctx.val_proba is not None, "compute_probability requires val_proba"
+    assert ctx.val_gt_labels is not None, "compute_probability requires val_gt_labels"
     val_proba = ctx.val_proba
     val_gt_labels = ctx.val_gt_labels
     classes = ctx.clf.classes_
@@ -74,7 +77,7 @@ def compute_probability(ctx: MetricsContext) -> MetricGroupResult:
         DataFrameResult(
             df=pd.DataFrame(cat_rows)
             if cat_rows
-            else pd.DataFrame(columns=["category", "log_loss", "n_samples"]),
+            else pd.DataFrame(columns=["category", "log_loss", "n_samples"]),  # pyright: ignore[reportArgumentType]  # pandas stubs type columns as Axes|None
             artifact_path="probability/per_category_log_loss",
         )
     )

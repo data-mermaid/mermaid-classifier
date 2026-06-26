@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import boto3
@@ -50,7 +51,7 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     return parsed.netloc, parsed.path.lstrip("/")
 
 
-def validate_artifact(model_pt: Path, model_json: Path) -> dict:
+def validate_artifact(model_pt: Path, model_json: Path) -> dict[str, Any]:
     """Re-validate the artifact at release time (the release "parity gate").
 
     load_predictor raises ManifestError on schema_version / input_dim /
@@ -79,7 +80,7 @@ def validate_artifact(model_pt: Path, model_json: Path) -> dict:
 _NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
 
 
-def s3_object_exists(s3_client, bucket: str, key: str) -> bool:
+def s3_object_exists(s3_client: Any, bucket: str, key: str) -> bool:
     """True if the object exists; False on 404/NotFound; re-raise otherwise."""
     try:
         s3_client.head_object(Bucket=bucket, Key=key)
@@ -91,7 +92,7 @@ def s3_object_exists(s3_client, bucket: str, key: str) -> bool:
 
 
 def assemble_s3_layout(
-    s3_client,
+    s3_client: Any,
     *,
     dest_bucket: str,
     dest_prefix: str,
@@ -136,7 +137,7 @@ def assemble_s3_layout(
     return {name: _uri(name) for name in ("model.pt", "model.json", "efficientnet.pt")}
 
 
-def _parse_args(argv):
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Release a trained classifier as vN.")
     p.add_argument("--mlflow-model-id", required=True)
     p.add_argument("--version", required=True)
@@ -146,7 +147,7 @@ def _parse_args(argv):
     return p.parse_args(argv)
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     validate_version(args.version)
 

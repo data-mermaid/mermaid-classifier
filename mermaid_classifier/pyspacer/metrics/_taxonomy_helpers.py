@@ -5,6 +5,8 @@ from __future__ import annotations
 import typing
 from collections import defaultdict
 
+# LabelId is `int | str` in pyspacer; MERMAID always uses str labels.
+# These helpers are typed str-only since they parse BAGF strings internally.
 from mermaid_classifier.common.benthic_attributes import split_ba_gf
 
 if typing.TYPE_CHECKING:
@@ -93,7 +95,7 @@ def group_by_top_level(
     ba_to_top: dict[str, str],
     ba_library: BenthicAttributeLibrary,
     min_samples: int = 30,
-) -> list[dict]:
+) -> list[dict[str, typing.Any]]:
     """Group samples by ground-truth top-level BA category.
 
     Returns list of dicts with keys: top_ba_id, name, indices, n_samples.

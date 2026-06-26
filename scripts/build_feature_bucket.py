@@ -94,17 +94,22 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import boto3
 import pandas as pd
 from botocore.exceptions import ClientError
 
+
+def _tqdm_fallback[T](iterable: Iterable[T] | None = None, **_kwargs: object) -> Iterable[T]:
+    """No-op tqdm fallback used when tqdm is not installed."""
+    return iterable if iterable is not None else iter(())
+
+
 try:
     from tqdm import tqdm
 except ImportError:  # tqdm is convenient but not required.
-
-    def tqdm(iterable=None, **_kwargs):
-        return iterable if iterable is not None else iter(())
+    tqdm = _tqdm_fallback  # pyright: ignore[reportAssignmentType]  # intentional: tqdm class vs fallback function have compatible call signatures
 
 
 logger = logging.getLogger("build_feature_bucket")
@@ -132,7 +137,7 @@ IMAGE_PAGE_ID_RE = re.compile(r"/image/(\d+)/")
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description=__doc__.split("\n\n", 1)[0],
+        description=(__doc__ or "").split("\n\n", 1)[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--target-bucket", required=True, help="Destination bucket. Must already exist.")
@@ -265,7 +270,7 @@ def _client_error_code(exc: ClientError) -> str:
     return exc.response.get("Error", {}).get("Code", "")
 
 
-def head_ok(s3, bucket: str, key: str) -> bool:
+def head_ok(s3: Any, bucket: str, key: str) -> bool:  # s3: boto3 S3 resource (untyped)
     try:
         s3.meta.client.head_object(Bucket=bucket, Key=key)
         return True
@@ -276,7 +281,7 @@ def head_ok(s3, bucket: str, key: str) -> bool:
 
 
 def filter_to_available_sources(
-    s3,
+    s3: Any,  # boto3 S3 resource (untyped)
     source_bucket: str,
     source_prefix: str,
     source_ids: list[str],
@@ -329,7 +334,9 @@ def filter_to_available_sources(
     return present
 
 
-def list_existing_feature_image_ids(s3, target_bucket: str, source_id: str) -> set[str]:
+def list_existing_feature_image_ids(
+    s3: Any, target_bucket: str, source_id: str
+) -> set[str]:  # s3: boto3 S3 resource (untyped)
     """Return the set of image IDs that already have a feature file in target."""
     prefix = f"s{source_id}/features/"
     paginator = s3.meta.client.get_paginator("list_objects_v2")
@@ -383,7 +390,7 @@ def _build_device_caching_extractor_class():
           pass; outputs are copied back to CPU before .tolist().
         """
 
-        def __init__(self, *, device: str, batch_size: int, **kwargs):
+        def __init__(self, *, device: str, batch_size: int, **kwargs: Any):
             super().__init__(**kwargs)
             import torch
 
@@ -392,7 +399,7 @@ def _build_device_caching_extractor_class():
             self._cached_net = None
             self._cached_loaded_remote = False
 
-        def _ensure_net(self):
+        def _ensure_net(self) -> tuple[Any, bool]:  # net: untyped pyspacer/torch model
             if self._cached_net is not None:
                 return self._cached_net, False
             weights_ds, loaded_remote = self.load_datastream("weights")
@@ -405,7 +412,9 @@ def _build_device_caching_extractor_class():
             self._cached_loaded_remote = loaded_remote
             return net, loaded_remote
 
-        def patches_to_features(self, patch_list):
+        def patches_to_features(
+            self, patch_list: Any
+        ) -> Any:  # patch_list: pyspacer untyped interface
             import numpy as np
             import torch
             from spacer.extractors.torch_extractors import transformation
@@ -440,8 +449,8 @@ def _build_device_caching_extractor_class():
 
 
 def verify_device_numerics(
-    extractor,
-    weights_loc,
+    extractor: Any,  # _DeviceCachingExtractor (untyped pyspacer subclass)
+    weights_loc: Any,  # spacer DataLocation (untyped)
     batch_size: int,
     device: str,
     n_patches: int = 8,
@@ -454,7 +463,7 @@ def verify_device_numerics(
         return
 
     import numpy as np
-    import torch  # noqa: F401  (forces the same import order)
+    import torch  # noqa: F401  # pyright: ignore[reportUnusedImport]  # forces same import order as production path
     from PIL import Image
 
     rng = np.random.default_rng(seed=42)
@@ -510,11 +519,11 @@ def build_extract_msg(
     source_id: str,
     image_id: str,
     rowcols: list[tuple[int, int]],
-    extractor,
+    extractor: Any,  # _DeviceCachingExtractor (untyped pyspacer subclass)
     source_bucket: str,
     source_prefix: str,
     target_bucket: str,
-):
+) -> Any:  # spacer ExtractFeaturesMsg (untyped)
     from spacer.data_classes import DataLocation
     from spacer.messages import ExtractFeaturesMsg
 
@@ -558,7 +567,7 @@ class PreparedSource:
 
 
 def build_name_to_image_id_mapping(
-    s3,
+    s3: Any,  # boto3 S3 resource (untyped)
     source_bucket: str,
     source_prefix: str,
     source_id: str,
@@ -579,16 +588,16 @@ def build_name_to_image_id_mapping(
             f"s{source_id}/image_list.csv missing required columns; got {list(df.columns)}"
         )
     df = df[["Name", "Image Page"]].dropna()
-    df["image_id"] = df["Image Page"].astype(str).str.extract(IMAGE_PAGE_ID_RE.pattern)[0]
+    df["image_id"] = df["Image Page"].astype(str).str.extract(IMAGE_PAGE_ID_RE.pattern)[0]  # pyright: ignore[reportAttributeAccessIssue]  # pandas-stubs infers ndarray for .astype(str) column
     df["name_norm"] = (
-        df["Name"].astype(str).map(lambda n: IMAGE_LIST_STATUS_SUFFIX_RE.sub("", n).strip())
+        df["Name"].astype(str).map(lambda n: IMAGE_LIST_STATUS_SUFFIX_RE.sub("", n).strip())  # pyright: ignore[reportAttributeAccessIssue]  # pandas-stubs infers ndarray for .astype(str) column
     )
-    df = df.dropna(subset=["image_id"])
+    df = df.dropna(subset=["image_id"])  # pyright: ignore[reportCallIssue]  # pandas-stubs overload mismatch
     return dict(zip(df["name_norm"], df["image_id"], strict=False))
 
 
 def prepare_source(
-    s3,
+    s3: Any,  # boto3 S3 resource (untyped)
     source_bucket: str,
     source_prefix: str,
     source_id: str,
@@ -631,8 +640,8 @@ def prepare_source(
                 )
                 return None
             raise
-        norm = df["Name"].astype(str).map(lambda n: IMAGE_LIST_STATUS_SUFFIX_RE.sub("", n).strip())
-        df["Image ID"] = norm.map(name_to_id)
+        norm = df["Name"].astype(str).map(lambda n: IMAGE_LIST_STATUS_SUFFIX_RE.sub("", n).strip())  # pyright: ignore[reportAttributeAccessIssue]  # pandas-stubs infers ndarray for .astype(str) column
+        df["Image ID"] = norm.map(lambda n: name_to_id.get(n))  # pyright: ignore[reportAttributeAccessIssue]  # pandas-stubs infers ndarray; use get() to return None for missing keys
         n_unmapped = int(df["Image ID"].isna().sum())
         if n_unmapped:
             logger.warning(
@@ -662,7 +671,7 @@ def prepare_source(
 
 
 def upload_annotations_csv(
-    s3,
+    s3: Any,  # boto3 S3 resource (untyped)
     source_id: str,
     transformed_csv: bytes,
     target_bucket: str,
@@ -682,12 +691,12 @@ def upload_annotations_csv(
 def process_source(
     *,
     source_id: str,
-    extractor,
-    s3,
+    extractor: Any,  # _DeviceCachingExtractor (untyped pyspacer subclass)
+    s3: Any,  # boto3 S3 resource (untyped)
     args: argparse.Namespace,
     counters: RunCounters,
-    progress_writer,
-    error_writer,
+    progress_writer: Any,  # IO[str] | None
+    error_writer: Any,  # csv._writer | None
 ) -> None:
     # Lazy import: spacer is only needed inside the GPU loop.
     from spacer.tasks import extract_features
@@ -782,7 +791,9 @@ def process_source(
 # ---- Logging helpers ------------------------------------------------
 
 
-def record_progress(writer, source_id: str, image_id: str, outcome: str, **extra) -> None:
+def record_progress(
+    writer: Any, source_id: str, image_id: str, outcome: str, **extra: object
+) -> None:  # writer: IO[str] | None
     if writer is None:
         return
     rec = {
@@ -796,7 +807,9 @@ def record_progress(writer, source_id: str, image_id: str, outcome: str, **extra
     writer.flush()
 
 
-def record_failure(writer, source_id: str, image_id: str, error_type: str, error_msg: str) -> None:
+def record_failure(
+    writer: Any, source_id: str, image_id: str, error_type: str, error_msg: str
+) -> None:  # writer: csv._writer | None
     if writer is None:
         return
     writer.writerow(

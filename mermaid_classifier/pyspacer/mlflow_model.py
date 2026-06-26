@@ -12,32 +12,44 @@ This module imports ``mlflow`` and therefore lives train-side, NOT in
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import mlflow
+from mlflow.models.signature import ModelSignature
+from mlflow.pyfunc import (
+    PythonModel,  # pyright: ignore[reportPrivateImportUsage]  # mlflow does not re-export PythonModel at package level
+)
 
 from mermaid_classifier.pyspacer.inference import load_predictor
 
 
-class ArtifactPredictorModel(mlflow.pyfunc.PythonModel):
+class ArtifactPredictorModel(PythonModel):
     """Loads model.pt + model.json via load_predictor; ``predict`` returns the
     calibrated probability matrix for a feature batch."""
 
-    def load_context(self, context):
+    def load_context(self, context: Any) -> None:  # pyright: ignore[reportUnknownParameterType]  # mlflow PythonModelContext is untyped
         self._predictor = load_predictor(
             context.artifacts["model_pt"],
             context.artifacts["model_json"],
         )
 
-    def predict(self, context, model_input, params=None):
+    def predict(  # pyright: ignore[reportUnknownParameterType]  # mlflow PythonModel.predict signature is untyped
+        self,
+        context: Any,
+        model_input: Any,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
         return self._predictor.predict_proba(model_input)
 
 
 def log_artifact_model(
-    model_pt_path,
-    model_json_path,
+    model_pt_path: Path | str,
+    model_json_path: Path | str,
     *,
-    registered_model_name,
-    signature=None,
-):
+    registered_model_name: str,
+    signature: ModelSignature | None = None,
+) -> Any:  # pyright: ignore[reportReturnType]  # mlflow.pyfunc.log_model return type is untyped
     """Log the portable artifact as an MLflow pyfunc model and register it.
 
     Stores ``model.pt`` + ``model.json`` as the model's artifacts, preserving
@@ -58,5 +70,5 @@ def log_artifact_model(
             "model_json": str(model_json_path),
         },
         registered_model_name=registered_model_name,
-        signature=signature,
+        signature=signature,  # pyright: ignore[reportArgumentType]  # mlflow signature param typed as ModelSignature (not Optional) but None is accepted at runtime
     )

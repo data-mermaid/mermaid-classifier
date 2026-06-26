@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 import duckdb
 import pandas as pd
+from pandas import Series
 
 
 @contextmanager
@@ -42,7 +43,7 @@ def _duckdb_temp_transform_table(
     duck_table_name: str,
     source_column_name: str,
     target_column_name: str,
-    transform_func: typing.Callable,
+    transform_func: typing.Callable[..., object],
 ):
     """
     Internal helper: given an existing DuckDB table and column, creates a
@@ -61,7 +62,7 @@ def _duckdb_temp_transform_table(
     # Build mapping DataFrame using pandas. This is more efficient and less
     # error-prone for inserting values compared to building a large
     # INSERT INTO statement.
-    mapping_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+    mapping_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning  # pyright: ignore[reportUnusedVariable]
         {
             source_column_name: unique_values,
             target_column_name: [transform_func(v) for v in unique_values],
@@ -209,8 +210,8 @@ def duckdb_filter_on_column(
 
 
 def duckdb_batched_rows(
-    rows: duckdb.DuckDBPyRelation,
-) -> typing.Generator[pd.core.series.Series, None, None]:
+    rows: duckdb.DuckDBPyRelation | duckdb.DuckDBPyConnection,
+) -> typing.Generator[Series, None, None]:
     """
     Reads from a DuckDB relation (chunkifying to avoid memory issues),
     and generates pandas dataframe rows.
@@ -246,7 +247,7 @@ def duckdb_grouped_rows(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     grouping_column_names: list[str],
-) -> typing.Generator[pd.core.series.Series, None, None]:
+) -> typing.Generator[list[Series], None, None]:
     """
     Fetch rows from the given DuckDB table in groups, with each group
     consisting of all rows that have a particular set of values in the

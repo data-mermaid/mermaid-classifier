@@ -15,9 +15,10 @@ from operator import itemgetter
 from pathlib import Path
 from urllib.parse import urlparse
 
-import matplotlib as mpl
+import matplotlib.cm
 import matplotlib.pyplot as plt
 import mlflow
+import mlflow.artifacts
 import numpy as np
 from bs4 import BeautifulSoup
 from spacer.data_classes import DataLocation
@@ -68,10 +69,10 @@ def _download_pair_to_tempdir(
     paths = []
     for loc, name in [(pt_loc, "model.pt"), (json_loc, "model.json")]:
         storage = storage_factory(loc.storage_type, loc.bucket_name)
-        stream = storage.load(loc.key)
+        stream = storage.load(loc.key)  # pyright: ignore[reportOptionalMemberAccess]  # storage_factory always returns Storage for valid storage types; None is unreachable
         dest = tmp_dir / name
         # getbuffer() writes the stream's bytes without an extra full copy.
-        dest.write_bytes(stream.getbuffer())
+        dest.write_bytes(stream.getbuffer())  # pyright: ignore[reportOptionalMemberAccess]  # storage.load returns BytesIO, not None
         paths.append(dest)
     return paths[0], paths[1]
 
@@ -93,6 +94,7 @@ def resolve_classifier_artifact(location: str) -> tuple[Path, Path]:
     base = location.rstrip("/")
     pt_loc = AnnotationRun.parse_location_str(f"{base}/model.pt")
     json_loc = AnnotationRun.parse_location_str(f"{base}/model.json")
+    assert pt_loc is not None and json_loc is not None  # guaranteed: non-empty strings passed
 
     if pt_loc.storage_type == "s3":
         return _download_pair_to_tempdir(pt_loc, json_loc)
@@ -104,12 +106,12 @@ class AnnotationRun:
         self,
         image: str,
         points_csv: str,
-        classifier: str = None,
-        weights: str = None,
-        labelset_csv: str = None,
+        classifier: str | None = None,
+        weights: str | None = None,
+        labelset_csv: str | None = None,
         num_predictions_to_save: int = 0,
-        coralnet_cache_dir: str = None,
-        plot_title: str = None,
+        coralnet_cache_dir: str | None = None,
+        plot_title: str | None = None,
     ):
         """
         image
@@ -179,13 +181,13 @@ class AnnotationRun:
 
         weights_location = weights or settings.weights_location
 
-        annotations: dict[tuple[int, int], list] = defaultdict(list)
-        scores: dict[tuple[int, int], list] = defaultdict(list)
+        annotations: dict[tuple[int, int], list[str]] = defaultdict(list)
+        scores: dict[tuple[int, int], list[float]] = defaultdict(list)
 
         # Read in CSV points.
         # Labels and scores may or may not be present.
-        with open(self.points_csv_path) as points_csv:
-            reader = csv.DictReader(points_csv)
+        with open(self.points_csv_path) as points_csv_f:
+            reader = csv.DictReader(points_csv_f)
             for csv_row in reader:
                 row = int(csv_row["row"])
                 column = int(csv_row["column"])
@@ -200,7 +202,9 @@ class AnnotationRun:
             image_id = int(image)
         except ValueError:
             # Non-numeric arg; interpret as file path/URI
-            self.image_loc = self.parse_location_str(image)
+            parsed = self.parse_location_str(image)
+            assert parsed is not None  # image is a required non-empty str parameter
+            self.image_loc = parsed
             auto_plot_title = image
         else:
             # Numeric arg; interpret as CoralNet image ID
@@ -220,6 +224,9 @@ class AnnotationRun:
             # Classify with the portable artifact: extract features with
             # pyspacer's EfficientNet extractor, then predict with the loaded
             # TorchScript head (no classifier pickle, no pyspacer classify call).
+            assert weights_loc is not None, (
+                "weights_location must be set when classifier is provided"
+            )
 
             model_pt, model_json = resolve_classifier_artifact(classifier)
             predictor = load_predictor(model_pt, model_json)
@@ -230,8 +237,8 @@ class AnnotationRun:
                 data_locations={"weights": weights_loc},
             )
             rowcols = list(annotations.keys())
-            check_extract_inputs(loaded_image, rowcols, self.image_loc.key)
-            features, _ = extractor(loaded_image, rowcols)
+            check_extract_inputs(loaded_image, rowcols, self.image_loc.key)  # pyright: ignore[reportArgumentType]  # pyspacer stubs use PIL.Image module, not PIL.Image.Image
+            features, _ = extractor(loaded_image, rowcols)  # pyright: ignore[reportArgumentType]  # same PIL stub issue
 
             predictions_per_point = max(num_predictions_to_save, 1)
 
@@ -247,10 +254,10 @@ class AnnotationRun:
                         zip(labels, proba, strict=False), key=itemgetter(1), reverse=True
                     )
                     annotations[(row, column)] = [
-                        label for label, score in top_predictions[:predictions_per_point]
+                        label for label, _ in top_predictions[:predictions_per_point]
                     ]
                     scores[(row, column)] = [
-                        score for label, score in top_predictions[:predictions_per_point]
+                        score for _, score in top_predictions[:predictions_per_point]
                     ]
             print("Finished classifying")
 
@@ -294,7 +301,7 @@ class AnnotationRun:
                 self.label_ids_to_names[bagf_id] = name
 
     @staticmethod
-    def parse_location_str(location: str) -> DataLocation:
+    def parse_location_str(location: str | None) -> DataLocation | None:
 
         if not location:
             return None
@@ -360,6 +367,8 @@ class AnnotationRun:
                 f" image-view page. Maybe it's in a private source."
             )
         image_url = original_img_elements[0].attrs.get("src")
+        if not isinstance(image_url, str):
+            raise ValueError(f"CoralNet image {image_id}: couldn't parse image URL from page.")
         file_suffix = Path(urlparse(image_url).path).suffix
 
         print("Downloading CoralNet image...")
@@ -374,16 +383,20 @@ class AnnotationRun:
         # No cache
         image_loc = DataLocation("memory", "image")
         memory_storage = storage_factory("memory")
-        memory_storage.store(image_loc.key, BytesIO(download_response.read()))
+        memory_storage.store(image_loc.key, BytesIO(download_response.read()))  # pyright: ignore[reportOptionalMemberAccess]  # memory storage_factory always returns MemoryStorage singleton
         return image_loc
 
     @staticmethod
-    def prediction_column_names(prediction_num):
+    def prediction_column_names(prediction_num: int) -> tuple[str, str]:
         if prediction_num == 1:
             return "label", "score"
         return f"label{prediction_num}", f"score{prediction_num}"
 
-    def write_predictions(self, annotations, scores):
+    def write_predictions(
+        self,
+        annotations: dict[tuple[int, int], list[str]],
+        scores: dict[tuple[int, int], list[float]],
+    ) -> None:
 
         writer_stream = StringIO()
 
@@ -397,9 +410,11 @@ class AnnotationRun:
             for num in range(1, self.num_predictions_to_save + 1):
                 writer_fieldnames += self.prediction_column_names(num)
             # Then, any additional columns that the original CSV happens
-            # to have.
+            # to have. (reader.fieldnames is None before the first row is read,
+            # but DictReader populates it lazily from the header; fall back to
+            # empty so pyright knows the iterable is always valid.)
             writer_fieldnames += [
-                name for name in reader.fieldnames if name not in writer_fieldnames
+                name for name in (reader.fieldnames or []) if name not in writer_fieldnames
             ]
             writer = csv.DictWriter(writer_stream, writer_fieldnames)
             writer.writeheader()
@@ -430,7 +445,7 @@ class AnnotationRun:
     def show(self):
 
         unique_top_labels = list(self.label_ids_to_names.keys())
-        color_list = mpl.cm.tab10(range(len(unique_top_labels)))
+        color_list = matplotlib.cm.tab10(range(len(unique_top_labels)))  # pyright: ignore[reportAttributeAccessIssue]  # matplotlib.cm colormaps are dynamic attributes not in stubs
         # Map the labelset to colors in the color set.
         label_ids_to_colors = dict(zip(unique_top_labels, color_list, strict=False))
 

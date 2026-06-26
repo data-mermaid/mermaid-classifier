@@ -94,5 +94,5 @@ class CsvSpec(abc.ABC):
 
             self.per_row_init_action(values)
 
-    def per_row_init_action(self, row: dict):
+    def per_row_init_action(self, row: dict[str, str | None]) -> None:
         raise NotImplementedError

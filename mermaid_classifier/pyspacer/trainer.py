@@ -8,13 +8,17 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from logging import getLogger
+from typing import Any
 
 import numpy as np
-from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
+from sklearn.calibration import (
+    CalibratedClassifierCV,
+    _fit_calibrator,  # pyright: ignore[reportPrivateUsage]  # private sklearn API used for memory-efficient batched calibration
+)
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import log_loss as sklearn_log_loss
 from spacer.data_classes import ImageLabels, ValResults
-from spacer.messages import TrainClassifierReturnMsg
+from spacer.messages import TrainClassifierReturnMsg, TrainingTaskLabels
 from spacer.train_classifier import ClassifierTrainer
 from spacer.train_utils import evaluate_classifier
 
@@ -51,8 +55,8 @@ class MermaidTrainer(ClassifierTrainer):
     def __init__(
         self,
         batch_size: int,
-        on_epoch_end: Callable[[dict], None] | None = None,
-        class_weight: dict | None = None,
+        on_epoch_end: Callable[[dict[str, Any]], None] | None = None,
+        class_weight: dict[str, float] | None = None,
         early_stopping_patience: int | None = None,
     ):
         if early_stopping_patience is not None and early_stopping_patience < 1:
@@ -74,9 +78,15 @@ class MermaidTrainer(ClassifierTrainer):
         # Populated by __call__; readable by the runner for MLflow
         # logging. Pre-initialized so the runner never hits an
         # AttributeError when patience is None.
-        self._early_stop_info: dict | None = None
+        self._early_stop_info: dict[str, Any] | None = None
 
-    def __call__(self, labels, nbr_epochs, pc_models):
+    def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]  # absorbs extra pyspacer params (e.g. the positional trainer arg) via **_kwargs
+        self,
+        labels: TrainingTaskLabels,
+        nbr_epochs: int,
+        pc_models: list[CalibratedClassifierCV],
+        **_kwargs: Any,
+    ) -> tuple[CalibratedClassifierCV, ValResults, TrainClassifierReturnMsg]:
         logger.debug(
             f"Unique classes:"
             f" Train + Ref = {len(labels.ref.classes_set)},"
@@ -123,6 +133,7 @@ class MermaidTrainer(ClassifierTrainer):
             best_epoch_idx: int | None = None
             epochs_since_best: int = 0
             stop_reason: str = "budget_exhausted"
+            epoch: int = 0
 
             for epoch in range(nbr_epochs):
                 # Training: load batches from disk, partial_fit, then
@@ -179,7 +190,7 @@ class MermaidTrainer(ClassifierTrainer):
 
                 if self.on_epoch_end is not None:
                     loss_curve = getattr(clf, "loss_curve_", [None])
-                    cb_metrics: dict = {
+                    cb_metrics: dict[str, Any] = {
                         "epoch": epoch,
                         "ref_accuracy": ref_accs[-1],
                         "val_accuracy": val_acc,
@@ -253,7 +264,8 @@ class MermaidTrainer(ClassifierTrainer):
         with _log_entry_and_exit("calibration"):
             clf_calibrated = self._calibrate_in_batches(clf, labels.ref)
 
-        classes = clf_calibrated.classes_.tolist()
+        assert clf_calibrated.classes_ is not None  # set by _calibrate_in_batches before returning
+        classes = clf_calibrated.classes_.tolist()  # pyright: ignore[reportUnknownMemberType,reportAttributeAccessIssue]  # sklearn stubs type classes_ as a union that lacks .tolist()
 
         # Evaluate new classifier on validation set
         val_gts, val_ests, val_scores = evaluate_classifier(clf_calibrated, labels.val)
@@ -280,7 +292,7 @@ class MermaidTrainer(ClassifierTrainer):
 
         return clf_calibrated, val_results, return_message
 
-    def _calc_acc_batched(self, clf, labels: ImageLabels) -> float:
+    def _calc_acc_batched(self, clf: TorchMLPClassifier, labels: ImageLabels) -> float:
         """Compute accuracy by streaming features from disk in batches,
         avoiding loading the full dataset into memory.
 
@@ -296,9 +308,9 @@ class MermaidTrainer(ClassifierTrainer):
 
     def _calc_acc_and_log_loss_batched(
         self,
-        clf,
+        clf: TorchMLPClassifier,
         labels: ImageLabels,
-        classes_list: list,
+        classes_list: list[Any],
     ) -> tuple[float, float]:
         """Compute accuracy AND log_loss in a single streaming pass.
 
@@ -313,8 +325,8 @@ class MermaidTrainer(ClassifierTrainer):
         eval set still register as zero-probability columns; matches
         the convention used by sklearn.metrics.log_loss(labels=...).
         """
-        gt: list = []
-        all_proba: list = []
+        gt: list[Any] = []
+        all_proba: list[Any] = []
         for x, y in labels.load_data_in_batches(batch_size=self.batch_size):
             all_proba.append(clf.predict_proba(x))
             gt.extend(y)
@@ -331,7 +343,7 @@ class MermaidTrainer(ClassifierTrainer):
 
     def _calibrate_in_batches(
         self,
-        clf,
+        clf: TorchMLPClassifier,
         ref_labels: ImageLabels,
     ) -> CalibratedClassifierCV:
         """
@@ -383,7 +395,7 @@ class MermaidTrainer(ClassifierTrainer):
 
         return wrapper
 
-    def serialize(self) -> dict:
+    def serialize(self) -> dict[str, Any]:
         data = super().serialize()
         data["batch_size"] = self.batch_size
         # on_epoch_end is not JSON-serializable; excluded

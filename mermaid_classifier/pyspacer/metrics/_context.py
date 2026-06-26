@@ -32,7 +32,7 @@ class MetricsContext:
     dataset: "TrainingDataset | None" = None
     clf: typing.Any = None
     val_proba: "np.ndarray | None" = None
-    val_gt_labels: "list | None" = None
+    val_gt_labels: "list[typing.Any] | None" = None
     ba_to_top: "dict[str, str] | None" = None
     ba_paths: "dict[str, list[str]] | None" = None
 
@@ -56,7 +56,7 @@ class MetricsContext:
         # by ba_library
         for class_id in self.val_results.classes:
             try:
-                self.ba_library.bagf_id_to_name(class_id, self.gf_library)
+                self.ba_library.bagf_id_to_name(class_id, self.gf_library)  # pyright: ignore[reportArgumentType]  # LabelId is int|str; MERMAID uses str
             except Exception as e:
                 raise MetricsContextError(
                     f"Class ID {class_id!r} not found in ba_library: {e}"

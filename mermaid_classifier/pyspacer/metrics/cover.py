@@ -25,17 +25,21 @@ def compute_cover(ctx: MetricsContext) -> MetricGroupResult:
     """Compute per-image cover reconstruction metrics."""
     val_results = ctx.val_results
     dataset = ctx.dataset
+    assert dataset is not None  # compute_cover is only called when dataset is not None
     classes = val_results.classes
+
+    # val_results.classes is list[LabelId] (int|str); MERMAID always uses str.
+    classes_str: list[str] = classes  # pyright: ignore[reportAssignmentType]
 
     # Build per-image cover vectors from flat gt/est arrays.
     # evaluate_classifier iterates images in dict.keys() order,
     # with each image's points contiguous.
-    all_classes = sorted({classes[i] for i in set(val_results.gt) | set(val_results.est)})
+    all_classes = sorted({classes_str[i] for i in set(val_results.gt) | set(val_results.est)})
     class_to_idx = {c: i for i, c in enumerate(all_classes)}
     n_classes = len(all_classes)
 
-    gt_labels = [classes[i] for i in val_results.gt]
-    est_labels = [classes[i] for i in val_results.est]
+    gt_labels = [classes_str[i] for i in val_results.gt]
+    est_labels = [classes_str[i] for i in val_results.est]
 
     n_images = len(list(dataset.labels.val.keys()))
     true_cover_matrix = np.zeros((n_images, n_classes))
@@ -70,7 +74,9 @@ def compute_cover(ctx: MetricsContext) -> MetricGroupResult:
     cover_df = pd.DataFrame(
         {
             "bagf_id": all_classes,
-            "bagf_name": [ctx.ba_library.bagf_id_to_name(c, ctx.gf_library) for c in all_classes],
+            "bagf_name": [
+                ctx.ba_library.bagf_id_to_name(c, ctx.gf_library) for c in all_classes
+            ],  # all_classes is list[str]
             "mean_true_cover_pct": true_cover_matrix.mean(axis=0) * 100,
             "bias_pct": per_class_bias * 100,
             "rmse_pct": per_class_rmse * 100,
@@ -88,13 +94,13 @@ def compute_cover(ctx: MetricsContext) -> MetricGroupResult:
         # r_squared is NaN for classes whose true cover is constant across
         # images; median over all-NaN warns "Mean of empty slice" via
         # pandas → numpy. Drop NaNs first; fall back to NaN if none remain.
-        r2_values = significant["r_squared"].dropna()
+        r2_values = significant["r_squared"].dropna()  # pyright: ignore[reportAttributeAccessIssue]  # pandas Series, not ndarray
         median_r2 = float(r2_values.median()) if len(r2_values) > 0 else float("nan")
         result.scalars.extend(
             [
                 ScalarMetric(
                     name="cover_mean_abs_bias_pct",
-                    value=float(significant["bias_pct"].abs().mean()),
+                    value=float(significant["bias_pct"].abs().mean()),  # pyright: ignore[reportAttributeAccessIssue]  # pandas Series
                 ),
                 ScalarMetric(
                     name="cover_mean_rmse_pct", value=float(significant["rmse_pct"].mean())

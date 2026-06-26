@@ -65,11 +65,12 @@ class _MLPModule(nn.Module):
             layers.append(nn.Linear(in_size, out_size))
         self.linears = nn.ModuleList(layers)
 
-        for linear in self.linears:
+        for module in self.linears:
+            assert isinstance(module, nn.Linear)
             # Glorot uniform — matches sklearn MLP's init for non-logistic
             # activations (factor=6 in sklearn's _init_coef).
-            nn.init.xavier_uniform_(linear.weight)
-            nn.init.zeros_(linear.bias)
+            nn.init.xavier_uniform_(module.weight)
+            nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for i, linear in enumerate(self.linears):
@@ -106,7 +107,7 @@ class TorchMLPClassifier:
         beta_1: float = 0.9,
         beta_2: float = 0.999,
         epsilon: float = 1e-8,
-        class_weight: dict | None = None,
+        class_weight: dict[str, float] | None = None,
     ):
         if activation != "relu":
             raise ValueError(
@@ -217,15 +218,16 @@ class TorchMLPClassifier:
         # over weights (not biases). We compute sum(W^2) here; the caller
         # scales it.
         penalty = torch.zeros(1, dtype=torch.float32)
-        for linear in self._module.linears:
-            penalty = penalty + (linear.weight**2).sum()
+        for module in self._module.linears:
+            assert isinstance(module, nn.Linear)
+            penalty = penalty + (module.weight**2).sum()
         return penalty.squeeze()
 
     def partial_fit(
         self,
-        X: np.ndarray | list,
-        y: np.ndarray | list,
-        classes: Sequence | None = None,
+        X: np.ndarray | list[Any],
+        y: np.ndarray | list[Any],
+        classes: Sequence[Any] | None = None,
     ) -> TorchMLPClassifier:
         X_arr = np.asarray(X, dtype=np.float32)
         if X_arr.ndim != 2:
@@ -302,11 +304,11 @@ class TorchMLPClassifier:
 
     def fit(
         self,
-        X: np.ndarray | list,
-        y: np.ndarray | list,
+        X: np.ndarray | list[Any],
+        y: np.ndarray | list[Any],
     ) -> TorchMLPClassifier:
         y_arr = np.asarray(y)
-        classes = np.unique(y_arr)
+        classes: list[Any] = np.unique(y_arr).tolist()
         # Reset so fit() starts fresh even on a previously-trained instance.
         for attr in (
             "_module",
@@ -327,7 +329,7 @@ class TorchMLPClassifier:
             prev_loss = cur
         return self
 
-    def _forward_probs(self, X: np.ndarray | list) -> np.ndarray:
+    def _forward_probs(self, X: np.ndarray | list[Any]) -> np.ndarray:
         if not hasattr(self, "_module"):
             raise RuntimeError(
                 "TorchMLPClassifier is not fitted. Call partial_fit or fit"
@@ -367,10 +369,10 @@ class TorchMLPClassifier:
         probs_np /= row_sums[:, np.newaxis]
         return probs_np
 
-    def predict_proba(self, X: np.ndarray | list) -> np.ndarray:
+    def predict_proba(self, X: np.ndarray | list[Any]) -> np.ndarray:
         return self._forward_probs(X)
 
-    def predict(self, X: np.ndarray | list) -> np.ndarray:
+    def predict(self, X: np.ndarray | list[Any]) -> np.ndarray:
         return self.classes_[np.argmax(self._forward_probs(X), axis=1)]
 
     # --- sklearn parameter protocol (lightweight) -------------------------

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import sklearn
 import sklearn.metrics
+from matplotlib.figure import Figure
 from scipy.cluster.hierarchy import leaves_list, linkage
 from scipy.spatial.distance import squareform
 from sklearn.metrics.pairwise import cosine_distances
@@ -66,7 +67,7 @@ def _build_confusion_matrix(
     ba_library: "BenthicAttributeLibrary",
     gf_library: "GrowthFormLibrary",
     class_order: list[int],
-) -> tuple[pd.DataFrame, plt.Figure]:
+) -> tuple[pd.DataFrame, Figure]:
     """Build a confusion matrix DataFrame and matplotlib Figure.
 
     Returns (df, fig). Caller is responsible for closing the figure.
@@ -80,18 +81,20 @@ def _build_confusion_matrix(
 
     if normalize:
         # 0-to-1 values -> integer percents.
-        matrix = np.int64(np.floor(matrix * 100))
+        matrix = np.floor(matrix * 100).astype(np.int64)
 
     # Reorder rows and columns by hierarchical clustering order.
     matrix = matrix[np.ix_(class_order, class_order)]
 
+    # val_results.classes is list[LabelId] (int|str); MERMAID always uses str.
+    classes_str: list[str] = val_results.classes  # pyright: ignore[reportAssignmentType]
     bagf_names = [
-        ba_library.bagf_id_to_name(val_results.classes[class_index], gf_library)
+        ba_library.bagf_id_to_name(classes_str[class_index], gf_library)
         for class_index in class_order
     ]
 
-    df = pd.DataFrame(data=matrix, columns=bagf_names)
-    df.insert(loc=0, column="-", value=bagf_names)
+    df = pd.DataFrame(data=matrix, columns=bagf_names)  # pyright: ignore[reportArgumentType]
+    df.insert(loc=0, column="-", value=bagf_names)  # pyright: ignore[reportArgumentType]
 
     num_labels = len(bagf_names)
     fig_size = max(12, num_labels * 0.6)
@@ -169,10 +172,13 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
     """Compute per-label and overall precision, recall, and F1."""
     val_results = ctx.val_results
 
+    # val_results.classes is list[LabelId] (int|str); MERMAID always uses str.
+    classes_str: list[str] = val_results.classes  # pyright: ignore[reportAssignmentType]
+
     # Convert the valresults to a pandas dataframe.
 
-    actual_annotations = pd.Categorical([val_results.classes[i] for i in val_results.gt])
-    predicted_annotations = pd.Categorical([val_results.classes[i] for i in val_results.est])
+    actual_annotations = pd.Categorical([classes_str[i] for i in val_results.gt])
+    predicted_annotations = pd.Categorical([classes_str[i] for i in val_results.est])
     annotations_df = pd.DataFrame(
         {
             "actual": actual_annotations,
@@ -183,9 +189,9 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
     # Precision, recall, F1: per label
 
     per_label_metrics = []
-    label_counts = Counter(val_results.classes[i] for i in val_results.gt)
+    label_counts = Counter(classes_str[i] for i in val_results.gt)
 
-    for label in val_results.classes:
+    for label in classes_str:
         precision = sklearn.metrics.precision_score(
             annotations_df["actual"],
             annotations_df["predicted"],
@@ -198,14 +204,14 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
             # or true positives and false negatives, either precision or
             # recall may have zero in the denominator of the calculation.
             # So we define what value we use in that situation.
-            zero_division=0.0,
+            zero_division=0.0,  # pyright: ignore[reportArgumentType]  # sklearn stubs type as str only
         )
         recall = sklearn.metrics.recall_score(
             annotations_df["actual"],
             annotations_df["predicted"],
             labels=[label],
             average="micro",
-            zero_division=0.0,
+            zero_division=0.0,  # pyright: ignore[reportArgumentType]  # sklearn stubs type as str only
         )
 
         if precision + recall == 0.0:
@@ -240,13 +246,13 @@ def compute_precision_recall_f1(ctx: MetricsContext) -> MetricGroupResult:
         actual_annotations,
         predicted_annotations,
         average="macro",
-        zero_division=0.0,
+        zero_division=0.0,  # pyright: ignore[reportArgumentType]  # sklearn stubs type as str only
     )
     recall = sklearn.metrics.recall_score(
         actual_annotations,
         predicted_annotations,
         average="macro",
-        zero_division=0.0,
+        zero_division=0.0,  # pyright: ignore[reportArgumentType]  # sklearn stubs type as str only
     )
     f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
 

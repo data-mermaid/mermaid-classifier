@@ -9,9 +9,12 @@ Metrics:
 Requires val_proba, val_gt_labels, and clf in MetricsContext.
 """
 
+from typing import TypedDict
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from mermaid_classifier.common.benthic_attributes import split_ba_gf
 from mermaid_classifier.pyspacer.metrics._context import MetricsContext
@@ -29,7 +32,19 @@ from mermaid_classifier.pyspacer.metrics._taxonomy_helpers import (
 )
 
 
-def _compute_topk_mrr(proba, gt_labels, classes, ks=(1, 3, 5, 10)):
+class _TopKMRRResult(TypedDict):
+    topk: dict[int, float]
+    mrr: float
+    ranks: NDArray[np.intp]
+    sorted_indices: NDArray[np.intp]
+
+
+def _compute_topk_mrr(
+    proba: np.ndarray,
+    gt_labels: list[str],
+    classes: list[str],
+    ks: tuple[int, ...] = (1, 3, 5, 10),
+) -> _TopKMRRResult:
     """Compute top-K accuracy and MRR from a probability matrix.
 
     Returns dict with 'topk' (dict k->accuracy), 'mrr' (float),
@@ -40,10 +55,10 @@ def _compute_topk_mrr(proba, gt_labels, classes, ks=(1, 3, 5, 10)):
     sorted_indices = np.argsort(-proba, axis=1)
 
     n = len(gt_labels)
-    ranks = np.zeros(n, dtype=int)
+    ranks: NDArray[np.intp] = np.zeros(n, dtype=np.intp)
     for i, gt_label in enumerate(gt_labels):
         gt_idx = class_to_idx[gt_label]
-        ranks[i] = np.where(sorted_indices[i] == gt_idx)[0][0] + 1
+        ranks[i] = int(np.where(sorted_indices[i] == gt_idx)[0][0]) + 1
 
     topk = {k: float(np.mean(ranks <= k)) for k in ks}
     mrr = float(np.mean(1.0 / ranks))
@@ -52,9 +67,12 @@ def _compute_topk_mrr(proba, gt_labels, classes, ks=(1, 3, 5, 10)):
 
 def compute_ranking(ctx: MetricsContext) -> MetricGroupResult:
     """Compute ranking metrics: top-K, MRR, per-category, hierarchical."""
-    val_proba = ctx.val_proba
-    val_gt_labels = ctx.val_gt_labels
-    classes = list(ctx.clf.classes_)
+    # Both are pre-computed by coordinator; it only calls this when val_proba is not None.
+    assert ctx.val_proba is not None, "compute_ranking requires val_proba"
+    assert ctx.val_gt_labels is not None, "compute_ranking requires val_gt_labels"
+    val_proba: np.ndarray = ctx.val_proba
+    val_gt_labels: list[str] = ctx.val_gt_labels  # pyright: ignore[reportAssignmentType]  # MERMAID always uses str labels
+    classes: list[str] = list(ctx.clf.classes_)  # pyright: ignore[reportAssignmentType]  # MERMAID always uses str labels
     ba_library = ctx.ba_library
 
     result = MetricGroupResult()
@@ -103,7 +121,7 @@ def compute_ranking(ctx: MetricsContext) -> MetricGroupResult:
             df=pd.DataFrame(cat_results)
             if cat_results
             else pd.DataFrame(
-                columns=["category", "top_1", "top_3", "top_5", "top_10", "mrr", "n_samples"]
+                columns=["category", "top_1", "top_3", "top_5", "top_10", "mrr", "n_samples"]  # pyright: ignore[reportArgumentType]  # pandas stubs type columns as Axes|None
             ),
             artifact_path="ranking/per_category_topk",
         )
@@ -159,7 +177,8 @@ def compute_ranking(ctx: MetricsContext) -> MetricGroupResult:
         gt_ba = gt_ba_ids[i]
         top_indices = sorted_indices[i, :max_k]
         sims = [
-            taxonomic_similarity(gt_ba, class_ba_ids[j], ba_paths, ba_library) for j in top_indices
+            taxonomic_similarity(gt_ba, class_ba_ids[int(j)], ba_paths, ba_library)
+            for j in top_indices
         ]
         for k in hier_ks:
             max_sim_at_k[k][i] = max(sims[:k])

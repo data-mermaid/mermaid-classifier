@@ -23,10 +23,11 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import boto3
 
-from mermaid_classifier.sagemaker.launcher_config import RunConfig, parse_run_config
+from mermaid_classifier.sagemaker.launcher_config import parse_run_config
 
 ACCOUNT = "554812291621"
 REGION = "us-east-1"
@@ -69,22 +70,25 @@ def load_items(csv_path: Path, column: str | None) -> list[str]:
     """Load a column from a CSV. If column is None, use the first column."""
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
         if column is None:
-            column = reader.fieldnames[0]
-        elif column not in reader.fieldnames:
-            raise ValueError(f"Column {column!r} not in {csv_path}: {reader.fieldnames}")
+            column = fieldnames[0]
+        elif column not in fieldnames:
+            raise ValueError(f"Column {column!r} not in {csv_path}: {fieldnames}")
         return [row[column] for row in reader if row[column]]
 
 
 def build_processing_request(
     *,
-    cfg: RunConfig,
+    cfg: Any,
     run_id: str,
     worker_idx: int,
     worker_items: list[str] | None,
-) -> dict:
+) -> dict[str, Any]:
     job = cfg.job
     proc = cfg.processing
+    if proc is None:
+        raise ValueError("cfg.processing must be set for a processing job")
     container_args = list(proc.container_args)
     if worker_items is not None:
         assert proc.shard is not None, "worker_items requires processing.shard"
@@ -128,7 +132,7 @@ def _configure_logging():
     )
 
 
-def _make_sagemaker_client():
+def _make_sagemaker_client() -> Any:
     from botocore.config import Config
 
     return boto3.client(
@@ -137,7 +141,11 @@ def _make_sagemaker_client():
     )
 
 
-def _wait_for_completion(client, job_names, poll_interval_s=DEFAULT_POLL_INTERVAL_S):
+def _wait_for_completion(
+    client: Any,
+    job_names: list[str],
+    poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+) -> dict[str, str]:
     status = dict.fromkeys(job_names, "Pending")
     while True:
         for name in job_names:
@@ -157,7 +165,7 @@ def _wait_for_completion(client, job_names, poll_interval_s=DEFAULT_POLL_INTERVA
         time.sleep(poll_interval_s)
 
 
-def _upload_config_dir(config_dir: Path, run_id: str, s3_client):
+def _upload_config_dir(config_dir: Path, run_id: str, s3_client: Any) -> str:
     key_prefix = f"runs/{run_id}/config"
     for p in sorted(config_dir.rglob("*")):
         if not p.is_file():
@@ -167,7 +175,7 @@ def _upload_config_dir(config_dir: Path, run_id: str, s3_client):
     return f"s3://{STAGING_BUCKET}/{key_prefix}/"
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
     _configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-config", required=True, type=Path)

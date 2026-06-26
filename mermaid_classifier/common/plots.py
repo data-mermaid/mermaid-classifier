@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from matplotlib import patheffects
+from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
 
 if TYPE_CHECKING:
-    import matplotlib
     from matplotlib.axes import Axes
 
 
@@ -34,7 +34,7 @@ class PointMarker:
     col: int
     color: Any
     shape: Any
-    text: str = None
+    text: str | None = None
 
 
 EDGE_COLOR = "black"
@@ -86,6 +86,8 @@ def plot_point_markers(ax: "Axes", markers: list[PointMarker]):
 
         # Text
         for marker in markers:
+            if marker.text is None:
+                continue
             # https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.annotate.html
             ax.annotate(
                 marker.text,
@@ -128,8 +130,11 @@ class LegendSpecElement:
 
 
 def plot_legend(
-    ax: "Axes", spec: list[LegendSpecElement], title: str = None, position_kwargs: dict = None
-) -> "matplotlib.legend.Legend":
+    ax: "Axes",
+    spec: list[LegendSpecElement],
+    title: str | None = None,
+    position_kwargs: dict[str, Any] | None = None,
+) -> Legend:
 
     legend_artists = [
         Line2D(
@@ -164,7 +169,7 @@ def plot_legend(
     )
 
 
-def adjust_lightness(rgba, l_factor):
+def adjust_lightness(rgba: tuple[float, float, float, float], l_factor: float) -> list[float]:
     """
     Adjust lightness of a matplotlib rgba color.
     https://stackoverflow.com/a/60562502
@@ -175,7 +180,7 @@ def adjust_lightness(rgba, l_factor):
     return [*new_rgb, a]
 
 
-def adjust_saturation(rgba, s_factor):
+def adjust_saturation(rgba: tuple[float, float, float, float], s_factor: float) -> list[float]:
     r, g, b, a = rgba
     h, lightness, s = colorsys.rgb_to_hls(r, g, b)
     new_rgb = colorsys.hls_to_rgb(h, lightness, s=min(1.0, s * s_factor))

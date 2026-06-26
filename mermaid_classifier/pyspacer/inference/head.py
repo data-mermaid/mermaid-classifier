@@ -14,6 +14,8 @@ annotations at import time; PEP 563 turns those annotations into strings
 (``'int'`` instead of ``int``), causing "Unknown type annotation: 'int'".
 """
 
+from typing import Any
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -22,6 +24,8 @@ import torch.nn.functional as F
 
 class CalibratedHead(nn.Module):
     n_classes: int
+    a: torch.Tensor
+    b: torch.Tensor
 
     def __init__(
         self,
@@ -85,7 +89,7 @@ class CalibratedHead(nn.Module):
         )
 
 
-def build_calibrated_head(model) -> CalibratedHead:
+def build_calibrated_head(model: Any) -> CalibratedHead:
     """Construct a CalibratedHead from a fitted CalibratedClassifierCV that
     wraps a TorchMLPClassifier with cv='prefit' and method='sigmoid'."""
     calibrated = model.calibrated_classifiers_

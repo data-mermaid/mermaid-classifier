@@ -27,8 +27,10 @@ import logging
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, TypedDict
 
 import mlflow
+import mlflow.artifacts
 import pandas as pd
 import yaml
 from jinja2 import Environment, FileSystemLoader
@@ -79,7 +81,17 @@ TAXONOMIC_METRICS = [
 # (artifact_path, loader_key): loader_key is 'png', 'csv', or 'yaml'.
 # Organized by section for building the template context.
 
-EVALUATION_SECTIONS = {
+
+class _SectionDefRequired(TypedDict):
+    title: str
+    artifacts: list[tuple[str, str]]
+
+
+class _SectionDef(_SectionDefRequired, total=False):
+    optional: bool
+
+
+EVALUATION_SECTIONS: dict[str, _SectionDef] = {
     "confusion_matrix": {
         "title": "Confusion Matrices",
         "artifacts": [
@@ -199,13 +211,15 @@ def load_csv_as_html_table(
     )
 
 
-def load_yaml_file(yaml_path: Path) -> dict:
+def load_yaml_file(yaml_path: Path) -> dict[str, Any]:
     """Read a YAML file and return the parsed dict."""
     with open(yaml_path) as f:
         return yaml.safe_load(f)
 
 
-def _load_artifact(artifact_dir: Path, artifact_path: str, loader_key: str):
+def _load_artifact(
+    artifact_dir: Path, artifact_path: str, loader_key: str
+) -> str | dict[str, Any] | None:
     """Load a single artifact if it exists, return None otherwise."""
     full_path = artifact_dir / artifact_path
     if not full_path.exists():
@@ -239,7 +253,7 @@ def _artifact_key(artifact_path: str) -> str:
 # -- Data fetching --
 
 
-def fetch_run_metadata(client: MlflowClient, run) -> dict:
+def fetch_run_metadata(client: MlflowClient, run: Any) -> dict[str, Any]:
     """Extract run info, params, tags, and experiment name."""
     experiment = client.get_experiment(run.info.experiment_id)
 
@@ -267,7 +281,7 @@ def fetch_run_metadata(client: MlflowClient, run) -> dict:
     }
 
 
-def fetch_scalar_metrics(run) -> dict:
+def fetch_scalar_metrics(run: Any) -> dict[str, Any]:
     """Organize run.data.metrics into named groups for the template.
 
     Each group is a list of (label, value) tuples, or None if no
@@ -275,8 +289,8 @@ def fetch_scalar_metrics(run) -> dict:
     """
     all_metrics = run.data.metrics
 
-    def _build_group(spec):
-        items = []
+    def _build_group(spec: list[tuple[str, str]]) -> list[tuple[str, Any]] | None:
+        items: list[tuple[str, Any]] = []
         for key, label in spec:
             if key in all_metrics:
                 items.append((label, all_metrics[key]))
@@ -314,7 +328,7 @@ def download_run_artifacts(run_id: str, dst_dir: Path) -> Path:
     return dst_dir
 
 
-def load_artifact_data(artifact_dir: Path) -> dict:
+def load_artifact_data(artifact_dir: Path) -> dict[str, Any]:
     """Load all known artifacts from the downloaded directory.
 
     Returns a nested dict suitable for the Jinja2 template context.
@@ -364,11 +378,11 @@ def load_artifact_data(artifact_dir: Path) -> dict:
 
 
 def build_template_context(
-    metadata: dict,
-    metrics: dict,
-    artifacts: dict,
+    metadata: dict[str, Any],
+    metrics: dict[str, Any],
+    artifacts: dict[str, Any],
     title: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Assemble everything into the context dict for Jinja2."""
     if title is None:
         title = f"Classifier Report - {metadata['experiment_name']} - {metadata['run_name']}"
@@ -400,7 +414,7 @@ def build_template_context(
     }
 
 
-def render_report(context: dict, output_path: Path):
+def render_report(context: dict[str, Any], output_path: Path) -> None:
     """Load the Jinja2 template, render with context, write to output_path."""
     template_dir = Path(__file__).parent
     env = Environment(

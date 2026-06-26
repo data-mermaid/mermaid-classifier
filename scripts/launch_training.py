@@ -21,13 +21,20 @@ import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import boto3
-from sagemaker.estimator import Estimator
-from sagemaker.inputs import TrainingInput
-from sagemaker.session import Session
+from sagemaker.estimator import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
+    Estimator,
+)
+from sagemaker.inputs import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
+    TrainingInput,
+)
+from sagemaker.session import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
+    Session,
+)
 
-from mermaid_classifier.sagemaker.launcher_config import RunConfig, parse_run_config
+from mermaid_classifier.sagemaker.launcher_config import parse_run_config
 
 # Canonical ARNs (see convention doc). Hardcoded by intent; the
 # launcher is bound to the dev account.
@@ -66,12 +73,12 @@ def make_run_id(prefix: str) -> str:
 
 def build_estimator_kwargs(
     *,
-    cfg: RunConfig,
+    cfg: Any,
     run_id: str,
     staging_bucket: str,
     mlflow_uri: str,
-    sm_session,
-) -> dict:
+    sm_session: Any,
+) -> dict[str, Any]:
     job = cfg.job
     env = {
         "MLFLOW_TRACKING_SERVER": mlflow_uri,
@@ -105,7 +112,7 @@ def _configure_logging():
     )
 
 
-def _upload_config_dir(config_dir: Path, run_id: str, sm_session) -> str:
+def _upload_config_dir(config_dir: Path, run_id: str, sm_session: Any) -> str:
     key_prefix = f"runs/{run_id}/config"
     log.info("Uploading %s to s3://%s/%s/", config_dir, STAGING_BUCKET, key_prefix)
     sm_session.upload_data(path=str(config_dir), bucket=STAGING_BUCKET, key_prefix=key_prefix)

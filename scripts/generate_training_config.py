@@ -35,6 +35,7 @@ import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, TypedDict
 
 import pandas as pd
 
@@ -116,7 +117,7 @@ def _load_species_gf_lookup(labels_df: pd.DataFrame) -> dict[str, str]:
         if "," in raw:
             continue  # multi-value: bucket choices, not inherent GF
         bucket = _porites_bucket(raw)
-        lookup[row["id"]] = bucket
+        lookup[str(row["id"])] = bucket
     return lookup
 
 
@@ -133,10 +134,23 @@ def _build_bucket_gf_uuid_lookup(gf_library: GrowthFormLibrary) -> dict[str, str
     return out
 
 
+class _FileAudit(TypedDict):
+    path: str
+    mtime: str
+    sha1_prefix: str
+
+
+class _Audits(TypedDict):
+    labels: _FileAudit
+    sources: _FileAudit
+    ba_api: str
+    cn_api: str
+
+
 # ---------- File audit ----------
 
 
-def _file_audit(path: Path) -> dict:
+def _file_audit(path: Path) -> _FileAudit:
     if not path.exists():
         return {"path": str(path), "mtime": "MISSING", "sha1_prefix": "MISSING"}
     stat = path.stat()
@@ -153,7 +167,7 @@ def _file_audit(path: Path) -> dict:
     }
 
 
-def _iter_audit(items, key=None) -> str:
+def _iter_audit(items: Any, key: Any = None) -> str:
     """sha1 prefix of a JSON-stringified iterable.
 
     `key` extracts a hashable representation of each item; defaults to
@@ -381,7 +395,7 @@ def build_included_label_rows(
 # ---------- Step D: writers ----------
 
 
-def write_rollups_csv(rows, out_path: Path) -> int:
+def write_rollups_csv(rows: list[tuple[str, str, str, str]], out_path: Path) -> int:
     with out_path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["from_ba_id", "from_gf_id", "to_ba_id", "to_gf_id"])
@@ -390,7 +404,7 @@ def write_rollups_csv(rows, out_path: Path) -> int:
     return len(rows)
 
 
-def write_included_labels_csv(rows, out_path: Path) -> int:
+def write_included_labels_csv(rows: list[tuple[str, str]], out_path: Path) -> int:
     with out_path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["ba_id", "gf_id"])
@@ -417,8 +431,8 @@ def copy_sources_csv(in_path: Path, out_path: Path) -> int:
 
 def write_readme(
     out_path: Path,
-    audits: dict[str, dict],
-    counts: dict,
+    audits: _Audits,
+    counts: dict[str, Any],
     unresolved_top108: list[str],
     excluded_top108_seen: list[str],
 ) -> None:
@@ -558,7 +572,7 @@ def validate_outputs(out_dir: Path) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description=__doc__.split("\n", 1)[0],
+        description=(__doc__ or "").split("\n", 1)[0],
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -589,7 +603,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    audits = {
+    audits: _Audits = {
         "labels": _file_audit(args.labels_csv),
         "sources": _file_audit(args.sources_csv),
         "ba_api": "n/a",
@@ -605,7 +619,9 @@ def main(argv: list[str] | None = None) -> int:
     missing = required - set(labels_df.columns)
     if missing:
         raise ValueError(f"labels CSV {args.labels_csv} missing columns: {sorted(missing)}")
-    top108_df = labels_df[labels_df["top100"].fillna(0).astype(int) == 1].reset_index(drop=True)
+    top108_df: pd.DataFrame = labels_df[labels_df["top100"].fillna(0).astype(int) == 1].reset_index(
+        drop=True
+    )  # pyright: ignore[reportAssignmentType]  # pandas boolean-index always returns DataFrame here
     logger.info(
         "Loaded %d top-108 rows from %s",
         len(top108_df),

@@ -6,16 +6,22 @@ Metrics:
 - Growth form differentiation accuracy
 """
 
+import typing
 from collections import Counter
+from typing import TYPE_CHECKING
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import sklearn.metrics
+from matplotlib.figure import Figure
 
 from mermaid_classifier.common.benthic_attributes import split_ba_gf
 from mermaid_classifier.pyspacer.metrics._context import MetricsContext
+
+if TYPE_CHECKING:
+    from mermaid_classifier.common.benthic_attributes import BenthicAttributeLibrary
 from mermaid_classifier.pyspacer.metrics._results import (
     DataFrameResult,
     FigureResult,
@@ -49,19 +55,20 @@ def compute_taxonomic(ctx: MetricsContext) -> MetricGroupResult:
 def _compute_error_attribution(ctx: MetricsContext) -> MetricGroupResult:
     """Attribute misclassifications to their LCA in the taxonomy tree."""
     val_results = ctx.val_results
-    classes = val_results.classes
+    # val_results.classes is list[LabelId] (int|str); MERMAID always uses str.
+    classes: list[str] = val_results.classes  # pyright: ignore[reportAssignmentType]
     ba_library = ctx.ba_library
 
     ba_full_paths = ctx.ba_paths or build_ba_paths(classes, ba_library)
 
-    def get_branch(ba_id):
+    def get_branch(ba_id: str) -> str:
         if ba_id in ba_full_paths:
             return ba_full_paths[ba_id][0]
         ancestors = ba_library.get_ancestor_ids(ba_id)
         return ancestors[0] if ancestors else ba_id
 
     # Count errors per LCA node.
-    lca_error_counts: Counter = Counter()
+    lca_error_counts: Counter[str | None] = Counter()
     total_errors = 0
 
     for gt_idx, est_idx in zip(val_results.gt, val_results.est, strict=False):
@@ -85,7 +92,7 @@ def _compute_error_attribution(ctx: MetricsContext) -> MetricGroupResult:
         result.dataframes.append(
             DataFrameResult(
                 df=pd.DataFrame(
-                    columns=[
+                    columns=[  # pyright: ignore[reportArgumentType]  # pandas stubs type columns as Axes|None
                         "lca_node",
                         "lca_name",
                         "branch",
@@ -100,7 +107,7 @@ def _compute_error_attribution(ctx: MetricsContext) -> MetricGroupResult:
         return result
 
     # Aggregate by branch.
-    branch_errors: Counter = Counter()
+    branch_errors: Counter[str] = Counter()
     for lca_node, count in lca_error_counts.items():
         if lca_node is not None:
             branch_errors[get_branch(lca_node)] += count
@@ -171,13 +178,13 @@ def _compute_error_attribution(ctx: MetricsContext) -> MetricGroupResult:
 
 
 def _plot_error_attribution(
-    lca_error_counts,
-    branch_errors,
-    total_errors,
-    cross_branch_count,
-    ba_library,
-    get_branch,
-):
+    lca_error_counts: Counter[str | None],
+    branch_errors: Counter[str],
+    total_errors: int,
+    cross_branch_count: int,
+    ba_library: "BenthicAttributeLibrary",
+    get_branch: "typing.Callable[[str], str]",
+) -> Figure:
     """Build the two-panel error attribution figure."""
     cmap = matplotlib.colormaps["tab20"]
 
@@ -299,14 +306,15 @@ def _plot_error_attribution(
 
     ax_detail.set_xlim(0, max(bar_counts) * 1.2)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
 
 
 def _compute_top_level_confusion(ctx: MetricsContext) -> MetricGroupResult:
     """Build row-normalized confusion matrix at the top-level BA."""
     val_results = ctx.val_results
-    classes = val_results.classes
+    # val_results.classes is list[LabelId] (int|str); MERMAID always uses str.
+    classes: list[str] = val_results.classes  # pyright: ignore[reportAssignmentType]
     ba_library = ctx.ba_library
 
     ba_to_top = ctx.ba_to_top or build_ba_to_top(classes, ba_library)
@@ -334,7 +342,7 @@ def _compute_top_level_confusion(ctx: MetricsContext) -> MetricGroupResult:
 
     row_sums = cm.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1
-    cm_pct = np.int64(np.floor(cm / row_sums * 100))
+    cm_pct = np.floor(cm / row_sums * 100).astype(np.int64)
 
     result = MetricGroupResult()
 
@@ -381,7 +389,7 @@ def _compute_top_level_confusion(ctx: MetricsContext) -> MetricGroupResult:
         DataFrameResult(
             df=pd.DataFrame(confusions)
             if confusions
-            else pd.DataFrame(columns=["true", "predicted", "row_normalized_pct", "sample_count"]),
+            else pd.DataFrame(columns=["true", "predicted", "row_normalized_pct", "sample_count"]),  # pyright: ignore[reportArgumentType]  # pandas stubs type columns as Axes|None
             artifact_path="taxonomic/top_level_confusions",
         )
     )
@@ -392,7 +400,8 @@ def _compute_top_level_confusion(ctx: MetricsContext) -> MetricGroupResult:
 def _compute_gf_differentiation(ctx: MetricsContext) -> MetricGroupResult:
     """Analyze growth form prediction accuracy."""
     val_results = ctx.val_results
-    classes = val_results.classes
+    # val_results.classes is list[LabelId] (int|str); MERMAID always uses str.
+    classes: list[str] = val_results.classes  # pyright: ignore[reportAssignmentType]
     gf_library = ctx.gf_library
 
     true_gf_names = []
@@ -428,7 +437,7 @@ def _compute_gf_differentiation(ctx: MetricsContext) -> MetricGroupResult:
         )
         result.dataframes.append(
             DataFrameResult(
-                df=pd.DataFrame(columns=["growth_form", "precision", "recall", "f1", "support"]),
+                df=pd.DataFrame(columns=["growth_form", "precision", "recall", "f1", "support"]),  # pyright: ignore[reportArgumentType]  # pandas stubs type columns as Axes|None
                 artifact_path="taxonomic/gf_precision_recall_f1",
             )
         )
@@ -465,7 +474,10 @@ def _compute_gf_differentiation(ctx: MetricsContext) -> MetricGroupResult:
     p_filtered = pred_gf_names_arr[true_has_gf]
 
     prec, rec, f1, support = sklearn.metrics.precision_recall_fscore_support(
-        t_filtered, p_filtered, labels=gf_row_labels, zero_division=0
+        t_filtered,
+        p_filtered,
+        labels=gf_row_labels,
+        zero_division=0,  # pyright: ignore[reportArgumentType]  # sklearn stubs type as str only
     )
 
     prf_df = (
@@ -475,7 +487,7 @@ def _compute_gf_differentiation(ctx: MetricsContext) -> MetricGroupResult:
                 "precision": np.round(prec, 3),
                 "recall": np.round(rec, 3),
                 "f1": np.round(f1, 3),
-                "support": support.astype(int),
+                "support": support.astype(int),  # pyright: ignore[reportOptionalMemberAccess]  # support is ndarray when labels given
             }
         )
         .sort_values("support", ascending=False)
@@ -502,11 +514,11 @@ def _compute_gf_differentiation(ctx: MetricsContext) -> MetricGroupResult:
 
     row_sums = cm_raw.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1
-    cm_pct = np.int64(np.floor(cm_raw / row_sums * 100))
+    cm_pct = np.floor(cm_raw / row_sums * 100).astype(np.int64)
 
     fig, ax = plt.subplots(figsize=(max(10, n_cols * 0.9), max(6, n_rows * 0.55)))
     try:
-        im = ax.imshow(cm_pct, cmap="Blues", aspect="auto")  # noqa: F841 — imshow side-effect registers the colormap scale on the axes
+        _im = ax.imshow(cm_pct, cmap="Blues", aspect="auto")  # noqa: F841 — imshow side-effect registers the colormap scale on the axes
 
         for i in range(n_rows):
             for j in range(n_cols):

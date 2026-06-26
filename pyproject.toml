@@ -121,6 +121,14 @@ reportExplicitAny = false
 reportUnusedCallResult = false
 reportImplicitStringConcatenation = false
 reportUnusedParameter = false
+# Untyped-dependency leakage: torch/pyspacer/duckdb/mlflow/sklearn ship no
+# stubs, so their return values propagate as Unknown. Enforcing these would be
+# ~1,400 noise-only ignores. Real-bug checks and own-signature annotation
+# requirements stay ON. (Pragmatic-strict decision — see plan Global Constraints.)
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
 
 [dependency-groups]
 sagemaker = []

@@ -58,7 +58,8 @@ def compute_per_source(ctx: MetricsContext) -> MetricGroupResult:
     # n_points entries; iteration order matches what evaluate_classifier
     # used when building val_results.
     source_per_index: list[str] = []
-    images_per_source: Counter = Counter()
+    images_per_source: Counter[str] = Counter()
+    assert dataset is not None  # compute_per_source only called when dataset is not None
     for feature_loc in dataset.labels.val.keys():  # noqa: SIM118 — ImageLabels.keys() is not a plain dict; __iter__ differs
         site, project_id = feature_loc_to_source[feature_loc]
         source_key = f"{site}:{project_id}"
@@ -80,7 +81,9 @@ def compute_per_source(ctx: MetricsContext) -> MetricGroupResult:
     gt = np.array(val_results.gt)
     est = np.array(val_results.est)
 
-    ba_paths = ctx.ba_paths or build_ba_paths(classes, ctx.ba_library)
+    # val_results.classes is list[LabelId] (int|str); MERMAID always uses str.
+    classes_str: list[str] = classes  # pyright: ignore[reportAssignmentType]
+    ba_paths = ctx.ba_paths or build_ba_paths(classes_str, ctx.ba_library)
 
     rows = []
     accuracies: list[float] = []
@@ -115,7 +118,10 @@ def compute_per_source(ctx: MetricsContext) -> MetricGroupResult:
             balanced_acc = float("nan")
 
         prec, rec, f1, _ = precision_recall_fscore_support(
-            gt_s, est_s, average="macro", zero_division=0
+            gt_s,
+            est_s,
+            average="macro",
+            zero_division=0,  # pyright: ignore[reportArgumentType]  # sklearn stubs type as str only
         )
 
         # Per-source cross-branch error rate, using the same definition
@@ -127,8 +133,8 @@ def compute_per_source(ctx: MetricsContext) -> MetricGroupResult:
             if gt_idx == est_idx:
                 continue
             err_total += 1
-            ba_gt, _ = split_ba_gf(classes[gt_idx])
-            ba_est, _ = split_ba_gf(classes[est_idx])
+            ba_gt, _ = split_ba_gf(classes_str[gt_idx])
+            ba_est, _ = split_ba_gf(classes_str[est_idx])
             if find_lca(ba_gt, ba_est, ba_paths) is None:
                 err_cross_branch += 1
         cross_branch_rate = err_cross_branch / err_total if err_total > 0 else 0.0
@@ -204,7 +210,7 @@ def _plot_accuracy_by_source(df: pd.DataFrame):
         ax.set_title("Per-Source Validation Accuracy (sources ordered by val annotation count)")
         ax.invert_yaxis()
         ax.axvline(
-            x=df["accuracy"].mean(), color="#1976d2", linestyle=":", linewidth=0.8, alpha=0.6
+            x=float(df["accuracy"].mean()), color="#1976d2", linestyle=":", linewidth=0.8, alpha=0.6
         )
         ax.legend(loc="lower right", fontsize=9)
 

@@ -1,6 +1,7 @@
 """Structured output types returned by metric functions."""
 
 import dataclasses
+import typing
 
 import pandas as pd
 from matplotlib.figure import Figure
@@ -34,7 +35,7 @@ class DataFrameResult:
 class DictResult:
     """A dict to log as a YAML/JSON artifact."""
 
-    data: dict
+    data: dict[str, typing.Any]
     artifact_path: str
 
 

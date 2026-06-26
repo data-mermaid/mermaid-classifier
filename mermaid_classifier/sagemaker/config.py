@@ -42,14 +42,14 @@ class SubsampleConfig(BaseModel):
 
     @field_validator("total_annotations")
     @classmethod
-    def _positive_total(cls, v):
+    def _positive_total(cls, v: int | None) -> int | None:
         if v is not None and v <= 0:
             raise ValueError("total_annotations must be > 0 or None")
         return v
 
     @field_validator("min_per_class")
     @classmethod
-    def _non_negative_floor(cls, v):
+    def _non_negative_floor(cls, v: int) -> int:
         if v < 0:
             raise ValueError("min_per_class must be >= 0")
         return v
@@ -63,7 +63,7 @@ class WeightingConfig(BaseModel):
 
     @field_validator("weight_ratio_cap")
     @classmethod
-    def _cap_at_least_one(cls, v):
+    def _cap_at_least_one(cls, v: float | None) -> float | None:
         if v is not None and v < 1.0:
             raise ValueError("weight_ratio_cap must be None or >= 1.0")
         return v
@@ -202,17 +202,17 @@ class TrainingRunConfig(BaseModel):
                 weight_ratio_cap=d.weighting.weight_ratio_cap,
             )
 
-        def _resolve(p):
+        def _resolve(p: Path | None) -> str | None:
             return None if p is None else str(p)
 
         dataset_options = DatasetOptions(
             include_mermaid=d.include_mermaid,
-            coralnet_sources_csv=_resolve(d.coralnet_sources_csv_path(config_dir)),
+            coralnet_sources_csv=_resolve(d.coralnet_sources_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             drop_growthforms=d.drop_growthforms,
-            label_rollup_spec_csv=_resolve(d.label_rollup_spec_csv_path(config_dir)),
-            included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),
-            excluded_labels_csv=_resolve(d.excluded_labels_csv_path(config_dir)),
-            ref_val_ratios=tuple(d.ref_val_ratios),
+            label_rollup_spec_csv=_resolve(d.label_rollup_spec_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            excluded_labels_csv=_resolve(d.excluded_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions
             subsample=subsample,
             weighting=weighting,
         )

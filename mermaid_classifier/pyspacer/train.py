@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import mlflow
@@ -81,7 +82,7 @@ class Sites(enum.Enum):
 
 
 @contextmanager
-def section_profiling(profiled_sections: list[dict], section_name: str):
+def section_profiling(profiled_sections: list[dict[str, object]], section_name: str):
     """
     Performance-profile a wrapped section of code and save the stats
     (time, memory) as part of the passed structure.
@@ -93,7 +94,7 @@ def section_profiling(profiled_sections: list[dict], section_name: str):
     yield
 
     seconds_elapsed = time.perf_counter() - start_time
-    section_profile = {
+    section_profile: dict[str, object] = {
         # Name for this section of code.
         "name": section_name,
         # Number of seconds.
@@ -143,19 +144,19 @@ def download_features_parallel(
     failed: set[tuple[str, str]] = set()
     succeeded = 0
 
-    def _download(item):
+    def _download(item: tuple[tuple[str, str], str]) -> None:
         (bucket, key), local_path = item
         if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
             return
         s3 = get_s3_resource()
         part_path = local_path + ".part"
-        s3.Object(bucket, key).download_file(part_path)
+        s3.Object(bucket, key).download_file(part_path)  # pyright: ignore[reportAttributeAccessIssue]  # boto3 S3 resource is untyped
         os.rename(part_path, local_path)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_download, item): item for item in s3_keys.items()}
         for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
-            (bucket, key), local_path = futures[future]
+            (bucket, key), _local_path = futures[future]
             try:
                 future.result()
                 succeeded += 1
@@ -188,11 +189,13 @@ class LabelFilter(CsvSpec):
 
         self.inclusion = inclusion
 
-    def per_row_init_action(self, row):
+    def per_row_init_action(self, row: dict[str, str | None]) -> None:
         # Ensure absent values are just '', not '' or None.
-        self.bagf_set.add((row["ba_id"], row.get("gf_id") or ""))
+        self.bagf_set.add((row["ba_id"] or "", row.get("gf_id") or ""))
 
-    def accepts_bagf(self, bagf_id: str):
+    def accepts_bagf(self, bagf_id: str | None) -> bool:
+        if bagf_id is None:
+            return not self.inclusion
         ba_id, gf_id = split_ba_gf(bagf_id)
 
         if self.inclusion:
@@ -249,18 +252,20 @@ class LabelRollupSpec(CsvSpec):
         ColumnSpec(name="to_gf_id"),
     ]
 
-    def __init__(self, *args, **kwargs):
-        self.lookup = {}
+    def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
+        self.lookup: dict[tuple[str, str], tuple[str, str]] = {}
 
         super().__init__(*args, **kwargs)
 
-    def per_row_init_action(self, row):
+    def per_row_init_action(self, row: dict[str, str | None]) -> None:
         # Ensure absent values are just '', not '' or None.
-        key = (row["from_ba_id"], row.get("from_gf_id") or "")
-        value = (row["to_ba_id"], row.get("to_gf_id") or "")
+        key = (row["from_ba_id"] or "", row.get("from_gf_id") or "")
+        value = (row["to_ba_id"] or "", row.get("to_gf_id") or "")
         self.lookup[key] = value
 
-    def roll_up(self, bagf_id: str) -> str:
+    def roll_up(self, bagf_id: str | None) -> str | None:
+        if bagf_id is None:
+            return None
         ba_id, gf_id = split_ba_gf(bagf_id)
 
         if (ba_id, gf_id) in self.lookup:
@@ -348,10 +353,10 @@ class CNSourceFilter(CsvSpec):
 
         super().__init__(csv_file=csv_file)
 
-    def per_row_init_action(self, row):
-        self.source_id_list.append(row["id"])
+    def per_row_init_action(self, row: dict[str, str | None]) -> None:
+        self.source_id_list.append(row["id"] or "")
 
-    def is_empty(self):
+    def is_empty(self) -> bool:
         return len(self.source_id_list) == 0
 
 
@@ -366,8 +371,8 @@ class Artifacts:
     coralnet_label_mapping: pd.DataFrame
     coralnet_project_stats: pd.DataFrame
     mermaid_project_stats: pd.DataFrame
-    profiled_sections: list[dict]
-    train_summary_stats: dict
+    profiled_sections: list[dict[str, object]]
+    train_summary_stats: dict[str, object]
     unmapped_labels: pd.DataFrame
 
 
@@ -460,11 +465,11 @@ class DatasetOptions:
     """
 
     include_mermaid: bool = True
-    coralnet_sources_csv: str = None
+    coralnet_sources_csv: str | None = None
     drop_growthforms: bool = False
-    label_rollup_spec_csv: str = None
-    included_labels_csv: str = None
-    excluded_labels_csv: str = None
+    label_rollup_spec_csv: str | None = None
+    included_labels_csv: str | None = None
+    excluded_labels_csv: str | None = None
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     # Optional per-class subsampling. None means use all annotations.
     # See mermaid_classifier.training.subsample for available strategies
@@ -599,7 +604,7 @@ class TrainingDataset:
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
-            anon=settings.aws_anonymous,
+            anon=settings.aws_anonymous == "True",
             key=settings.aws_key_id,
             secret=settings.aws_secret,
             token=settings.aws_session_token,
@@ -629,7 +634,7 @@ class TrainingDataset:
 
         def _annotations_stats() -> tuple[int, int]:
             # (annotation rows, distinct feature_vector i.e. unique images)
-            return self.duck_conn.execute(
+            return self.duck_conn.execute(  # pyright: ignore[reportReturnType]  # duckdb fetchone returns tuple[Any, ...] | None but we know it's always (int, int)
                 "SELECT COUNT(*), COUNT(DISTINCT feature_vector) FROM annotations"
             ).fetchone()
 
@@ -879,7 +884,7 @@ class TrainingDataset:
         # mapping, but the string 'None' from the MERMAID annotations
         # parquet.
         # Normalize the latter to ''.
-        def transform_func(gf_id):
+        def transform_func(gf_id: str | None) -> str | None:
             if gf_id == "None":
                 return ""
             return gf_id
@@ -1030,8 +1035,8 @@ class TrainingDataset:
 
         # Add BAs and GFs to the DuckDB table, using
         # our mapping from CoralNet label IDs to MERMAID BAs/GFs.
-        def label_to_ba(label):
-            if label not in label_mapping:
+        def label_to_ba(label: str | None) -> str | None:
+            if label is None or label not in label_mapping:
                 return None
             entry = label_mapping[label]
             return entry.benthic_attribute_id
@@ -1044,8 +1049,8 @@ class TrainingDataset:
             base_to_new_func=label_to_ba,
         )
 
-        def label_to_gf(label):
-            if label not in label_mapping:
+        def label_to_gf(label: str | None) -> str | None:
+            if label is None or label not in label_mapping:
                 return None
             entry = label_mapping[label]
             return entry.growth_form_id
@@ -1087,7 +1092,7 @@ class TrainingDataset:
         # Result should be [] if doesn't exist, which 'bools' to False.
         return bool(table_query_result)
 
-    def handle_missing_feature_vectors(self, mermaid_full_paths_in_s3: set):
+    def handle_missing_feature_vectors(self, mermaid_full_paths_in_s3: set[str]) -> None:
 
         # Build the annotation data's full feature paths, in DuckDB.
         self.duck_conn.execute(
@@ -1110,7 +1115,7 @@ class TrainingDataset:
             )
 
             # Get the S3 feature paths into another table.
-            s3_paths_df = pd.DataFrame({"feature_full": list(mermaid_full_paths_in_s3)})  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            s3_paths_df = pd.DataFrame({"feature_full": list(mermaid_full_paths_in_s3)})  # noqa: F841  # pyright: ignore[reportUnusedVariable]  # referenced by name in DuckDB SQL via Python-scope scanning
             self.duck_conn.execute(
                 f"CREATE TEMP TABLE {s3_features_table_name} AS SELECT * FROM s3_paths_df"
             )
@@ -1198,16 +1203,18 @@ class TrainingDataset:
                 # Here, in one loop iteration, we're given all the
                 # annotation rows for a single image.
                 first_row = rows[0]
-                bucket = first_row["bucket"]
-                feature_bucket_path = first_row["feature_vector"]
-                site = first_row["site"]
-                project_id = first_row["project_id"]
+                bucket = str(first_row["bucket"])
+                feature_bucket_path = str(first_row["feature_vector"])
+                site = str(first_row["site"])
+                project_id = str(first_row["project_id"])
 
                 image_annotations = []
 
                 # One annotation per row.
                 for row in rows:
-                    bagf = combine_ba_gf(row["benthic_attribute_id"], row["growth_form_id"])
+                    bagf = combine_ba_gf(
+                        str(row["benthic_attribute_id"]), str(row["growth_form_id"])
+                    )
 
                     annotation = (
                         int(row["row"]),
@@ -1315,7 +1322,9 @@ class TrainingDataset:
 
         return self._duck_conn
 
-    def compute_project_stats(self, site=None, has_training_sets=False):
+    def compute_project_stats(
+        self, site: str | None = None, has_training_sets: bool = False
+    ) -> pd.DataFrame:
         where_clause = "" if site is None else f"WHERE site = '{site}'"
 
         counts_sql = " count(DISTINCT image_id) AS num_images, count(*) AS num_annotations"
@@ -1367,7 +1376,7 @@ class TrainingDataset:
             )
 
             for set_name, training_set in training_sets:
-                values_batch: list[tuple] = []
+                values_batch: list[tuple[str, str, int, int, str]] = []
 
                 for feature_loc, row, col in self.generate_training_set_annotations(training_set):
                     # feature_loc is a filesystem DataLocation whose key is a
@@ -1405,8 +1414,10 @@ class TrainingDataset:
                 f"  USING (bucket, feature_vector, row, col)"
             )
 
-    def _add_tuples_to_table(self, table_name, tuples: list[tuple]):
-        df = pd.DataFrame.from_records(tuples)  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+    def _add_tuples_to_table(
+        self, table_name: str, tuples: list[tuple[str, str, int, int, str]]
+    ) -> None:
+        df = pd.DataFrame.from_records(tuples)  # noqa: F841  # pyright: ignore[reportUnusedVariable]  # referenced by name in DuckDB SQL via Python-scope scanning
         self.duck_conn.execute(f"INSERT INTO {table_name} SELECT * FROM df")
 
     @staticmethod
@@ -1431,13 +1442,22 @@ class TrainingDataset:
             " countif(training_set IS NULL) AS dropped"
             " FROM annotations GROUP BY benthic_attribute_id"
         )
+        ba_library = get_benthic_attribute_library()
+        gf_library_inst = get_growth_form_library()
+
+        def _ba_id_to_name(ba_id: str | None) -> str | None:
+            return ba_library.id_to_name(ba_id) if ba_id is not None else None
+
+        def _gf_id_to_name(gf_id: str | None) -> str | None:
+            return gf_library_inst.id_to_name(gf_id) if gf_id is not None else None
+
         # Add BA names alongside the IDs for readability.
         duckdb_add_column(
             duck_conn=self.duck_conn,
             duck_table_name="ba_counts",
             base_column_name="benthic_attribute_id",
             new_column_name="benthic_attribute_name",
-            base_to_new_func=get_benthic_attribute_library().id_to_name,
+            base_to_new_func=_ba_id_to_name,
         )
         # Sort by total annotation count, and reorder columns
         # while we're at it.
@@ -1476,7 +1496,7 @@ class TrainingDataset:
             duck_table_name="bagf_counts",
             base_column_name="benthic_attribute_id",
             new_column_name="benthic_attribute_name",
-            base_to_new_func=get_benthic_attribute_library().id_to_name,
+            base_to_new_func=_ba_id_to_name,
         )
         # Add GF names for readability.
         duckdb_add_column(
@@ -1484,7 +1504,7 @@ class TrainingDataset:
             duck_table_name="bagf_counts",
             base_column_name="growth_form_id",
             new_column_name="growth_form_name",
-            base_to_new_func=get_growth_form_library().id_to_name,
+            base_to_new_func=_gf_id_to_name,
         )
         # Sort by annotation count, and reorder columns
         # while we're at it.
@@ -1595,13 +1615,13 @@ class TrainingRunner:
     MLflow.
     """
 
-    dataset: TrainingDataset = None
-    profiled_sections: list[dict]
+    dataset: TrainingDataset | None = None
+    profiled_sections: list[dict[str, object]]
 
     def __init__(
         self,
-        dataset_options: DatasetOptions = None,
-        training_options: TrainingOptions = None,
+        dataset_options: DatasetOptions | None = None,
+        training_options: TrainingOptions | None = None,
     ):
         # Normalize Settings -> SPACER_*/MLFLOW_* env vars before any PySpacer
         # or MLflow work. This used to run as an import side effect of
@@ -1682,14 +1702,14 @@ class TrainingRunner:
             if cleanup_dataset and self.dataset is not None:
                 self.dataset.cleanup()
 
-    def _on_epoch_end(self, metrics: dict):
+    def _on_epoch_end(self, metrics: dict[str, object]) -> None:
         """Called after each training epoch. Override for logging."""
         pass
 
     def _compute_class_weights(
         self,
-        labels,
-    ) -> tuple[dict | None, dict]:
+        labels: typing.Any,
+    ) -> tuple[dict[str, float] | None, dict[str, object]]:
         """Compute per-class loss weights from training-set class counts,
         using the configured ``DatasetOptions.weighting`` strategy.
 
@@ -1782,7 +1802,9 @@ class TrainingRunner:
 
 
 class MLflowTrainingRunner(TrainingRunner):
-    def __init__(self, *args, mlflow_options: MLflowOptions = None, **kwargs):
+    def __init__(
+        self, *args: typing.Any, mlflow_options: MLflowOptions | None = None, **kwargs: typing.Any
+    ) -> None:
         # Normalize Settings -> SPACER_*/MLFLOW_* env vars *before* the first
         # mlflow_connect() below, which needs MLFLOW_HTTP_REQUEST_MAX_RETRIES to
         # be set (otherwise a failed initial connection retries far more times
@@ -1798,7 +1820,7 @@ class MLflowTrainingRunner(TrainingRunner):
         super().__init__(*args, **kwargs)
         self.mlflow_options = mlflow_options or MLflowOptions()
 
-    def run(self, run_name=None):
+    def run(self, run_name: str | None = None, cleanup_dataset: bool = True) -> typing.Any:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]  # intentionally narrows cleanup_dataset; MLflow runner always manages cleanup itself
 
         model_name = self._get_model_name()
         if run_name is None:
@@ -1808,9 +1830,12 @@ class MLflowTrainingRunner(TrainingRunner):
         mlflow.enable_system_metrics_logging()
         mlflow.set_experiment(self.mlflow_options.experiment_name)
 
+        return_msg: typing.Any = None
+        model_info: typing.Any = None
+
         with mlflow.start_run(run_name=run_name):
             # Add swap monitoring to MLflow's system metrics polling loop.
-            run_id = mlflow.active_run().info.run_id
+            run_id = mlflow.active_run().info.run_id  # pyright: ignore[reportOptionalMemberAccess]  # active_run() is non-None inside start_run() context
             if run_id in run_id_to_system_metrics_monitor:
                 run_id_to_system_metrics_monitor[run_id].monitors.append(SwapMonitor())
 
@@ -1870,6 +1895,7 @@ class MLflowTrainingRunner(TrainingRunner):
                 return_msg, clf_calibrated, val_results = super().run(
                     run_name=run_name, cleanup_dataset=False
                 )
+                assert self.dataset is not None  # set by base TrainingRunner.run()
 
                 # Weighting artifacts/metrics are stashed by the base run()
                 # via _compute_class_weights. Log them now.
@@ -1932,12 +1958,12 @@ class MLflowTrainingRunner(TrainingRunner):
                         epoch: self.format_metric(acc)
                         for epoch, acc in enumerate(return_msg.ref_accs, 1)
                     }
-                    mlflow.log_dict(ref_accs_dict, "epoch_ref_accuracies.yaml")
+                    mlflow.log_dict(ref_accs_dict, "epoch_ref_accuracies.yaml")  # pyright: ignore[reportArgumentType]  # mlflow log_dict expects dict[str, Any] but int keys are valid in YAML
 
                     # Store the deployable artifact (model.pt + model.json) as
                     # the registered model via the pyfunc shim — one loader
                     # everywhere.
-                    signature = mlflow.models.infer_signature(params=training_options_to_log)
+                    signature = mlflow.models.infer_signature(params=training_options_to_log)  # pyright: ignore[reportPrivateImportUsage]  # mlflow.models is a submodule, not formally re-exported
                     model_info = log_artifact_model(
                         model_pt,
                         model_json,
@@ -1946,13 +1972,13 @@ class MLflowTrainingRunner(TrainingRunner):
                     )
             finally:
                 if getattr(self, "dataset", None) is not None:
-                    self.dataset.cleanup()
+                    self.dataset.cleanup()  # pyright: ignore[reportOptionalMemberAccess]  # getattr guard above ensures non-None
 
         logger.info(f"Model ID: {model_info.model_id}")
 
         return return_msg, model_info
 
-    def _on_epoch_end(self, metrics: dict):
+    def _on_epoch_end(self, metrics: dict[str, Any]) -> None:
         """Log per-epoch metrics to MLflow.
 
         Logs step-based metrics that appear as live charts in the MLflow UI
@@ -1967,31 +1993,37 @@ class MLflowTrainingRunner(TrainingRunner):
         `best_val_loss`); we log them as flat scalar metrics so they're
         easy to query post-hoc.
         """
-        step = metrics["epoch"]
-        mlflow.log_metric("epoch/ref_accuracy", metrics["ref_accuracy"], step=step)
+        step = int(metrics["epoch"])  # type: ignore[arg-type]
+        mlflow.log_metric("epoch/ref_accuracy", float(metrics["ref_accuracy"]), step=step)  # type: ignore[arg-type]
         if metrics.get("val_accuracy") is not None:
-            mlflow.log_metric("epoch/val_accuracy", metrics["val_accuracy"], step=step)
+            mlflow.log_metric("epoch/val_accuracy", float(metrics["val_accuracy"]), step=step)  # type: ignore[arg-type]
         if metrics.get("val_loss") is not None:
-            mlflow.log_metric("epoch/val_loss", metrics["val_loss"], step=step)
+            mlflow.log_metric("epoch/val_loss", float(metrics["val_loss"]), step=step)  # type: ignore[arg-type]
         if metrics["training_loss"] is not None:
-            mlflow.log_metric("epoch/training_loss", metrics["training_loss"], step=step)
-        mlflow.log_metric("epoch/cumulative_seconds", metrics["cumulative_seconds"], step=step)
+            mlflow.log_metric("epoch/training_loss", float(metrics["training_loss"]), step=step)  # type: ignore[arg-type]
+        mlflow.log_metric(
+            "epoch/cumulative_seconds", float(metrics["cumulative_seconds"]), step=step
+        )  # type: ignore[arg-type]
 
         # One-shot early-stopping summary (only present on the final
         # epoch). Logged as scalar metrics with no step so they appear
         # alongside the other run-level numbers.
         if metrics.get("final_epoch") is not None:
-            mlflow.log_metric("early_stop/final_epoch", float(metrics["final_epoch"]), step=0)
+            mlflow.log_metric("early_stop/final_epoch", float(metrics["final_epoch"]), step=0)  # type: ignore[arg-type]
             mlflow.log_metric(
                 "early_stop/triggered", float(bool(metrics.get("early_stopped"))), step=0
             )
             if metrics.get("best_val_epoch") is not None:
                 mlflow.log_metric(
-                    "early_stop/best_val_epoch", float(metrics["best_val_epoch"]), step=0
+                    "early_stop/best_val_epoch",
+                    float(metrics["best_val_epoch"]),
+                    step=0,  # type: ignore[arg-type]
                 )
             if metrics.get("best_val_loss") is not None:
                 mlflow.log_metric(
-                    "early_stop/best_val_loss", float(metrics["best_val_loss"]), step=0
+                    "early_stop/best_val_loss",
+                    float(metrics["best_val_loss"]),
+                    step=0,  # type: ignore[arg-type]
                 )
 
     def _get_model_name(self):
@@ -2060,9 +2092,9 @@ class MLflowTrainingRunner(TrainingRunner):
         ba_library = get_benthic_attribute_library()
         gf_library = get_growth_form_library()
 
-        def _decorate(row):
+        def _decorate(row: pd.Series) -> pd.Series:  # type: ignore[type-arg]
             try:
-                ba_id, gf_id = split_ba_gf(row["bagf_id"])
+                ba_id, gf_id = split_ba_gf(str(row["bagf_id"]))
                 ba_name = ba_library.id_to_name(ba_id) if ba_id else ""
                 gf_name = gf_library.id_to_name(gf_id) if gf_id else ""
             except Exception:
@@ -2078,7 +2110,7 @@ class MLflowTrainingRunner(TrainingRunner):
 
         decorated = df.apply(_decorate, axis=1)
         df = pd.concat([df, decorated], axis=1)
-        df = df[
+        df = df[  # type: ignore[index]
             [
                 "bagf_id",
                 "ba_id",
@@ -2088,7 +2120,7 @@ class MLflowTrainingRunner(TrainingRunner):
                 "count",
                 "weight",
             ]
-        ].sort_values("weight", ascending=False)
+        ].sort_values("weight", ascending=False)  # pyright: ignore[reportCallIssue]  # pandas DataFrame.sort_values overload issue with column-subscript result
 
         self.log_dataframe(df, "weighting/per_class_weights")
 
@@ -2115,16 +2147,12 @@ class MLflowTrainingRunner(TrainingRunner):
         ba_library = get_benthic_attribute_library()
         gf_library = get_growth_form_library()
 
-        def _decorate(row):
+        def _decorate(row: pd.Series) -> pd.Series:  # type: ignore[type-arg]
             try:
-                ba_name = (
-                    ba_library.id_to_name(row["benthic_attribute_id"])
-                    if row["benthic_attribute_id"]
-                    else ""
-                )
-                gf_name = (
-                    gf_library.id_to_name(row["growth_form_id"]) if row["growth_form_id"] else ""
-                )
+                _ba_id = str(row["benthic_attribute_id"])
+                _gf_id = str(row["growth_form_id"])
+                ba_name = ba_library.id_to_name(_ba_id) if _ba_id else ""
+                gf_name = gf_library.id_to_name(_gf_id) if _gf_id else ""
             except Exception:
                 ba_name, gf_name = "", ""
             return pd.Series({"ba_name": ba_name, "gf_name": gf_name})
@@ -2132,7 +2160,7 @@ class MLflowTrainingRunner(TrainingRunner):
         if not df.empty:
             decorated = df.apply(_decorate, axis=1)
             out = pd.concat([df, decorated], axis=1)
-            out = out[
+            out = out[  # type: ignore[index]
                 [
                     "benthic_attribute_id",
                     "ba_name",
@@ -2142,7 +2170,7 @@ class MLflowTrainingRunner(TrainingRunner):
                     "target_n",
                     "realized_n",
                 ]
-            ].sort_values("realized_n", ascending=False)
+            ].sort_values("realized_n", ascending=False)  # pyright: ignore[reportCallIssue]  # pandas DataFrame.sort_values overload issue with column-subscript result
             self.log_dataframe(out, "subsample/per_class_counts")
 
         realized = getattr(self.dataset, "_subsample_realized_total", None)
@@ -2232,11 +2260,12 @@ class MLflowTrainingRunner(TrainingRunner):
         ).fetch_df()
         self.log_dataframe(val_annotations_df, "annotations_val")
 
-    def log_dataframe(self, df, filestem):
+    def log_dataframe(self, df: pd.DataFrame, filestem: str) -> None:
         """
         MLflow's log_table() saves a .json instead of .csv, which means
         the resulting artifact file cannot be inspected readily with an
         external program such as Excel / LibreOffice Calc.
         To save a .csv, we use log_text() instead, with this helper function.
         """
+        assert self.dataset is not None
         _log_dataframe(self.dataset.duck_conn, df, filestem)
