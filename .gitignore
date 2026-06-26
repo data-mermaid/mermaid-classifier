@@ -169,3 +169,6 @@ mlflow.db
 # AI
 CLAUDE.md
 .claude/
+
+# Generated HTML training reports (scripts/generate_report.py)
+report_*.html
