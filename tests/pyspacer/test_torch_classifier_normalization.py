@@ -9,6 +9,7 @@ and emits its own RuntimeWarning if the pre-renorm drift is larger than
 expected float32 accumulation error, which would indicate a real
 numerical issue (NaN/Inf logits, bypassed softmax) rather than rounding.
 """
+
 from __future__ import annotations
 
 import unittest
@@ -51,13 +52,15 @@ class RowSumRenormalizationTest(unittest.TestCase):
                 max_iter=2,
                 random_state=0,
             ),
-            X, y,
+            X,
+            y,
         )
         probs = clf.predict_proba(X)
         np.testing.assert_allclose(
             probs.sum(axis=1),
             np.ones(len(probs), dtype=np.float64),
-            rtol=0, atol=1e-12,
+            rtol=0,
+            atol=1e-12,
         )
 
 
@@ -75,20 +78,21 @@ class NoSpuriousDriftWarningTest(unittest.TestCase):
                 max_iter=2,
                 random_state=0,
             ),
-            X, y,
+            X,
+            y,
         )
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             clf.predict_proba(X)
         drift_warnings = [
-            w for w in caught
-            if issubclass(w.category, RuntimeWarning)
-            and "row sums deviate" in str(w.message)
+            w
+            for w in caught
+            if issubclass(w.category, RuntimeWarning) and "row sums deviate" in str(w.message)
         ]
         self.assertEqual(
-            drift_warnings, [],
-            f"Unexpected drift warning(s): "
-            f"{[str(w.message) for w in drift_warnings]}",
+            drift_warnings,
+            [],
+            f"Unexpected drift warning(s): {[str(w.message) for w in drift_warnings]}",
         )
 
 
@@ -106,7 +110,8 @@ class AnomalousDriftTriggersWarningTest(unittest.TestCase):
                 max_iter=2,
                 random_state=0,
             ),
-            X, y,
+            X,
+            y,
         )
 
     def test_drifted_rows_trigger_warning_and_still_renormalize(self):
@@ -122,21 +127,22 @@ class AnomalousDriftTriggersWarningTest(unittest.TestCase):
             out = real_softmax(logits, dim=dim)
             return out * 1.5
 
-        target = (
-            "mermaid_classifier.pyspacer.torch_classifier.F.softmax"
-        )
-        with mock.patch(target, side_effect=_broken_softmax):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                probs = clf.predict_proba(X_eval)
+        target = "mermaid_classifier.pyspacer.torch_classifier.F.softmax"
+        with (
+            mock.patch(target, side_effect=_broken_softmax),
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always")
+            probs = clf.predict_proba(X_eval)
 
         drift_warnings = [
-            w for w in caught
-            if issubclass(w.category, RuntimeWarning)
-            and "row sums deviate" in str(w.message)
+            w
+            for w in caught
+            if issubclass(w.category, RuntimeWarning) and "row sums deviate" in str(w.message)
         ]
         self.assertEqual(
-            len(drift_warnings), 1,
+            len(drift_warnings),
+            1,
             f"Expected exactly one drift warning, got {len(drift_warnings)}. "
             f"All warnings: {[str(w.message) for w in caught]}",
         )
@@ -146,7 +152,8 @@ class AnomalousDriftTriggersWarningTest(unittest.TestCase):
         np.testing.assert_allclose(
             probs.sum(axis=1),
             np.ones(len(probs), dtype=np.float64),
-            rtol=0, atol=1e-12,
+            rtol=0,
+            atol=1e-12,
         )
 
 

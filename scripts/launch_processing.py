@@ -13,6 +13,7 @@ Example
         --run-config sagemaker/runs/my-extraction.yaml \\
         --config-dir sagemaker/configs/my-extraction/
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,12 +21,13 @@ import csv
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import boto3
 
-from mermaid_classifier.sagemaker.launcher_config import RunConfig, parse_run_config
+from mermaid_classifier.sagemaker.launcher_config import parse_run_config
 
 ACCOUNT = "554812291621"
 REGION = "us-east-1"
@@ -46,13 +48,12 @@ def expand_image_uri(image: str) -> str:
         raise ValueError(f"Image {image!r} must be `<repo>:<tag>` or a full ECR URI.")
     repo, _ = image.split(":", 1)
     if repo not in KNOWN_SHORT_REPOS:
-        raise ValueError(
-            f"Unknown short-form repo {repo!r}. Known: {sorted(KNOWN_SHORT_REPOS)}.")
+        raise ValueError(f"Unknown short-form repo {repo!r}. Known: {sorted(KNOWN_SHORT_REPOS)}.")
     return f"{ECR_HOST}/{image}"
 
 
 def make_run_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    return f"{prefix}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
 
 
 def chunk_items(items: list[str], n_workers: int) -> list[list[str]]:
@@ -69,22 +70,25 @@ def load_items(csv_path: Path, column: str | None) -> list[str]:
     """Load a column from a CSV. If column is None, use the first column."""
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
         if column is None:
-            column = reader.fieldnames[0]
-        elif column not in reader.fieldnames:
-            raise ValueError(f"Column {column!r} not in {csv_path}: {reader.fieldnames}")
+            column = fieldnames[0]
+        elif column not in fieldnames:
+            raise ValueError(f"Column {column!r} not in {csv_path}: {fieldnames}")
         return [row[column] for row in reader if row[column]]
 
 
 def build_processing_request(
     *,
-    cfg: RunConfig,
+    cfg: Any,
     run_id: str,
     worker_idx: int,
     worker_items: list[str] | None,
-) -> dict:
+) -> dict[str, Any]:
     job = cfg.job
     proc = cfg.processing
+    if proc is None:
+        raise ValueError("cfg.processing must be set for a processing job")
     container_args = list(proc.container_args)
     if worker_items is not None:
         assert proc.shard is not None, "worker_items requires processing.shard"
@@ -110,9 +114,11 @@ def build_processing_request(
             **job.env,
         },
         "Tags": (
-            [{"Key": "Project", "Value": "mermaid-classifier"},
-             {"Key": "RunId", "Value": run_id},
-             {"Key": "WorkerIdx", "Value": str(worker_idx)}]
+            [
+                {"Key": "Project", "Value": "mermaid-classifier"},
+                {"Key": "RunId", "Value": run_id},
+                {"Key": "WorkerIdx", "Value": str(worker_idx)},
+            ]
             + [{"Key": k, "Value": v} for k, v in job.tags.items()]
         ),
     }
@@ -126,16 +132,21 @@ def _configure_logging():
     )
 
 
-def _make_sagemaker_client():
+def _make_sagemaker_client() -> Any:
     from botocore.config import Config
+
     return boto3.client(
         "sagemaker",
         config=Config(region_name=REGION, retries={"mode": "adaptive", "max_attempts": 10}),
     )
 
 
-def _wait_for_completion(client, job_names, poll_interval_s=DEFAULT_POLL_INTERVAL_S):
-    status = {n: "Pending" for n in job_names}
+def _wait_for_completion(
+    client: Any,
+    job_names: list[str],
+    poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+) -> dict[str, str]:
+    status = dict.fromkeys(job_names, "Pending")
     while True:
         for name in job_names:
             if status[name] in TERMINAL_STATES:
@@ -145,12 +156,16 @@ def _wait_for_completion(client, job_names, poll_interval_s=DEFAULT_POLL_INTERVA
         unfinished = [n for n, s in status.items() if s not in TERMINAL_STATES]
         if not unfinished:
             return status
-        log.info("Polling: %d/%d still running; sleeping %ds",
-                 len(unfinished), len(job_names), poll_interval_s)
+        log.info(
+            "Polling: %d/%d still running; sleeping %ds",
+            len(unfinished),
+            len(job_names),
+            poll_interval_s,
+        )
         time.sleep(poll_interval_s)
 
 
-def _upload_config_dir(config_dir: Path, run_id: str, s3_client):
+def _upload_config_dir(config_dir: Path, run_id: str, s3_client: Any) -> str:
     key_prefix = f"runs/{run_id}/config"
     for p in sorted(config_dir.rglob("*")):
         if not p.is_file():
@@ -160,7 +175,7 @@ def _upload_config_dir(config_dir: Path, run_id: str, s3_client):
     return f"s3://{STAGING_BUCKET}/{key_prefix}/"
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
     _configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-config", required=True, type=Path)
@@ -183,18 +198,18 @@ def main(argv=None):
     # Build the request list (with or without shard).
     if cfg.processing.shard:
         items = load_items(
-            args.config_dir / cfg.processing.shard.items_from,
-            cfg.processing.shard.items_column)
+            args.config_dir / cfg.processing.shard.items_from, cfg.processing.shard.items_column
+        )
         chunks = chunk_items(items, cfg.processing.shard.workers)
         log.info("Sharding %d items across %d workers", len(items), len(chunks))
         requests = [
-            build_processing_request(
-                cfg=cfg, run_id=run_id, worker_idx=i, worker_items=chunk)
+            build_processing_request(cfg=cfg, run_id=run_id, worker_idx=i, worker_items=chunk)
             for i, chunk in enumerate(chunks)
         ]
     else:
-        requests = [build_processing_request(
-            cfg=cfg, run_id=run_id, worker_idx=0, worker_items=None)]
+        requests = [
+            build_processing_request(cfg=cfg, run_id=run_id, worker_idx=0, worker_items=None)
+        ]
 
     if args.dry_run:
         print("=" * 60)
@@ -203,7 +218,7 @@ def main(argv=None):
         print(f"run_id:    {run_id}")
         print(f"workers:   {len(requests)}")
         print(f"image:     {expand_image_uri(cfg.job.image)}")
-        print(f"per-worker container_args:")
+        print("per-worker container_args:")
         for i, r in enumerate(requests):
             print(f"  [{i}] {r['AppSpecification']['ContainerArguments']}")
         return
@@ -221,7 +236,8 @@ def main(argv=None):
     cw_url = (
         f"https://{REGION}.console.aws.amazon.com/cloudwatch/home"
         f"?region={REGION}#logsV2:log-groups/log-group/"
-        f"$252Faws$252Fsagemaker$252FProcessingJobs")
+        f"$252Faws$252Fsagemaker$252FProcessingJobs"
+    )
     log.info("CloudWatch: %s", cw_url)
 
     if args.no_wait:

@@ -1,5 +1,6 @@
 """Tests for the MLflow pyfunc shim that stores the portable artifact
 (model.pt + model.json) and serves it through load_predictor."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,13 +35,13 @@ class ArtifactPredictorModelTest(unittest.TestCase):
             got = pyfunc_model.predict(_Ctx(), X)
 
         self.assertEqual(got.shape, model.predict_proba(X).shape)
-        self.assertLess(
-            float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
+        self.assertLess(float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
 
 
 class LogArtifactModelTest(unittest.TestCase):
     def test_logs_pt_and_json_and_no_pickle_and_reloads(self):
         import mlflow
+
         from mermaid_classifier.pyspacer.inference import export_artifact
         from mermaid_classifier.pyspacer.mlflow_model import log_artifact_model
 
@@ -57,17 +58,14 @@ class LogArtifactModelTest(unittest.TestCase):
             artifacts_root = d / "artifacts"
             mlflow.set_tracking_uri(f"sqlite:///{d / 'mlflow.db'}")
             exp_id = mlflow.create_experiment(
-                "test-artifact-store",
-                artifact_location=artifacts_root.as_uri())
+                "test-artifact-store", artifact_location=artifacts_root.as_uri()
+            )
             with mlflow.start_run(experiment_id=exp_id):
-                info = log_artifact_model(
-                    model_pt, model_json,
-                    registered_model_name=None)
+                info = log_artifact_model(model_pt, model_json, registered_model_name=None)
                 loaded = mlflow.pyfunc.load_model(info.model_uri)
 
             # Stored the deployable files, and NO classifier pickle.
-            artifact_files = [p.name for p in artifacts_root.rglob("*")
-                              if p.is_file()]
+            artifact_files = [p.name for p in artifacts_root.rglob("*") if p.is_file()]
             self.assertIn("model.pt", artifact_files)
             self.assertIn("model.json", artifact_files)
             # The spec prohibits the *classifier* pickle (model.pkl), not
@@ -75,9 +73,7 @@ class LogArtifactModelTest(unittest.TestCase):
             self.assertNotIn("model.pkl", artifact_files)
 
             got = loaded.predict(X)
-        self.assertLess(
-            float(np.max(np.abs(np.asarray(got) - model.predict_proba(X)))),
-            1e-6)
+        self.assertLess(float(np.max(np.abs(np.asarray(got) - model.predict_proba(X)))), 1e-6)
 
 
 if __name__ == "__main__":

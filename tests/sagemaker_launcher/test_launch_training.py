@@ -1,4 +1,5 @@
 """Tests for scripts.launch_training (mermaid-classifier)."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -47,8 +48,7 @@ class ExpandImageTest(unittest.TestCase):
         result = lt.expand_image_uri("mermaid-classifier-jobs:training-latest")
         self.assertEqual(
             result,
-            "554812291621.dkr.ecr.us-east-1.amazonaws.com"
-            "/mermaid-classifier-jobs:training-latest",
+            "554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-jobs:training-latest",
         )
 
     def test_full_uri_passes_through(self):
@@ -76,6 +76,7 @@ class BuildEstimatorKwargsTest(unittest.TestCase):
         mock_dt.now.return_value.strftime.return_value = "20260525T120000Z"
 
         from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+
         cfg = parse_run_config(_minimal_yaml(), kind="training", strict=False)
         kwargs = lt.build_estimator_kwargs(
             cfg=cfg,
@@ -98,11 +99,12 @@ class BuildEstimatorKwargsTest(unittest.TestCase):
         )
         self.assertEqual(
             kwargs["image_uri"],
-            "554812291621.dkr.ecr.us-east-1.amazonaws.com"
-            "/mermaid-classifier-jobs:training-smoke",
+            "554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-jobs:training-smoke",
         )
         # MLflow URI is injected as env, NOT YAML-overridable.
-        self.assertEqual(kwargs["environment"]["MLFLOW_TRACKING_SERVER"],
-            "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2")
+        self.assertEqual(
+            kwargs["environment"]["MLFLOW_TRACKING_SERVER"],
+            "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2",
+        )
         # YAML env preserved:
         self.assertEqual(kwargs["environment"]["MY_VAR"], "1")

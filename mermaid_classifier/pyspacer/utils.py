@@ -1,56 +1,61 @@
-from datetime import datetime, timedelta
 import logging
+import logging.config
+from datetime import datetime, timedelta
 
 import mlflow
+from mlflow.exceptions import MlflowException
 
 from mermaid_classifier.pyspacer.settings import settings
 
 
-def logging_config_for_script(name):
+def logging_config_for_script(name: str) -> logging.Logger:
     """
     Call this to set up a logging config that prints info messages,
     and file-logs info and debug messages.
     """
-    logging.config.dictConfig({
-        'version': 1,
-        'formatters': {
-            'default': {
-                'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            }
-        },
-        'handlers': {
-            'console': {
-                'level': 'INFO',
-                'class': 'logging.StreamHandler',
-                'stream': 'ext://sys.stdout',
+    logging.config.dictConfig(
+        {
+            "version": 1,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                }
             },
-            'file': {
-                'level': 'DEBUG',
-                'class': 'logging.FileHandler',
-                'filename': f'{name}.log',
-                # Clear logs of the previous run
-                'mode': 'w',
+            "handlers": {
+                "console": {
+                    "level": "INFO",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                },
+                "file": {
+                    "level": "DEBUG",
+                    "class": "logging.FileHandler",
+                    "filename": f"{name}.log",
+                    # Clear logs of the previous run
+                    "mode": "w",
+                },
             },
-        },
-        'loggers': {
-            name: {
-                'handlers': ['console', 'file'],
-                'level': 'DEBUG',
-            }
-        },
-    })
+            "loggers": {
+                name: {
+                    "handlers": ["console", "file"],
+                    "level": "DEBUG",
+                }
+            },
+        }
+    )
     return logging.getLogger(name)
 
 
 def mlflow_connect(tracking_uri: str | None = None) -> timedelta:
     uri = tracking_uri or settings.mlflow_tracking_server
-    mlflow.set_tracking_uri(uri=uri)
+    if uri is not None:
+        mlflow.set_tracking_uri(uri=uri)
 
     try:
         # Do something to test the server connection.
         time_before_connect = datetime.now()
         mlflow.search_experiments(max_results=1)
-    except mlflow.exceptions.MlflowException as e:
+    except MlflowException as e:
         # Note that this may take a long time to reach
         # unless you set MLFLOW_HTTP_REQUEST_MAX_RETRIES to
         # a low number.
@@ -58,10 +63,10 @@ def mlflow_connect(tracking_uri: str | None = None) -> timedelta:
             raise RuntimeError(
                 "Could not connect to the MLflow tracking server."
                 " Is the tracking server up and running?"
-            )
+            ) from e
         # If it's some other kind of MlflowException, just re-raise
         # for debugging purposes.
-        raise e
+        raise
 
     time_after_connect = datetime.now()
     # Return the time taken to connect.

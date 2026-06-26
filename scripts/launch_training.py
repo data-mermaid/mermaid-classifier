@@ -13,20 +13,28 @@ Example
         --config-dir sagemaker/configs/my-run/ \\
         --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2
 """
+
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import boto3
-from sagemaker.estimator import Estimator
-from sagemaker.inputs import TrainingInput
-from sagemaker.session import Session
+from sagemaker.estimator import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
+    Estimator,
+)
+from sagemaker.inputs import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
+    TrainingInput,
+)
+from sagemaker.session import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
+    Session,
+)
 
-from mermaid_classifier.sagemaker.launcher_config import RunConfig, parse_run_config
+from mermaid_classifier.sagemaker.launcher_config import parse_run_config
 
 # Canonical ARNs (see convention doc). Hardcoded by intent; the
 # launcher is bound to the dev account.
@@ -54,41 +62,42 @@ def expand_image_uri(image: str) -> str:
     if repo not in KNOWN_SHORT_REPOS:
         raise ValueError(
             f"Unknown short-form repo {repo!r}. Known: {sorted(KNOWN_SHORT_REPOS)}. "
-            f"Use a full ECR URI to override.")
+            f"Use a full ECR URI to override."
+        )
     return f"{ECR_HOST}/{image}"
 
 
 def make_run_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    return f"{prefix}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
 
 
 def build_estimator_kwargs(
     *,
-    cfg: RunConfig,
+    cfg: Any,
     run_id: str,
     staging_bucket: str,
     mlflow_uri: str,
-    sm_session,
-) -> dict:
+    sm_session: Any,
+) -> dict[str, Any]:
     job = cfg.job
     env = {
         "MLFLOW_TRACKING_SERVER": mlflow_uri,
         "AWS_DEFAULT_REGION": REGION,
         **job.env,
     }
-    kwargs = dict(
-        image_uri=expand_image_uri(job.image),
-        role=EXEC_ROLE,
-        instance_count=job.instance_count,
-        instance_type=job.instance_type,
-        volume_size=job.volume_gb,
-        max_run=job.max_runtime_hours * 3600,
-        output_path=f"s3://{staging_bucket}/runs/{run_id}/output/",
-        environment=env,
-        sagemaker_session=sm_session,
-        base_job_name=job.name_prefix,
-        tags=[{"Key": k, "Value": v} for k, v in job.tags.items()],
-    )
+    kwargs = {
+        "image_uri": expand_image_uri(job.image),
+        "role": EXEC_ROLE,
+        "instance_count": job.instance_count,
+        "instance_type": job.instance_type,
+        "volume_size": job.volume_gb,
+        "max_run": job.max_runtime_hours * 3600,
+        "output_path": f"s3://{staging_bucket}/runs/{run_id}/output/",
+        "environment": env,
+        "sagemaker_session": sm_session,
+        "base_job_name": job.name_prefix,
+        "tags": [{"Key": k, "Value": v} for k, v in job.tags.items()],
+    }
     if job.use_spot:
         kwargs["use_spot_instances"] = True
         kwargs["max_wait"] = job.max_runtime_hours * 3600 + 3600
@@ -103,11 +112,10 @@ def _configure_logging():
     )
 
 
-def _upload_config_dir(config_dir: Path, run_id: str, sm_session) -> str:
+def _upload_config_dir(config_dir: Path, run_id: str, sm_session: Any) -> str:
     key_prefix = f"runs/{run_id}/config"
     log.info("Uploading %s to s3://%s/%s/", config_dir, STAGING_BUCKET, key_prefix)
-    sm_session.upload_data(
-        path=str(config_dir), bucket=STAGING_BUCKET, key_prefix=key_prefix)
+    sm_session.upload_data(path=str(config_dir), bucket=STAGING_BUCKET, key_prefix=key_prefix)
     return f"s3://{STAGING_BUCKET}/{key_prefix}/"
 
 
@@ -116,7 +124,8 @@ def _cloudwatch_url(run_id: str) -> str:
         f"https://{REGION}.console.aws.amazon.com/cloudwatch/home"
         f"?region={REGION}#logsV2:log-groups/log-group/"
         f"$252Faws$252Fsagemaker$252FTrainingJobs"
-        f"/log-events/{run_id}")
+        f"/log-events/{run_id}"
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -128,8 +137,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    cfg = parse_run_config(
-        args.run_config.read_text(), kind="training", strict=False)
+    cfg = parse_run_config(args.run_config.read_text(), kind="training", strict=False)
 
     if not args.config_dir.is_dir():
         log.error("Config dir does not exist: %s", args.config_dir)
@@ -158,8 +166,12 @@ def main(argv: list[str] | None = None) -> None:
     _upload_config_dir(args.config_dir.resolve(), run_id, sm_session)
 
     kwargs = build_estimator_kwargs(
-        cfg=cfg, run_id=run_id, staging_bucket=STAGING_BUCKET,
-        mlflow_uri=args.mlflow_tracking_uri, sm_session=sm_session)
+        cfg=cfg,
+        run_id=run_id,
+        staging_bucket=STAGING_BUCKET,
+        mlflow_uri=args.mlflow_tracking_uri,
+        sm_session=sm_session,
+    )
 
     log.info("Run ID:       %s", run_id)
     log.info("CloudWatch:   %s", cw_url)
@@ -168,8 +180,8 @@ def main(argv: list[str] | None = None) -> None:
     estimator = Estimator(**kwargs)
     inputs = {
         "config": TrainingInput(
-            s3_data=f"s3://{STAGING_BUCKET}/runs/{run_id}/config/",
-            input_mode="File"),
+            s3_data=f"s3://{STAGING_BUCKET}/runs/{run_id}/config/", input_mode="File"
+        ),
     }
     # Additional channels from cfg.training.channels:
     if cfg.training:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import typing
 from collections import defaultdict
 
+# LabelId is `int | str` in pyspacer; MERMAID always uses str labels.
+# These helpers are typed str-only since they parse BAGF strings internally.
 from mermaid_classifier.common.benthic_attributes import split_ba_gf
 
 if typing.TYPE_CHECKING:
@@ -20,7 +22,8 @@ def top_level_ancestor(ba_id: str, ba_library: BenthicAttributeLibrary) -> str:
 
 
 def build_ba_to_top(
-    classes: list[str], ba_library: BenthicAttributeLibrary,
+    classes: list[str],
+    ba_library: BenthicAttributeLibrary,
 ) -> dict[str, str]:
     """Map each BA ID (extracted from BAGF class IDs) to its top-level ancestor."""
     ba_to_top: dict[str, str] = {}
@@ -32,7 +35,8 @@ def build_ba_to_top(
 
 
 def build_ba_paths(
-    classes: list[str], ba_library: BenthicAttributeLibrary,
+    classes: list[str],
+    ba_library: BenthicAttributeLibrary,
 ) -> dict[str, list[str]]:
     """Map each BA ID to its root-to-leaf path [root, ..., parent, self]."""
     ba_paths: dict[str, list[str]] = {}
@@ -44,7 +48,9 @@ def build_ba_paths(
 
 
 def find_lca(
-    ba_a: str, ba_b: str, ba_paths: dict[str, list[str]],
+    ba_a: str,
+    ba_b: str,
+    ba_paths: dict[str, list[str]],
 ) -> str | None:
     """Walk both root-to-leaf paths in parallel, return last matching node.
 
@@ -53,7 +59,7 @@ def find_lca(
     path_a = ba_paths[ba_a]
     path_b = ba_paths[ba_b]
     lca = None
-    for a, b in zip(path_a, path_b):
+    for a, b in zip(path_a, path_b, strict=False):
         if a == b:
             lca = a
         else:
@@ -89,7 +95,7 @@ def group_by_top_level(
     ba_to_top: dict[str, str],
     ba_library: BenthicAttributeLibrary,
     min_samples: int = 30,
-) -> list[dict]:
+) -> list[dict[str, typing.Any]]:
     """Group samples by ground-truth top-level BA category.
 
     Returns list of dicts with keys: top_ba_id, name, indices, n_samples.
@@ -105,10 +111,12 @@ def group_by_top_level(
     for top_ba_id, indices in category_indices.items():
         if len(indices) < min_samples:
             continue
-        groups.append({
-            'top_ba_id': top_ba_id,
-            'name': ba_library.id_to_name(top_ba_id),
-            'indices': indices,
-            'n_samples': len(indices),
-        })
+        groups.append(
+            {
+                "top_ba_id": top_ba_id,
+                "name": ba_library.id_to_name(top_ba_id),
+                "indices": indices,
+                "n_samples": len(indices),
+            }
+        )
     return groups

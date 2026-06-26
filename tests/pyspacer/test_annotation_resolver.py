@@ -1,6 +1,7 @@
 """Tests for annotation.py's classifier-artifact resolver: turning an MLflow
 model ID, S3 directory, or local directory into local (model.pt, model.json)
 paths for load_predictor."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ class ResolveFilesystemDirectoryTest(unittest.TestCase):
         from mermaid_classifier.pyspacer.annotation import (
             resolve_classifier_artifact,
         )
+
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "model.pt").write_bytes(b"pt")
             (Path(d) / "model.json").write_text("{}")
@@ -29,6 +31,7 @@ class ResolveFilesystemDirectoryTest(unittest.TestCase):
         from mermaid_classifier.pyspacer.annotation import (
             resolve_classifier_artifact,
         )
+
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "model.pt").write_bytes(b"pt")
             (Path(d) / "model.json").write_text("{}")
@@ -42,11 +45,13 @@ class ResolveFilesystemDirectoryTest(unittest.TestCase):
 class ResolveMlflowModelIdTest(unittest.TestCase):
     def test_round_trip_resolves_and_matches_source(self):
         import mlflow
+
         from mermaid_classifier.pyspacer.annotation import (
             resolve_classifier_artifact,
         )
         from mermaid_classifier.pyspacer.inference import (
-            export_artifact, load_predictor,
+            export_artifact,
+            load_predictor,
         )
         from mermaid_classifier.pyspacer.mlflow_model import log_artifact_model
 
@@ -59,11 +64,10 @@ class ResolveMlflowModelIdTest(unittest.TestCase):
             artifacts_root = d / "artifacts"
             mlflow.set_tracking_uri(f"sqlite:///{d / 'mlflow.db'}")
             exp_id = mlflow.create_experiment(
-                "test-resolver",
-                artifact_location=artifacts_root.as_uri())
+                "test-resolver", artifact_location=artifacts_root.as_uri()
+            )
             with mlflow.start_run(experiment_id=exp_id):
-                info = log_artifact_model(
-                    model_pt, model_json, registered_model_name=None)
+                info = log_artifact_model(model_pt, model_json, registered_model_name=None)
 
             # mlflow_connect() would reset the tracking URI to the production
             # server; patch it to a no-op so resolution stays on sqlite.
@@ -76,8 +80,7 @@ class ResolveMlflowModelIdTest(unittest.TestCase):
             predictor = load_predictor(pt, js)
             got = predictor.predict_proba(X)
 
-        self.assertLess(
-            float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
+        self.assertLess(float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
 
 
 class PyspacerPickleGuardTest(unittest.TestCase):
@@ -85,6 +88,7 @@ class PyspacerPickleGuardTest(unittest.TestCase):
 
     def _source(self):
         from mermaid_classifier.pyspacer import annotation
+
         return Path(annotation.__file__).read_text()
 
     def test_no_classify_image_or_classifyimagemsg(self):

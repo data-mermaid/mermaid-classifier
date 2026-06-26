@@ -1,4 +1,5 @@
 """compute_per_class_targets allocator behavior tests."""
+
 from __future__ import annotations
 
 import unittest
@@ -66,8 +67,7 @@ class StratifiedTest(unittest.TestCase):
         targets = compute_per_class_targets(opts, counts)
         self.assertEqual(len(targets), 5)
         for cls, t in targets.items():
-            self.assertGreaterEqual(
-                t, 10, f"{cls} trimmed below min_per_class floor")
+            self.assertGreaterEqual(t, 10, f"{cls} trimmed below min_per_class floor")
 
     def test_overshoot_trims_largest_class(self):
         # Three equal-size classes, budget=100. Naive rounding gives

@@ -1,6 +1,7 @@
 """Builds a small fitted CalibratedClassifierCV(TorchMLPClassifier) the same
 way MermaidTrainer does, with no network or MLflow. Shared across artifact
 tests."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -27,8 +28,7 @@ def make_calibrated_model(
     # Separable-ish features so calibration has signal.
     centers = rng.normal(0, 3, size=(n_classes, n_features)).astype(np.float32)
     y_idx = rng.integers(0, n_classes, size=n_samples)
-    X = (centers[y_idx] + rng.normal(0, 1, size=(n_samples, n_features))
-         ).astype(np.float32)
+    X = (centers[y_idx] + rng.normal(0, 1, size=(n_samples, n_features))).astype(np.float32)
     y = classes[y_idx]
 
     clf = TorchMLPClassifier(hidden_layer_sizes=(16,), random_state=0)
@@ -38,8 +38,7 @@ def make_calibrated_model(
     # CalibratedClassifierCV has no decision_function on TorchMLPClassifier,
     # so calibration runs on predict_proba (softmax) outputs.
     predictions = clf.predict_proba(X)
-    calibrated_inner = _fit_calibrator(
-        clf, predictions, y, clf.classes_, method="sigmoid")
+    calibrated_inner = _fit_calibrator(clf, predictions, y, clf.classes_, method="sigmoid")
     wrapper = CalibratedClassifierCV(clf, cv="prefit")
     wrapper.calibrated_classifiers_ = [calibrated_inner]
     wrapper.classes_ = clf.classes_

@@ -1,10 +1,10 @@
-from contextlib import contextmanager
 import importlib
-from io import StringIO
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
+from contextlib import contextmanager
+from io import StringIO
+from types import SimpleNamespace
 from unittest import mock
 
 import pandas as pd
@@ -12,8 +12,7 @@ from spacer.data_classes import DataLocation, ImageLabels
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
 from mermaid_classifier.pyspacer.settings import settings
-from mermaid_classifier.pyspacer.train import (
-    Artifacts, CNSourceFilter, Sites, TrainingDataset)
+from mermaid_classifier.pyspacer.train import Artifacts, CNSourceFilter, Sites, TrainingDataset
 
 
 class SettingsOverride:
@@ -30,6 +29,7 @@ class SettingsOverride:
     Some parts are from
     https://rednafi.com/python/patch-pydantic-settings-in-pytest/
     """
+
     def __init__(self, **kwargs):
         self.options = kwargs
         super().__init__()
@@ -68,17 +68,17 @@ class NoInitDataset(TrainingDataset):
     just want access to the other methods of the class.
     So here we make init barebones.
     """
+
     def __init__(self):
         self._duck_conn = None
         self.artifacts = Artifacts()
         self._feature_temp_dir = None
-        self._feature_dir = '/tmp/mermaid_features_test'
+        self._feature_dir = "/tmp/mermaid_features_test"
 
 
 class BaseTrainTest(unittest.TestCase):
-
     def setUp(self):
-        self.override = SettingsOverride(aws_anonymous='True')
+        self.override = SettingsOverride(aws_anonymous="True")
         self.override.enable()
         super().setUp()
 
@@ -92,13 +92,15 @@ def same_char_uuid(char: str):
     If you pass in '0', you get '00000000-0000-0000-0000-000000000000'.
     Passing in 0-9 or a-f should result in a valid uuid4 string.
     """
-    return '-'.join([
-        ''.join([char]*8),
-        ''.join([char]*4),
-        ''.join([char]*4),
-        ''.join([char]*4),
-        ''.join([char]*12),
-    ])
+    return "-".join(
+        [
+            "".join([char] * 8),
+            "".join([char] * 4),
+            "".join([char] * 4),
+            "".join([char] * 4),
+            "".join([char] * 12),
+        ]
+    )
 
 
 class ReadCoralNetDataTest(BaseTrainTest):
@@ -121,47 +123,43 @@ class ReadCoralNetDataTest(BaseTrainTest):
         dataset = NoInitDataset()
 
         source_id = 23
-        dataset.cn_source_filter = CNSourceFilter(StringIO(
-            'id\n'
-            f'{source_id}\n'
-        ))
+        dataset.cn_source_filter = CNSourceFilter(StringIO(f"id\n{source_id}\n"))
 
         # CoralNet annotations are read in as CSV.
         cn_annotations_csv_content = (
-            'Image ID,Row,Column,Label ID\n'
-            '12345,2000,1200,123\n'
-            '67890,1500,2800,456\n'
+            "Image ID,Row,Column,Label ID\n12345,2000,1200,123\n67890,1500,2800,456\n"
         )
 
         # Mock CN-MM mapping to use.
         mapping = [
-            dict(
-                benthic_attribute_id=same_char_uuid('0'),
-                growth_form_id=same_char_uuid('1'),
-                benthic_attribute_name='BA1',
-                growth_form_name='GF1',
-                provider_id='123',
-                provider_label='Label123',
-            ),
-            dict(
-                benthic_attribute_id=same_char_uuid('2'),
+            {
+                "benthic_attribute_id": same_char_uuid("0"),
+                "growth_form_id": same_char_uuid("1"),
+                "benthic_attribute_name": "BA1",
+                "growth_form_name": "GF1",
+                "provider_id": "123",
+                "provider_label": "Label123",
+            },
+            {
+                "benthic_attribute_id": same_char_uuid("2"),
                 # We expect the API's mapping to have null/None
                 # for blank growth forms.
-                growth_form_id=None,
-                benthic_attribute_name='BA2',
-                growth_form_name=None,
-                provider_id='456',
-                provider_label='Label456',
-            ),
+                "growth_form_id": None,
+                "benthic_attribute_name": "BA2",
+                "growth_form_name": None,
+                "provider_id": "456",
+                "provider_label": "Label456",
+            },
         ]
 
-        prefix_pattern = 's{source_id}_'
+        prefix_pattern = "s{source_id}_"
         prefix = prefix_pattern.format(source_id=source_id)
 
         with tempfile.NamedTemporaryFile(
-            prefix=prefix, mode='w', delete_on_close=False,
+            prefix=prefix,
+            mode="w",
+            delete_on_close=False,
         ) as csv_f:
-
             csv_f.write(cn_annotations_csv_content)
             csv_f.close()
 
@@ -170,14 +168,15 @@ class ReadCoralNetDataTest(BaseTrainTest):
                     coralnet_annotations_csv_pattern=csv_f.name,
                 ),
                 mock.patch.object(
-                    CoralNetMermaidMapping, '_download_mapping',
+                    CoralNetMermaidMapping,
+                    "_download_mapping",
                 ) as mock_download_mapping,
                 # read_coralnet_data uses S3FileSystem.exists to skip
                 # sources whose annotations.csv isn't in S3. The test
                 # serves its CSV from a local tempfile, so short-circuit
                 # that check.
                 mock.patch(
-                    'mermaid_classifier.pyspacer.train.S3FileSystem',
+                    "mermaid_classifier.pyspacer.train.S3FileSystem",
                 ) as mock_s3fs_cls,
             ):
                 mock_download_mapping.return_value = mapping
@@ -186,20 +185,18 @@ class ReadCoralNetDataTest(BaseTrainTest):
                 dataset.read_coralnet_data()
 
         result_tuples = dataset.duck_conn.execute(
-            "SELECT image_id, row, col, benthic_attribute_id, growth_form_id"
-            " FROM annotations").fetchall()
+            "SELECT image_id, row, col, benthic_attribute_id, growth_form_id FROM annotations"
+        ).fetchall()
         result_tuples.sort()
 
         self.assertListEqual(
             list(result_tuples[0]),
-            ['12345', 2000, 1200,
-             same_char_uuid('0'), same_char_uuid('1')],
+            ["12345", 2000, 1200, same_char_uuid("0"), same_char_uuid("1")],
         )
         # Empty GF should show as ''.
         self.assertListEqual(
             list(result_tuples[1]),
-            ['67890', 1500, 2800,
-             same_char_uuid('2'), ''],
+            ["67890", 1500, 2800, same_char_uuid("2"), ""],
         )
 
 
@@ -222,47 +219,44 @@ class ReadMermaidDataTest(BaseTrainTest):
         # Write a couple of coralnet annotations to DuckDB.
         # One with growth form, one without (this is represented as the
         # empty string '').
-        cn_annotations_df = pd.DataFrame(dict(
-            site=['coralnet']*2,
-            bucket=['cn-data']*2,
-            project_id=['12', '34'],
-            image_id=['12345', '67890'],
-            feature_vector=['s12/i12345.fv', 's34/i67890.fv'],
-            row=[2000, 1500],
-            col=[1200, 2800],
-            label_id=['123', '456'],
-            benthic_attribute_id=[same_char_uuid('0'), same_char_uuid('1')],
-            growth_form_id=[same_char_uuid('2'), ''],
-        ))
-
-        dataset.duck_conn.execute(
-            f"CREATE TABLE annotations AS SELECT * FROM cn_annotations_df"
+        cn_annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "site": ["coralnet"] * 2,
+                "bucket": ["cn-data"] * 2,
+                "project_id": ["12", "34"],
+                "image_id": ["12345", "67890"],
+                "feature_vector": ["s12/i12345.fv", "s34/i67890.fv"],
+                "row": [2000, 1500],
+                "col": [1200, 2800],
+                "label_id": ["123", "456"],
+                "benthic_attribute_id": [same_char_uuid("0"), same_char_uuid("1")],
+                "growth_form_id": [same_char_uuid("2"), ""],
+            }
         )
 
-        with tempfile.NamedTemporaryFile(delete_on_close=False) as parquet_f:
+        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM cn_annotations_df")
 
+        with tempfile.NamedTemporaryFile(delete_on_close=False) as parquet_f:
             # Write a couple of mermaid annotations to a parquet file.
             # One with growth form, one without (this is represented in
             # mermaid parquet as string 'None').
-            mermaid_parquet_df = pd.DataFrame(dict(
-                image_id=[same_char_uuid('3'), same_char_uuid('4')],
-                row=[3000, 500],
-                col=[2200, 1800],
-                benthic_attribute_id=[
-                    same_char_uuid('5'), same_char_uuid('6')],
-                growth_form_id=[same_char_uuid('7'), 'None'],
-            ))
+            mermaid_parquet_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+                {
+                    "image_id": [same_char_uuid("3"), same_char_uuid("4")],
+                    "row": [3000, 500],
+                    "col": [2200, 1800],
+                    "benthic_attribute_id": [same_char_uuid("5"), same_char_uuid("6")],
+                    "growth_form_id": [same_char_uuid("7"), "None"],
+                }
+            )
             dataset.duck_conn.execute(
-                f"CREATE TABLE mermaid_parquet_input AS"
-                f" SELECT * FROM mermaid_parquet_df"
+                "CREATE TABLE mermaid_parquet_input AS SELECT * FROM mermaid_parquet_df"
             )
 
             # DuckDB will reopen the file, so close it first.
             parquet_f.close()
             dataset.duck_conn.execute(
-                f"COPY (SELECT * FROM mermaid_parquet_input)"
-                f" TO '{parquet_f.name}'"
-                f" (FORMAT parquet)"
+                f"COPY (SELECT * FROM mermaid_parquet_input) TO '{parquet_f.name}' (FORMAT parquet)"
             )
 
             with override_settings(
@@ -271,98 +265,93 @@ class ReadMermaidDataTest(BaseTrainTest):
                 dataset.read_mermaid_data()
 
         result_tuples = dataset.duck_conn.execute(
-            "SELECT image_id, row, col, benthic_attribute_id, growth_form_id"
-            " FROM annotations").fetchall()
+            "SELECT image_id, row, col, benthic_attribute_id, growth_form_id FROM annotations"
+        ).fetchall()
         # We don't really care about the result order. So we'll alphabetize
         # the results to make it easier to assert on them.
         result_tuples.sort()
 
         self.assertListEqual(
             list(result_tuples[0]),
-            ['12345', 2000, 1200,
-             same_char_uuid('0'), same_char_uuid('2')],
+            ["12345", 2000, 1200, same_char_uuid("0"), same_char_uuid("2")],
         )
         self.assertListEqual(
             list(result_tuples[1]),
-            [same_char_uuid('3'), 3000, 2200,
-             same_char_uuid('5'), same_char_uuid('7')],
+            [same_char_uuid("3"), 3000, 2200, same_char_uuid("5"), same_char_uuid("7")],
         )
         # mermaid 'None' growth form should have become ''.
         self.assertListEqual(
             list(result_tuples[2]),
-            [same_char_uuid('4'), 500, 1800,
-             same_char_uuid('6'), ''],
+            [same_char_uuid("4"), 500, 1800, same_char_uuid("6"), ""],
         )
         # coralnet row with '' growth form should not be accidentally
         # dropped.
         self.assertListEqual(
             list(result_tuples[3]),
-            ['67890', 1500, 2800,
-             same_char_uuid('1'), ''],
+            ["67890", 1500, 2800, same_char_uuid("1"), ""],
         )
 
 
 class HandleMissingFeatureVectorsTest(BaseTrainTest):
-
     @staticmethod
     def annotations_fvs(dataset):
         result_tuples = dataset.duck_conn.execute(
-            "SELECT feature_vector FROM annotations").fetchall()
-        feature_vector_files = [
-            tup[0] for tup in result_tuples]
+            "SELECT feature_vector FROM annotations"
+        ).fetchall()
+        feature_vector_files = [tup[0] for tup in result_tuples]
         return sorted(feature_vector_files)
 
     def test_none_missing(self):
-        annotations_df = pd.DataFrame({
-            'site': [Sites.MERMAID.value]*4,
-            'bucket': ['my-bucket']*4,
-            'feature_vector': ['01.fv', '01.fv', '02.fv', '02.fv'],
-        })
+        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "site": [Sites.MERMAID.value] * 4,
+                "bucket": ["my-bucket"] * 4,
+                "feature_vector": ["01.fv", "01.fv", "02.fv", "02.fv"],
+            }
+        )
         s3_paths = {
-            'my-bucket/01.fv',
-            'my-bucket/02.fv',
+            "my-bucket/01.fv",
+            "my-bucket/02.fv",
         }
 
         dataset = NoInitDataset()
-        dataset.duck_conn.execute(
-            "CREATE TABLE annotations AS SELECT * FROM annotations_df"
-        )
+        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
         # Since there shouldn't be any missing feature vectors, it
         # shouldn't log any warnings.
-        with self.assertNoLogs(logger='train', level='WARN'):
+        with self.assertNoLogs(logger="train", level="WARN"):
             dataset.handle_missing_feature_vectors(s3_paths)
 
         self.assertListEqual(
             self.annotations_fvs(dataset),
-            ['01.fv', '01.fv', '02.fv', '02.fv'],
+            ["01.fv", "01.fv", "02.fv", "02.fv"],
             msg="No annotations should have been filtered out",
         )
 
     def test_one_missing(self):
-        annotations_df = pd.DataFrame({
-            'site': [Sites.MERMAID.value]*4,
-            'bucket': ['my-bucket']*4,
-            'feature_vector': ['01.fv', '01.fv', '02.fv', '02.fv'],
-        })
+        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "site": [Sites.MERMAID.value] * 4,
+                "bucket": ["my-bucket"] * 4,
+                "feature_vector": ["01.fv", "01.fv", "02.fv", "02.fv"],
+            }
+        )
         # S3 doesn't have 02.
         s3_paths = {
-            'my-bucket/01.fv',
-            'my-bucket/05.fv',
+            "my-bucket/01.fv",
+            "my-bucket/05.fv",
         }
 
         dataset = NoInitDataset()
-        dataset.duck_conn.execute(
-            "CREATE TABLE annotations AS SELECT * FROM annotations_df"
-        )
+        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
         with (
-            self.assertLogs(logger='train', level='WARN') as warn_cm,
+            self.assertLogs(logger="train", level="WARN") as warn_cm,
             override_settings(training_inputs_percent_missing_allowed=50),
         ):
             dataset.handle_missing_feature_vectors(s3_paths)
 
         self.assertListEqual(
             self.annotations_fvs(dataset),
-            ['01.fv', '01.fv'],
+            ["01.fv", "01.fv"],
             msg="02.fv should have been filtered out",
         )
 
@@ -370,34 +359,34 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
             warn_cm.output[0],
             "WARNING:train:Skipping 1 feature vector(s) because the files"
             " aren't in S3. Example(s):"
-            "\nmy-bucket/02.fv"
+            "\nmy-bucket/02.fv",
         )
 
     def test_over_three_missing(self):
-        annotations_df = pd.DataFrame({
-            'site': [Sites.MERMAID.value]*5,
-            'bucket': ['my-bucket']*5,
-            'feature_vector': ['01.fv', '02.fv', '03.fv', '04.fv', '05.fv'],
-        })
+        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "site": [Sites.MERMAID.value] * 5,
+                "bucket": ["my-bucket"] * 5,
+                "feature_vector": ["01.fv", "02.fv", "03.fv", "04.fv", "05.fv"],
+            }
+        )
         # S3 doesn't have 01, 02, 04, 05.
         s3_paths = {
-            'my-bucket/03.fv',
-            'my-bucket/07.fv',
+            "my-bucket/03.fv",
+            "my-bucket/07.fv",
         }
 
         dataset = NoInitDataset()
-        dataset.duck_conn.execute(
-            "CREATE TABLE annotations AS SELECT * FROM annotations_df"
-        )
+        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
         with (
-            self.assertLogs(logger='train', level='WARN') as warn_cm,
+            self.assertLogs(logger="train", level="WARN") as warn_cm,
             override_settings(training_inputs_percent_missing_allowed=90),
         ):
             dataset.handle_missing_feature_vectors(s3_paths)
 
         self.assertListEqual(
             self.annotations_fvs(dataset),
-            ['03.fv'],
+            ["03.fv"],
             msg="All but 03.fv should have been filtered out",
         )
 
@@ -408,39 +397,41 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
             " aren't in S3. Example(s):",
             message,
         )
-        example_count = sum([
-            1 if feature_path in message else 0
-            for feature_path in [
-                'my-bucket/01.fv',
-                'my-bucket/02.fv',
-                'my-bucket/04.fv',
-                'my-bucket/05.fv',
+        example_count = sum(
+            [
+                1 if feature_path in message else 0
+                for feature_path in [
+                    "my-bucket/01.fv",
+                    "my-bucket/02.fv",
+                    "my-bucket/04.fv",
+                    "my-bucket/05.fv",
+                ]
             ]
-        ])
+        )
         self.assertEqual(example_count, 3)
 
     def test_over_threshold_missing(self):
-        annotations_df = pd.DataFrame({
-            'site': [Sites.MERMAID.value]*5,
-            'bucket': ['my-bucket']*5,
-            'feature_vector': ['01.fv', '02.fv', '03.fv', '04.fv', '05.fv'],
-        })
+        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "site": [Sites.MERMAID.value] * 5,
+                "bucket": ["my-bucket"] * 5,
+                "feature_vector": ["01.fv", "02.fv", "03.fv", "04.fv", "05.fv"],
+            }
+        )
         # S3 doesn't have 01, 05 (40% missing).
         # We'll add more extras here to demonstrate that the threshold is
         # out of features in annotations, not features in S3.
         s3_paths = {
-            'my-bucket/02.fv',
-            'my-bucket/03.fv',
-            'my-bucket/04.fv',
-            'my-bucket/12.fv',
-            'my-bucket/13.fv',
-            'my-bucket/14.fv',
+            "my-bucket/02.fv",
+            "my-bucket/03.fv",
+            "my-bucket/04.fv",
+            "my-bucket/12.fv",
+            "my-bucket/13.fv",
+            "my-bucket/14.fv",
         }
 
         dataset = NoInitDataset()
-        dataset.duck_conn.execute(
-            "CREATE TABLE annotations AS SELECT * FROM annotations_df"
-        )
+        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
         with (
             self.assertRaises(RuntimeError) as error_cm,
             override_settings(training_inputs_percent_missing_allowed=39),
@@ -448,13 +439,10 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
             dataset.handle_missing_feature_vectors(s3_paths)
 
         message = str(error_cm.exception)
-        self.assertIn(
-            "Too many feature vectors are missing (2), such as:", message)
-        self.assertIn('my-bucket/01.fv', message)
-        self.assertIn('my-bucket/05.fv', message)
-        self.assertIn(
-            "You can configure the tolerance for missing feature vectors",
-            message)
+        self.assertIn("Too many feature vectors are missing (2), such as:", message)
+        self.assertIn("my-bucket/01.fv", message)
+        self.assertIn("my-bucket/05.fv", message)
+        self.assertIn("You can configure the tolerance for missing feature vectors", message)
 
 
 class LazyLibraryTest(BaseTrainTest):
@@ -465,15 +453,14 @@ class LazyLibraryTest(BaseTrainTest):
     """
 
     def test_importing_train_does_not_call_the_mermaid_api(self):
-        module_name = 'mermaid_classifier.pyspacer.train'
+        module_name = "mermaid_classifier.pyspacer.train"
 
         def fail(*args, **kwargs):
-            raise AssertionError(
-                "Importing train made a network call to the MERMAID API")
+            raise AssertionError("Importing train made a network call to the MERMAID API")
 
         original_module = sys.modules.get(module_name)
         try:
-            with mock.patch('urllib.request.urlopen', side_effect=fail):
+            with mock.patch("urllib.request.urlopen", side_effect=fail):
                 # Force a fresh import so the module body re-executes.
                 sys.modules.pop(module_name, None)
                 importlib.import_module(module_name)
@@ -501,41 +488,47 @@ class AddTrainingSetNamesTest(BaseTrainTest):
         Otherwise the join matches nothing, every annotation gets a NULL
         training_set, and the stats artifacts wrongly report 100% dropped.
         """
-        annotations_df = pd.DataFrame({
-            'bucket': ['bucketA', 'bucketA', 'bucketB'],
-            'feature_vector': [
-                'cn/img1.featurevector',
-                'cn/img1.featurevector',
-                'mermaid/img2.featurevector',
-            ],
-            'row': [10, 30, 50],
-            'col': [20, 40, 60],
-        })
+        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "bucket": ["bucketA", "bucketA", "bucketB"],
+                "feature_vector": [
+                    "cn/img1.featurevector",
+                    "cn/img1.featurevector",
+                    "mermaid/img2.featurevector",
+                ],
+                "row": [10, 30, 50],
+                "col": [20, 40, 60],
+            }
+        )
 
         dataset = NoInitDataset()
-        dataset.duck_conn.execute(
-            "CREATE TABLE annotations AS SELECT * FROM annotations_df"
-        )
+        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
 
         # The labels carry filesystem DataLocations keyed by local download
         # paths, alongside a mapping back to the original (bucket, key).
-        loc1_path = '/tmp/feat/bucketA/cn/img1.featurevector'
-        loc2_path = '/tmp/feat/bucketB/mermaid/img2.featurevector'
+        loc1_path = "/tmp/feat/bucketA/cn/img1.featurevector"
+        loc2_path = "/tmp/feat/bucketB/mermaid/img2.featurevector"
         dataset._feature_path_to_s3_location = {
-            loc1_path: ('bucketA', 'cn/img1.featurevector'),
-            loc2_path: ('bucketB', 'mermaid/img2.featurevector'),
+            loc1_path: ("bucketA", "cn/img1.featurevector"),
+            loc2_path: ("bucketB", "mermaid/img2.featurevector"),
         }
 
         dataset.labels = SimpleNamespace(
-            train=ImageLabels({
-                DataLocation('filesystem', loc1_path): [(10, 20, 'BA1')],
-            }),
-            ref=ImageLabels({
-                DataLocation('filesystem', loc1_path): [(30, 40, 'BA1')],
-            }),
-            val=ImageLabels({
-                DataLocation('filesystem', loc2_path): [(50, 60, 'BA2')],
-            }),
+            train=ImageLabels(
+                {
+                    DataLocation("filesystem", loc1_path): [(10, 20, "BA1")],
+                }
+            ),
+            ref=ImageLabels(
+                {
+                    DataLocation("filesystem", loc1_path): [(30, 40, "BA1")],
+                }
+            ),
+            val=ImageLabels(
+                {
+                    DataLocation("filesystem", loc2_path): [(50, 60, "BA2")],
+                }
+            ),
         )
 
         dataset.add_training_set_names()
@@ -548,9 +541,9 @@ class AddTrainingSetNamesTest(BaseTrainTest):
         self.assertListEqual(
             result,
             [
-                ('bucketA', 'cn/img1.featurevector', 10, 20, 'train'),
-                ('bucketA', 'cn/img1.featurevector', 30, 40, 'ref'),
-                ('bucketB', 'mermaid/img2.featurevector', 50, 60, 'val'),
+                ("bucketA", "cn/img1.featurevector", 10, 20, "train"),
+                ("bucketA", "cn/img1.featurevector", 30, 40, "ref"),
+                ("bucketB", "mermaid/img2.featurevector", 50, 60, "val"),
             ],
             msg="Each annotation should be matched to its train/ref/val set",
         )
@@ -558,5 +551,4 @@ class AddTrainingSetNamesTest(BaseTrainTest):
         dropped = dataset.duck_conn.execute(
             "SELECT count(*) FROM annotations WHERE training_set IS NULL"
         ).fetchone()[0]
-        self.assertEqual(
-            dropped, 0, msg="No annotation should be reported as dropped")
+        self.assertEqual(dropped, 0, msg="No annotation should be reported as dropped")

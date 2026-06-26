@@ -1,30 +1,36 @@
 """export_artifact: freeze the calibrated head to TorchScript, parity-gate it
 against the source model, and write the generated manifest."""
+
 from __future__ import annotations
 
 import json
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 
 from mermaid_classifier.pyspacer.inference import (
-    SCHEMA_VERSION, TASK_NAME, PARITY_PROVEN_SKLEARN, ParityError, SklearnPinError,
+    PARITY_PROVEN_SKLEARN,
+    SCHEMA_VERSION,
+    TASK_NAME,
+    ParityError,
+    SklearnPinError,
 )
 from mermaid_classifier.pyspacer.inference.head import build_calibrated_head
 
 
 def export_artifact(
-    model,
-    output_dir,
-    reference_features,
+    model: Any,
+    output_dir: str | Path,
+    reference_features: Any,
     *,
-    config: dict | None = None,
+    config: dict[str, Any] | None = None,
     task: str = TASK_NAME,
     tol: float = 1e-6,
     enforce_sklearn_pin: bool = True,
-):
+) -> tuple[Path, dict[str, Any], float]:
     """Build, freeze, parity-gate, and persist the portable artifact.
 
     Returns (model_pt_path, manifest_dict, max_abs_diff). Raises ParityError

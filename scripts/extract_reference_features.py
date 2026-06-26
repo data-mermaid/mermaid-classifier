@@ -19,9 +19,11 @@ Then run the live gate:
   cd tests && uv run --no-sync python -m unittest -v \\
       pyspacer.test_portable_artifact.LiveModelParityTest
 """
+
 from __future__ import annotations
 
 import argparse
+from typing import Any
 from urllib.parse import urlparse
 
 import numpy as np
@@ -31,8 +33,7 @@ from spacer.data_classes import DataLocation, ImageFeatures
 def _data_location(loc: str) -> DataLocation:
     uri = urlparse(loc)
     if uri.scheme == "s3":
-        return DataLocation(
-            "s3", bucket_name=uri.netloc, key=uri.path.strip("/"))
+        return DataLocation("s3", bucket_name=uri.netloc, key=uri.path.strip("/"))
     return DataLocation("filesystem", key=loc)
 
 
@@ -40,12 +41,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", required=True, help="output .npy path")
     ap.add_argument(
-        "features", nargs="+",
+        "features",
+        nargs="+",
         help="pyspacer feature files (.featurevector), local paths or s3:// URIs",
     )
     args = ap.parse_args()
 
-    vectors: list[list[float]] = []
+    vectors: list[Any] = []
     for loc in args.features:
         feats = ImageFeatures.load(_data_location(loc))
         for pf in feats.point_features:
@@ -55,8 +57,7 @@ def main() -> None:
     if X.ndim != 2:
         raise SystemExit(f"expected a 2-D feature matrix; got shape {X.shape}")
     np.save(args.out, X)
-    print(f"wrote {X.shape[0]} real feature vectors "
-          f"(dim {X.shape[1]}) to {args.out}")
+    print(f"wrote {X.shape[0]} real feature vectors (dim {X.shape[1]}) to {args.out}")
 
 
 if __name__ == "__main__":

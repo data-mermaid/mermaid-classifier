@@ -14,6 +14,8 @@ annotations at import time; PEP 563 turns those annotations into strings
 (``'int'`` instead of ``int``), causing "Unknown type annotation: 'int'".
 """
 
+from typing import Any
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -22,6 +24,8 @@ import torch.nn.functional as F
 
 class CalibratedHead(nn.Module):
     n_classes: int
+    a: torch.Tensor
+    b: torch.Tensor
 
     def __init__(
         self,
@@ -49,7 +53,7 @@ class CalibratedHead(nn.Module):
         if len(weights) == 0:
             raise ValueError("weights must contain at least one layer.")
         self.linears = nn.ModuleList()
-        for w, bias in zip(weights, biases):
+        for w, bias in zip(weights, biases, strict=False):
             layer = nn.Linear(int(w.shape[1]), int(w.shape[0]))
             with torch.no_grad():
                 layer.weight.copy_(w)
@@ -62,12 +66,10 @@ class CalibratedHead(nn.Module):
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         x = features
         n = len(self.linears)
-        i = 0
-        for linear in self.linears:
+        for i, linear in enumerate(self.linears):
             x = linear(x)
             if i < n - 1:
                 x = F.relu(x)
-            i += 1
         # Computed in float32, matching TorchMLPClassifier._forward_probs; the ~1e-7 residual
         # vs sklearn's float64 path is expected and bounded by the export-time parity gate.
         p = F.softmax(x, dim=1)
@@ -80,22 +82,20 @@ class CalibratedHead(nn.Module):
         safe_denom = torch.where(nonzero, denom, torch.ones_like(denom))
         uniform = torch.full_like(c, 1.0 / float(self.n_classes))
         proba = torch.where(nonzero, c / safe_denom, uniform)
-        proba = torch.where(
+        return torch.where(
             (proba > 1.0) & (proba <= 1.0 + 1e-5),
             torch.ones_like(proba),
             proba,
         )
-        return proba
 
 
-def build_calibrated_head(model) -> CalibratedHead:
+def build_calibrated_head(model: Any) -> CalibratedHead:
     """Construct a CalibratedHead from a fitted CalibratedClassifierCV that
     wraps a TorchMLPClassifier with cv='prefit' and method='sigmoid'."""
     calibrated = model.calibrated_classifiers_
     if len(calibrated) != 1:
         raise ValueError(
-            f"Expected exactly one calibrated classifier (cv='prefit'), got"
-            f" {len(calibrated)}."
+            f"Expected exactly one calibrated classifier (cv='prefit'), got {len(calibrated)}."
         )
     inner = calibrated[0]
     estimator = inner.estimator
@@ -113,10 +113,7 @@ def build_calibrated_head(model) -> CalibratedHead:
             f" K={n_classes}. sklearn stores a single calibrator for K == 2."
         )
     if len(calibrators) != n_classes:
-        raise ValueError(
-            f"Expected {n_classes} per-class calibrators, got"
-            f" {len(calibrators)}."
-        )
+        raise ValueError(f"Expected {n_classes} per-class calibrators, got {len(calibrators)}.")
 
     module = estimator._module
     weights = [lin.weight.detach().clone().float() for lin in module.linears]

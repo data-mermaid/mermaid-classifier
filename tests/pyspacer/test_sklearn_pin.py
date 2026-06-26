@@ -2,6 +2,7 @@
 artifact's parity gate was proven against. A silent sklearn bump can change
 CalibratedClassifierCV / _SigmoidCalibration semantics, so this test fails the
 build until parity is re-proven and the pin + constant are updated together."""
+
 import unittest
 from importlib.metadata import version
 

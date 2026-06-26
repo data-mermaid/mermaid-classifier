@@ -1,11 +1,15 @@
-from collections import defaultdict
 import colorsys
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from matplotlib import patheffects
-from matplotlib.lines import Line2D
 import numpy as np
+from matplotlib import patheffects
+from matplotlib.legend import Legend
+from matplotlib.lines import Line2D
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
 
 
 @dataclass
@@ -25,18 +29,19 @@ class PointMarker:
     text
     Text to write next to the point marker using Axes.annotate().
     """
+
     row: int
     col: int
     color: Any
     shape: Any
-    text: str = None
+    text: str | None = None
 
 
-EDGE_COLOR = 'black'
+EDGE_COLOR = "black"
 EDGE_WIDTH = 0.5
 
 
-def plot_point_markers(ax: 'Axes', markers: list[PointMarker]):
+def plot_point_markers(ax: "Axes", markers: list[PointMarker]):
 
     marker_groups = defaultdict(list)
     marker_size = 100.0
@@ -44,27 +49,21 @@ def plot_point_markers(ax: 'Axes', markers: list[PointMarker]):
     text_offset = 4.0
 
     for marker in markers:
-        if (
-            isinstance(marker.color, list)
-            or isinstance(marker.color, np.ndarray)
-        ):
+        if isinstance(marker.color, (list, np.ndarray)):
             hashable_color = tuple(marker.color)
         else:
             hashable_color = marker.color
 
         # Group the markers according to their common properties other
         # than row, col, text.
-        group_identifying_dict = dict(
-            color=hashable_color,
-            shape=marker.shape,
-        )
-        group_hash = tuple(
-            (k, v) for k, v in group_identifying_dict.items()
-        )
+        group_identifying_dict = {
+            "color": hashable_color,
+            "shape": marker.shape,
+        }
+        group_hash = tuple((k, v) for k, v in group_identifying_dict.items())
         marker_groups[group_hash].append(marker)
 
     for group_hash, markers in marker_groups.items():
-
         xs = [marker.col for marker in markers]
         ys = [marker.row for marker in markers]
         group_dict = dict(group_hash)
@@ -73,28 +72,31 @@ def plot_point_markers(ax: 'Axes', markers: list[PointMarker]):
         ax.scatter(
             xs,
             ys,
-            marker=group_dict['shape'],
-            color=group_dict['color'],
+            marker=group_dict["shape"],
+            color=group_dict["color"],
             # Bit of transparency helps to make the marker not stand
             # out too much.
             alpha=0.8,
             s=marker_size,
             # Marker edges make the markers easier to see when the
             # marker color is similar to the image color.
-            edgecolors=EDGE_COLOR, linewidths=EDGE_WIDTH,
+            edgecolors=EDGE_COLOR,
+            linewidths=EDGE_WIDTH,
         )
 
         # Text
         for marker in markers:
+            if marker.text is None:
+                continue
             # https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.annotate.html
             ax.annotate(
                 marker.text,
                 (marker.col, marker.row),
-                color=group_dict['color'],
+                color=group_dict["color"],
                 alpha=0.8,
                 fontsize=font_size,
                 # https://matplotlib.org/stable/api/text_api.html#matplotlib.text.Text.set_fontweight
-                fontweight='semibold',
+                fontweight="semibold",
                 # textcoords in offset units allow the text to be a
                 # consistent distance from the point marker, regardless
                 # of image scale or zoom level.
@@ -106,7 +108,7 @@ def plot_point_markers(ax: 'Axes', markers: list[PointMarker]):
                 #  values here doesn't do it; probably also need to adjust the
                 #  anchor.
                 xytext=(text_offset, text_offset),
-                textcoords='offset points',
+                textcoords="offset points",
                 # Border/outline around the text for better visibility when
                 # the marker color is similar to the image color.
                 # https://github.com/has2k1/plotnine/discussions/898
@@ -128,20 +130,24 @@ class LegendSpecElement:
 
 
 def plot_legend(
-    ax: 'Axes',
+    ax: "Axes",
     spec: list[LegendSpecElement],
-    title: str = None,
-    position_kwargs: dict = None
-) -> 'matplotlib.legend.Legend':
+    title: str | None = None,
+    position_kwargs: dict[str, Any] | None = None,
+) -> Legend:
 
     legend_artists = [
         Line2D(
             # We don't care about this numeric data; this is
             # just a placeholder for the legend.
-            [0],[0],
-            marker=spec_element.shape, linestyle='None', markersize=8,
+            [0],
+            [0],
+            marker=spec_element.shape,
+            linestyle="None",
+            markersize=8,
             markerfacecolor=spec_element.color,
-            markeredgecolor=EDGE_COLOR, markeredgewidth=EDGE_WIDTH,
+            markeredgecolor=EDGE_COLOR,
+            markeredgewidth=EDGE_WIDTH,
             label=spec_element.label,
         )
         for spec_element in spec
@@ -149,7 +155,7 @@ def plot_legend(
 
     if position_kwargs is None:
         # Put the legend outside the plot, to the upper right.
-        position_kwargs = dict(loc='upper left', bbox_to_anchor=(1.0, 1.0))
+        position_kwargs = {"loc": "upper left", "bbox_to_anchor": (1.0, 1.0)}
 
     # This call already adds the legend to the axes, but the legend
     # handle may be needed for things like adding multiple legends, so
@@ -159,23 +165,23 @@ def plot_legend(
         # Spacing between the legend items
         labelspacing=1,
         title=title,
-        **position_kwargs
+        **position_kwargs,
     )
 
 
-def adjust_lightness(rgba, l_factor):
+def adjust_lightness(rgba: tuple[float, float, float, float], l_factor: float) -> list[float]:
     """
     Adjust lightness of a matplotlib rgba color.
     https://stackoverflow.com/a/60562502
     """
     r, g, b, a = rgba
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
-    new_rgb = colorsys.hls_to_rgb(h, min(1.0, l * l_factor), s=s)
+    h, lightness, s = colorsys.rgb_to_hls(r, g, b)
+    new_rgb = colorsys.hls_to_rgb(h, min(1.0, lightness * l_factor), s=s)
     return [*new_rgb, a]
 
 
-def adjust_saturation(rgba, s_factor):
+def adjust_saturation(rgba: tuple[float, float, float, float], s_factor: float) -> list[float]:
     r, g, b, a = rgba
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
-    new_rgb = colorsys.hls_to_rgb(h, l, s=min(1.0, s * s_factor))
+    h, lightness, s = colorsys.rgb_to_hls(r, g, b)
+    new_rgb = colorsys.hls_to_rgb(h, lightness, s=min(1.0, s * s_factor))
     return [*new_rgb, a]

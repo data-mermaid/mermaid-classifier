@@ -1,9 +1,11 @@
 """load_predictor: serve-time loader for the portable artifact, with loud
 load-time validation of the graph against its manifest."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -14,28 +16,26 @@ from mermaid_classifier.pyspacer.inference import SCHEMA_VERSION, ManifestError
 class Predictor:
     """A loaded classifier head: feature batch -> calibrated probabilities."""
 
-    def __init__(self, graph, classes: list[str], input_dim: int):
+    def __init__(self, graph: Any, classes: list[str], input_dim: int) -> None:
         self._graph = graph
         self.classes = classes
         self.input_dim = input_dim
 
     @property
-    def classes_(self):
+    def classes_(self) -> list[str]:
         """Alias for ``classes`` so a Predictor is a drop-in for the former
         pickled classifier in metrics code that reads ``clf.classes_``."""
         return self.classes
 
-    def predict_proba(self, features) -> np.ndarray:
+    def predict_proba(self, features: Any) -> np.ndarray:
         arr = np.asarray(features, dtype=np.float32)
         if arr.ndim != 2 or arr.shape[1] != self.input_dim:
-            raise ValueError(
-                f"features must be (N, {self.input_dim}); got {arr.shape}."
-            )
+            raise ValueError(f"features must be (N, {self.input_dim}); got {arr.shape}.")
         with torch.no_grad():
             return self._graph(torch.from_numpy(arr)).numpy().astype(np.float64)
 
 
-def load_predictor(model_pt_path, model_json_path) -> Predictor:
+def load_predictor(model_pt_path: str | Path, model_json_path: str | Path) -> Predictor:
     """Load model.pt + model.json, validating compatibility loudly.
 
     Raises ManifestError on schema-version, class-count, or input_dim
@@ -63,8 +63,7 @@ def load_predictor(model_pt_path, model_json_path) -> Predictor:
             probe = graph(torch.zeros(1, input_dim, dtype=torch.float32))
     except Exception as exc:  # noqa: BLE001 - re-raise loudly as ManifestError
         raise ManifestError(
-            f"graph rejects input_dim={input_dim} declared in model.json:"
-            f" {exc}"
+            f"graph rejects input_dim={input_dim} declared in model.json: {exc}"
         ) from exc
 
     if probe.shape[1] != len(classes):

@@ -27,6 +27,7 @@ Example
         --sources-csv /path/to/sources.csv \\
         --aws-profile wcs
 """
+
 from __future__ import annotations
 
 # -- SSO bootstrap ----------------------------------------------------
@@ -38,7 +39,6 @@ import sys
 
 
 def _bootstrap_aws_env(profile: str | None) -> None:
-    import boto3
 
     if profile is None:
         # Container / ambient mode: let every consumer (pyspacer, our
@@ -47,22 +47,22 @@ def _bootstrap_aws_env(profile: str | None) -> None:
         # endpoint as the session token nears expiry. Pinning
         # AWS_PROFILE or copying frozen creds into SPACER_AWS_* here
         # would freeze a 1-hour token and break long-running jobs.
-        os.environ.pop('AWS_PROFILE', None)
-        os.environ.pop('SPACER_AWS_ACCESS_KEY_ID', None)
-        os.environ.pop('SPACER_AWS_SECRET_ACCESS_KEY', None)
-        os.environ.pop('SPACER_AWS_SESSION_TOKEN', None)
+        os.environ.pop("AWS_PROFILE", None)
+        os.environ.pop("SPACER_AWS_ACCESS_KEY_ID", None)
+        os.environ.pop("SPACER_AWS_SECRET_ACCESS_KEY", None)
+        os.environ.pop("SPACER_AWS_SESSION_TOKEN", None)
         return
 
-    os.environ['AWS_PROFILE'] = profile
+    os.environ["AWS_PROFILE"] = profile
     session = boto3.Session()
     credentials = session.get_credentials()
     if credentials is None:
         return
     creds = credentials.get_frozen_credentials()
-    os.environ['SPACER_AWS_ACCESS_KEY_ID'] = creds.access_key
-    os.environ['SPACER_AWS_SECRET_ACCESS_KEY'] = creds.secret_key
+    os.environ["SPACER_AWS_ACCESS_KEY_ID"] = creds.access_key
+    os.environ["SPACER_AWS_SECRET_ACCESS_KEY"] = creds.secret_key
     if creds.token:
-        os.environ['SPACER_AWS_SESSION_TOKEN'] = creds.token
+        os.environ["SPACER_AWS_SESSION_TOKEN"] = creds.token
 
 
 def _early_profile_from_argv(argv: list[str]) -> str | None:
@@ -71,14 +71,14 @@ def _early_profile_from_argv(argv: list[str]) -> str | None:
     Honors --no-aws-bootstrap (signals ambient credentials) and
     --aws-profile (otherwise). Default is 'wcs'.
     """
-    if '--no-aws-bootstrap' in argv:
+    if "--no-aws-bootstrap" in argv:
         return None
     for i, a in enumerate(argv):
-        if a == '--aws-profile' and i + 1 < len(argv):
+        if a == "--aws-profile" and i + 1 < len(argv):
             return argv[i + 1]
-        if a.startswith('--aws-profile='):
-            return a.split('=', 1)[1]
-    return 'wcs'
+        if a.startswith("--aws-profile="):
+            return a.split("=", 1)[1]
+    return "wcs"
 
 
 # -- main module imports ----------------------------------------------
@@ -88,42 +88,48 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
 import boto3
 import pandas as pd
 from botocore.exceptions import ClientError
 
+
+def _tqdm_fallback[T](iterable: Iterable[T] | None = None, **_kwargs: object) -> Iterable[T]:
+    """No-op tqdm fallback used when tqdm is not installed."""
+    return iterable if iterable is not None else iter(())
+
+
 try:
     from tqdm import tqdm
 except ImportError:  # tqdm is convenient but not required.
-    def tqdm(iterable=None, **_kwargs):
-        return iterable if iterable is not None else iter(())
+    tqdm = _tqdm_fallback  # pyright: ignore[reportAssignmentType]  # intentional: tqdm class vs fallback function have compatible call signatures
 
-logger = logging.getLogger('build_feature_bucket')
 
-DEFAULT_SOURCE_BUCKET = 'source-image-bucket'
-DEFAULT_SOURCE_PREFIX = 'coralnet-public-images/'
-DEFAULT_AWS_PROFILE = 'wcs'
+logger = logging.getLogger("build_feature_bucket")
+
+DEFAULT_SOURCE_BUCKET = "source-image-bucket"
+DEFAULT_SOURCE_PREFIX = "coralnet-public-images/"
+DEFAULT_AWS_PROFILE = "wcs"
 DEFAULT_MAX_IO_WORKERS = 16
 
-SOURCE_ID_COLUMN_CANDIDATES = ('id', 'Source ID', 'source_id')
+SOURCE_ID_COLUMN_CANDIDATES = ("id", "Source ID", "source_id")
 
-FEATURE_KEY_RE = re.compile(r'.*/i([^/]+)\.featurevector$')
+FEATURE_KEY_RE = re.compile(r".*/i([^/]+)\.featurevector$")
 
 # `image_list.csv` Name values look like "001-CA2M-1.JPG - Confirmed".
 # `annotations.csv` Name values are the bare filename without the suffix.
 # Strip the trailing status to make them join.
-IMAGE_LIST_STATUS_SUFFIX_RE = re.compile(
-    r'\s+-\s+(?:Confirmed|Unconfirmed|Unclassified)\s*$')
+IMAGE_LIST_STATUS_SUFFIX_RE = re.compile(r"\s+-\s+(?:Confirmed|Unconfirmed|Unclassified)\s*$")
 
 # `Image Page` column in image_list.csv looks like "/image/1719202/view/".
-IMAGE_PAGE_ID_RE = re.compile(r'/image/(\d+)/')
+IMAGE_PAGE_ID_RE = re.compile(r"/image/(\d+)/")
 
 
 # ---- CLI -------------------------------------------------------------
@@ -131,56 +137,78 @@ IMAGE_PAGE_ID_RE = re.compile(r'/image/(\d+)/')
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description=__doc__.split('\n\n', 1)[0],
+        description=(__doc__ or "").split("\n\n", 1)[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument('--target-bucket', required=True,
-                   help='Destination bucket. Must already exist.')
+    p.add_argument("--target-bucket", required=True, help="Destination bucket. Must already exist.")
     src_group = p.add_mutually_exclusive_group(required=True)
-    src_group.add_argument('--sources-csv', type=Path,
-                           help='CSV with a source-ID column.')
-    src_group.add_argument('--source-ids',
-                           help='Comma-separated source IDs (testing).')
-    p.add_argument('--source-id-column',
-                   help='Override CSV column name for source ID. '
-                        f'Default: auto-detect {SOURCE_ID_COLUMN_CANDIDATES}.')
-    p.add_argument('--source-bucket', default=DEFAULT_SOURCE_BUCKET)
-    p.add_argument('--source-prefix', default=DEFAULT_SOURCE_PREFIX)
-    p.add_argument('--weights',
-                   help='EfficientNet weights URI (s3://... or path). '
-                        'Default: settings.weights_location.')
-    p.add_argument('--device', choices=['auto', 'mps', 'cuda', 'cpu'],
-                   default='auto',
-                   help='Torch device for the forward pass. "auto" picks '
-                        'mps if available, else cuda, else cpu. On Apple '
-                        'Silicon, mps is ~5-10x faster than cpu.')
-    p.add_argument('--batch-size', type=int, default=10,
-                   help='Patches per forward-pass batch (pyspacer default '
-                        'is 10; bump to 64-128 on mps for higher throughput).')
-    p.add_argument('--verify-numerics', action='store_true',
-                   help='Before processing, compare chosen-device features '
-                        'against CPU features on a random batch. Adds ~10s '
-                        'startup; catches MPS/CUDA numerical regressions.')
-    p.add_argument('--max-io-workers', type=int, default=DEFAULT_MAX_IO_WORKERS)
-    p.add_argument('--aws-profile', default=DEFAULT_AWS_PROFILE)
-    p.add_argument('--no-aws-bootstrap', action='store_true',
-                   help='Skip SSO bootstrap; use ambient AWS credentials '
-                        '(e.g. SageMaker task role, EC2 instance profile).')
+    src_group.add_argument("--sources-csv", type=Path, help="CSV with a source-ID column.")
+    src_group.add_argument("--source-ids", help="Comma-separated source IDs (testing).")
+    p.add_argument(
+        "--source-id-column",
+        help="Override CSV column name for source ID. "
+        f"Default: auto-detect {SOURCE_ID_COLUMN_CANDIDATES}.",
+    )
+    p.add_argument("--source-bucket", default=DEFAULT_SOURCE_BUCKET)
+    p.add_argument("--source-prefix", default=DEFAULT_SOURCE_PREFIX)
+    p.add_argument(
+        "--weights",
+        help="EfficientNet weights URI (s3://... or path). Default: settings.weights_location.",
+    )
+    p.add_argument(
+        "--device",
+        choices=["auto", "mps", "cuda", "cpu"],
+        default="auto",
+        help='Torch device for the forward pass. "auto" picks '
+        "mps if available, else cuda, else cpu. On Apple "
+        "Silicon, mps is ~5-10x faster than cpu.",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Patches per forward-pass batch (pyspacer default "
+        "is 10; bump to 64-128 on mps for higher throughput).",
+    )
+    p.add_argument(
+        "--verify-numerics",
+        action="store_true",
+        help="Before processing, compare chosen-device features "
+        "against CPU features on a random batch. Adds ~10s "
+        "startup; catches MPS/CUDA numerical regressions.",
+    )
+    p.add_argument("--max-io-workers", type=int, default=DEFAULT_MAX_IO_WORKERS)
+    p.add_argument("--aws-profile", default=DEFAULT_AWS_PROFILE)
+    p.add_argument(
+        "--no-aws-bootstrap",
+        action="store_true",
+        help="Skip SSO bootstrap; use ambient AWS credentials "
+        "(e.g. SageMaker task role, EC2 instance profile).",
+    )
     skip_group = p.add_mutually_exclusive_group()
-    skip_group.add_argument('--skip-existing', dest='skip_existing',
-                            action='store_true', default=True)
-    skip_group.add_argument('--force', dest='skip_existing',
-                            action='store_false',
-                            help='Re-extract even if feature file already exists.')
-    p.add_argument('--dry-run', action='store_true',
-                   help='Log planned work; do not write to S3.')
-    p.add_argument('--error-log', type=Path,
-                   help='Append-only CSV for per-image failures. '
-                        'Default: build_feature_bucket_errors_<ts>.csv')
-    p.add_argument('--progress-log', type=Path,
-                   help='Append-only JSONL for (source, image, outcome). '
-                        'Default: build_feature_bucket_progress_<ts>.jsonl')
-    p.add_argument('--log-level', default='INFO')
+    skip_group.add_argument(
+        "--skip-existing", dest="skip_existing", action="store_true", default=True
+    )
+    skip_group.add_argument(
+        "--force",
+        dest="skip_existing",
+        action="store_false",
+        help="Re-extract even if feature file already exists.",
+    )
+    p.add_argument("--dry-run", action="store_true", help="Log planned work; do not write to S3.")
+    p.add_argument(
+        "--error-log",
+        type=Path,
+        help="Append-only CSV for per-image failures. "
+        "Default: build_feature_bucket_errors_<ts>.csv",
+    )
+    p.add_argument(
+        "--progress-log",
+        type=Path,
+        help="Append-only JSONL for (source, image, outcome). "
+        "Default: build_feature_bucket_progress_<ts>.jsonl",
+    )
+    p.add_argument("--log-level", default="INFO")
     return p
 
 
@@ -191,8 +219,7 @@ def detect_id_column(columns: Iterable[str], override: str | None) -> str:
     cols = list(columns)
     if override:
         if override not in cols:
-            raise ValueError(
-                f"--source-id-column={override!r} not found in CSV columns: {cols}")
+            raise ValueError(f"--source-id-column={override!r} not found in CSV columns: {cols}")
         return override
     for candidate in SOURCE_ID_COLUMN_CANDIDATES:
         if candidate in cols:
@@ -200,7 +227,8 @@ def detect_id_column(columns: Iterable[str], override: str | None) -> str:
     raise ValueError(
         f"Could not find a source-ID column in CSV. "
         f"Tried {SOURCE_ID_COLUMN_CANDIDATES}; got columns: {cols}. "
-        f"Pass --source-id-column to override.")
+        f"Pass --source-id-column to override."
+    )
 
 
 def load_source_ids_from_csv(path: Path, override: str | None) -> list[str]:
@@ -208,7 +236,7 @@ def load_source_ids_from_csv(path: Path, override: str | None) -> list[str]:
     col = detect_id_column(df.columns, override)
     # Cast to string and strip whitespace; drop blanks.
     ids = [str(v).strip() for v in df[col].tolist()]
-    ids = [v for v in ids if v and v.lower() != 'nan']
+    ids = [v for v in ids if v and v.lower() != "nan"]
     # Normalize numeric "123.0" -> "123" while leaving non-numeric IDs alone.
     out = []
     for v in ids:
@@ -228,21 +256,21 @@ def load_source_ids_from_csv(path: Path, override: str | None) -> list[str]:
 def load_source_ids_from_args(args: argparse.Namespace) -> list[str]:
     if args.sources_csv:
         return load_source_ids_from_csv(args.sources_csv, args.source_id_column)
-    raw = [s.strip() for s in args.source_ids.split(',')]
+    raw = [s.strip() for s in args.source_ids.split(",")]
     return [s for s in raw if s]
 
 
 # ---- S3 helpers -----------------------------------------------------
 
 
-_NOT_FOUND_CODES = ('404', 'NoSuchKey', 'NotFound')
+_NOT_FOUND_CODES = ("404", "NoSuchKey", "NotFound")
 
 
 def _client_error_code(exc: ClientError) -> str:
-    return exc.response.get('Error', {}).get('Code', '')
+    return exc.response.get("Error", {}).get("Code", "")
 
 
-def head_ok(s3, bucket: str, key: str) -> bool:
+def head_ok(s3: Any, bucket: str, key: str) -> bool:  # s3: boto3 S3 resource (untyped)
     try:
         s3.meta.client.head_object(Bucket=bucket, Key=key)
         return True
@@ -253,8 +281,11 @@ def head_ok(s3, bucket: str, key: str) -> bool:
 
 
 def filter_to_available_sources(
-    s3, source_bucket: str, source_prefix: str,
-    source_ids: list[str], max_workers: int,
+    s3: Any,  # boto3 S3 resource (untyped)
+    source_bucket: str,
+    source_prefix: str,
+    source_ids: list[str],
+    max_workers: int,
 ) -> list[str]:
     """Drop source IDs whose annotations.csv is missing in the source bucket.
 
@@ -265,7 +296,7 @@ def filter_to_available_sources(
     client = s3.meta.client
 
     def probe(sid: str) -> tuple[str, bool | ClientError]:
-        key = f'{source_prefix}s{sid}/annotations.csv'
+        key = f"{source_prefix}s{sid}/annotations.csv"
         try:
             client.head_object(Bucket=source_bucket, Key=key)
             return sid, True
@@ -277,13 +308,11 @@ def filter_to_available_sources(
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         results = dict(ex.map(probe, source_ids))
 
-    other_errors = {
-        sid: r for sid, r in results.items() if isinstance(r, ClientError)
-    }
+    other_errors = {sid: r for sid, r in results.items() if isinstance(r, ClientError)}
     if other_errors:
         sample_sid, sample_exc = next(iter(other_errors.items()))
         code = _client_error_code(sample_exc)
-        msg = sample_exc.response.get('Error', {}).get('Message', '')
+        msg = sample_exc.response.get("Error", {}).get("Message", "")
         raise RuntimeError(
             f"HEAD on s3://{source_bucket}/{source_prefix}s{{id}}/annotations.csv "
             f"failed with non-404 error for {len(other_errors)}/{len(source_ids)} "
@@ -297,19 +326,24 @@ def filter_to_available_sources(
     if missing:
         logger.warning(
             "%d source(s) skipped -- no annotations.csv in s3://%s/%s: %s",
-            len(missing), source_bucket, source_prefix,
-            ', '.join(missing[:20]) + (' ...' if len(missing) > 20 else ''))
+            len(missing),
+            source_bucket,
+            source_prefix,
+            ", ".join(missing[:20]) + (" ..." if len(missing) > 20 else ""),
+        )
     return present
 
 
-def list_existing_feature_image_ids(s3, target_bucket: str, source_id: str) -> set[str]:
+def list_existing_feature_image_ids(
+    s3: Any, target_bucket: str, source_id: str
+) -> set[str]:  # s3: boto3 S3 resource (untyped)
     """Return the set of image IDs that already have a feature file in target."""
-    prefix = f's{source_id}/features/'
-    paginator = s3.meta.client.get_paginator('list_objects_v2')
+    prefix = f"s{source_id}/features/"
+    paginator = s3.meta.client.get_paginator("list_objects_v2")
     existing: set[str] = set()
     for page in paginator.paginate(Bucket=target_bucket, Prefix=prefix):
-        for obj in page.get('Contents', []):
-            m = FEATURE_KEY_RE.match(obj['Key'])
+        for obj in page.get("Contents", []):
+            m = FEATURE_KEY_RE.match(obj["Key"])
             if m:
                 existing.add(m.group(1))
     return existing
@@ -325,19 +359,16 @@ def resolve_device(name: str) -> str:
     """Resolve --device argument to a concrete torch device string."""
     import torch
 
-    if name == 'auto':
+    if name == "auto":
         if torch.backends.mps.is_available():
-            return 'mps'
+            return "mps"
         if torch.cuda.is_available():
-            return 'cuda'
-        return 'cpu'
-    if name == 'mps' and not torch.backends.mps.is_available():
-        raise RuntimeError(
-            "--device mps requested but torch.backends.mps.is_available() "
-            "is False.")
-    if name == 'cuda' and not torch.cuda.is_available():
-        raise RuntimeError(
-            "--device cuda requested but torch.cuda.is_available() is False.")
+            return "cuda"
+        return "cpu"
+    if name == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("--device mps requested but torch.backends.mps.is_available() is False.")
+    if name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested but torch.cuda.is_available() is False.")
     return name
 
 
@@ -359,18 +390,19 @@ def _build_device_caching_extractor_class():
           pass; outputs are copied back to CPU before .tolist().
         """
 
-        def __init__(self, *, device: str, batch_size: int, **kwargs):
+        def __init__(self, *, device: str, batch_size: int, **kwargs: Any):
             super().__init__(**kwargs)
             import torch
+
             self._device = torch.device(device)
             self._batch_size = int(batch_size)
             self._cached_net = None
             self._cached_loaded_remote = False
 
-        def _ensure_net(self):
+        def _ensure_net(self) -> tuple[Any, bool]:  # net: untyped pyspacer/torch model
             if self._cached_net is not None:
                 return self._cached_net, False
-            weights_ds, loaded_remote = self.load_datastream('weights')
+            weights_ds, loaded_remote = self.load_datastream("weights")
             # Parent's load_weights builds an untrained model on CPU and
             # loads the state_dict into it. We then move it to our device.
             net = type(self).__mro__[1].load_weights(weights_ds)
@@ -380,7 +412,9 @@ def _build_device_caching_extractor_class():
             self._cached_loaded_remote = loaded_remote
             return net, loaded_remote
 
-        def patches_to_features(self, patch_list):
+        def patches_to_features(
+            self, patch_list: Any
+        ) -> Any:  # patch_list: pyspacer untyped interface
             import numpy as np
             import torch
             from spacer.extractors.torch_extractors import transformation
@@ -392,22 +426,22 @@ def _build_device_caching_extractor_class():
             num_batches = int(np.ceil(n / bs))
             feats: list[list[float]] = []
             for b in range(num_batches):
-                batch_imgs = patch_list[b * bs:(b + 1) * bs]
-                batch_t = torch.stack(
-                    [transformer(i) for i in batch_imgs]
-                ).to(self._device, non_blocking=True)
+                batch_imgs = patch_list[b * bs : (b + 1) * bs]
+                batch_t = torch.stack([transformer(i) for i in batch_imgs]).to(
+                    self._device, non_blocking=True
+                )
                 with torch.no_grad():
                     out = net.extract_features(batch_t)
                 # Bring back to CPU before .tolist() -- MPS tensors can't
                 # be iterated as Python floats directly on some torch builds.
-                feats.extend(out.detach().to('cpu').tolist())
+                feats.extend(out.detach().to("cpu").tolist())
                 del batch_t, out
             # Release MPS/CUDA allocator cache so the OS can reclaim memory
             # between images. Without this on Apple Silicon the allocator
             # fragments over a long run and pushes the system into swap.
-            if self._device.type == 'mps' and hasattr(torch, 'mps'):
+            if self._device.type == "mps" and hasattr(torch, "mps"):
                 torch.mps.empty_cache()
-            elif self._device.type == 'cuda':
+            elif self._device.type == "cuda":
                 torch.cuda.empty_cache()
             return feats, loaded_remote
 
@@ -415,17 +449,21 @@ def _build_device_caching_extractor_class():
 
 
 def verify_device_numerics(
-    extractor, weights_loc, batch_size: int, device: str, n_patches: int = 8,
+    extractor: Any,  # _DeviceCachingExtractor (untyped pyspacer subclass)
+    weights_loc: Any,  # spacer DataLocation (untyped)
+    batch_size: int,
+    device: str,
+    n_patches: int = 8,
     threshold: float = 0.999,
 ) -> None:
     """Sanity check: feature vectors on the chosen device match CPU output
     on a fixed random batch. Raises RuntimeError if min cosine similarity
     drops below ``threshold``."""
-    if device == 'cpu':
+    if device == "cpu":
         return
 
     import numpy as np
-    import torch  # noqa: F401  (forces the same import order)
+    import torch  # noqa: F401  # pyright: ignore[reportUnusedImport]  # forces same import order as production path
     from PIL import Image
 
     rng = np.random.default_rng(seed=42)
@@ -436,8 +474,9 @@ def verify_device_numerics(
 
     cls = _build_device_caching_extractor_class()
     cpu_extractor = cls(
-        data_locations=dict(weights=weights_loc),
-        device='cpu', batch_size=batch_size,
+        data_locations={"weights": weights_loc},
+        device="cpu",
+        batch_size=batch_size,
     )
 
     device_feats, _ = extractor.patches_to_features(patches)
@@ -445,52 +484,61 @@ def verify_device_numerics(
 
     A = np.asarray(device_feats)
     B = np.asarray(cpu_feats)
-    sims = (A * B).sum(axis=1) / (
-        np.linalg.norm(A, axis=1) * np.linalg.norm(B, axis=1) + 1e-12)
+    sims = (A * B).sum(axis=1) / (np.linalg.norm(A, axis=1) * np.linalg.norm(B, axis=1) + 1e-12)
     logger.info(
         "Device numerics check (%s vs cpu, %d random patches): "
         "min_cos=%.6f median=%.6f max_abs_diff=%.4g",
-        device, n_patches, float(sims.min()), float(np.median(sims)),
-        float(np.abs(A - B).max()))
+        device,
+        n_patches,
+        float(sims.min()),
+        float(np.median(sims)),
+        float(np.abs(A - B).max()),
+    )
     if sims.min() < threshold:
         raise RuntimeError(
             f"Device numerics check FAILED on {device}: min cosine "
             f"similarity {sims.min():.6f} < {threshold}. The features "
-            f"would not be safe to mix with previously CPU-extracted ones.")
+            f"would not be safe to mix with previously CPU-extracted ones."
+        )
 
 
 def parse_weights_location(uri: str):
     """Parse an s3://bucket/key or filesystem path into a DataLocation."""
     from spacer.data_classes import DataLocation
 
-    if uri.startswith('s3://'):
-        rest = uri[len('s3://'):]
-        bucket, _, key = rest.partition('/')
+    if uri.startswith("s3://"):
+        rest = uri[len("s3://") :]
+        bucket, _, key = rest.partition("/")
         if not bucket or not key:
             raise ValueError(f"Bad S3 URI for weights: {uri!r}")
-        return DataLocation(storage_type='s3', key=key, bucket_name=bucket)
-    return DataLocation(storage_type='filesystem', key=uri)
+        return DataLocation(storage_type="s3", key=key, bucket_name=bucket)
+    return DataLocation(storage_type="filesystem", key=uri)
 
 
 def build_extract_msg(
-    source_id: str, image_id: str, rowcols: list[tuple[int, int]],
-    extractor, source_bucket: str, source_prefix: str, target_bucket: str,
-):
+    source_id: str,
+    image_id: str,
+    rowcols: list[tuple[int, int]],
+    extractor: Any,  # _DeviceCachingExtractor (untyped pyspacer subclass)
+    source_bucket: str,
+    source_prefix: str,
+    target_bucket: str,
+) -> Any:  # spacer ExtractFeaturesMsg (untyped)
     from spacer.data_classes import DataLocation
     from spacer.messages import ExtractFeaturesMsg
 
     return ExtractFeaturesMsg(
-        job_token=f's{source_id}_i{image_id}',
+        job_token=f"s{source_id}_i{image_id}",
         extractor=extractor,
         rowcols=rowcols,
         image_loc=DataLocation(
-            storage_type='s3',
-            key=f'{source_prefix}s{source_id}/images/{image_id}.jpg',
+            storage_type="s3",
+            key=f"{source_prefix}s{source_id}/images/{image_id}.jpg",
             bucket_name=source_bucket,
         ),
         feature_loc=DataLocation(
-            storage_type='s3',
-            key=f's{source_id}/features/i{image_id}.featurevector',
+            storage_type="s3",
+            key=f"s{source_id}/features/i{image_id}.featurevector",
             bucket_name=target_bucket,
         ),
     )
@@ -519,7 +567,10 @@ class PreparedSource:
 
 
 def build_name_to_image_id_mapping(
-    s3, source_bucket: str, source_prefix: str, source_id: str,
+    s3: Any,  # boto3 S3 resource (untyped)
+    source_bucket: str,
+    source_prefix: str,
+    source_id: str,
 ) -> dict[str, str]:
     """Read s{id}/image_list.csv and build {filename: numeric_image_id}.
 
@@ -529,27 +580,27 @@ def build_name_to_image_id_mapping(
     annotations.csv carries the bare filename ("001-CA2M-1.JPG"), so we
     strip the status suffix before keying.
     """
-    key = f'{source_prefix}s{source_id}/image_list.csv'
-    body = s3.Object(source_bucket, key).get()['Body'].read()
+    key = f"{source_prefix}s{source_id}/image_list.csv"
+    body = s3.Object(source_bucket, key).get()["Body"].read()
     df = pd.read_csv(BytesIO(body))
-    if 'Name' not in df.columns or 'Image Page' not in df.columns:
+    if "Name" not in df.columns or "Image Page" not in df.columns:
         raise ValueError(
-            f"s{source_id}/image_list.csv missing required columns; "
-            f"got {list(df.columns)}")
-    df = df[['Name', 'Image Page']].dropna()
-    df['image_id'] = (
-        df['Image Page'].astype(str).str.extract(IMAGE_PAGE_ID_RE.pattern)[0]
+            f"s{source_id}/image_list.csv missing required columns; got {list(df.columns)}"
+        )
+    df = df[["Name", "Image Page"]].dropna()
+    df["image_id"] = df["Image Page"].astype(str).str.extract(IMAGE_PAGE_ID_RE.pattern)[0]  # pyright: ignore[reportAttributeAccessIssue]  # pandas-stubs infers ndarray for .astype(str) column
+    df["name_norm"] = (
+        df["Name"].astype(str).map(lambda n: IMAGE_LIST_STATUS_SUFFIX_RE.sub("", n).strip())  # pyright: ignore[reportAttributeAccessIssue]  # pandas-stubs infers ndarray for .astype(str) column
     )
-    df['name_norm'] = (
-        df['Name'].astype(str).map(
-            lambda n: IMAGE_LIST_STATUS_SUFFIX_RE.sub('', n).strip())
-    )
-    df = df.dropna(subset=['image_id'])
-    return dict(zip(df['name_norm'], df['image_id']))
+    df = df.dropna(subset=["image_id"])  # pyright: ignore[reportCallIssue]  # pandas-stubs overload mismatch
+    return dict(zip(df["name_norm"], df["image_id"], strict=False))
 
 
 def prepare_source(
-    s3, source_bucket: str, source_prefix: str, source_id: str,
+    s3: Any,  # boto3 S3 resource (untyped)
+    source_bucket: str,
+    source_prefix: str,
+    source_id: str,
 ) -> PreparedSource | None:
     """Read source annotations.csv (and image_list.csv if needed), augment
     with an `Image ID` column when only `Name` is present, group rowcols
@@ -557,95 +608,106 @@ def prepare_source(
 
     Returns None if the source is unusable (missing files/columns).
     """
-    ann_key = f'{source_prefix}s{source_id}/annotations.csv'
-    body = s3.Object(source_bucket, ann_key).get()['Body'].read()
+    ann_key = f"{source_prefix}s{source_id}/annotations.csv"
+    body = s3.Object(source_bucket, ann_key).get()["Body"].read()
     df = pd.read_csv(BytesIO(body))
 
-    required_basic = {'Row', 'Column', 'Label ID'}
+    required_basic = {"Row", "Column", "Label ID"}
     missing_basic = required_basic - set(df.columns)
     if missing_basic:
         logger.warning(
             "s%s: annotations.csv missing required columns %s; skipping source",
-            source_id, missing_basic)
+            source_id,
+            missing_basic,
+        )
         return None
 
     n_unmapped = 0
-    if 'Image ID' not in df.columns:
-        if 'Name' not in df.columns:
+    if "Image ID" not in df.columns:
+        if "Name" not in df.columns:
             logger.warning(
-                "s%s: annotations.csv has neither 'Image ID' nor 'Name'; "
-                "skipping source", source_id)
+                "s%s: annotations.csv has neither 'Image ID' nor 'Name'; skipping source", source_id
+            )
             return None
         try:
-            name_to_id = build_name_to_image_id_mapping(
-                s3, source_bucket, source_prefix, source_id)
+            name_to_id = build_name_to_image_id_mapping(s3, source_bucket, source_prefix, source_id)
         except ClientError as exc:
             code = _client_error_code(exc)
             if code in _NOT_FOUND_CODES:
                 logger.warning(
-                    "s%s: image_list.csv missing -- cannot map Name->Image ID; "
-                    "skipping source", source_id)
+                    "s%s: image_list.csv missing -- cannot map Name->Image ID; skipping source",
+                    source_id,
+                )
                 return None
             raise
-        norm = df['Name'].astype(str).map(
-            lambda n: IMAGE_LIST_STATUS_SUFFIX_RE.sub('', n).strip())
-        df['Image ID'] = norm.map(name_to_id)
-        n_unmapped = int(df['Image ID'].isna().sum())
+        norm = df["Name"].astype(str).map(lambda n: IMAGE_LIST_STATUS_SUFFIX_RE.sub("", n).strip())  # pyright: ignore[reportAttributeAccessIssue]  # pandas-stubs infers ndarray for .astype(str) column
+        df["Image ID"] = norm.map(lambda n: name_to_id.get(n))  # pyright: ignore[reportAttributeAccessIssue]  # pandas-stubs infers ndarray; use get() to return None for missing keys
+        n_unmapped = int(df["Image ID"].isna().sum())
         if n_unmapped:
             logger.warning(
                 "s%s: dropping %d/%d annotation row(s) with unmappable Name",
-                source_id, n_unmapped, len(df))
-            df = df.dropna(subset=['Image ID']).copy()
-        df['Image ID'] = df['Image ID'].astype(int).astype(str)
+                source_id,
+                n_unmapped,
+                len(df),
+            )
+            df = df.dropna(subset=["Image ID"]).copy()
+        df["Image ID"] = df["Image ID"].astype(int).astype(str)
     else:
-        df['Image ID'] = df['Image ID'].astype(str)
+        df["Image ID"] = df["Image ID"].astype(str)
 
     # Group rowcols by Image ID.
-    sub = df[['Image ID', 'Row', 'Column']].copy()
-    sub['Row'] = sub['Row'].astype(int)
-    sub['Column'] = sub['Column'].astype(int)
+    sub = df[["Image ID", "Row", "Column"]].copy()
+    sub["Row"] = sub["Row"].astype(int)
+    sub["Column"] = sub["Column"].astype(int)
     images: dict[str, list[tuple[int, int]]] = {}
-    for image_id, g in sub.groupby('Image ID', sort=True):
-        pairs = sorted({(r, c) for r, c in zip(g['Row'], g['Column'])})
+    for image_id, g in sub.groupby("Image ID", sort=True):
+        pairs = sorted({(r, c) for r, c in zip(g["Row"], g["Column"], strict=False)})
         images[str(image_id)] = pairs
 
     # Emit transformed CSV bytes (Image ID added; everything else preserved).
     buf = BytesIO()
     df.to_csv(buf, index=False)
-    return PreparedSource(
-        transformed_csv=buf.getvalue(), images=images,
-        n_unmapped_rows=n_unmapped)
+    return PreparedSource(transformed_csv=buf.getvalue(), images=images, n_unmapped_rows=n_unmapped)
 
 
 def upload_annotations_csv(
-    s3, source_id: str, transformed_csv: bytes,
-    target_bucket: str, skip_existing: bool, dry_run: bool,
+    s3: Any,  # boto3 S3 resource (untyped)
+    source_id: str,
+    transformed_csv: bytes,
+    target_bucket: str,
+    skip_existing: bool,
+    dry_run: bool,
 ) -> str:
     """Return 'uploaded' or 'skipped'."""
-    tgt_key = f's{source_id}/annotations.csv'
+    tgt_key = f"s{source_id}/annotations.csv"
     if skip_existing and head_ok(s3, target_bucket, tgt_key):
-        return 'skipped'
+        return "skipped"
     if dry_run:
-        return 'uploaded'
-    s3.meta.client.put_object(
-        Bucket=target_bucket, Key=tgt_key, Body=transformed_csv)
-    return 'uploaded'
+        return "uploaded"
+    s3.meta.client.put_object(Bucket=target_bucket, Key=tgt_key, Body=transformed_csv)
+    return "uploaded"
 
 
 def process_source(
-    *, source_id: str, extractor, s3, args: argparse.Namespace,
-    counters: RunCounters, progress_writer, error_writer,
+    *,
+    source_id: str,
+    extractor: Any,  # _DeviceCachingExtractor (untyped pyspacer subclass)
+    s3: Any,  # boto3 S3 resource (untyped)
+    args: argparse.Namespace,
+    counters: RunCounters,
+    progress_writer: Any,  # IO[str] | None
+    error_writer: Any,  # csv._writer | None
 ) -> None:
     # Lazy import: spacer is only needed inside the GPU loop.
     from spacer.tasks import extract_features
 
     try:
-        prepared = prepare_source(
-            s3, args.source_bucket, args.source_prefix, source_id)
+        prepared = prepare_source(s3, args.source_bucket, args.source_prefix, source_id)
     except ClientError as exc:
         logger.error("s%s: failed to read source: %s", source_id, exc)
-        record_failure(error_writer, source_id, image_id='',
-                       error_type=type(exc).__name__, error_msg=str(exc))
+        record_failure(
+            error_writer, source_id, image_id="", error_type=type(exc).__name__, error_msg=str(exc)
+        )
         counters.sources_skipped += 1
         return
 
@@ -655,68 +717,73 @@ def process_source(
 
     try:
         ann_outcome = upload_annotations_csv(
-            s3, source_id, prepared.transformed_csv,
+            s3,
+            source_id,
+            prepared.transformed_csv,
             target_bucket=args.target_bucket,
-            skip_existing=args.skip_existing, dry_run=args.dry_run)
+            skip_existing=args.skip_existing,
+            dry_run=args.dry_run,
+        )
     except ClientError as exc:
-        logger.error("s%s: failed to upload annotations.csv: %s",
-                     source_id, exc)
-        record_failure(error_writer, source_id, image_id='',
-                       error_type=type(exc).__name__, error_msg=str(exc))
+        logger.error("s%s: failed to upload annotations.csv: %s", source_id, exc)
+        record_failure(
+            error_writer, source_id, image_id="", error_type=type(exc).__name__, error_msg=str(exc)
+        )
         counters.sources_skipped += 1
         return
 
-    if ann_outcome == 'uploaded':
+    if ann_outcome == "uploaded":
         counters.annotations_copied += 1
     else:
         counters.annotations_skipped += 1
 
     existing = (
         list_existing_feature_image_ids(s3, args.target_bucket, source_id)
-        if args.skip_existing else set()
+        if args.skip_existing
+        else set()
     )
 
     grouped = prepared.images
     image_ids = sorted(grouped.keys())
-    inner = tqdm(image_ids, desc=f's{source_id}', leave=False, unit='img')
+    inner = tqdm(image_ids, desc=f"s{source_id}", leave=False, unit="img")
     for image_id in inner:
         rowcols = grouped[image_id]
         if not rowcols:
             counters.images_skipped += 1
-            record_progress(progress_writer, source_id, image_id, 'skipped',
-                            reason='no_rowcols')
+            record_progress(progress_writer, source_id, image_id, "skipped", reason="no_rowcols")
             continue
         if image_id in existing:
             counters.images_skipped += 1
-            record_progress(progress_writer, source_id, image_id, 'skipped',
-                            reason='exists')
+            record_progress(progress_writer, source_id, image_id, "skipped", reason="exists")
             continue
 
         if args.dry_run:
             counters.images_ok += 1
-            record_progress(progress_writer, source_id, image_id, 'ok',
-                            dry_run=True)
+            record_progress(progress_writer, source_id, image_id, "ok", dry_run=True)
             continue
 
         msg = build_extract_msg(
-            source_id=source_id, image_id=image_id, rowcols=rowcols,
-            extractor=extractor, source_bucket=args.source_bucket,
+            source_id=source_id,
+            image_id=image_id,
+            rowcols=rowcols,
+            extractor=extractor,
+            source_bucket=args.source_bucket,
             source_prefix=args.source_prefix,
-            target_bucket=args.target_bucket)
+            target_bucket=args.target_bucket,
+        )
         try:
             extract_features(msg)
             counters.images_ok += 1
-            record_progress(progress_writer, source_id, image_id, 'ok')
+            record_progress(progress_writer, source_id, image_id, "ok")
         except KeyboardInterrupt:
             raise
         except Exception as exc:
             counters.images_failed += 1
-            logger.warning("s%s i%s: extract_features failed: %s",
-                           source_id, image_id, exc)
-            record_failure(error_writer, source_id, image_id,
-                           type(exc).__name__, str(exc))
-            record_progress(progress_writer, source_id, image_id, 'failed',
-                            error_type=type(exc).__name__)
+            logger.warning("s%s i%s: extract_features failed: %s", source_id, image_id, exc)
+            record_failure(error_writer, source_id, image_id, type(exc).__name__, str(exc))
+            record_progress(
+                progress_writer, source_id, image_id, "failed", error_type=type(exc).__name__
+            )
 
     counters.sources_done += 1
 
@@ -724,29 +791,36 @@ def process_source(
 # ---- Logging helpers ------------------------------------------------
 
 
-def record_progress(writer, source_id: str, image_id: str, outcome: str,
-                    **extra) -> None:
+def record_progress(
+    writer: Any, source_id: str, image_id: str, outcome: str, **extra: object
+) -> None:  # writer: IO[str] | None
     if writer is None:
         return
     rec = {
-        'ts': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        'source_id': source_id,
-        'image_id': image_id,
-        'outcome': outcome,
+        "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source_id": source_id,
+        "image_id": image_id,
+        "outcome": outcome,
         **extra,
     }
-    writer.write(json.dumps(rec) + '\n')
+    writer.write(json.dumps(rec) + "\n")
     writer.flush()
 
 
-def record_failure(writer, source_id: str, image_id: str,
-                   error_type: str, error_msg: str) -> None:
+def record_failure(
+    writer: Any, source_id: str, image_id: str, error_type: str, error_msg: str
+) -> None:  # writer: csv._writer | None
     if writer is None:
         return
-    writer.writerow([
-        datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        source_id, image_id, error_type, error_msg,
-    ])
+    writer.writerow(
+        [
+            datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            source_id,
+            image_id,
+            error_type,
+            error_msg,
+        ]
+    )
 
 
 # ---- main -----------------------------------------------------------
@@ -758,18 +832,20 @@ def main(argv: list[str] | None = None) -> int:
     _bootstrap_aws_env(_early_profile_from_argv(argv))
 
     args = build_arg_parser().parse_args(argv)
-    logging.basicConfig(level=args.log_level,
-                        format='%(asctime)s %(levelname)s %(name)s %(message)s')
+    logging.basicConfig(
+        level=args.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
 
     # Imports that depend on env-resolved settings.
-    from mermaid_classifier.pyspacer.settings import settings
     from spacer.aws import get_s3_resource
+
+    from mermaid_classifier.pyspacer.settings import settings
 
     weights_uri = args.weights or settings.weights_location
     if not weights_uri:
         logger.error(
-            "No EfficientNet weights configured. Pass --weights or set "
-            "WEIGHTS_LOCATION in .env.")
+            "No EfficientNet weights configured. Pass --weights or set WEIGHTS_LOCATION in .env."
+        )
         return 2
     weights_loc = parse_weights_location(weights_uri)
 
@@ -777,63 +853,71 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Compute device: %s (batch_size=%d)", device, args.batch_size)
     extractor_cls = _build_device_caching_extractor_class()
     extractor = extractor_cls(
-        data_locations=dict(weights=weights_loc),
-        device=device, batch_size=args.batch_size,
+        data_locations={"weights": weights_loc},
+        device=device,
+        batch_size=args.batch_size,
     )
     if args.verify_numerics:
-        verify_device_numerics(
-            extractor, weights_loc, args.batch_size, device)
+        verify_device_numerics(extractor, weights_loc, args.batch_size, device)
 
     s3 = get_s3_resource()
 
     source_ids = load_source_ids_from_args(args)
     logger.info("Requested %d source(s).", len(source_ids))
     source_ids = filter_to_available_sources(
-        s3, args.source_bucket, args.source_prefix, source_ids,
-        args.max_io_workers)
-    logger.info("%d source(s) have annotations.csv and will be processed.",
-                len(source_ids))
+        s3, args.source_bucket, args.source_prefix, source_ids, args.max_io_workers
+    )
+    logger.info("%d source(s) have annotations.csv and will be processed.", len(source_ids))
 
-    ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    error_log_path = args.error_log or Path(f'build_feature_bucket_errors_{ts}.csv')
-    progress_log_path = args.progress_log or Path(
-        f'build_feature_bucket_progress_{ts}.jsonl')
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    error_log_path = args.error_log or Path(f"build_feature_bucket_errors_{ts}.csv")
+    progress_log_path = args.progress_log or Path(f"build_feature_bucket_progress_{ts}.jsonl")
 
     counters = RunCounters()
-    error_f = open(error_log_path, 'a', newline='')
-    error_writer = csv.writer(error_f)
-    if error_f.tell() == 0:
-        error_writer.writerow(['ts', 'source_id', 'image_id', 'error_type', 'error_msg'])
-    progress_f = open(progress_log_path, 'a')
+    with (
+        open(error_log_path, "a", newline="") as error_f,
+        open(progress_log_path, "a") as progress_f,
+    ):
+        error_writer = csv.writer(error_f)
+        if error_f.tell() == 0:
+            error_writer.writerow(["ts", "source_id", "image_id", "error_type", "error_msg"])
 
-    logger.info("Errors -> %s", error_log_path)
-    logger.info("Progress -> %s", progress_log_path)
-    if args.dry_run:
-        logger.warning("DRY RUN -- no S3 writes will occur.")
+        logger.info("Errors -> %s", error_log_path)
+        logger.info("Progress -> %s", progress_log_path)
+        if args.dry_run:
+            logger.warning("DRY RUN -- no S3 writes will occur.")
 
-    try:
-        for source_id in tqdm(source_ids, desc='sources', unit='src'):
-            process_source(
-                source_id=source_id, extractor=extractor, s3=s3, args=args,
-                counters=counters,
-                progress_writer=progress_f, error_writer=error_writer)
-    except KeyboardInterrupt:
-        logger.warning("Interrupted by user; printing partial summary.")
-    finally:
-        error_f.close()
-        progress_f.close()
-        elapsed = time.monotonic() - counters.started
-        logger.info(
-            "Done. sources_done=%d sources_skipped=%d "
-            "images_ok=%d images_skipped=%d images_failed=%d "
-            "annotations_copied=%d annotations_skipped=%d elapsed=%.1fs",
-            counters.sources_done, counters.sources_skipped,
-            counters.images_ok, counters.images_skipped, counters.images_failed,
-            counters.annotations_copied, counters.annotations_skipped,
-            elapsed)
+        try:
+            for source_id in tqdm(source_ids, desc="sources", unit="src"):
+                process_source(
+                    source_id=source_id,
+                    extractor=extractor,
+                    s3=s3,
+                    args=args,
+                    counters=counters,
+                    progress_writer=progress_f,
+                    error_writer=error_writer,
+                )
+        except KeyboardInterrupt:
+            logger.warning("Interrupted by user; printing partial summary.")
+        finally:
+            elapsed = time.monotonic() - counters.started
+            logger.info(
+                "Done. sources_done=%d sources_skipped=%d "
+                "images_ok=%d images_skipped=%d images_failed=%d "
+                "annotations_copied=%d annotations_skipped=%d elapsed=%.1fs",
+                counters.sources_done,
+                counters.sources_skipped,
+                counters.images_ok,
+                counters.images_skipped,
+                counters.images_failed,
+                counters.annotations_copied,
+                counters.annotations_skipped,
+                elapsed,
+            )
 
     return 0 if counters.images_failed == 0 else 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

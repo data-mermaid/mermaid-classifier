@@ -9,6 +9,7 @@ and used to run as a side effect of the subpackage ``__init__``).
 We assert this in a fresh subprocess so an already-imported settings module in
 the test session can't mask a regression.
 """
+
 import subprocess
 import sys
 import unittest
@@ -30,7 +31,8 @@ print("ok")
     def test_importing_pyspacer_subpackage_does_not_import_settings(self):
         result = subprocess.run(
             [sys.executable, "-c", self.CHILD],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("ok", result.stdout)

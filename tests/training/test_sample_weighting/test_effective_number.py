@@ -1,4 +1,5 @@
 """compute_class_weights unit tests (effective number of samples, Cui 2019)."""
+
 from __future__ import annotations
 
 import math
@@ -6,7 +7,8 @@ import unittest
 
 from mermaid_classifier.common.benthic_attributes import combine_ba_gf
 from mermaid_classifier.training.sample_weighting import (
-    SampleWeightingOptions, compute_class_weights,
+    SampleWeightingOptions,
+    compute_class_weights,
 )
 from mermaid_classifier.training.sample_weighting.effective_number import (
     BETA,
@@ -25,13 +27,11 @@ class EffectiveNumberTest(unittest.TestCase):
         w = self._run(counts)
 
         def expected(n):
-            en = (1.0 - BETA ** n) / (1.0 - BETA)
+            en = (1.0 - BETA**n) / (1.0 - BETA)
             return 1.0 / en
 
-        self.assertTrue(math.isclose(
-            w[combine_ba_gf("A1", "g1")], expected(100), rel_tol=1e-9))
-        self.assertTrue(math.isclose(
-            w[combine_ba_gf("A2", "g1")], expected(10), rel_tol=1e-9))
+        self.assertTrue(math.isclose(w[combine_ba_gf("A1", "g1")], expected(100), rel_tol=1e-9))
+        self.assertTrue(math.isclose(w[combine_ba_gf("A2", "g1")], expected(10), rel_tol=1e-9))
 
     def test_rare_class_outweighs_common(self):
         counts = {

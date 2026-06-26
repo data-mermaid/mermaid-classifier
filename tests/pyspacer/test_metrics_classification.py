@@ -21,11 +21,12 @@ class _MockBALibrary:
     """Minimal mock of BenthicAttributeLibrary for testing."""
 
     def bagf_id_to_name(self, bagf_id, gf_library):
-        return f'name_{bagf_id}'
+        return f"name_{bagf_id}"
 
 
 class _MockGFLibrary:
     """Minimal mock of GrowthFormLibrary for testing."""
+
     pass
 
 
@@ -62,7 +63,7 @@ class ComputeConfusionMatricesTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1, 0, 1],
             est_indices=[0, 1, 1, 0],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         result = compute_confusion_matrices(ctx)
 
@@ -70,12 +71,8 @@ class ComputeConfusionMatricesTest(unittest.TestCase):
         # Two confusion matrices: frequencies and percents
         self.assertEqual(len(result.dataframes), 2)
         self.assertEqual(len(result.figures), 2)
-        self.assertEqual(
-            result.dataframes[0].artifact_path,
-            'confusion_matrix/frequencies')
-        self.assertEqual(
-            result.dataframes[1].artifact_path,
-            'confusion_matrix/percents')
+        self.assertEqual(result.dataframes[0].artifact_path, "confusion_matrix/frequencies")
+        self.assertEqual(result.dataframes[1].artifact_path, "confusion_matrix/percents")
 
         # Clean up figures
         for fig_result in result.figures:
@@ -86,7 +83,7 @@ class ComputeConfusionMatricesTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         result = compute_confusion_matrices(ctx)
 
@@ -102,7 +99,7 @@ class ComputeConfusionMatricesTest(unittest.TestCase):
 
     def test_dataframe_shape(self):
         """DataFrame should have N+1 columns and N rows."""
-        classes = ['a::', 'b::', 'c::']
+        classes = ["a::", "b::", "c::"]
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1, 2, 2],
             est_indices=[0, 1, 1, 1, 2, 0],
@@ -128,7 +125,7 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         result = compute_precision_recall_f1(ctx)
 
@@ -136,42 +133,38 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
         # Scalars: precision_macro, recall_macro, f1_macro
         self.assertEqual(len(result.scalars), 3)
         scalar_names = {s.name for s in result.scalars}
-        self.assertEqual(
-            scalar_names,
-            {'precision_macro', 'recall_macro', 'f1_macro'})
+        self.assertEqual(scalar_names, {"precision_macro", "recall_macro", "f1_macro"})
 
         # Per-label DataFrame
         self.assertEqual(len(result.dataframes), 1)
-        self.assertEqual(
-            result.dataframes[0].artifact_path, 'metrics_per_label')
+        self.assertEqual(result.dataframes[0].artifact_path, "metrics_per_label")
         df = result.dataframes[0].df
         self.assertEqual(len(df), 2)  # Two classes
 
         # Overall dict
         self.assertEqual(len(result.dicts), 1)
-        self.assertEqual(
-            result.dicts[0].artifact_path, 'metrics_overall.yaml')
-        self.assertIn('precision_macro', result.dicts[0].data)
+        self.assertEqual(result.dicts[0].artifact_path, "metrics_overall.yaml")
+        self.assertIn("precision_macro", result.dicts[0].data)
 
     def test_perfect_predictions(self):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         result = compute_precision_recall_f1(ctx)
 
         scalars = {s.name: s.value for s in result.scalars}
-        self.assertEqual(scalars['precision_macro'], 1.0)
-        self.assertEqual(scalars['recall_macro'], 1.0)
-        self.assertEqual(scalars['f1_macro'], 1.0)
+        self.assertEqual(scalars["precision_macro"], 1.0)
+        self.assertEqual(scalars["recall_macro"], 1.0)
+        self.assertEqual(scalars["f1_macro"], 1.0)
 
         # Per-label should all be 1.0
         df = result.dataframes[0].df
         for _, row in df.iterrows():
-            self.assertEqual(row['precision'], 1.0)
-            self.assertEqual(row['recall'], 1.0)
-            self.assertEqual(row['f1_score'], 1.0)
+            self.assertEqual(row["precision"], 1.0)
+            self.assertEqual(row["recall"], 1.0)
+            self.assertEqual(row["f1_score"], 1.0)
 
     def test_all_wrong_predictions(self):
         """When all predictions are wrong, macro F1 should be 0.0,
@@ -179,34 +172,34 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[1, 1, 0, 0],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         result = compute_precision_recall_f1(ctx)
 
         scalars = {s.name: s.value for s in result.scalars}
-        self.assertEqual(scalars['precision_macro'], 0.0)
-        self.assertEqual(scalars['recall_macro'], 0.0)
-        self.assertEqual(scalars['f1_macro'], 0.0)
+        self.assertEqual(scalars["precision_macro"], 0.0)
+        self.assertEqual(scalars["recall_macro"], 0.0)
+        self.assertEqual(scalars["f1_macro"], 0.0)
 
         # Per-label should all be 0.0
         df = result.dataframes[0].df
         for _, row in df.iterrows():
-            self.assertEqual(row['precision'], 0.0)
-            self.assertEqual(row['recall'], 0.0)
-            self.assertEqual(row['f1_score'], 0.0)
+            self.assertEqual(row["precision"], 0.0)
+            self.assertEqual(row["recall"], 0.0)
+            self.assertEqual(row["f1_score"], 0.0)
 
     def test_per_label_has_bagf_fields(self):
         ctx = _make_ctx(
             gt_indices=[0],
             est_indices=[0],
-            classes=['a::'],
+            classes=["a::"],
         )
         result = compute_precision_recall_f1(ctx)
 
         df = result.dataframes[0].df
-        self.assertIn('bagf_name', df.columns)
-        self.assertIn('bagf_id', df.columns)
-        self.assertEqual(df.iloc[0]['bagf_id'], 'a::')
+        self.assertIn("bagf_name", df.columns)
+        self.assertIn("bagf_id", df.columns)
+        self.assertEqual(df.iloc[0]["bagf_id"], "a::")
 
 
 class ComputeBalancedAccuracyMccTest(unittest.TestCase):
@@ -216,7 +209,7 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1, 2, 2],
             est_indices=[0, 0, 1, 1, 2, 2],
-            classes=['a::', 'b::', 'c::'],
+            classes=["a::", "b::", "c::"],
         )
         result = compute_balanced_accuracy_mcc(ctx)
 
@@ -224,20 +217,20 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         self.assertEqual(len(result.scalars), 2)
 
         scalars_by_name = {s.name: s.value for s in result.scalars}
-        self.assertEqual(scalars_by_name['balanced_accuracy'], 1.0)
-        self.assertEqual(scalars_by_name['mcc'], 1.0)
+        self.assertEqual(scalars_by_name["balanced_accuracy"], 1.0)
+        self.assertEqual(scalars_by_name["mcc"], 1.0)
 
     def test_all_wrong_binary(self):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[1, 1, 0, 0],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         result = compute_balanced_accuracy_mcc(ctx)
 
         scalars_by_name = {s.name: s.value for s in result.scalars}
-        self.assertEqual(scalars_by_name['balanced_accuracy'], 0.0)
-        self.assertEqual(scalars_by_name['mcc'], -1.0)
+        self.assertEqual(scalars_by_name["balanced_accuracy"], 0.0)
+        self.assertEqual(scalars_by_name["mcc"], -1.0)
 
     def test_imbalanced_classes(self):
         # 8 samples of class 0, 2 samples of class 1.
@@ -246,20 +239,20 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
             est_indices=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         result = compute_balanced_accuracy_mcc(ctx)
 
         scalars_by_name = {s.name: s.value for s in result.scalars}
-        self.assertEqual(scalars_by_name['balanced_accuracy'], 0.5)
+        self.assertEqual(scalars_by_name["balanced_accuracy"], 0.5)
         # MCC is 0 when predicting a single class
-        self.assertEqual(scalars_by_name['mcc'], 0.0)
+        self.assertEqual(scalars_by_name["mcc"], 0.0)
 
     def test_no_figures_or_dataframes(self):
         ctx = _make_ctx(
             gt_indices=[0, 1],
             est_indices=[0, 1],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         result = compute_balanced_accuracy_mcc(ctx)
 
@@ -284,8 +277,7 @@ class MetricsContextValidationTest(unittest.TestCase):
         """Empty ground truth should fail validation."""
         # Build a valid ValResults, then clear gt/est to simulate
         # an edge case (ValResults.__init__ validates non-empty).
-        val_results = _make_val_results(
-            gt_indices=[0], est_indices=[0], classes=['a::'])
+        val_results = _make_val_results(gt_indices=[0], est_indices=[0], classes=["a::"])
         val_results.gt = []
         val_results.est = []
         ctx = self._make_ctx_with_val_results(val_results)
@@ -299,10 +291,8 @@ class MetricsContextValidationTest(unittest.TestCase):
             def bagf_id_to_name(self, bagf_id, gf_library):
                 raise KeyError(f"Unknown ID: {bagf_id}")
 
-        val_results = _make_val_results(
-            gt_indices=[0], est_indices=[0], classes=['unknown::'])
-        ctx = self._make_ctx_with_val_results(
-            val_results, ba_library=_BrokenBALibrary())
+        val_results = _make_val_results(gt_indices=[0], est_indices=[0], classes=["unknown::"])
+        ctx = self._make_ctx_with_val_results(val_results, ba_library=_BrokenBALibrary())
         with self.assertRaises(MetricsContextError):
             ctx.validate()
 
@@ -311,15 +301,14 @@ class MetricsContextValidationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1],
             est_indices=[0, 1],
-            classes=['a::', 'b::'],
+            classes=["a::", "b::"],
         )
         ctx.validate()  # Should not raise
 
     def test_out_of_range_class_index_raises(self):
         """Class indices beyond len(classes) should fail validation."""
         # Build valid ValResults, then inject an out-of-range index.
-        val_results = _make_val_results(
-            gt_indices=[0], est_indices=[0], classes=['a::'])
+        val_results = _make_val_results(gt_indices=[0], est_indices=[0], classes=["a::"])
         val_results.gt = [0, 5]
         val_results.est = [0, 0]
         val_results.scores = [1.0, 1.0]
@@ -328,5 +317,5 @@ class MetricsContextValidationTest(unittest.TestCase):
             ctx.validate()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

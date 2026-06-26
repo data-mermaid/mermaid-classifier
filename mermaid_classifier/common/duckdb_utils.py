@@ -1,9 +1,10 @@
-from contextlib import contextmanager
 import typing
 import uuid
+from contextlib import contextmanager
 
 import duckdb
 import pandas as pd
+from pandas import Series
 
 
 @contextmanager
@@ -42,7 +43,7 @@ def _duckdb_temp_transform_table(
     duck_table_name: str,
     source_column_name: str,
     target_column_name: str,
-    transform_func: typing.Callable,
+    transform_func: typing.Callable[..., object],
 ):
     """
     Internal helper: given an existing DuckDB table and column, creates a
@@ -54,24 +55,22 @@ def _duckdb_temp_transform_table(
     """
     # Get all unique values of the existing column.
     tuples_with_unique_values = list(
-        duck_conn.execute(
-            f"SELECT DISTINCT {source_column_name} FROM {duck_table_name}"
-        ).fetchall()
+        duck_conn.execute(f"SELECT DISTINCT {source_column_name} FROM {duck_table_name}").fetchall()
     )
     unique_values = [tup[0] for tup in tuples_with_unique_values]
 
     # Build mapping DataFrame using pandas. This is more efficient and less
     # error-prone for inserting values compared to building a large
     # INSERT INTO statement.
-    mapping_df = pd.DataFrame({
-        source_column_name: unique_values,
-        target_column_name: [transform_func(v) for v in unique_values]
-    })
+    mapping_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning  # pyright: ignore[reportUnusedVariable]
+        {
+            source_column_name: unique_values,
+            target_column_name: [transform_func(v) for v in unique_values],
+        }
+    )
 
     with duckdb_temp_table_name(duck_conn) as temp_table_name:
-        duck_conn.execute(
-            f"CREATE TABLE {temp_table_name} AS SELECT * FROM mapping_df"
-        )
+        duck_conn.execute(f"CREATE TABLE {temp_table_name} AS SELECT * FROM mapping_df")
         yield temp_table_name
 
 
@@ -87,13 +86,10 @@ def duckdb_replace_column(
     """
     # Drop the original column.
     # https://duckdb.org/docs/stable/sql/statements/alter_table
-    duck_conn.execute(
-        f"ALTER TABLE {duck_table_name} DROP {column_name}"
-    )
+    duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP {column_name}")
     # New-values column becomes the new column.
     duck_conn.execute(
-        f"ALTER TABLE {duck_table_name}"
-        f" RENAME {new_values_column_name} TO {column_name}"
+        f"ALTER TABLE {duck_table_name} RENAME {new_values_column_name} TO {column_name}"
     )
 
 
@@ -101,7 +97,7 @@ def duckdb_transform_column(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     column_name: str,
-    transform_func: typing.Callable[[str|None], str|None],
+    transform_func: typing.Callable[[str | None], str | None],
 ):
     """
     Transform the values of the specified DuckDB column using the given
@@ -111,10 +107,9 @@ def duckdb_transform_column(
         duck_conn,
         duck_table_name,
         column_name,
-        f'transformed_{column_name}',
+        f"transformed_{column_name}",
         transform_func,
     ) as transform_table_name:
-
         # Use JOIN ... USING to apply the transform.
         duck_conn.execute(
             f"CREATE OR REPLACE TABLE {duck_table_name} AS"
@@ -129,7 +124,7 @@ def duckdb_transform_column(
         duck_conn,
         duck_table_name,
         column_name,
-        f'transformed_{column_name}',
+        f"transformed_{column_name}",
     )
 
 
@@ -137,21 +132,14 @@ def duckdb_replace_value_in_column(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     column_name: str,
-    old_value: str|None,
-    new_value: str|None,
+    old_value: str | None,
+    new_value: str | None,
 ):
     """
     Replace old_value with new_value in the column_name column.
     """
-    if old_value is None:
-        where_predicate = "IS NULL"
-    else:
-        where_predicate = f"= '{old_value}'"
-
-    if new_value is None:
-        new_value_sql = "NULL"
-    else:
-        new_value_sql = f"'{new_value}'"
+    where_predicate = "IS NULL" if old_value is None else f"= '{old_value}'"
+    new_value_sql = "NULL" if new_value is None else f"'{new_value}'"
 
     duck_conn.execute(
         f"UPDATE {duck_table_name}"
@@ -165,7 +153,7 @@ def duckdb_add_column(
     duck_table_name: str,
     base_column_name: str,
     new_column_name: str,
-    base_to_new_func: typing.Callable[[str|None], str|None],
+    base_to_new_func: typing.Callable[[str | None], str | None],
 ):
     """
     Transform the values of the specified DuckDB 'base column' into
@@ -178,7 +166,6 @@ def duckdb_add_column(
         new_column_name,
         base_to_new_func,
     ) as transform_table_name:
-
         # Use JOIN ... USING to add the new column.
         # https://duckdb.org/docs/stable/sql/query_syntax/from#conditional-joins
         duck_conn.execute(
@@ -194,7 +181,7 @@ def duckdb_filter_on_column(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     column_name: str,
-    inclusion_func: typing.Callable[[str|None], bool],
+    inclusion_func: typing.Callable[[str | None], bool],
 ):
     """
     Filter the rows of the specified DuckDB table by passing the
@@ -204,10 +191,9 @@ def duckdb_filter_on_column(
         duck_conn,
         duck_table_name,
         column_name,
-        'included',
+        "included",
         inclusion_func,
     ) as transform_table_name:
-
         # Use JOIN to determine which annotations to keep, and
         # WHERE to filter things down.
         #
@@ -224,8 +210,8 @@ def duckdb_filter_on_column(
 
 
 def duckdb_batched_rows(
-    rows: duckdb.DuckDBPyRelation,
-) -> typing.Generator[pd.core.series.Series, None, None]:
+    rows: duckdb.DuckDBPyRelation | duckdb.DuckDBPyConnection,
+) -> typing.Generator[Series, None, None]:
     """
     Reads from a DuckDB relation (chunkifying to avoid memory issues),
     and generates pandas dataframe rows.
@@ -261,7 +247,7 @@ def duckdb_grouped_rows(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     grouping_column_names: list[str],
-) -> typing.Generator[pd.core.series.Series, None, None]:
+) -> typing.Generator[list[Series], None, None]:
     """
     Fetch rows from the given DuckDB table in groups, with each group
     consisting of all rows that have a particular set of values in the
@@ -272,10 +258,7 @@ def duckdb_grouped_rows(
     # for those columns, all the rows with that set of values are all
     # together - which is our goal here.
     columns_str = ", ".join(grouping_column_names)
-    rows = duck_conn.execute(
-        f"SELECT * FROM {duck_table_name}"
-        f" ORDER BY {columns_str}"
-    )
+    rows = duck_conn.execute(f"SELECT * FROM {duck_table_name} ORDER BY {columns_str}")
 
     grouping_values = None
     group_rows = []

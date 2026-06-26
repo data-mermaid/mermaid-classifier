@@ -8,13 +8,17 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from logging import getLogger
+from typing import Any
 
 import numpy as np
-from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
-from sklearn.metrics import accuracy_score, log_loss as sklearn_log_loss
-
+from sklearn.calibration import (
+    CalibratedClassifierCV,
+    _fit_calibrator,  # pyright: ignore[reportPrivateUsage]  # private sklearn API used for memory-efficient batched calibration
+)
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import log_loss as sklearn_log_loss
 from spacer.data_classes import ImageLabels, ValResults
-from spacer.messages import TrainClassifierReturnMsg
+from spacer.messages import TrainClassifierReturnMsg, TrainingTaskLabels
 from spacer.train_classifier import ClassifierTrainer
 from spacer.train_utils import evaluate_classifier
 
@@ -29,12 +33,11 @@ def _log_entry_and_exit(name: str):
     'Entering: <name>' on enter, 'Exiting: <name> after <s> seconds.'
     on exit, timing the body."""
     start_time = time.time()
-    logger.debug('Entering: %s', name)
+    logger.debug("Entering: %s", name)
     try:
         yield
     finally:
-        logger.debug(
-            'Exiting: %s after %f seconds.', name, time.time() - start_time)
+        logger.debug("Exiting: %s after %f seconds.", name, time.time() - start_time)
 
 
 class MermaidTrainer(ClassifierTrainer):
@@ -52,15 +55,13 @@ class MermaidTrainer(ClassifierTrainer):
     def __init__(
         self,
         batch_size: int,
-        on_epoch_end: Callable[[dict], None] | None = None,
-        class_weight: dict | None = None,
+        on_epoch_end: Callable[[dict[str, Any]], None] | None = None,
+        class_weight: dict[str, float] | None = None,
         early_stopping_patience: int | None = None,
     ):
-        if (early_stopping_patience is not None
-                and early_stopping_patience < 1):
+        if early_stopping_patience is not None and early_stopping_patience < 1:
             raise ValueError(
-                f"early_stopping_patience must be >= 1 or None,"
-                f" got {early_stopping_patience!r}"
+                f"early_stopping_patience must be >= 1 or None, got {early_stopping_patience!r}"
             )
         self.batch_size = batch_size
         self.on_epoch_end = on_epoch_end
@@ -77,27 +78,35 @@ class MermaidTrainer(ClassifierTrainer):
         # Populated by __call__; readable by the runner for MLflow
         # logging. Pre-initialized so the runner never hits an
         # AttributeError when patience is None.
-        self._early_stop_info: dict | None = None
+        self._early_stop_info: dict[str, Any] | None = None
 
-    def __call__(self, labels, nbr_epochs, pc_models):
+    def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]  # absorbs extra pyspacer params (e.g. the positional trainer arg) via **_kwargs
+        self,
+        labels: TrainingTaskLabels,
+        nbr_epochs: int,
+        pc_models: list[CalibratedClassifierCV],
+        **_kwargs: Any,
+    ) -> tuple[CalibratedClassifierCV, ValResults, TrainClassifierReturnMsg]:
         logger.debug(
             f"Unique classes:"
             f" Train + Ref = {len(labels.ref.classes_set)},"
-            f" Val = {len(labels.val.classes_set)}")
+            f" Val = {len(labels.val.classes_set)}"
+        )
         logger.debug(
             f"Label count:"
             f" Train = {labels.train.label_count},"
             f" Ref = {labels.ref.label_count},"
             f" Val = {labels.val.label_count},"
-            f" Total = {labels.label_count}")
+            f" Total = {labels.label_count}"
+        )
         logger.debug(
             f"Data sets:"
             f" Train = {len(labels.train)} images,"
             f" {labels.train.label_count} labels;"
             f" Ref = {len(labels.ref)} images,"
-            f" {labels.ref.label_count} labels")
-        logger.debug(
-            f"Batch size: {self.batch_size} labels")
+            f" {labels.ref.label_count} labels"
+        )
+        logger.debug(f"Batch size: {self.batch_size} labels")
 
         classes_list = list(labels.ref.classes_set)
 
@@ -119,11 +128,12 @@ class MermaidTrainer(ClassifierTrainer):
             # Early-stopping bookkeeping. All three remain None when
             # early_stopping_patience is None, so the no-ES path adds
             # zero overhead.
-            best_val_loss: float = float('inf')
+            best_val_loss: float = float("inf")
             best_clf_snapshot = None
             best_epoch_idx: int | None = None
             epochs_since_best: int = 0
-            stop_reason: str = 'budget_exhausted'
+            stop_reason: str = "budget_exhausted"
+            epoch: int = 0
 
             for epoch in range(nbr_epochs):
                 # Training: load batches from disk, partial_fit, then
@@ -137,8 +147,7 @@ class MermaidTrainer(ClassifierTrainer):
                 # Ref accuracy: stream ref features from disk in batches.
                 # Only predictions (tiny) accumulate, not feature arrays.
                 # Training batch data is no longer in memory at this point.
-                ref_accs.append(
-                    self._calc_acc_batched(clf, labels.ref))
+                ref_accs.append(self._calc_acc_batched(clf, labels.ref))
                 logger.debug(f"Epoch {epoch}, acc: {ref_accs[-1]}")
 
                 # Validation accuracy + log_loss: streamed in batches,
@@ -154,9 +163,9 @@ class MermaidTrainer(ClassifierTrainer):
                 # trend analysis -- we are watching the *change* across
                 # epochs, not the absolute value.
                 val_acc, val_loss = self._calc_acc_and_log_loss_batched(
-                    clf, labels.val, classes_list)
-                logger.debug(
-                    f"Epoch {epoch}, val_acc: {val_acc}, val_loss: {val_loss}")
+                    clf, labels.val, classes_list
+                )
+                logger.debug(f"Epoch {epoch}, val_acc: {val_acc}, val_loss: {val_loss}")
 
                 # Early-stopping bookkeeping (no-op if patience is None).
                 if self.early_stopping_patience is not None:
@@ -174,22 +183,19 @@ class MermaidTrainer(ClassifierTrainer):
 
                 # Determine if this is the final epoch we will run.
                 # Used to decorate the callback with stop-summary fields.
-                will_stop_after_this = (
-                    epoch == nbr_epochs - 1
-                    or (self.early_stopping_patience is not None
-                        and epochs_since_best
-                        >= self.early_stopping_patience)
+                will_stop_after_this = epoch == nbr_epochs - 1 or (
+                    self.early_stopping_patience is not None
+                    and epochs_since_best >= self.early_stopping_patience
                 )
 
                 if self.on_epoch_end is not None:
-                    loss_curve = getattr(clf, 'loss_curve_', [None])
-                    cb_metrics: dict = {
+                    loss_curve = getattr(clf, "loss_curve_", [None])
+                    cb_metrics: dict[str, Any] = {
                         "epoch": epoch,
                         "ref_accuracy": ref_accs[-1],
                         "val_accuracy": val_acc,
                         "val_loss": val_loss,
-                        "training_loss":
-                            loss_curve[-1] if loss_curve else None,
+                        "training_loss": loss_curve[-1] if loss_curve else None,
                         "cumulative_seconds": time.time() - t0,
                     }
                     if will_stop_after_this:
@@ -199,21 +205,20 @@ class MermaidTrainer(ClassifierTrainer):
                         # non-final epochs is intentional.
                         early_stopped = (
                             self.early_stopping_patience is not None
-                            and epochs_since_best
-                            >= self.early_stopping_patience
+                            and epochs_since_best >= self.early_stopping_patience
                         )
                         cb_metrics["final_epoch"] = epoch + 1
                         cb_metrics["early_stopped"] = early_stopped
                         if best_epoch_idx is not None:
-                            cb_metrics["best_val_epoch"] = (
-                                best_epoch_idx + 1)
+                            cb_metrics["best_val_epoch"] = best_epoch_idx + 1
                             cb_metrics["best_val_loss"] = best_val_loss
                     self.on_epoch_end(cb_metrics)
 
-                if (self.early_stopping_patience is not None
-                        and epochs_since_best
-                        >= self.early_stopping_patience):
-                    stop_reason = 'early_stopping'
+                if (
+                    self.early_stopping_patience is not None
+                    and epochs_since_best >= self.early_stopping_patience
+                ):
+                    stop_reason = "early_stopping"
                     logger.info(
                         f"Early stopping at epoch {epoch + 1}:"
                         f" val_loss has not improved for"
@@ -230,9 +235,11 @@ class MermaidTrainer(ClassifierTrainer):
             # still uses the best-val_loss snapshot rather than the
             # last-epoch one. When patience is None we never took a
             # snapshot, and clf is whatever the last epoch produced.
-            if (self.early_stopping_patience is not None
-                    and best_clf_snapshot is not None
-                    and best_epoch_idx != epoch):
+            if (
+                self.early_stopping_patience is not None
+                and best_clf_snapshot is not None
+                and best_epoch_idx != epoch
+            ):
                 logger.info(
                     f"Restoring classifier from epoch"
                     f" {(best_epoch_idx or 0) + 1}"
@@ -243,16 +250,12 @@ class MermaidTrainer(ClassifierTrainer):
             # Stash a small summary on self for runner-side logging
             # (read by MLflowTrainingRunner._log_early_stop_info).
             self._early_stop_info = {
-                'enabled': self.early_stopping_patience is not None,
-                'patience': self.early_stopping_patience,
-                'stop_reason': stop_reason,
-                'final_epoch': epoch + 1,
-                'best_val_epoch': (
-                    best_epoch_idx + 1
-                    if best_epoch_idx is not None else None),
-                'best_val_loss': (
-                    best_val_loss
-                    if best_val_loss != float('inf') else None),
+                "enabled": self.early_stopping_patience is not None,
+                "patience": self.early_stopping_patience,
+                "stop_reason": stop_reason,
+                "final_epoch": epoch + 1,
+                "best_val_epoch": (best_epoch_idx + 1 if best_epoch_idx is not None else None),
+                "best_val_loss": (best_val_loss if best_val_loss != float("inf") else None),
             }
 
         # Calibration: stream ref data in batches — avoids loading full feature
@@ -261,11 +264,11 @@ class MermaidTrainer(ClassifierTrainer):
         with _log_entry_and_exit("calibration"):
             clf_calibrated = self._calibrate_in_batches(clf, labels.ref)
 
-        classes = clf_calibrated.classes_.tolist()
+        assert clf_calibrated.classes_ is not None  # set by _calibrate_in_batches before returning
+        classes = clf_calibrated.classes_.tolist()  # pyright: ignore[reportUnknownMemberType,reportAttributeAccessIssue]  # sklearn stubs type classes_ as a union that lacks .tolist()
 
         # Evaluate new classifier on validation set
-        val_gts, val_ests, val_scores = evaluate_classifier(
-            clf_calibrated, labels.val)
+        val_gts, val_ests, val_scores = evaluate_classifier(clf_calibrated, labels.val)
 
         # Evaluate previous classifiers on validation set
         pc_accs = []
@@ -289,7 +292,7 @@ class MermaidTrainer(ClassifierTrainer):
 
         return clf_calibrated, val_results, return_message
 
-    def _calc_acc_batched(self, clf, labels: ImageLabels) -> float:
+    def _calc_acc_batched(self, clf: TorchMLPClassifier, labels: ImageLabels) -> float:
         """Compute accuracy by streaming features from disk in batches,
         avoiding loading the full dataset into memory.
 
@@ -305,9 +308,9 @@ class MermaidTrainer(ClassifierTrainer):
 
     def _calc_acc_and_log_loss_batched(
         self,
-        clf,
+        clf: TorchMLPClassifier,
         labels: ImageLabels,
-        classes_list: list,
+        classes_list: list[Any],
     ) -> tuple[float, float]:
         """Compute accuracy AND log_loss in a single streaming pass.
 
@@ -322,8 +325,8 @@ class MermaidTrainer(ClassifierTrainer):
         eval set still register as zero-probability columns; matches
         the convention used by sklearn.metrics.log_loss(labels=...).
         """
-        gt: list = []
-        all_proba: list = []
+        gt: list[Any] = []
+        all_proba: list[Any] = []
         for x, y in labels.load_data_in_batches(batch_size=self.batch_size):
             all_proba.append(clf.predict_proba(x))
             gt.extend(y)
@@ -340,7 +343,7 @@ class MermaidTrainer(ClassifierTrainer):
 
     def _calibrate_in_batches(
         self,
-        clf,
+        clf: TorchMLPClassifier,
         ref_labels: ImageLabels,
     ) -> CalibratedClassifierCV:
         """
@@ -355,8 +358,7 @@ class MermaidTrainer(ClassifierTrainer):
         """
         all_preds, all_y = [], []
 
-        for x_batch, y_batch in ref_labels.load_data_in_batches(
-                batch_size=self.batch_size):
+        for x_batch, y_batch in ref_labels.load_data_in_batches(batch_size=self.batch_size):
             x_arr = np.array(x_batch)
             y_arr = np.array(y_batch)
 
@@ -372,16 +374,14 @@ class MermaidTrainer(ClassifierTrainer):
             all_y.append(y_arr)
 
         predictions = np.vstack(all_preds)  # (N, K) multiclass; (N, 1) binary
-        y = np.concatenate(all_y)           # (N,)
+        y = np.concatenate(all_y)  # (N,)
 
         # _fit_calibrator is a private sklearn API used here for memory
         # efficiency — it calibrates from pre-computed predictions instead of
         # re-running predict_proba on the full dataset at once. If an sklearn
         # upgrade breaks this, it will fail at training time (not inference).
         # The serialized model format is identical to the public .fit() API.
-        calibrated_inner = _fit_calibrator(
-            clf, predictions, y, clf.classes_, method="sigmoid"
-        )
+        calibrated_inner = _fit_calibrator(clf, predictions, y, clf.classes_, method="sigmoid")
 
         # Construct CalibratedClassifierCV without calling .fit().
         # Sets all attributes that spacer/storage.py validates:
@@ -395,8 +395,8 @@ class MermaidTrainer(ClassifierTrainer):
 
         return wrapper
 
-    def serialize(self) -> dict:
+    def serialize(self) -> dict[str, Any]:
         data = super().serialize()
-        data['batch_size'] = self.batch_size
+        data["batch_size"] = self.batch_size
         # on_epoch_end is not JSON-serializable; excluded
         return data

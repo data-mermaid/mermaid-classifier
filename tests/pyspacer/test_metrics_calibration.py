@@ -10,7 +10,12 @@ from mermaid_classifier.pyspacer.metrics.calibration import (
     _adaptive_ece,
     compute_calibration,
 )
-from pyspacer.metrics_test_helpers import MockBALibrary, MockGFLibrary, make_val_results, format_metric
+from pyspacer.metrics_test_helpers import (
+    MockBALibrary,
+    MockGFLibrary,
+    format_metric,
+    make_val_results,
+)
 
 
 def _make_ctx(gt_indices, est_indices, classes, scores=None):
@@ -67,8 +72,7 @@ class AdaptiveECETest(unittest.TestCase):
         est = list(range(n))
         scores = [0.8] * n
         ece, bin_data = _adaptive_ece(scores, gt, est, n_bins=3)
-        expected_keys = {'avg_confidence', 'avg_accuracy', 'count',
-                         'conf_min', 'conf_max'}
+        expected_keys = {"avg_confidence", "avg_accuracy", "count", "conf_min", "conf_max"}
         for b in bin_data:
             self.assertEqual(set(b.keys()), expected_keys)
 
@@ -82,7 +86,7 @@ class ComputeCalibrationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1, 0, 1],
             est_indices=[0, 1, 1, 0],
-            classes=['A1::', 'B1::'],
+            classes=["A1::", "B1::"],
             scores=[0.9, 0.8, 0.7, 0.6],
         )
         result = compute_calibration(ctx)
@@ -90,14 +94,14 @@ class ComputeCalibrationTest(unittest.TestCase):
         self.assertIsInstance(result, MetricGroupResult)
 
         scalar_names = {s.name for s in result.scalars}
-        self.assertIn('ece', scalar_names)
+        self.assertIn("ece", scalar_names)
 
         df_paths = {df.artifact_path for df in result.dataframes}
-        self.assertIn('calibration/per_bin_details', df_paths)
-        self.assertIn('calibration/per_category_ece', df_paths)
+        self.assertIn("calibration/per_bin_details", df_paths)
+        self.assertIn("calibration/per_category_ece", df_paths)
 
         fig_paths = {f.artifact_path for f in result.figures}
-        self.assertIn('calibration/reliability_diagram.png', fig_paths)
+        self.assertIn("calibration/reliability_diagram.png", fig_paths)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
@@ -107,12 +111,12 @@ class ComputeCalibrationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 1, 1, 0],
-            classes=['A1::', 'B1::'],
+            classes=["A1::", "B1::"],
             scores=[0.9, 0.6, 0.8, 0.55],
         )
         result = compute_calibration(ctx)
 
-        ece_scalar = next(s for s in result.scalars if s.name == 'ece')
+        ece_scalar = next(s for s in result.scalars if s.name == "ece")
         self.assertIsInstance(ece_scalar.value, float)
         self.assertGreaterEqual(ece_scalar.value, 0.0)
         self.assertLessEqual(ece_scalar.value, 1.0)
@@ -126,14 +130,13 @@ class ComputeCalibrationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 1, 1, 0],
-            classes=['A1::', 'B1::'],
+            classes=["A1::", "B1::"],
             scores=[0.9, 0.6, 0.8, 0.55],
         )
         result = compute_calibration(ctx)
 
         per_cat_df_result = next(
-            df for df in result.dataframes
-            if df.artifact_path == 'calibration/per_category_ece'
+            df for df in result.dataframes if df.artifact_path == "calibration/per_category_ece"
         )
         self.assertEqual(len(per_cat_df_result.df), 0)
 
@@ -151,18 +154,16 @@ class ComputeCalibrationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=gt_indices,
             est_indices=est_indices,
-            classes=['A1::', 'B1::'],
+            classes=["A1::", "B1::"],
             scores=scores,
         )
         result = compute_calibration(ctx)
 
         per_cat_df_result = next(
-            df for df in result.dataframes
-            if df.artifact_path == 'calibration/per_category_ece'
+            df for df in result.dataframes if df.artifact_path == "calibration/per_category_ece"
         )
         self.assertGreater(len(per_cat_df_result.df), 0)
-        expected_columns = {'category', 'ece', 'accuracy', 'avg_confidence',
-                            'n_samples'}
+        expected_columns = {"category", "ece", "accuracy", "avg_confidence", "n_samples"}
         self.assertEqual(set(per_cat_df_result.df.columns), expected_columns)
 
         for fig_result in result.figures:
@@ -173,22 +174,28 @@ class ComputeCalibrationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1, 0, 1],
             est_indices=[0, 1, 0, 1],
-            classes=['A1::', 'B1::'],
+            classes=["A1::", "B1::"],
             scores=[0.9, 0.8, 0.7, 0.6],
         )
         result = compute_calibration(ctx)
 
         per_bin_df_result = next(
-            df for df in result.dataframes
-            if df.artifact_path == 'calibration/per_bin_details'
+            df for df in result.dataframes if df.artifact_path == "calibration/per_bin_details"
         )
-        expected_columns = {'bin', 'conf_min', 'conf_max', 'avg_confidence',
-                            'avg_accuracy', 'gap', 'count'}
+        expected_columns = {
+            "bin",
+            "conf_min",
+            "conf_max",
+            "avg_confidence",
+            "avg_accuracy",
+            "gap",
+            "count",
+        }
         self.assertEqual(set(per_bin_df_result.df.columns), expected_columns)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

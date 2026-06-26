@@ -21,12 +21,12 @@ def log_dataframe(
     produce a proper .csv instead.
     """
     with duckdb_temp_table_name(duck_conn) as table_name:
-        duck_conn.execute(
-            f"CREATE TABLE {table_name} AS SELECT * FROM df"
-        )
+        duck_conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
 
         with tempfile.NamedTemporaryFile(
-            mode='w+t', suffix='.csv', delete_on_close=False,
+            mode="w+t",
+            suffix=".csv",
+            delete_on_close=False,
         ) as f:
             # DuckDB will reopen the file, so close first.
             f.close()
@@ -34,7 +34,7 @@ def log_dataframe(
 
             # Need to open yet again to get the DuckDB-written contents.
             with open(f.name) as f_new:
-                mlflow.log_text(f_new.read(), filestem + '.csv')
+                mlflow.log_text(f_new.read(), filestem + ".csv")
 
             # As this context manager finishes, the temp file will be
             # deleted.

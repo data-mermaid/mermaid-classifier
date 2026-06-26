@@ -29,6 +29,7 @@ Pickling: `_module` and `_optimizer` are serialised via `state_dict()`
 and rebuilt on unpickle so loaded classifiers remain callable without
 requiring the exact same torch internal object graph.
 """
+
 from __future__ import annotations
 
 import warnings
@@ -39,7 +40,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 # Upper bound on the row-sum drift we expect from a softmax computed in
 # float32 then cast to float64. float32 eps ≈ 1.2e-7; even naive summation
@@ -61,15 +61,16 @@ class _MLPModule(nn.Module):
         super().__init__()
         layer_sizes = [n_features_in, *hidden_layer_sizes, n_outputs]
         layers: list[nn.Linear] = []
-        for in_size, out_size in zip(layer_sizes[:-1], layer_sizes[1:]):
+        for in_size, out_size in zip(layer_sizes[:-1], layer_sizes[1:], strict=False):
             layers.append(nn.Linear(in_size, out_size))
         self.linears = nn.ModuleList(layers)
 
-        for linear in self.linears:
+        for module in self.linears:
+            assert isinstance(module, nn.Linear)
             # Glorot uniform — matches sklearn MLP's init for non-logistic
             # activations (factor=6 in sklearn's _init_coef).
-            nn.init.xavier_uniform_(linear.weight)
-            nn.init.zeros_(linear.bias)
+            nn.init.xavier_uniform_(module.weight)
+            nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for i, linear in enumerate(self.linears):
@@ -106,18 +107,14 @@ class TorchMLPClassifier:
         beta_1: float = 0.9,
         beta_2: float = 0.999,
         epsilon: float = 1e-8,
-        class_weight: dict | None = None,
+        class_weight: dict[str, float] | None = None,
     ):
         if activation != "relu":
             raise ValueError(
-                f"TorchMLPClassifier only supports activation='relu', got"
-                f" {activation!r}."
+                f"TorchMLPClassifier only supports activation='relu', got {activation!r}."
             )
         if solver != "adam":
-            raise ValueError(
-                f"TorchMLPClassifier only supports solver='adam', got"
-                f" {solver!r}."
-            )
+            raise ValueError(f"TorchMLPClassifier only supports solver='adam', got {solver!r}.")
 
         self.hidden_layer_sizes = tuple(hidden_layer_sizes)
         self.activation = activation
@@ -156,9 +153,7 @@ class TorchMLPClassifier:
         # `np.random.seed(...)` makes shuffling reproducible — while still
         # advancing between calls (no fixed shuffle).
         if not hasattr(self, "_none_rng"):
-            self._none_rng = np.random.default_rng(
-                np.random.randint(0, np.iinfo(np.int32).max)
-            )
+            self._none_rng = np.random.default_rng(np.random.randint(0, np.iinfo(np.int32).max))
         return self._none_rng
 
     def _labels_to_indices(self, y: np.ndarray) -> np.ndarray:
@@ -205,8 +200,7 @@ class TorchMLPClassifier:
         weights: list[float] = []
         for cls in self.classes_:
             if cls not in self.class_weight:
-                bad = sorted(set(self.classes_.tolist())
-                             - set(self.class_weight))
+                bad = sorted(set(self.classes_.tolist()) - set(self.class_weight))
                 raise ValueError(
                     f"class_weight is missing weights for {bad!r}."
                     f" Pass weights for every class in classes_."
@@ -214,8 +208,7 @@ class TorchMLPClassifier:
             w = float(self.class_weight[cls])
             if w < 0:
                 raise ValueError(
-                    f"class_weight for {cls!r} is negative ({w!r});"
-                    f" weights must be >= 0."
+                    f"class_weight for {cls!r} is negative ({w!r}); weights must be >= 0."
                 )
             weights.append(w)
         return torch.tensor(weights, dtype=torch.float32)
@@ -225,16 +218,17 @@ class TorchMLPClassifier:
         # over weights (not biases). We compute sum(W^2) here; the caller
         # scales it.
         penalty = torch.zeros(1, dtype=torch.float32)
-        for linear in self._module.linears:
-            penalty = penalty + (linear.weight ** 2).sum()
+        for module in self._module.linears:
+            assert isinstance(module, nn.Linear)
+            penalty = penalty + (module.weight**2).sum()
         return penalty.squeeze()
 
     def partial_fit(
         self,
-        X: np.ndarray | list,
-        y: np.ndarray | list,
-        classes: Sequence | None = None,
-    ) -> "TorchMLPClassifier":
+        X: np.ndarray | list[Any],
+        y: np.ndarray | list[Any],
+        classes: Sequence[Any] | None = None,
+    ) -> TorchMLPClassifier:
         X_arr = np.asarray(X, dtype=np.float32)
         if X_arr.ndim != 2:
             raise ValueError(f"X must be 2D, got shape {X_arr.shape}")
@@ -255,10 +249,7 @@ class TorchMLPClassifier:
             self._class_weight_tensor = self._build_class_weight_tensor()
         else:
             if X_arr.shape[1] != self.n_features_in_:
-                raise ValueError(
-                    f"X has {X_arr.shape[1]} features, expected"
-                    f" {self.n_features_in_}"
-                )
+                raise ValueError(f"X has {X_arr.shape[1]} features, expected {self.n_features_in_}")
 
         y_indices = self._labels_to_indices(np.asarray(y))
         n_samples = X_arr.shape[0]
@@ -290,8 +281,7 @@ class TorchMLPClassifier:
             # zero direct gradient via their own CE term, but their
             # logits still participate in the softmax denominator for
             # other classes — for full exclusion, filter the dataset.
-            data_loss = F.cross_entropy(
-                logits, yb, weight=self._class_weight_tensor)
+            data_loss = F.cross_entropy(logits, yb, weight=self._class_weight_tensor)
             # Match sklearn's MLP: L2 penalty per mini-batch is
             # (0.5 * alpha / mb_size) * sum(W^2) — scaled by the size of
             # this specific mini-batch, not the full partial_fit input.
@@ -314,14 +304,20 @@ class TorchMLPClassifier:
 
     def fit(
         self,
-        X: np.ndarray | list,
-        y: np.ndarray | list,
-    ) -> "TorchMLPClassifier":
+        X: np.ndarray | list[Any],
+        y: np.ndarray | list[Any],
+    ) -> TorchMLPClassifier:
         y_arr = np.asarray(y)
-        classes = np.unique(y_arr)
+        classes: list[Any] = np.unique(y_arr).tolist()
         # Reset so fit() starts fresh even on a previously-trained instance.
-        for attr in ("_module", "_optimizer", "classes_", "n_features_in_",
-                     "n_iter_", "loss_curve_"):
+        for attr in (
+            "_module",
+            "_optimizer",
+            "classes_",
+            "n_features_in_",
+            "n_iter_",
+            "loss_curve_",
+        ):
             if hasattr(self, attr):
                 delattr(self, attr)
         prev_loss = np.inf
@@ -333,7 +329,7 @@ class TorchMLPClassifier:
             prev_loss = cur
         return self
 
-    def _forward_probs(self, X: np.ndarray | list) -> np.ndarray:
+    def _forward_probs(self, X: np.ndarray | list[Any]) -> np.ndarray:
         if not hasattr(self, "_module"):
             raise RuntimeError(
                 "TorchMLPClassifier is not fitted. Call partial_fit or fit"
@@ -346,10 +342,7 @@ class TorchMLPClassifier:
         if X_arr.ndim != 2:
             raise ValueError(f"X must be 2D, got shape {X_arr.shape}")
         if X_arr.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"X has {X_arr.shape[1]} features, expected"
-                f" {self.n_features_in_}"
-            )
+            raise ValueError(f"X has {X_arr.shape[1]} features, expected {self.n_features_in_}")
         self._module.eval()
         with torch.no_grad():
             probs = F.softmax(self._module(torch.from_numpy(X_arr)), dim=1)
@@ -376,10 +369,10 @@ class TorchMLPClassifier:
         probs_np /= row_sums[:, np.newaxis]
         return probs_np
 
-    def predict_proba(self, X: np.ndarray | list) -> np.ndarray:
+    def predict_proba(self, X: np.ndarray | list[Any]) -> np.ndarray:
         return self._forward_probs(X)
 
-    def predict(self, X: np.ndarray | list) -> np.ndarray:
+    def predict(self, X: np.ndarray | list[Any]) -> np.ndarray:
         return self.classes_[np.argmax(self._forward_probs(X), axis=1)]
 
     # --- sklearn parameter protocol (lightweight) -------------------------
@@ -405,12 +398,10 @@ class TorchMLPClassifier:
             "class_weight": getattr(self, "class_weight", None),
         }
 
-    def set_params(self, **params: Any) -> "TorchMLPClassifier":
+    def set_params(self, **params: Any) -> TorchMLPClassifier:
         for key, value in params.items():
             if not hasattr(self, key):
-                raise ValueError(
-                    f"Invalid parameter {key!r} for TorchMLPClassifier"
-                )
+                raise ValueError(f"Invalid parameter {key!r} for TorchMLPClassifier")
             setattr(self, key, value)
         return self
 
@@ -421,9 +412,7 @@ class TorchMLPClassifier:
         module = state.pop("_module", None)
         optimizer = state.pop("_optimizer", None)
         if module is not None:
-            state["_module_state"] = {
-                k: v.detach().cpu() for k, v in module.state_dict().items()
-            }
+            state["_module_state"] = {k: v.detach().cpu() for k, v in module.state_dict().items()}
         if optimizer is not None:
             state["_optimizer_state"] = optimizer.state_dict()
         return state

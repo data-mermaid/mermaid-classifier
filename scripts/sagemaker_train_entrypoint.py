@@ -14,6 +14,7 @@ Lifecycle inside the container:
 If anything raises, the traceback is logged and the process exits 1
 so SageMaker marks the job Failed.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,7 +24,6 @@ import sys
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
-
 
 DEFAULT_CONFIG_DIR = "/opt/ml/input/data/config"
 CONFIG_FILENAME = "training_config.yaml"
@@ -72,8 +72,8 @@ def _first_line_dump(config_dir: Path) -> None:
     log.info("python: %s", sys.version.replace("\n", " "))
     try:
         from importlib.metadata import version
-        for pkg in ("pyspacer", "mlflow", "duckdb", "torch",
-                    "pydantic", "pyyaml"):
+
+        for pkg in ("pyspacer", "mlflow", "duckdb", "torch", "pydantic", "pyyaml"):
             try:
                 log.info("pkg %s: %s", pkg, version(pkg))
             except Exception:
@@ -107,6 +107,7 @@ def _resolve_runner_factory():
     the pyspacer import side effects.
     """
     from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
+
     return MLflowTrainingRunner
 
 
@@ -115,8 +116,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config-dir",
-        default=os.environ.get(
-            "SAGEMAKER_CONFIG_DIR", DEFAULT_CONFIG_DIR),
+        default=os.environ.get("SAGEMAKER_CONFIG_DIR", DEFAULT_CONFIG_DIR),
         help=(
             "Directory containing training_config.yaml and sibling "
             "CSVs. Default: /opt/ml/input/data/config (where SageMaker "
@@ -133,15 +133,16 @@ def main(argv: list[str] | None = None) -> None:
             from mermaid_classifier.sagemaker.config import (
                 TrainingRunConfig,
             )
-            config = TrainingRunConfig.from_yaml_path(
-                config_dir / CONFIG_FILENAME)
+
+            config = TrainingRunConfig.from_yaml_path(config_dir / CONFIG_FILENAME)
 
         with _stage("apply_env"):
             config.apply_env()
 
         with _stage("build_options"):
-            dataset_options, training_options, mlflow_options = (
-                config.build_options(config_dir=config_dir))
+            dataset_options, training_options, mlflow_options = config.build_options(
+                config_dir=config_dir
+            )
             # build_options imports mermaid_classifier.pyspacer.train,
             # whose module-level logging.config.dictConfig call sets
             # disable_existing_loggers=True (the default), which marks

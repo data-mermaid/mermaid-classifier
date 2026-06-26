@@ -1,0 +1,47 @@
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel in-progress runs when a PR is updated.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ruff + basedpyright (Linux, Python 3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Install package with training extras and lint group
+        # Real deps must be installed so basedpyright can resolve imports
+        # (torch, pyspacer, scikit-learn, mlflow, duckdb, …).
+        # --frozen fails CI if uv.lock is out of sync with pyproject.toml.
+        run: uv sync --frozen --extra training --group lint
+
+      - name: Check lockfile is in sync
+        run: uv lock --check
+
+      - name: Ruff lint
+        run: uv run --no-sync ruff check .
+
+      - name: Ruff format check
+        run: uv run --no-sync ruff format --check .
+
+      - name: basedpyright (strict)
+        run: uv run --no-sync basedpyright

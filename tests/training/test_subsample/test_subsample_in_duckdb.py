@@ -10,6 +10,7 @@ without spinning up the full TrainingDataset pipeline, so it stays fast
 and self-contained. If the SQL in train.py changes, mirror the update
 here.
 """
+
 from __future__ import annotations
 
 import unittest
@@ -30,7 +31,6 @@ def _build_synthetic_annotations(seed: int = 0) -> pd.DataFrame:
     Each row gets a unique (site, project_id, image_id, row, col) tuple
     so the deterministic ORDER BY produces a stable order.
     """
-    rng = pd.Series(range(1000), name="i")
     # Skewed distribution: class 0 has 500 rows, class 1 has 200,
     # class 2 has 100, classes 3-9 split the rest.
     weights = [500, 200, 100, 50, 50, 30, 30, 20, 10, 10]
@@ -39,32 +39,31 @@ def _build_synthetic_annotations(seed: int = 0) -> pd.DataFrame:
     idx = 0
     for cls_i, w in enumerate(weights):
         for j in range(w):
-            rows.append({
-                "site": "coralnet",
-                "project_id": "p1",
-                "image_id": f"img_{idx:05d}",
-                "row": j,
-                "col": j,
-                "benthic_attribute_id": f"ba_{cls_i:02d}",
-                "growth_form_id": f"gf_{cls_i:02d}",
-                "feature_vector": f"feat_{idx}",
-            })
+            rows.append(
+                {
+                    "site": "coralnet",
+                    "project_id": "p1",
+                    "image_id": f"img_{idx:05d}",
+                    "row": j,
+                    "col": j,
+                    "benthic_attribute_id": f"ba_{cls_i:02d}",
+                    "growth_form_id": f"gf_{cls_i:02d}",
+                    "feature_vector": f"feat_{idx}",
+                }
+            )
             idx += 1
     df = pd.DataFrame(rows)
     # Shuffle so the natural row order is NOT the deterministic one.
     return df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
 
-def _apply_sql(conn: duckdb.DuckDBPyConnection,
-               annotations: pd.DataFrame,
-               targets: dict[tuple[str, str], int]) -> set[str]:
+def _apply_sql(
+    conn: duckdb.DuckDBPyConnection, annotations: pd.DataFrame, targets: dict[tuple[str, str], int]
+) -> set[str]:
     """Apply the same SQL as TrainingDataset._apply_subsample and
     return the set of surviving image_ids."""
     conn.register("_input_annotations", annotations)
-    conn.execute(
-        "CREATE OR REPLACE TABLE annotations AS"
-        " SELECT * FROM _input_annotations"
-    )
+    conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM _input_annotations")
     targets_df = pd.DataFrame(
         [
             {
@@ -103,12 +102,11 @@ class SubsampleSqlDeterminismTest(unittest.TestCase):
     def setUp(self):
         self.annotations = _build_synthetic_annotations()
         opts = SubsampleOptions(
-            strategy="stratified", total_annotations=200,
+            strategy="stratified",
+            total_annotations=200,
         )
         counts = (
-            self.annotations.groupby(
-                ["benthic_attribute_id", "growth_form_id"]
-            ).size().to_dict()
+            self.annotations.groupby(["benthic_attribute_id", "growth_form_id"]).size().to_dict()
         )
         self.targets = compute_per_class_targets(opts, counts)
 
@@ -123,10 +121,8 @@ class SubsampleSqlDeterminismTest(unittest.TestCase):
     def test_two_connections_select_identical_rows(self):
         # Same input, different connections, different thread counts.
         # If the SQL is non-deterministic, these sets will diverge.
-        rows_a = _apply_sql(self._new_conn(threads=1), self.annotations,
-                            self.targets)
-        rows_b = _apply_sql(self._new_conn(threads=4), self.annotations,
-                            self.targets)
+        rows_a = _apply_sql(self._new_conn(threads=1), self.annotations, self.targets)
+        rows_b = _apply_sql(self._new_conn(threads=4), self.annotations, self.targets)
         self.assertEqual(rows_a, rows_b)
 
     def test_repeated_run_in_same_connection_is_stable(self):
@@ -152,12 +148,11 @@ class SubsampleSqlDeterminismTest(unittest.TestCase):
         # per-class budget of 40. Classes smaller than 40 are kept in
         # full (not oversampled); larger classes are capped at 40.
         opts = SubsampleOptions(
-            strategy="balanced", total_annotations=400,
+            strategy="balanced",
+            total_annotations=400,
         )
         counts = (
-            self.annotations.groupby(
-                ["benthic_attribute_id", "growth_form_id"]
-            ).size().to_dict()
+            self.annotations.groupby(["benthic_attribute_id", "growth_form_id"]).size().to_dict()
         )
         targets = compute_per_class_targets(opts, counts)
         conn = self._new_conn(threads=2)
@@ -165,14 +160,12 @@ class SubsampleSqlDeterminismTest(unittest.TestCase):
         # Class 9 only has 10 rows; balanced should NOT produce more
         # than 10 surviving rows for it.
         n_class_9 = conn.execute(
-            "SELECT COUNT(*) FROM annotations"
-            " WHERE benthic_attribute_id = 'ba_09'"
+            "SELECT COUNT(*) FROM annotations WHERE benthic_attribute_id = 'ba_09'"
         ).fetchone()[0]
         self.assertEqual(n_class_9, 10)
         # Common class capped at 40.
         n_class_0 = conn.execute(
-            "SELECT COUNT(*) FROM annotations"
-            " WHERE benthic_attribute_id = 'ba_00'"
+            "SELECT COUNT(*) FROM annotations WHERE benthic_attribute_id = 'ba_00'"
         ).fetchone()[0]
         self.assertEqual(n_class_0, 40)
         # Sanity: total survivors equal target sum.

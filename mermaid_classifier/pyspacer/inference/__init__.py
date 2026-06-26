@@ -34,11 +34,18 @@ class SklearnPinError(Exception):
 
 from mermaid_classifier.pyspacer.inference.export import export_artifact  # noqa: E402
 from mermaid_classifier.pyspacer.inference.loader import (  # noqa: E402
-    Predictor, load_predictor,
+    Predictor,
+    load_predictor,
 )
 
 __all__ = [
-    "SCHEMA_VERSION", "TASK_NAME", "PARITY_PROVEN_SKLEARN",
-    "ParityError", "ManifestError", "SklearnPinError",
-    "export_artifact", "Predictor", "load_predictor",
+    "SCHEMA_VERSION",
+    "TASK_NAME",
+    "PARITY_PROVEN_SKLEARN",
+    "ParityError",
+    "ManifestError",
+    "SklearnPinError",
+    "export_artifact",
+    "Predictor",
+    "load_predictor",
 ]

@@ -1,48 +1,48 @@
 """
 Get/generate and show annotations for a specified image.
 """
+
 import atexit
-from collections import defaultdict
 import csv
-from io import BytesIO, StringIO
-from operator import itemgetter
 import os
-from pathlib import Path
 import re
 import shutil
 import tempfile
-from urllib.parse import urlparse
 import urllib.request
+from collections import defaultdict
+from io import BytesIO, StringIO
+from operator import itemgetter
+from pathlib import Path
+from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup
-import matplotlib as mpl
+import matplotlib.cm
 import matplotlib.pyplot as plt
 import mlflow
+import mlflow.artifacts
 import numpy as np
+from bs4 import BeautifulSoup
 from spacer.data_classes import DataLocation
 from spacer.extractors import EfficientNetExtractor
 from spacer.storage import load_image, storage_factory
 from spacer.task_utils import check_extract_inputs
 
-from mermaid_classifier.common.benthic_attributes import (
-    BenthicAttributeLibrary, GrowthFormLibrary)
+from mermaid_classifier.common.benthic_attributes import BenthicAttributeLibrary, GrowthFormLibrary
 from mermaid_classifier.common.plots import (
     LegendSpecElement,
+    PointMarker,
     plot_legend,
     plot_point_markers,
-    PointMarker,
 )
 from mermaid_classifier.pyspacer.inference import load_predictor
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.pyspacer.utils import mlflow_connect
-
 
 # A model ID is m- followed by 32 hex digits, but we'll assume 30-32
 # hex digits is meant to be an MLflow run ID.
 # That way, if the user accidentally copies only 31 digits and
 # pastes it into this script, it'll try to find the run ID instead of
 # trying it as a filesystem path.
-MLFLOW_MODEL_ID_REGEX = re.compile(r'm-[a-f0-9]{30,32}')
+MLFLOW_MODEL_ID_REGEX = re.compile(r"m-[a-f0-9]{30,32}")
 
 
 def mlflow_model_id_to_artifact_uris(model_id: str) -> tuple[str, str]:
@@ -54,24 +54,25 @@ def mlflow_model_id_to_artifact_uris(model_id: str) -> tuple[str, str]:
     base = logged_model.artifact_location
     # #57's log_artifact_model logs model_pt/model_json as pyfunc artifacts,
     # which MLflow stores under the model's artifacts/ subdirectory.
-    return f'{base}/artifacts/model.pt', f'{base}/artifacts/model.json'
+    return f"{base}/artifacts/model.pt", f"{base}/artifacts/model.json"
 
 
 def _download_pair_to_tempdir(
-    pt_loc: DataLocation, json_loc: DataLocation,
+    pt_loc: DataLocation,
+    json_loc: DataLocation,
 ) -> tuple[Path, Path]:
     """Download an S3 model.pt + model.json pair into one temp dir."""
-    tmp_dir = Path(tempfile.mkdtemp(prefix='clf_artifact_'))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="clf_artifact_"))
     # mkdtemp() isn't auto-cleaned, and the pair must outlive this call (the
     # caller loads them immediately after), so reclaim the dir at process exit.
     atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
     paths = []
-    for loc, name in [(pt_loc, 'model.pt'), (json_loc, 'model.json')]:
+    for loc, name in [(pt_loc, "model.pt"), (json_loc, "model.json")]:
         storage = storage_factory(loc.storage_type, loc.bucket_name)
-        stream = storage.load(loc.key)
+        stream = storage.load(loc.key)  # pyright: ignore[reportOptionalMemberAccess]  # storage_factory always returns Storage for valid storage types; None is unreachable
         dest = tmp_dir / name
         # getbuffer() writes the stream's bytes without an extra full copy.
-        dest.write_bytes(stream.getbuffer())
+        dest.write_bytes(stream.getbuffer())  # pyright: ignore[reportOptionalMemberAccess]  # storage.load returns BytesIO, not None
         paths.append(dest)
     return paths[0], paths[1]
 
@@ -90,27 +91,27 @@ def resolve_classifier_artifact(location: str) -> tuple[Path, Path]:
         return Path(local_pt), Path(local_json)
 
     # Directory mode: S3 URI or local filesystem directory.
-    base = location.rstrip('/')
-    pt_loc = AnnotationRun.parse_location_str(f'{base}/model.pt')
-    json_loc = AnnotationRun.parse_location_str(f'{base}/model.json')
+    base = location.rstrip("/")
+    pt_loc = AnnotationRun.parse_location_str(f"{base}/model.pt")
+    json_loc = AnnotationRun.parse_location_str(f"{base}/model.json")
+    assert pt_loc is not None and json_loc is not None  # guaranteed: non-empty strings passed
 
-    if pt_loc.storage_type == 's3':
+    if pt_loc.storage_type == "s3":
         return _download_pair_to_tempdir(pt_loc, json_loc)
     return Path(pt_loc.key), Path(json_loc.key)
 
 
 class AnnotationRun:
-
     def __init__(
         self,
         image: str,
         points_csv: str,
-        classifier: str = None,
-        weights: str = None,
-        labelset_csv: str = None,
+        classifier: str | None = None,
+        weights: str | None = None,
+        labelset_csv: str | None = None,
         num_predictions_to_save: int = 0,
-        coralnet_cache_dir: str = None,
-        plot_title: str = None,
+        coralnet_cache_dir: str | None = None,
+        plot_title: str | None = None,
     ):
         """
         image
@@ -178,31 +179,32 @@ class AnnotationRun:
         self.num_predictions_to_save = num_predictions_to_save
         self.coralnet_cache_dir = coralnet_cache_dir
 
-        weights_location = (
-            weights or settings.weights_location)
+        weights_location = weights or settings.weights_location
 
-        annotations: dict[tuple[int, int], list] = defaultdict(list)
-        scores: dict[tuple[int, int], list] = defaultdict(list)
+        annotations: dict[tuple[int, int], list[str]] = defaultdict(list)
+        scores: dict[tuple[int, int], list[float]] = defaultdict(list)
 
         # Read in CSV points.
         # Labels and scores may or may not be present.
-        with open(self.points_csv_path) as points_csv:
-            reader = csv.DictReader(points_csv)
+        with open(self.points_csv_path) as points_csv_f:
+            reader = csv.DictReader(points_csv_f)
             for csv_row in reader:
-                row = int(csv_row['row'])
-                column = int(csv_row['column'])
+                row = int(csv_row["row"])
+                column = int(csv_row["column"])
                 # Optional cells could not be in the dict or they could be ''.
                 # Default label is 'None'. Default score is nothing (not added
                 # to dict).
-                annotations[(row, column)].append(csv_row.get('label', 'None'))
-                if csv_row.get('score'):
-                    scores[(row, column)].append(float(csv_row['score']))
+                annotations[(row, column)].append(csv_row.get("label", "None"))
+                if csv_row.get("score"):
+                    scores[(row, column)].append(float(csv_row["score"]))
 
         try:
             image_id = int(image)
         except ValueError:
             # Non-numeric arg; interpret as file path/URI
-            self.image_loc = self.parse_location_str(image)
+            parsed = self.parse_location_str(image)
+            assert parsed is not None  # image is a required non-empty str parameter
+            self.image_loc = parsed
             auto_plot_title = image
         else:
             # Numeric arg; interpret as CoralNet image ID
@@ -212,17 +214,19 @@ class AnnotationRun:
         if classifier:
             auto_plot_title += f"\nClassified by: {classifier}"
         else:
-            auto_plot_title += f"\nAnnotations from CSV file"
+            auto_plot_title += "\nAnnotations from CSV file"
 
         self.plot_title = plot_title or auto_plot_title
 
         weights_loc = self.parse_location_str(weights_location)
 
         if classifier:
-
             # Classify with the portable artifact: extract features with
             # pyspacer's EfficientNet extractor, then predict with the loaded
             # TorchScript head (no classifier pickle, no pyspacer classify call).
+            assert weights_loc is not None, (
+                "weights_location must be set when classifier is provided"
+            )
 
             model_pt, model_json = resolve_classifier_artifact(classifier)
             predictor = load_predictor(model_pt, model_json)
@@ -230,11 +234,11 @@ class AnnotationRun:
             print("Extracting features and classifying...")
             loaded_image = load_image(self.image_loc)
             extractor = EfficientNetExtractor(
-                data_locations=dict(weights=weights_loc),
+                data_locations={"weights": weights_loc},
             )
             rowcols = list(annotations.keys())
-            check_extract_inputs(loaded_image, rowcols, self.image_loc.key)
-            features, _ = extractor(loaded_image, rowcols)
+            check_extract_inputs(loaded_image, rowcols, self.image_loc.key)  # pyright: ignore[reportArgumentType]  # pyspacer stubs use PIL.Image module, not PIL.Image.Image
+            features, _ = extractor(loaded_image, rowcols)  # pyright: ignore[reportArgumentType]  # same PIL stub issue
 
             predictions_per_point = max(num_predictions_to_save, 1)
 
@@ -243,37 +247,32 @@ class AnnotationRun:
             # call instead of once per point.
             labels = predictor.classes
             if rowcols:
-                feature_batch = np.vstack(
-                    [features.get_array(rowcol) for rowcol in rowcols])
+                feature_batch = np.vstack([features.get_array(rowcol) for rowcol in rowcols])
                 proba_batch = predictor.predict_proba(feature_batch).tolist()
-                for (row, column), proba in zip(rowcols, proba_batch):
+                for (row, column), proba in zip(rowcols, proba_batch, strict=False):
                     top_predictions = sorted(
-                        zip(labels, proba), key=itemgetter(1), reverse=True)
+                        zip(labels, proba, strict=False), key=itemgetter(1), reverse=True
+                    )
                     annotations[(row, column)] = [
-                        label for label, score
-                        in top_predictions[:predictions_per_point]]
+                        label for label, _ in top_predictions[:predictions_per_point]
+                    ]
                     scores[(row, column)] = [
-                        score for label, score
-                        in top_predictions[:predictions_per_point]]
+                        score for _, score in top_predictions[:predictions_per_point]
+                    ]
             print("Finished classifying")
 
         else:
-
-            print(
-                "No classifier specified, so points_csv must specify"
-                " all annotations.")
+            print("No classifier specified, so points_csv must specify all annotations.")
 
         # Number 1 prediction for each point.
-        self.top_annotations = dict(
-            (rowcol, labels[0]) for rowcol, labels in annotations.items())
-        self.top_scores = dict(
-            (rowcol, score_vals[0]) for rowcol, score_vals in scores.items())
+        self.top_annotations = {rowcol: labels[0] for rowcol, labels in annotations.items()}
+        self.top_scores = {rowcol: score_vals[0] for rowcol, score_vals in scores.items()}
 
         # All points must have labels specified by now - either through the
         # points CSV, or using the classifier (the latter takes precedence if
         # specified).
         for rowcol, top_label in self.top_annotations.items():
-            if top_label == 'None':
+            if top_label == "None":
                 raise ValueError(f"Point {rowcol} doesn't have a label.")
 
         if self.num_predictions_to_save > 0 and classifier:
@@ -281,29 +280,28 @@ class AnnotationRun:
             # since a classifier is being used.
             self.write_predictions(annotations, scores)
 
-        unique_top_labels = set(
-            label for label in self.top_annotations.values())
+        unique_top_labels = set(self.top_annotations.values())
 
         if labelset_csv:
             # Read in the label IDs to names mapping.
             with open(labelset_csv) as csv_f:
                 reader = csv.DictReader(csv_f)
                 self.label_ids_to_names = {
-                    csv_row['id']: csv_row['name']
+                    csv_row["id"]: csv_row["name"]
                     for csv_row in reader
-                    if csv_row['id'] in unique_top_labels
+                    if csv_row["id"] in unique_top_labels
                 }
         else:
             # Use MERMAID's API to get the names.
             ba_library = BenthicAttributeLibrary()
             gf_library = GrowthFormLibrary()
-            self.label_ids_to_names = dict()
+            self.label_ids_to_names = {}
             for bagf_id in unique_top_labels:
                 name = ba_library.bagf_id_to_name(bagf_id, gf_library)
                 self.label_ids_to_names[bagf_id] = name
 
     @staticmethod
-    def parse_location_str(location: str) -> DataLocation:
+    def parse_location_str(location: str | None) -> DataLocation | None:
 
         if not location:
             return None
@@ -314,32 +312,32 @@ class AnnotationRun:
         # MLflow probably has 5 ways of un-proxying such artifact URIs, but
         # none have worked for us for some reason, so we un-proxy it manually.
         uri = urlparse(location)
-        if uri.scheme == 'mlflow-artifacts':
+        if uri.scheme == "mlflow-artifacts":
             # So far we only handle the case where artifacts are stored in
             # the local filesystem cwd.
             # If other cases come up in practice, add to this code to handle
             # those cases.
-            location = 'mlartifacts' + uri.path
+            location = "mlartifacts" + uri.path
 
         try:
             # S3 URI
             # Example:
             # s3://my-bucket/my-folder/model.pkl
             uri = urlparse(location)
-            if uri.scheme == 's3':
+            if uri.scheme == "s3":
                 return DataLocation(
-                    's3',
+                    "s3",
                     bucket_name=uri.netloc,
                     # url.path probably begins with a slash, which isn't
                     # what we want when ultimately passing this to boto's
                     # Object().
-                    key=uri.path.strip('/'),
+                    key=uri.path.strip("/"),
                 )
         except ValueError:
             pass
 
         # Default to assuming a filesystem path
-        return DataLocation('filesystem', key=location)
+        return DataLocation("filesystem", key=location)
 
     def get_coralnet_image(self, image_id: int) -> DataLocation:
         """
@@ -350,26 +348,27 @@ class AnnotationRun:
             # We don't know the file suffix, so look for any file that has the
             # expected filename without the suffix.
             for filename in os.listdir(self.coralnet_cache_dir):
-                if Path(filename).stem == f'i{image_id}':
+                if Path(filename).stem == f"i{image_id}":
                     print("CoralNet image found in the cache dir")
                     image_path = Path(self.coralnet_cache_dir, filename)
-                    return DataLocation('filesystem', str(image_path))
+                    return DataLocation("filesystem", str(image_path))
 
-        image_view_url = f'https://coralnet.ucsd.edu/image/{image_id}/view/'
+        image_view_url = f"https://coralnet.ucsd.edu/image/{image_id}/view/"
         image_view_response = urllib.request.urlopen(image_view_url)
-        response_soup = BeautifulSoup(
-            image_view_response.read(), 'html.parser')
+        response_soup = BeautifulSoup(image_view_response.read(), "html.parser")
 
-        original_img_elements = response_soup.select(
-            'div#original_image_container > img')
+        original_img_elements = response_soup.select("div#original_image_container > img")
         if not original_img_elements:
             # This only happens on a private source. If the image is
             # nonexistent, then the response is 404, causing urlopen() to
             # fail with an HTTPError.
             raise ValueError(
                 f"CoralNet image {image_id}: couldn't find image on the"
-                f" image-view page. Maybe it's in a private source.")
-        image_url = original_img_elements[0].attrs.get('src')
+                f" image-view page. Maybe it's in a private source."
+            )
+        image_url = original_img_elements[0].attrs.get("src")
+        if not isinstance(image_url, str):
+            raise ValueError(f"CoralNet image {image_id}: couldn't parse image URL from page.")
         file_suffix = Path(urlparse(image_url).path).suffix
 
         print("Downloading CoralNet image...")
@@ -377,27 +376,27 @@ class AnnotationRun:
         print("Finished download")
 
         if self.coralnet_cache_dir:
-            image_path = Path(
-                self.coralnet_cache_dir, f'i{image_id}{file_suffix}')
-            with open(image_path, 'wb') as image_file:
+            image_path = Path(self.coralnet_cache_dir, f"i{image_id}{file_suffix}")
+            with open(image_path, "wb") as image_file:
                 image_file.write(download_response.read())
-            return DataLocation('filesystem', str(image_path))
-        else:
-            # No cache
-            image_loc = DataLocation('memory', 'image')
-            memory_storage = storage_factory('memory')
-            memory_storage.store(
-                image_loc.key, BytesIO(download_response.read()))
+            return DataLocation("filesystem", str(image_path))
+        # No cache
+        image_loc = DataLocation("memory", "image")
+        memory_storage = storage_factory("memory")
+        memory_storage.store(image_loc.key, BytesIO(download_response.read()))  # pyright: ignore[reportOptionalMemberAccess]  # memory storage_factory always returns MemoryStorage singleton
         return image_loc
 
     @staticmethod
-    def prediction_column_names(prediction_num):
+    def prediction_column_names(prediction_num: int) -> tuple[str, str]:
         if prediction_num == 1:
-            return 'label', 'score'
-        else:
-            return f'label{prediction_num}', f'score{prediction_num}'
+            return "label", "score"
+        return f"label{prediction_num}", f"score{prediction_num}"
 
-    def write_predictions(self, annotations, scores):
+    def write_predictions(
+        self,
+        annotations: dict[tuple[int, int], list[str]],
+        scores: dict[tuple[int, int], list[float]],
+    ) -> None:
 
         writer_stream = StringIO()
 
@@ -407,14 +406,16 @@ class AnnotationRun:
             reader = csv.DictReader(points_csv)
 
             # Output CSV will have these columns first.
-            writer_fieldnames = ['row', 'column']
+            writer_fieldnames = ["row", "column"]
             for num in range(1, self.num_predictions_to_save + 1):
                 writer_fieldnames += self.prediction_column_names(num)
             # Then, any additional columns that the original CSV happens
-            # to have.
+            # to have. (reader.fieldnames is None before the first row is read,
+            # but DictReader populates it lazily from the header; fall back to
+            # empty so pyright knows the iterable is always valid.)
             writer_fieldnames += [
-                name for name in reader.fieldnames
-                if name not in writer_fieldnames]
+                name for name in (reader.fieldnames or []) if name not in writer_fieldnames
+            ]
             writer = csv.DictWriter(writer_stream, writer_fieldnames)
             writer.writeheader()
 
@@ -423,36 +424,30 @@ class AnnotationRun:
             for old_csv_row in reader:
                 new_csv_row = old_csv_row.copy()
 
-                row = int(old_csv_row['row'])
-                column = int(old_csv_row['column'])
+                row = int(old_csv_row["row"])
+                column = int(old_csv_row["column"])
 
                 for index in range(self.num_predictions_to_save):
                     prediction_num = index + 1
                     annotation = annotations[(row, column)][index]
-                    score_str = format(scores[(row, column)][index], '.4f')
+                    score_str = format(scores[(row, column)][index], ".4f")
 
-                    label_col_name, score_col_name = \
-                        self.prediction_column_names(prediction_num)
+                    label_col_name, score_col_name = self.prediction_column_names(prediction_num)
                     new_csv_row[label_col_name] = annotation
                     new_csv_row[score_col_name] = score_str
 
                 writer.writerow(new_csv_row)
 
         # Write that memory stream back to the points-csv file.
-        with open(
-            self.points_csv_path, 'w', newline='', encoding='utf-8'
-        ) as points_csv:
+        with open(self.points_csv_path, "w", newline="", encoding="utf-8") as points_csv:
             points_csv.write(writer_stream.getvalue())
 
     def show(self):
 
         unique_top_labels = list(self.label_ids_to_names.keys())
-        color_list = mpl.cm.tab10(range(len(unique_top_labels)))
+        color_list = matplotlib.cm.tab10(range(len(unique_top_labels)))  # pyright: ignore[reportAttributeAccessIssue]  # matplotlib.cm colormaps are dynamic attributes not in stubs
         # Map the labelset to colors in the color set.
-        label_ids_to_colors = dict(zip(
-            unique_top_labels,
-            color_list,
-        ))
+        label_ids_to_colors = dict(zip(unique_top_labels, color_list, strict=False))
 
         fig = plt.gcf()
         ax = fig.add_subplot(111)
@@ -469,47 +464,45 @@ class AnnotationRun:
         for rowcol, top_label in self.top_annotations.items():
             if rowcol in self.top_scores:
                 raw_top_score = self.top_scores[rowcol]
-                score_as_percent = round(raw_top_score*100)
+                score_as_percent = round(raw_top_score * 100)
                 # TODO: Score text optional; maybe shape is enough
                 score_text = str(score_as_percent)
                 # https://matplotlib.org/stable/api/markers_api.html
                 if score_as_percent >= 70:
-                    shape = 'o'
+                    shape = "o"
                 elif score_as_percent >= 50:
-                    shape = 's'
+                    shape = "s"
                 else:
-                    shape = '^'
+                    shape = "^"
             else:
                 score_text = None
-                shape = 'o'
-            point_markers.append(PointMarker(
-                row=rowcol[0],
-                col=rowcol[1],
-                color=label_ids_to_colors[top_label],
-                shape=shape,
-                text=score_text,
-            ))
+                shape = "o"
+            point_markers.append(
+                PointMarker(
+                    row=rowcol[0],
+                    col=rowcol[1],
+                    color=label_ids_to_colors[top_label],
+                    shape=shape,
+                    text=score_text,
+                )
+            )
 
         plot_point_markers(ax, point_markers)
 
-        label_names = [
-            self.label_ids_to_names[str(label_id)]
-            for label_id in unique_top_labels
-        ]
+        label_names = [self.label_ids_to_names[str(label_id)] for label_id in unique_top_labels]
         # Color legend
         legend_spec = [
-            LegendSpecElement(color=color, shape='o', label=label)
-            for color, label in zip(color_list, label_names)
+            LegendSpecElement(color=color, shape="o", label=label)
+            for color, label in zip(color_list, label_names, strict=False)
         ]
 
         # Shape legend; only show this if there are scores
         if len(self.top_scores) > 0:
             # TODO: DRY with the thresholds defined above
             legend_spec += [
-                LegendSpecElement(
-                    color='white', shape='o', label="70% or more confidence"),
-                LegendSpecElement(color='white', shape='s', label="50-69%"),
-                LegendSpecElement(color='white', shape='^', label="49% or less"),
+                LegendSpecElement(color="white", shape="o", label="70% or more confidence"),
+                LegendSpecElement(color="white", shape="s", label="50-69%"),
+                LegendSpecElement(color="white", shape="^", label="49% or less"),
             ]
         plot_legend(ax, legend_spec)
 
