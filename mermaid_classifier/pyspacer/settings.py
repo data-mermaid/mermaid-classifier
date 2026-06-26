@@ -132,9 +132,10 @@ def set_env_vars_for_packages():
         # simplify setup while still allowing access to public S3 files.
         "aws_anonymous": "SPACER_AWS_ANONYMOUS",
         # Accessing private AWS data is most easily done by using the
-        # instance metadata service within AWS, but here are other
-        # ways. For example, log into AWS with SSO, choose a role to view
-        # a temporary key+secret+token for, and plug those 3 values in.
+        # instance metadata service within AWS, but here are other ways.
+        # For example, log into AWS with SSO and choose a role to view its
+        # short-lived credentials (access key, secret, session token), then
+        # set those three values here.
         "aws_key_id": "SPACER_AWS_ACCESS_KEY_ID",
         "aws_secret": "SPACER_AWS_SECRET_ACCESS_KEY",
         "aws_session_token": "SPACER_AWS_SESSION_TOKEN",

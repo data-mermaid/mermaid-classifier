@@ -52,7 +52,7 @@ def mlflow_model_id_to_artifact_uris(model_id: str) -> tuple[str, str]:
 
     logged_model = mlflow.get_logged_model(model_id)
     base = logged_model.artifact_location
-    # #57's log_artifact_model logs model_pt/model_json as pyfunc artifacts,
+    # log_artifact_model logs model.pt / model.json as pyfunc artifacts,
     # which MLflow stores under the model's artifacts/ subdirectory.
     return f"{base}/artifacts/model.pt", f"{base}/artifacts/model.json"
 
