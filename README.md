@@ -58,8 +58,6 @@ extra you need, e.g. `pip install "mermaid-classifier[inference] @ git+https://g
 
 ### Additional steps for PySpacer classifiers
 
-1. If you're in JupyterLab, you need to have interactive matplotlib working to have pan, zoom, and save controls on annotation plots. If you want this, after pip-installing ipympl, you must [hard-refresh](https://www.howtogeek.com/672607/how-to-hard-refresh-your-web-browser-to-bypass-your-cache/) the browser tab that has the JupyterLab space open.
-
 1. You'll need to specify configuration values, using either an `.env` file in the directory that you're running your script or notebook from, or by setting environment variables. See the `pyspacer_example` directory for a full example.
 
 ### Installation environment
@@ -122,11 +120,7 @@ Run the checks locally with the `lint` dependency group:
     uv run --group lint ruff format --check . # CI's format gate (no writes)
     uv run --group lint basedpyright          # type check
 
-basedpyright runs in strict mode over `mermaid_classifier/` + `scripts/`, with
-the "unknown type" rules that fire on untyped third-party libraries
-(torch/pyspacer/duckdb/mlflow/sklearn) disabled — see `[tool.basedpyright]` in
-`pyproject.toml`. `tests/` are linted and formatted but not type-checked; the
-legacy `v1/` directory is excluded from all checks.
+basedpyright runs in strict mode over `mermaid_classifier/` + `scripts/` (see `[tool.basedpyright]` in `pyproject.toml` for the exact rule set).
 
 ### Design notes
 
@@ -141,52 +135,18 @@ Although this project isn't on PyPI, the fact that it's set up as a package make
 
 ## Architecture
 
-### Package Layout (flat layout, not src/)
+This project is a flat-layout Python package: importable code under
+`mermaid_classifier/` (`common/` utilities, `pyspacer/` training + inference,
+`training/` strategies, `metrics/`), with `scripts/` as CLI drivers and `tests/`
+mirroring the package.
 
-- `mermaid_classifier/common/` -- Shared utilities (MERMAID API clients, DuckDB helpers, CSV parsing, plotting)
-- `mermaid_classifier/pyspacer/` -- PySpacer training and classification pipeline
-- `tests/pyspacer/` -- Unit tests (unittest, not pytest)
-- `pyspacer_example/` -- Jupyter notebook demo with sample `.env`
-- `v1/` -- Legacy code, not incorporated into current version
+Two dependency lanes are an architectural invariant: **`[inference]`** is
+deliberately minimal so serving images stay light, while **`[training]`** is a
+superset. Trained models ship as a portable, pickle-free **TorchScript head +
+`model.json` manifest** (not a sklearn pickle); `scikit-learn` is pinned in
+lockstep across both extras because calibration semantics can shift between
+releases.
 
-### Training Pipeline (train.py)
-
-The core pipeline flows through `TrainingDataset` -> `TrainingRunner` / `MLflowTrainingRunner`:
-
-1. **Data loading**: `read_coralnet_data()` reads per-source CSVs from S3 via DuckDB; `read_mermaid_data()` reads a Parquet file. Both write to a DuckDB `annotations` table.
-2. **Label mapping**: CoralNet label IDs are mapped to MERMAID BA+GF using `CoralNetMermaidMapping` (fetched from MERMAID API, cached after first load).
-3. **Filtering & rollup**: `LabelFilter`, `LabelRollupSpec`, `CNSourceFilter` (all `CsvSpec` subclasses) control which labels/sources are included and how labels are consolidated.
-4. **Feature vector validation**: Checks S3 for missing `.fv` files; drops or aborts based on `TRAINING_INPUTS_PERCENT_MISSING_ALLOWED`.
-5. **Train/ref/val split**: Uses PySpacer's `preprocess_labels()` with `SplitMode`.
-6. **Training**: Calls PySpacer's `train_classifier()` with `TrainClassifierMsg`.
-7. **Logging**: `MLflowTrainingRunner` logs model, metrics (precision/recall/F1), confusion matrices, and profiling data to MLflow.
-
-### Key Patterns
-
-- **Configuration**: Pydantic `Settings` class reads from `.env` file in cwd. Setting names are lowercase in code, UPPERCASE in `.env`. See `pyspacer_example/.env` for all options.
-- **DuckDB as ETL engine**: All data transformations use SQL via DuckDB (not pandas). Helpers in `duckdb_utils.py` provide context managers for temp tables, column transforms, batched iteration, etc.
-- **NULL growth forms**: CoralNet labels without a growth form must be stored as empty string `''` in DuckDB (not NULL), because NULL breaks JOINs. Tests specifically verify this.
-- **BA+GF separator**: `::` separates benthic attribute from growth form (e.g., `Acropora::Branching` or `Hard coral::` for no GF). Empty growth forms must still have the trailing `::`.
-- **CsvSpec pattern**: `LabelFilter`, `LabelRollupSpec`, and `CNSourceFilter` all inherit from `CsvSpec`, which validates CSV columns and initializes from a file-like object.
-- **Context managers for resource cleanup**: `section_profiling()` for timing, `make_confusion_matrix()` for matplotlib figures, `duckdb_temp_table_name()` for temp tables.
-
-### Testing Patterns
-
-- Tests use `unittest` (not pytest).
-- `SettingsOverride` / `override_settings()` context manager patches Pydantic settings for test isolation.
-- `NoInitDataset` bypasses expensive `TrainingDataset.__init__` (which hits S3 and MERMAID API) to test individual methods.
-- `CoralNetMermaidMapping._download_mapping` is mocked to avoid live API calls.
-
-### Configuration (Settings)
-
-Key settings (set via `.env` or environment variables):
-
-| Setting | Purpose |
-|---|---|
-| `CORALNET_TRAIN_DATA_BUCKET` / `MERMAID_TRAIN_DATA_BUCKET` | S3 buckets for training data |
-| `WEIGHTS_LOCATION` | Path to EfficientNet extractor weights |
-| `AWS_ANONYMOUS` | `True` for public S3 access without credentials |
-| `MLFLOW_TRACKING_SERVER` | MLflow server URI (ARN or localhost) |
-| `SPACER_EXTRACTORS_CACHE_DIR` | Cache dir for downloaded weights |
-| `SPACER_BATCH_SIZE` | Override for training batch size; if unset, auto-calculated from available memory at training time |
-| `MLFLOW_HTTP_REQUEST_MAX_RETRIES` | Default 7 is slow; 2 recommended |
+For the full architecture, conventions, training-pipeline flow, settings, and
+testing patterns, see **[CLAUDE.md](CLAUDE.md)** — it is the source of truth and
+is kept current.
