@@ -1,3 +1,19 @@
+"""Run a classifier training job locally.
+
+This is the production training recipe: it builds DatasetOptions /
+TrainingOptions / MLflowOptions and runs MLflowTrainingRunner against the
+configured CoralNet + MERMAID data, logging the model and metrics to MLflow.
+
+Run from the repo root with AWS SSO access to the training buckets:
+
+    uv run python scripts/classifier_train.py
+
+It reads AWS credentials from the `wcs` SSO profile and configuration from the
+`.env` in the cwd (see `pyspacer_example/.env`). For the SageMaker equivalent,
+see scripts/launch_training.py and docs/training_at_scale.md. For the script
+ordering overall, see docs/workflow.md.
+"""
+
 import os
 
 import boto3
