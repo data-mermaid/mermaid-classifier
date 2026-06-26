@@ -1,6 +1,5 @@
 # Utilities related to benthic attribute info from the MERMAID API.
 
-import csv
 import dataclasses
 import functools
 import json
@@ -253,39 +252,3 @@ class CoralNetMermaidMapping:
             api_mapping.extend(response_json["results"])
 
         return api_mapping
-
-
-def output_ba_csvs():
-    """
-    Output CSV files of all the benthic attributes into the current directory.
-    Not the most glamorous of visualizations, but can still be handy.
-    """
-    benthic_attrs = BenthicAttributeLibrary()
-
-    raw_path = "benthic_attributes_raw.csv"
-    fieldnames = ["id", "name", "parent"]
-    print(f"Writing to: {raw_path}")
-    with open(raw_path, "w", newline="", encoding="utf-8") as raw_f:
-        writer = csv.DictWriter(raw_f, fieldnames=fieldnames)
-        writer.writeheader()
-        for result in benthic_attrs.raw_results:
-            writer.writerow({k: v for k, v in result.items() if k in fieldnames})
-
-    results_ordered_by_parent = benthic_attrs.get_descendants(None)
-    ordered_path = "benthic_attributes_ordered_by_parent.csv"
-    fieldnames = ["name", "parent_name"]
-    print(f"Writing to: {ordered_path}")
-    with open(ordered_path, "w", newline="", encoding="utf-8") as ordered_f:
-        writer = csv.DictWriter(ordered_f, fieldnames=fieldnames)
-        writer.writeheader()
-        for result in results_ordered_by_parent:
-            if result["parent"] is None:
-                parent_name = None
-            else:
-                parent_name = benthic_attrs.id_to_name(str(result["parent"]))
-            writer.writerow(
-                {
-                    "name": result["name"],
-                    "parent_name": parent_name,
-                }
-            )
