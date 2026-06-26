@@ -16,15 +16,11 @@ import time
 import typing
 
 import duckdb
-try:
-    import mlflow
-    MLFLOW_IMPORT_ERROR = None
-except ImportError as err:
-    MLFLOW_IMPORT_ERROR = err
+import mlflow
+from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 import pandas as pd
 import psutil
 from s3fs.core import S3FileSystem
-from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
 from spacer.aws import get_s3_resource
 from spacer.data_classes import DataLocation, ImageLabels
@@ -1865,10 +1861,6 @@ class MLflowTrainingRunner(TrainingRunner):
         mlflow_options: MLflowOptions = None,
         **kwargs
     ):
-        if MLFLOW_IMPORT_ERROR:
-            # MLflow couldn't be imported.
-            raise MLFLOW_IMPORT_ERROR
-
         # Normalize Settings -> SPACER_*/MLFLOW_* env vars *before* the first
         # mlflow_connect() below, which needs MLFLOW_HTTP_REQUEST_MAX_RETRIES to
         # be set (otherwise a failed initial connection retries far more times
