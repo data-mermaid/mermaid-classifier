@@ -371,7 +371,7 @@ class MermaidTrainer(ClassifierTrainer):
             all_preds.append(preds)
             all_y.append(y_arr)
 
-        predictions = np.vstack(all_preds)  # (N, K)
+        predictions = np.vstack(all_preds)  # (N, K) multiclass; (N, 1) binary
         y = np.concatenate(all_y)           # (N,)
 
         # _fit_calibrator is a private sklearn API used here for memory
