@@ -1,6 +1,7 @@
 """
 Get/generate and show annotations for a specified image.
 """
+import atexit
 from collections import defaultdict
 import csv
 from io import BytesIO, StringIO
@@ -8,6 +9,7 @@ from operator import itemgetter
 import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 from urllib.parse import urlparse
 import urllib.request
@@ -60,12 +62,16 @@ def _download_pair_to_tempdir(
 ) -> tuple[Path, Path]:
     """Download an S3 model.pt + model.json pair into one temp dir."""
     tmp_dir = Path(tempfile.mkdtemp(prefix='clf_artifact_'))
+    # mkdtemp() isn't auto-cleaned, and the pair must outlive this call (the
+    # caller loads them immediately after), so reclaim the dir at process exit.
+    atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
     paths = []
     for loc, name in [(pt_loc, 'model.pt'), (json_loc, 'model.json')]:
         storage = storage_factory(loc.storage_type, loc.bucket_name)
         stream = storage.load(loc.key)
         dest = tmp_dir / name
-        dest.write_bytes(stream.getvalue())
+        # getbuffer() writes the stream's bytes without an extra full copy.
+        dest.write_bytes(stream.getbuffer())
         paths.append(dest)
     return paths[0], paths[1]
 
@@ -222,29 +228,33 @@ class AnnotationRun:
             predictor = load_predictor(model_pt, model_json)
 
             print("Extracting features and classifying...")
-            image = load_image(self.image_loc)
+            loaded_image = load_image(self.image_loc)
             extractor = EfficientNetExtractor(
                 data_locations=dict(weights=weights_loc),
             )
             rowcols = list(annotations.keys())
-            check_extract_inputs(image, rowcols, self.image_loc.key)
-            features, _ = extractor(image, rowcols)
+            check_extract_inputs(loaded_image, rowcols, self.image_loc.key)
+            features, _ = extractor(loaded_image, rowcols)
 
             predictions_per_point = max(num_predictions_to_save, 1)
 
-            # Get top label(s) and score(s) for each point
+            # Get top label(s) and score(s) for each point. predict_proba
+            # takes an (N, input_dim) batch, so classify every point in one
+            # call instead of once per point.
             labels = predictor.classes
-            for row, column in rowcols:
-                proba = predictor.predict_proba(
-                    features.get_array((row, column))).tolist()[0]
-                top_predictions = sorted(
-                    zip(labels, proba), key=itemgetter(1), reverse=True)
-                annotations[(row, column)] = [
-                    label for label, score
-                    in top_predictions[:predictions_per_point]]
-                scores[(row, column)] = [
-                    score for label, score
-                    in top_predictions[:predictions_per_point]]
+            if rowcols:
+                feature_batch = np.vstack(
+                    [features.get_array(rowcol) for rowcol in rowcols])
+                proba_batch = predictor.predict_proba(feature_batch).tolist()
+                for (row, column), proba in zip(rowcols, proba_batch):
+                    top_predictions = sorted(
+                        zip(labels, proba), key=itemgetter(1), reverse=True)
+                    annotations[(row, column)] = [
+                        label for label, score
+                        in top_predictions[:predictions_per_point]]
+                    scores[(row, column)] = [
+                        score for label, score
+                        in top_predictions[:predictions_per_point]]
             print("Finished classifying")
 
         else:
