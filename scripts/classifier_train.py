@@ -1,3 +1,19 @@
+"""Run a classifier training job locally.
+
+This is the production training recipe: it builds DatasetOptions /
+TrainingOptions / MLflowOptions and runs MLflowTrainingRunner against the
+configured CoralNet + MERMAID data, logging the model and metrics to MLflow.
+
+Run from the repo root with AWS SSO access to the training buckets:
+
+    uv run python scripts/classifier_train.py
+
+It reads AWS credentials from the `wcs` SSO profile and configuration from the
+`.env` in the cwd (see `pyspacer_example/.env`). For the SageMaker equivalent,
+see scripts/launch_training.py and docs/training_at_scale.md. For the script
+ordering overall, see docs/workflow.md.
+"""
+
 import os
 
 import boto3
@@ -32,8 +48,8 @@ from mermaid_classifier.training.subsample import SubsampleOptions
 
 # Production recipe, validated on the 20-source / 80-class
 # tiela77_top100_min1k dataset (~1.77M annotations after rollup).
-# See docs/hidden-layer-experiments.md (architecture / training budget)
-# and docs/balancing-experiments.md (label balancing) for the underlying
+# See docs/research/hidden-layer-experiments.md (architecture / training budget)
+# and docs/research/balancing-experiments.md (label balancing) for the underlying
 # experiments and observed metric tradeoffs.
 
 # Full-dataset annotation count after rollup + included-labels filter,
@@ -76,7 +92,7 @@ if __name__ == "__main__":
         training_options=TrainingOptions(
             # The MLP head architecture and learning rate are fixed at the
             # production values inside MermaidTrainer (see
-            # docs/hidden-layer-experiments.md). ``epochs=40`` is a
+            # docs/research/hidden-layer-experiments.md). ``epochs=40`` is a
             # generous upper bound; ``early_stopping_patience=3`` against
             # ``epoch/val_loss`` lets each run find its own minimum
             # (typically epoch 14-29 on this data).

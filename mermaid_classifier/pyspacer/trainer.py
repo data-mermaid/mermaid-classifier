@@ -113,7 +113,7 @@ class MermaidTrainer(ClassifierTrainer):
         # Initialize classifier and train
         with _log_entry_and_exit("training MLP"):
             # Production MLP architecture from the hidden-layer
-            # experiments (see docs/hidden-layer-experiments.md).
+            # experiments (see docs/research/hidden-layer-experiments.md).
             # random_state=0 keeps weight init deterministic across runs.
             clf = TorchMLPClassifier(
                 hidden_layer_sizes=(500, 300, 100),

@@ -40,7 +40,7 @@ def training_batch_size(
     sklearn_copy_bytes = _FEATURE_BYTES  # worst-case full copy
 
     # MLP hidden_layer_sizes is fixed at the production (500, 300, 100)
-    # architecture (see MermaidTrainer / docs/hidden-layer-experiments.md);
+    # architecture (see MermaidTrainer / docs/research/hidden-layer-experiments.md);
     # num_classes is the output layer. sklearn's backprop holds both
     # forward activations and backprop deltas (plus gradient buffers) per
     # layer, so per-sample activation memory is roughly double the

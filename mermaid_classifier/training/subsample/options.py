@@ -12,7 +12,7 @@ Two strategies are wired in:
 
 * ``'balanced'`` -- equalize counts across classes. Each class is capped
   at ``total_annotations / num_classes``. This is the production recipe
-  (see ``docs/balancing-experiments.md``): at full-data scale most
+  (see ``docs/research/balancing-experiments.md``): at full-data scale most
   classes fall below the per-class target and are kept in full, so the
   allocator mostly just caps the dominant classes, with ``min_per_class``
   flooring the rare ones.
