@@ -208,15 +208,6 @@ def duckdb_batched_rows(
             # Empty dataframe; no more chunks left.
             break
 
-        # Some ways to inspect the pandas dataframe in a debugger:
-        # dataframe
-        # dataframe.columns    # Column names
-        # dataframe.iloc[0]    # First row
-        # set([row['growth_form_name']
-        #     for _index, row in dataframe.iterrows()])
-        # [(row['row'], row['col']) for _index, row in dataframe.iterrows()
-        #  if row['image_id'] == '0032dba6-8357-42e2-bace-988f99032286']
-
         for _index, row in dataframe.iterrows():
             # With this generator behavior, the chunkifying detail
             # is invisible to the caller.
