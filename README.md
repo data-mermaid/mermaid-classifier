@@ -60,9 +60,10 @@ extra you need, e.g. `pip install "mermaid-classifier[inference] @ git+https://g
 
 Training a classifier (or running inference) needs a few configuration values —
 S3 buckets, the feature-extractor weights location, the MLflow tracking server,
-etc. Provide them with an `.env` file in the directory you run from, or as
-environment variables. Copy [`.env.example`](.env.example) at the repo root for
-a full, annotated set.
+etc. Provide them with an `.env` file in the directory you run from (copy
+[`.env.example`](.env.example) from the repo root to `.env` and fill it in —
+`Settings` only reads a file literally named `.env`), or set the values as
+environment variables.
 
 ### Installation environment
 
