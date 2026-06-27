@@ -1,6 +1,6 @@
 # mermaid-classifier
 
-This Python repository enables data scientists to experiment with PySpacer-based classifiers. It also has MERMAID-relevant utilities which aren't specific to the type of classifier being developed.
+Everything needed to **train** the MERMAID coral-reef image classifier and **deploy it for inference**: the PySpacer-based training pipeline and the portable, pickle-free model artifact (and loader) it produces. Also includes shared MERMAID taxonomy/data utilities used along the way.
 
 
 ## Overview
@@ -59,8 +59,9 @@ extra you need, e.g. `pip install "mermaid-classifier[inference] @ git+https://g
 ### Configuration
 
 Training a classifier (or running inference) needs a few configuration values —
-S3 buckets, the feature-extractor weights location, the MLflow tracking URI,
-etc. Provide them with an `.env` file in the directory you run from (copy
+S3 buckets, the feature-extractor weights location, the MLflow tracking
+destination (`MLFLOW_TRACKING_SERVER` — note: not MLflow's standard
+`MLFLOW_TRACKING_URI`), etc. Provide them with an `.env` file in the directory you run from (copy
 [`.env.example`](.env.example) from the repo root to `.env` and fill it in —
 `Settings` only reads a file literally named `.env`), or set the values as
 environment variables.
