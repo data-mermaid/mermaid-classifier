@@ -120,6 +120,15 @@ render from MLflow runs via `scripts/generate_report.py` +
 - **Test isolation**: `override_settings()` / `SettingsOverride` patch settings;
   `NoInitDataset` bypasses the S3/API-hitting `TrainingDataset.__init__`;
   `CoralNetMermaidMapping._download_mapping` is mocked.
+- **Config dirs are repo-root-relative**: a committed training config is a
+  `sagemaker/configs/<name>/` dir (`training_config.yaml` + sibling
+  `sources.csv` / `rollups.csv` / `included_labels.csv`). Scripts run from the
+  repo root; both `classifier_train.py` (local) and the SageMaker launcher load
+  a config by repo-root-relative `--config-dir` and share that one
+  `training_config.yaml` (single source of truth — no recipe duplication).
+  `generate_training_config.py` writes there by default, but its raw *inputs*
+  (the curated source list, the Drive-exported label mapping) live in the
+  surrounding workspace, not this repo.
 
 ## Releasing a classifier version
 
