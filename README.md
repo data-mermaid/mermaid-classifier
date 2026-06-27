@@ -59,7 +59,7 @@ extra you need, e.g. `pip install "mermaid-classifier[inference] @ git+https://g
 ### Configuration
 
 Training a classifier (or running inference) needs a few configuration values —
-S3 buckets, the feature-extractor weights location, the MLflow tracking server,
+S3 buckets, the feature-extractor weights location, the MLflow tracking URI,
 etc. Provide them with an `.env` file in the directory you run from (copy
 [`.env.example`](.env.example) from the repo root to `.env` and fill it in —
 `Settings` only reads a file literally named `.env`), or set the values as
@@ -73,14 +73,14 @@ AWS SageMaker advantages over local:
 
 - Easily and securely access private S3 files through spaces, as long as the SageMaker domain is set up with an applicable Space execution role.
 - Web-based IDE spaces with real-time collaboration.
-- MLflow tracking servers can be shared by everyone who can access the SageMaker domain.
+- The always-running SageMaker MLflow App is shared by everyone who can access the SageMaker domain (point `MLFLOW_TRACKING_SERVER` at its ARN — no server to start).
 - Default distribution image already has many Python packages relevant to this project. This could be preferable over maintaining a 3 GB local venv.
 
 Local env advantages over SageMaker:
 
 - Don't have to worry about the AWS web session expiring every so often, and don't need constant internet to keep working.
 - More IDE choices, not just VSCode (Code Editor spaces) or JupyterLab.
-- Can run a local MLflow tracking server with very low startup and cost.
+- MLflow logs to a local SQLite DB with no tracking server to run; start the MLflow UI only when you want to browse results.
 - Easier to customize and persist the packages that are installed in the environment.
 
 If you're on a local dev machine and accessing public S3 files, the `AWS_ANONYMOUS` setting may be useful.
