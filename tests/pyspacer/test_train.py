@@ -239,9 +239,9 @@ class ReadMermaidDataTest(BaseTrainTest):
         dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM cn_annotations_df")
 
         with tempfile.NamedTemporaryFile(delete_on_close=False) as parquet_f:
-            # Write a couple of mermaid annotations to a parquet file.
+            # Write a couple of MERMAID annotations to a parquet file.
             # One with growth form, one without (this is represented in
-            # mermaid parquet as string 'None').
+            # MERMAID parquet as string 'None').
             mermaid_parquet_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
                 {
                     "image_id": [same_char_uuid("3"), same_char_uuid("4")],
@@ -281,7 +281,7 @@ class ReadMermaidDataTest(BaseTrainTest):
             list(result_tuples[1]),
             [same_char_uuid("3"), 3000, 2200, same_char_uuid("5"), same_char_uuid("7")],
         )
-        # mermaid 'None' growth form should have become ''.
+        # MERMAID 'None' growth form should have become ''.
         self.assertListEqual(
             list(result_tuples[2]),
             [same_char_uuid("4"), 500, 1800, same_char_uuid("6"), ""],
