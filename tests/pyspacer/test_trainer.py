@@ -101,15 +101,13 @@ class CalibrateInBatchesTest(unittest.TestCase):
 
         return clf_standard, clf_batched, X_ref
 
-    def test_mlp_multiclass_calibration_equivalence(self):
-        """MLPClassifier with 5 classes: batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways(5)
-        self._assert_calibration_equivalent(std, batched, X)
-
-    def test_mlp_binary_calibration_equivalence(self):
-        """MLPClassifier with 2 classes (binary edge case): batch == standard."""
-        std, batched, X = self._train_and_calibrate_both_ways(2)
-        self._assert_calibration_equivalent(std, batched, X)
+    def test_mlp_calibration_equivalence(self):
+        """Batched calibration matches standard, for multiclass and the binary edge case."""
+        # 2 classes exercises sklearn's binary calibration path; 5 the multiclass path.
+        for n_classes in (5, 2):
+            with self.subTest(n_classes=n_classes):
+                std, batched, X = self._train_and_calibrate_both_ways(n_classes)
+                self._assert_calibration_equivalent(std, batched, X)
 
     def _assert_calibration_equivalent(self, clf_std, clf_batched, X_test):
         """

@@ -3,7 +3,6 @@
 import unittest
 
 import matplotlib.pyplot as plt
-from spacer.data_classes import ValResults
 
 from mermaid_classifier.pyspacer.metrics._context import (
     MetricsContext,
@@ -15,44 +14,22 @@ from mermaid_classifier.pyspacer.metrics.classification import (
     compute_confusion_matrices,
     compute_precision_recall_f1,
 )
-
-
-class _MockBALibrary:
-    """Minimal mock of BenthicAttributeLibrary for testing."""
-
-    def bagf_id_to_name(self, bagf_id, gf_library):
-        return f"name_{bagf_id}"
-
-
-class _MockGFLibrary:
-    """Minimal mock of GrowthFormLibrary for testing."""
-
-    pass
-
-
-def _make_val_results(gt_indices, est_indices, classes):
-    """Helper to build a ValResults with dummy scores."""
-    scores = [1.0] * len(gt_indices)
-    return ValResults(
-        scores=scores,
-        gt=gt_indices,
-        est=est_indices,
-        classes=classes,
-    )
-
-
-def _format_metric(value):
-    return round(float(value), 3)
+from pyspacer.metrics_test_helpers import (
+    MockBALibrary,
+    MockGFLibrary,
+    format_metric,
+    make_val_results,
+)
 
 
 def _make_ctx(gt_indices, est_indices, classes):
     """Build a MetricsContext from simple index lists."""
-    val_results = _make_val_results(gt_indices, est_indices, classes)
+    val_results = make_val_results(gt_indices, est_indices, classes)
     return MetricsContext(
         val_results=val_results,
-        ba_library=_MockBALibrary(),
-        gf_library=_MockGFLibrary(),
-        format_func=_format_metric,
+        ba_library=MockBALibrary(),
+        gf_library=MockGFLibrary(),
+        format_func=format_metric,
     )
 
 
@@ -268,16 +245,16 @@ class MetricsContextValidationTest(unittest.TestCase):
         """Build a MetricsContext with a pre-built ValResults."""
         return MetricsContext(
             val_results=val_results,
-            ba_library=ba_library or _MockBALibrary(),
-            gf_library=_MockGFLibrary(),
-            format_func=_format_metric,
+            ba_library=ba_library or MockBALibrary(),
+            gf_library=MockGFLibrary(),
+            format_func=format_metric,
         )
 
     def test_empty_gt_raises(self):
         """Empty ground truth should fail validation."""
         # Build a valid ValResults, then clear gt/est to simulate
         # an edge case (ValResults.__init__ validates non-empty).
-        val_results = _make_val_results(gt_indices=[0], est_indices=[0], classes=["a::"])
+        val_results = make_val_results(gt_indices=[0], est_indices=[0], classes=["a::"])
         val_results.gt = []
         val_results.est = []
         ctx = self._make_ctx_with_val_results(val_results)
@@ -291,7 +268,7 @@ class MetricsContextValidationTest(unittest.TestCase):
             def bagf_id_to_name(self, bagf_id, gf_library):
                 raise KeyError(f"Unknown ID: {bagf_id}")
 
-        val_results = _make_val_results(gt_indices=[0], est_indices=[0], classes=["unknown::"])
+        val_results = make_val_results(gt_indices=[0], est_indices=[0], classes=["unknown::"])
         ctx = self._make_ctx_with_val_results(val_results, ba_library=_BrokenBALibrary())
         with self.assertRaises(MetricsContextError):
             ctx.validate()
@@ -308,7 +285,7 @@ class MetricsContextValidationTest(unittest.TestCase):
     def test_out_of_range_class_index_raises(self):
         """Class indices beyond len(classes) should fail validation."""
         # Build valid ValResults, then inject an out-of-range index.
-        val_results = _make_val_results(gt_indices=[0], est_indices=[0], classes=["a::"])
+        val_results = make_val_results(gt_indices=[0], est_indices=[0], classes=["a::"])
         val_results.gt = [0, 5]
         val_results.est = [0, 0]
         val_results.scores = [1.0, 1.0]
