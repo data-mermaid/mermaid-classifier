@@ -97,8 +97,12 @@ taxonomy:
 
 Post-training metric groups (classification, calibration, cover, probability,
 ranking, taxonomic, per_source) orchestrated by `MetricsCoordinator` /
-`MetricsContext`. HTML reports render from MLflow runs via
-`scripts/generate_report.py` + `scripts/report_template.html.j2`.
+`MetricsContext`. The coordinator iterates a declarative registry
+(`registry.py`: the ordered `METRIC_GROUPS` list + `applicable_metric_groups`,
+which gates groups on available context like `dataset`/`val_proba`), so adding a
+metric group is a one-line edit there, not a coordinator change. HTML reports
+render from MLflow runs via `scripts/generate_report.py` +
+`scripts/report_template.html.j2`.
 
 ## Conventions and gotchas
 
