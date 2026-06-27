@@ -49,7 +49,13 @@ from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT = REPO_ROOT.parent
 
-DEFAULT_OUTPUT_DIR = WORKSPACE_ROOT / "sagemaker" / "configs" / "coralnet_top108"
+# Output goes in-repo so the generated config dir can be committed under
+# sagemaker/configs/ and consumed repo-root-relative by classifier_train.py and
+# the SageMaker launcher. The raw INPUTS, by contrast, live in the surrounding
+# workspace and are not committed to this repo (the curated CoralNet source list
+# and the Google-Drive-exported label mapping). Override any of these with the
+# --output-dir / --sources-csv / --labels-csv flags.
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "sagemaker" / "configs" / "coralnet_top108"
 DEFAULT_SOURCES_CSV = WORKSPACE_ROOT / "sagemaker" / "sources" / "CoralNetSourcesKept.csv"
 DEFAULT_LABELS_CSV = (
     WORKSPACE_ROOT

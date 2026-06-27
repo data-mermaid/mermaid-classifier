@@ -1,110 +1,96 @@
-"""Run a classifier training job locally.
+"""Run a classifier training job locally from a committed config.
 
-This is the production training recipe: it builds DatasetOptions /
-TrainingOptions / MLflowOptions and runs MLflowTrainingRunner against the
-configured CoralNet + MERMAID data, logging the model and metrics to MLflow.
+Loads a committed training config — the same ``training_config.yaml`` + sibling
+CSVs the SageMaker path consumes — and runs it locally, so local and SageMaker
+training share a single source of truth and cannot drift. This mirrors
+``scripts/sagemaker_train_entrypoint.py``: load config → ``apply_env()`` →
+``build_options()`` → run.
 
 Run from the repo root with AWS SSO access to the training buckets:
 
     uv run python scripts/classifier_train.py
+    uv run python scripts/classifier_train.py --config-dir sagemaker/configs/example
 
-It reads AWS credentials from the `wcs` SSO profile and configuration from the
-`.env` in the cwd (see `pyspacer_example/.env`). For the SageMaker equivalent,
-see scripts/launch_training.py and docs/training_at_scale.md. For the script
-ordering overall, see docs/workflow.md.
+Defaults to the committed ``coralnet_top108_best`` config. Config dirs are
+repo-root-relative (``sagemaker/configs/<name>/``). Local AWS credentials come
+from the ``wcs`` SSO profile; the MLflow tracking server comes from the ``.env``
+in the cwd (see ``pyspacer_example/.env``); the chosen config's ``env`` block
+supplies bucket names / weights location. For the SageMaker equivalent see
+``scripts/launch_training.py`` + ``docs/training_at_scale.md``; for the overall
+script order see ``docs/workflow.md``.
 """
 
+from __future__ import annotations
+
+import argparse
 import os
+from pathlib import Path
 
 import boto3
 
-# Resolve AWS SSO credentials before importing mermaid_classifier,
-# whose Settings() object is created at import time and reads env vars then.
-os.environ["AWS_PROFILE"] = "wcs"
-session = boto3.Session()
-credentials = session.get_credentials()
-if credentials:
-    creds = credentials.get_frozen_credentials()
-    os.environ["SPACER_AWS_ACCESS_KEY_ID"] = creds.access_key
-    os.environ["SPACER_AWS_SECRET_ACCESS_KEY"] = creds.secret_key
-    if creds.token:
-        os.environ["SPACER_AWS_SESSION_TOKEN"] = creds.token
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG_DIR = REPO_ROOT / "sagemaker" / "configs" / "coralnet_top108_best"
+CONFIG_FILENAME = "training_config.yaml"
 
-# Normalize Settings -> SPACER_*/MLFLOW_* env vars now (this used to be an import
-# side effect of mermaid_classifier.pyspacer). MLflowTrainingRunner.__init__ also
-# calls this; it is idempotent.
-from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
 
-set_env_vars_for_packages()
+def _resolve_local_aws_credentials() -> None:
+    """Resolve AWS SSO credentials into the SPACER_AWS_* env vars (local-dev only).
 
-from mermaid_classifier.pyspacer.options import (
-    DatasetOptions,
-    MLflowOptions,
-    TrainingOptions,
-)
-from mermaid_classifier.pyspacer.runner import MLflowTrainingRunner
-from mermaid_classifier.training.sample_weighting import SampleWeightingOptions
-from mermaid_classifier.training.subsample import SubsampleOptions
+    On SageMaker an instance role supplies credentials; locally we read the
+    ``wcs`` SSO profile and expose them under the ``SPACER_AWS_*`` names that
+    pyspacer's ``Settings()`` reads. Must run before pyspacer is imported.
+    """
+    os.environ["AWS_PROFILE"] = "wcs"
+    credentials = boto3.Session().get_credentials()
+    if credentials:
+        creds = credentials.get_frozen_credentials()
+        os.environ["SPACER_AWS_ACCESS_KEY_ID"] = creds.access_key
+        os.environ["SPACER_AWS_SECRET_ACCESS_KEY"] = creds.secret_key
+        if creds.token:
+            os.environ["SPACER_AWS_SESSION_TOKEN"] = creds.token
 
-# Production recipe, validated on the 20-source / 80-class
-# tiela77_top100_min1k dataset (~1.77M annotations after rollup).
-# See docs/research/hidden-layer-experiments.md (architecture / training budget)
-# and docs/research/balancing-experiments.md (label balancing) for the underlying
-# experiments and observed metric tradeoffs.
 
-# Full-dataset annotation count after rollup + included-labels filter,
-# measured 2026-04-30. Used as the budget for `balanced` subsampling so
-# that classes smaller than the implied per-class target (~22K) are kept
-# in full while the few dominant classes are capped.
-FULL_DATA_TOTAL = 1_770_000
+def _resolve_runner_factory():
+    """Return ``MLflowTrainingRunner`` (heavy import; factored out so tests can patch it)."""
+    from mermaid_classifier.pyspacer.runner import MLflowTrainingRunner
+
+    return MLflowTrainingRunner
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Run a committed training config locally.")
+    parser.add_argument(
+        "--config-dir",
+        default=str(DEFAULT_CONFIG_DIR),
+        help=(
+            "Directory containing training_config.yaml and its sibling CSVs, "
+            "repo-root-relative (e.g. sagemaker/configs/example). "
+            f"Default: {DEFAULT_CONFIG_DIR.relative_to(REPO_ROOT)}."
+        ),
+    )
+    args = parser.parse_args(argv)
+    config_dir = Path(args.config_dir).resolve()
+
+    # Resolve local AWS creds before any pyspacer import (Settings() reads env
+    # at import time).
+    _resolve_local_aws_credentials()
+
+    # Load the committed config and apply its env block BEFORE importing
+    # pyspacer — same ordering as scripts/sagemaker_train_entrypoint.py.
+    from mermaid_classifier.sagemaker.config import TrainingRunConfig
+
+    config = TrainingRunConfig.from_yaml_path(config_dir / CONFIG_FILENAME)
+    config.apply_env()
+
+    dataset_options, training_options, mlflow_options = config.build_options(config_dir=config_dir)
+
+    runner_class = _resolve_runner_factory()
+    runner_class(
+        dataset_options=dataset_options,
+        training_options=training_options,
+        mlflow_options=mlflow_options,
+    ).run()
 
 
 if __name__ == "__main__":
-    runner = MLflowTrainingRunner(
-        dataset_options=DatasetOptions(
-            # Specifying False here means you're only training on CoralNet sources.
-            include_mermaid=True,
-            coralnet_sources_csv="../sagemaker/configs/tiela77_top108_hierarchy/sources.csv",
-            label_rollup_spec_csv="../sagemaker/configs/tiela77_top108_hierarchy/rollups.csv",
-            included_labels_csv="../sagemaker/configs/tiela77_top108_hierarchy/included_labels.csv",
-            # Local-dev alternative for fast smoke runs (10 sources):
-            # coralnet_sources_csv='../sagemaker/sources/CoralNetSourcesFirst10.csv',
-            drop_growthforms=False,
-            # Class-balanced subsampling. At full-data scale most of the
-            # 80 classes have fewer rows than total/num_classes, so the
-            # allocator mostly just caps the dominant classes (Turf
-            # algae, Sand, Porites, Bare substrate) while keeping the
-            # rest in full. ``min_per_class=200`` floors rare classes so
-            # they aren't dropped entirely. Realized subsample on the
-            # tiela77 dataset is ~457K rows.
-            subsample=SubsampleOptions(
-                strategy="balanced",
-                total_annotations=FULL_DATA_TOTAL,
-                min_per_class=200,
-            ),
-            # Sample weighting via the effective-number-of-samples
-            # formulation (the sole strategy after the balancing sweep).
-            # Pass None to disable weighting entirely.
-            weighting=SampleWeightingOptions(
-                weight_ratio_cap=5000.0,  # bound max:min ratio of weights
-            ),
-        ),
-        training_options=TrainingOptions(
-            # The MLP head architecture and learning rate are fixed at the
-            # production values inside MermaidTrainer (see
-            # docs/research/hidden-layer-experiments.md). ``epochs=40`` is a
-            # generous upper bound; ``early_stopping_patience=3`` against
-            # ``epoch/val_loss`` lets each run find its own minimum
-            # (typically epoch 14-29 on this data).
-            epochs=40,
-            early_stopping_patience=3,
-        ),
-        mlflow_options=MLflowOptions(
-            experiment_name="pyspacer-beta-test",
-            model_name="GregTest",
-            # Logs all input annotations to MLflow (in addition to the
-            # always-logged validation split). Also possible to just log a subset.
-            # extra_annotations_to_log='all',
-        ),
-    )
-    runner.run()
+    main()

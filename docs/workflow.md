@@ -26,9 +26,12 @@ Most steps have both a local path and a SageMaker path:
 
 **When:** Whenever you need a new or updated CoralNet→MERMAID label-mapping
 directory (rollup CSV + included-labels CSV). Run this once per taxonomy
-revision, writing the output into an in-repo config directory so it can be
-committed and referenced by downstream scripts. Pass `--output-dir` explicitly
-— the default points outside this repo (at the surrounding workspace).
+revision. The output is written in-repo under `sagemaker/configs/` (default
+`coralnet_top108`) so it can be committed and consumed repo-root-relative by
+downstream scripts; pass `--output-dir` to choose a different config name. Its
+raw inputs — the curated CoralNet source list and the Drive-exported label
+mapping — live in the surrounding workspace (not this repo); override them with
+`--sources-csv` / `--labels-csv`.
 
 ```bash
 uv run python scripts/generate_training_config.py \
@@ -58,7 +61,7 @@ Choose one path based on scale:
 
 | Path | Script | When |
 | - | - | - |
-| **Local** | `classifier_train.py` | Production training recipe — runs `MLflowTrainingRunner` with the configured CoralNet + MERMAID data and logs to MLflow. Requires AWS SSO. |
+| **Local** | `classifier_train.py` | Loads a committed config (default `sagemaker/configs/coralnet_top108_best`; `--config-dir` picks another) and runs it locally via `MLflowTrainingRunner` — the *same* `training_config.yaml` the SageMaker path consumes, so local and SageMaker share one recipe. Requires AWS SSO. |
 | **SageMaker** | `launch_training.py` + `sagemaker_train_entrypoint.py` | Launches a SageMaker TrainingJob via an Estimator. The entrypoint reads a YAML config and runs `MLflowTrainingRunner` inside the container. See [training_at_scale.md](training_at_scale.md). |
 
 ---
