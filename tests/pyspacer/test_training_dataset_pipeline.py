@@ -40,11 +40,8 @@ from unittest import mock
 
 import pandas as pd
 
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions,
-    LabelFilter,
-    LabelRollupSpec,
-)
+from mermaid_classifier.pyspacer.label_specs import LabelFilter, LabelRollupSpec
+from mermaid_classifier.pyspacer.options import DatasetOptions
 from mermaid_classifier.training.subsample import SubsampleOptions
 
 # Reuse scaffolding from the existing test module.
@@ -276,7 +273,7 @@ class PrepAnnotationsTest(unittest.TestCase):
 
     def _call_prep(self):
         with mock.patch(
-            "mermaid_classifier.pyspacer.train.download_features_parallel",
+            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
             return_value=set(),
         ):
             return self.dataset.prep_annotations_for_pyspacer()
@@ -342,7 +339,7 @@ class AddTrainingSetNamesTest(unittest.TestCase):
     def test_training_set_column_values_in_expected_set(self):
         """After add_training_set_names, all training_set values are train/ref/val."""
         with mock.patch(
-            "mermaid_classifier.pyspacer.train.download_features_parallel",
+            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
             return_value=set(),
         ):
             labels = self.dataset.prep_annotations_for_pyspacer()
@@ -360,7 +357,7 @@ class AddTrainingSetNamesTest(unittest.TestCase):
     def test_no_null_training_set(self):
         """Every row should have a non-NULL training_set after the call."""
         with mock.patch(
-            "mermaid_classifier.pyspacer.train.download_features_parallel",
+            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
             return_value=set(),
         ):
             labels = self.dataset.prep_annotations_for_pyspacer()
@@ -375,7 +372,7 @@ class AddTrainingSetNamesTest(unittest.TestCase):
     def test_train_ref_val_counts_match_labels(self):
         """Row counts per set in the table match the label counts from prep."""
         with mock.patch(
-            "mermaid_classifier.pyspacer.train.download_features_parallel",
+            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
             return_value=set(),
         ):
             labels = self.dataset.prep_annotations_for_pyspacer()

@@ -37,12 +37,12 @@ from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
 
 set_env_vars_for_packages()
 
-from mermaid_classifier.pyspacer.train import (
+from mermaid_classifier.pyspacer.options import (
     DatasetOptions,
     MLflowOptions,
-    MLflowTrainingRunner,
     TrainingOptions,
 )
+from mermaid_classifier.pyspacer.runner import MLflowTrainingRunner
 from mermaid_classifier.training.sample_weighting import SampleWeightingOptions
 from mermaid_classifier.training.subsample import SubsampleOptions
 

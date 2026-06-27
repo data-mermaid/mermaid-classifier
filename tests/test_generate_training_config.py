@@ -35,7 +35,8 @@ from mermaid_classifier.common.benthic_attributes import (  # noqa: E402
 
 def _canned_urlopen(*args, **kwargs):
     """Tiny but valid responses so module-level imports of
-    `mermaid_classifier.pyspacer.train` don't reach the network."""
+    `mermaid_classifier.pyspacer.dataset` and `mermaid_classifier.pyspacer.runner`
+    don't reach the network."""
     url = args[0] if args else kwargs.get("url", "")
     if isinstance(url, urllib.request.Request):
         url = url.full_url
@@ -52,7 +53,8 @@ def _canned_urlopen(*args, **kwargs):
 
 def setUpModule():
     with mock.patch("urllib.request.urlopen", side_effect=_canned_urlopen):
-        import mermaid_classifier.pyspacer.train  # noqa: F401
+        import mermaid_classifier.pyspacer.dataset  # noqa: F401
+        import mermaid_classifier.pyspacer.runner  # noqa: F401
 
 
 # ---------- Fixture UUIDs ----------

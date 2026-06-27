@@ -11,8 +11,10 @@ import pandas as pd
 from spacer.data_classes import DataLocation, ImageLabels
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
+from mermaid_classifier.pyspacer.dataset import TrainingDataset
+from mermaid_classifier.pyspacer.label_specs import CNSourceFilter
+from mermaid_classifier.pyspacer.options import Artifacts, Sites
 from mermaid_classifier.pyspacer.settings import settings
-from mermaid_classifier.pyspacer.train import Artifacts, CNSourceFilter, Sites, TrainingDataset
 
 
 class SettingsOverride:
@@ -176,7 +178,7 @@ class ReadCoralNetDataTest(BaseTrainTest):
                 # serves its CSV from a local tempfile, so short-circuit
                 # that check.
                 mock.patch(
-                    "mermaid_classifier.pyspacer.train.S3FileSystem",
+                    "mermaid_classifier.pyspacer.dataset.S3FileSystem",
                 ) as mock_s3fs_cls,
             ):
                 mock_download_mapping.return_value = mapping
@@ -448,26 +450,32 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
 class LazyLibraryTest(BaseTrainTest):
     """
     The BA and GF libraries hit the MERMAID API in their __init__. Importing
-    the train module must not trigger those network calls (it used to, via
-    module-level singletons), so unit tests can run offline.
+    the training modules (dataset/runner) must not trigger those network calls
+    (it used to, via module-level singletons), so unit tests can run offline.
     """
 
-    def test_importing_train_does_not_call_the_mermaid_api(self):
-        module_name = "mermaid_classifier.pyspacer.train"
+    def test_importing_training_modules_does_not_call_the_mermaid_api(self):
+        module_names = [
+            "mermaid_classifier.pyspacer.dataset",
+            "mermaid_classifier.pyspacer.runner",
+        ]
 
         def fail(*args, **kwargs):
-            raise AssertionError("Importing train made a network call to the MERMAID API")
+            raise AssertionError("Importing dataset/runner made a network call to the MERMAID API")
 
-        original_module = sys.modules.get(module_name)
+        original_modules = {name: sys.modules.get(name) for name in module_names}
         try:
             with mock.patch("urllib.request.urlopen", side_effect=fail):
                 # Force a fresh import so the module body re-executes.
-                sys.modules.pop(module_name, None)
-                importlib.import_module(module_name)
+                for name in module_names:
+                    sys.modules.pop(name, None)
+                for name in module_names:
+                    importlib.import_module(name)
         finally:
-            # Restore the originally-imported module for other tests.
-            if original_module is not None:
-                sys.modules[module_name] = original_module
+            # Restore the originally-imported modules for other tests.
+            for name, original_module in original_modules.items():
+                if original_module is not None:
+                    sys.modules[name] = original_module
 
 
 class AddTrainingSetNamesTest(BaseTrainTest):

@@ -3,7 +3,7 @@
 Exercises the orchestration path that connects DatasetOptions.weighting
 through to compute_class_weights and the per-class log structure. We
 bypass the real BenthicAttributeLibrary/GrowthFormLibrary by
-monkeypatching the module globals in train.py with fakes — those real
+monkeypatching the module globals in runner.py with fakes — those real
 classes hit the MERMAID API on construction, which is unsuitable for
 unit tests.
 """
@@ -42,7 +42,7 @@ class TrainerPipelineTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # Import train.py with the MERMAID API singletons patched out.
+        # Import runner.py with the MERMAID API singletons patched out.
         # This avoids any network call at import time.
         with (
             mock.patch(
@@ -54,27 +54,27 @@ class TrainerPipelineTest(unittest.TestCase):
                 return_value=FakeGFLibrary({"g1": "GF1", "g2": "GF2"}),
             ),
         ):
-            from mermaid_classifier.pyspacer import train as train_mod
-        cls.train_mod = train_mod
+            from mermaid_classifier.pyspacer import runner as runner_mod
+        cls.runner_mod = runner_mod
 
     def setUp(self):
         # Replace the cached taxonomy-library accessors with ones that
-        # return our fakes, for the duration of each test. train.py calls
+        # return our fakes, for the duration of each test. runner.py calls
         # get_benthic_attribute_library() / get_growth_form_library()
         # (the real ones hit the MERMAID API on construction).
         fake_ba = small_tree()
         fake_gf = FakeGFLibrary({"g1": "GF1", "g2": "GF2"})
         self._patches = [
-            mock.patch.object(self.train_mod, "get_benthic_attribute_library", lambda: fake_ba),
-            mock.patch.object(self.train_mod, "get_growth_form_library", lambda: fake_gf),
+            mock.patch.object(self.runner_mod, "get_benthic_attribute_library", lambda: fake_ba),
+            mock.patch.object(self.runner_mod, "get_growth_form_library", lambda: fake_gf),
         ]
         for p in self._patches:
             p.start()
         self.addCleanup(lambda: [p.stop() for p in self._patches])
 
     def _make_runner(self, weighting):
-        DatasetOptions = self.train_mod.DatasetOptions
-        TrainingRunner = self.train_mod.TrainingRunner
+        DatasetOptions = self.runner_mod.DatasetOptions
+        TrainingRunner = self.runner_mod.TrainingRunner
         return TrainingRunner(
             dataset_options=DatasetOptions(
                 include_mermaid=False,

@@ -217,7 +217,7 @@ class BuildOptionsTest(unittest.TestCase):
 
     def test_build_options_produces_three_dataclasses(self):
         try:
-            from mermaid_classifier.pyspacer.train import (
+            from mermaid_classifier.pyspacer.options import (
                 DatasetOptions,
                 MLflowOptions,
                 TrainingOptions,

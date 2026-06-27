@@ -11,7 +11,7 @@ if typing.TYPE_CHECKING:
         BenthicAttributeLibrary,
         GrowthFormLibrary,
     )
-    from mermaid_classifier.pyspacer.train import TrainingDataset
+    from mermaid_classifier.pyspacer.dataset import TrainingDataset
 
 
 class MetricsContextError(Exception):

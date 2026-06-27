@@ -174,7 +174,7 @@ class TrainingRunConfig(BaseModel):
         -------
         (DatasetOptions, TrainingOptions, MLflowOptions)
         """
-        from mermaid_classifier.pyspacer.train import (
+        from mermaid_classifier.pyspacer.options import (
             DatasetOptions,
             MLflowOptions,
             TrainingOptions,
