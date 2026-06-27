@@ -3,16 +3,12 @@ Train a classifier using feature vectors and annotations
 provided on S3.
 """
 
-import concurrent.futures
-import dataclasses
-import enum
 import os
 import re
 import tempfile
-import time
 import typing
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -23,30 +19,34 @@ import pandas as pd
 import psutil
 from mlflow.tracking.fluent import run_id_to_system_metrics_monitor
 from s3fs.core import S3FileSystem
-from spacer.aws import get_s3_resource
 from spacer.data_classes import DataLocation, ImageLabels
 from spacer.task_utils import SplitMode, preprocess_labels
 
 from mermaid_classifier.common.benthic_attributes import (
-    BAGF_SEP,
     CoralNetMermaidMapping,
     combine_ba_gf,
     get_benthic_attribute_library,
     get_growth_form_library,
     split_ba_gf,
 )
-from mermaid_classifier.common.csv_utils import ColumnSpec, CsvSpec
 from mermaid_classifier.common.duckdb_utils import (
     duckdb_add_column,
-    duckdb_filter_on_column,
     duckdb_grouped_rows,
-    duckdb_replace_column,
     duckdb_temp_table_name,
     duckdb_transform_column,
+)
+from mermaid_classifier.pyspacer._pipeline_utils import (
+    download_features_parallel,
+    section_profiling,
 )
 from mermaid_classifier.pyspacer.inference import (
     export_artifact,
     load_predictor,
+)
+from mermaid_classifier.pyspacer.label_specs import (
+    CNSourceFilter,
+    LabelFilter,
+    LabelRollupSpec,
 )
 from mermaid_classifier.pyspacer.metrics import (
     MetricsContext,
@@ -56,6 +56,13 @@ from mermaid_classifier.pyspacer.metrics._logging import (
     log_dataframe as _log_dataframe,
 )
 from mermaid_classifier.pyspacer.mlflow_model import log_artifact_model
+from mermaid_classifier.pyspacer.options import (
+    Artifacts,
+    DatasetOptions,
+    MLflowOptions,
+    Sites,
+    TrainingOptions,
+)
 from mermaid_classifier.pyspacer.settings import (
     set_env_vars_for_packages,
     settings,
@@ -64,489 +71,13 @@ from mermaid_classifier.pyspacer.settings import (
 from mermaid_classifier.pyspacer.swap_monitor import SwapMonitor
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 from mermaid_classifier.pyspacer.utils import logging_config_for_script, mlflow_connect
-from mermaid_classifier.training.sample_weighting import (
-    SampleWeightingOptions,
-    compute_class_weights,
-)
+from mermaid_classifier.training.sample_weighting import compute_class_weights
 from mermaid_classifier.training.subsample import (
     SubsampleOptions,
     compute_per_class_targets,
 )
 
 logger = logging_config_for_script("train")
-
-
-class Sites(enum.Enum):
-    CORALNET = "coralnet"
-    MERMAID = "mermaid"
-
-
-@contextmanager
-def section_profiling(profiled_sections: list[dict[str, object]], section_name: str):
-    """
-    Performance-profile a wrapped section of code and save the stats
-    (time, memory) as part of the passed structure.
-    """
-    approx_start_date = datetime.now()
-    # This is more accurate, but doesn't have time-of-day info.
-    start_time = time.perf_counter()
-
-    yield
-
-    seconds_elapsed = time.perf_counter() - start_time
-    section_profile: dict[str, object] = {
-        # Name for this section of code.
-        "name": section_name,
-        # Number of seconds.
-        "seconds": format(seconds_elapsed, ".1f"),
-        # Hours, minutes, seconds, ns.
-        "hms": str(timedelta(seconds=seconds_elapsed)),
-        # Date and time, to see if the sections we've chosen skip any
-        # substantial time blocks that we should also be monitoring.
-        "approx_start": approx_start_date.strftime("%b %d %H:%M:%S"),
-        "memory_usage_at_end": f"{psutil.virtual_memory().percent}%",
-    }
-    profiled_sections.append(section_profile)
-
-    logger.debug(
-        f"{section_name} -"
-        f" Elapsed time = {section_profile['hms']},"
-        f" Memory usage at end = {section_profile['memory_usage_at_end']}"
-    )
-
-
-def download_features_parallel(
-    s3_keys: dict[tuple[str, str], str],
-    max_workers: int = 50,
-) -> set[tuple[str, str]]:
-    """
-    Download feature vectors from S3 in parallel.
-
-    Args:
-        s3_keys: Mapping of (bucket, key) → local_path for each file
-            to download.
-        max_workers: Number of concurrent download threads.
-
-    Returns:
-        Set of (bucket, key) tuples that failed to download.
-    """
-    total = len(s3_keys)
-    if total == 0:
-        return set()
-
-    logger.info(f"Downloading {total} feature vectors with {max_workers} workers...")
-
-    # Pre-create all unique parent directories.
-    unique_dirs = {os.path.dirname(local_path) for local_path in s3_keys.values()}
-    for d in unique_dirs:
-        os.makedirs(d, exist_ok=True)
-
-    failed: set[tuple[str, str]] = set()
-    succeeded = 0
-
-    def _download(item: tuple[tuple[str, str], str]) -> None:
-        (bucket, key), local_path = item
-        if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-            return
-        s3 = get_s3_resource()
-        part_path = local_path + ".part"
-        s3.Object(bucket, key).download_file(part_path)  # pyright: ignore[reportAttributeAccessIssue]  # boto3 S3 resource is untyped
-        os.rename(part_path, local_path)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_download, item): item for item in s3_keys.items()}
-        for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
-            (bucket, key), _local_path = futures[future]
-            try:
-                future.result()
-                succeeded += 1
-            except Exception as e:
-                failed.add((bucket, key))
-                logger.warning(f"Failed to download s3://{bucket}/{key}: {e}")
-            if i % 1000 == 0 or i == total:
-                logger.info(
-                    f"Download progress: {i}/{total} ({succeeded} ok, {len(failed)} failed)"
-                )
-
-    return failed
-
-
-class LabelFilter(CsvSpec):
-    """
-    A CSV-defined spec which says what benthic attribute + growth form
-    combos to include in, or exclude from, training data.
-    """
-
-    column_specs = [
-        ColumnSpec(name="ba_id", allow_blank=False),
-        ColumnSpec(name="gf_id"),
-    ]
-
-    def __init__(self, csv_file: typing.TextIO, inclusion: bool = True):
-        self.bagf_set: set[tuple[str, str]] = set()
-
-        super().__init__(csv_file=csv_file)
-
-        self.inclusion = inclusion
-
-    def per_row_init_action(self, row: dict[str, str | None]) -> None:
-        # Ensure absent values are just '', not '' or None.
-        self.bagf_set.add((row["ba_id"] or "", row.get("gf_id") or ""))
-
-    def accepts_bagf(self, bagf_id: str | None) -> bool:
-        if bagf_id is None:
-            return not self.inclusion
-        ba_id, gf_id = split_ba_gf(bagf_id)
-
-        if self.inclusion:
-            return (ba_id, gf_id) in self.bagf_set
-        return (ba_id, gf_id) not in self.bagf_set
-
-    def filter_in_duckdb(
-        self,
-        duck_conn: duckdb.DuckDBPyConnection,
-        duck_table_name: str,
-        ba_id_column_name: str = "benthic_attribute_id",
-        gf_id_column_name: str = "growth_form_id",
-    ):
-        """
-        Filter down the rows in the given DuckDB table, based on the
-        benthic attribute ID and growth form ID columns, and this
-        instance's filter rules.
-        """
-        # Concatenate BA+GF so that we can define the filter as a
-        # single-column operation.
-        # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
-        duck_conn.execute(
-            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-            f" SELECT"
-            f"  *,"
-            f"  concat_ws("
-            f"   '{BAGF_SEP}', {ba_id_column_name}, {gf_id_column_name})"
-            f"   AS bagf_id"
-            f" FROM {duck_table_name}"
-        )
-
-        # Filter.
-        duckdb_filter_on_column(
-            duck_conn=duck_conn,
-            duck_table_name=duck_table_name,
-            column_name="bagf_id",
-            inclusion_func=self.accepts_bagf,
-        )
-
-        # Don't need the combined BAGF column anymore.
-        duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP bagf_id")
-
-
-class LabelRollupSpec(CsvSpec):
-    """
-    A CSV-defined spec which says what BA+GF combos to roll up to
-    what other BA+GF combos.
-    """
-
-    column_specs = [
-        ColumnSpec(name="from_ba_id", allow_blank=False),
-        ColumnSpec(name="from_gf_id"),
-        ColumnSpec(name="to_ba_id", allow_blank=False),
-        ColumnSpec(name="to_gf_id"),
-    ]
-
-    def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
-        self.lookup: dict[tuple[str, str], tuple[str, str]] = {}
-
-        super().__init__(*args, **kwargs)
-
-    def per_row_init_action(self, row: dict[str, str | None]) -> None:
-        # Ensure absent values are just '', not '' or None.
-        key = (row["from_ba_id"] or "", row.get("from_gf_id") or "")
-        value = (row["to_ba_id"] or "", row.get("to_gf_id") or "")
-        self.lookup[key] = value
-
-    def roll_up(self, bagf_id: str | None) -> str | None:
-        if bagf_id is None:
-            return None
-        ba_id, gf_id = split_ba_gf(bagf_id)
-
-        if (ba_id, gf_id) in self.lookup:
-            new_ba_id, new_gf_id = self.lookup[(ba_id, gf_id)]
-            return combine_ba_gf(new_ba_id, new_gf_id)
-        # If this BAGF is not in the rollup spec, then we leave the
-        # BAGF as is.
-        return bagf_id
-
-    def roll_up_in_duckdb(
-        self,
-        duck_conn: duckdb.DuckDBPyConnection,
-        duck_table_name: str,
-        ba_id_column_name: str = "benthic_attribute_id",
-        gf_id_column_name: str = "growth_form_id",
-    ):
-        """
-        Roll up the BA IDs and GF IDs in the given DuckDB table,
-        based on this instance's rollup rules.
-        """
-        # Concatenate BA+GF so that we can define the rollup as a
-        # single-column transform.
-        # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
-        # If there's no GF, then the result is the BA plus separator.
-        duck_conn.execute(
-            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-            f" SELECT"
-            f"  *,"
-            f"  concat_ws("
-            f"   '{BAGF_SEP}', {ba_id_column_name}, {gf_id_column_name})"
-            f"   AS bagf_id"
-            f" FROM {duck_table_name}"
-        )
-
-        # Apply the rollup.
-        duckdb_transform_column(
-            duck_conn=duck_conn,
-            duck_table_name=duck_table_name,
-            column_name="bagf_id",
-            transform_func=self.roll_up,
-        )
-
-        # Propagate rolled-up BAGF back to the split BA-GF fields.
-        # https://duckdb.org/docs/stable/sql/functions/text#split_partstring-separator-index
-        duck_conn.execute(
-            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-            f" SELECT"
-            f"  *,"
-            f"  bagf_id.split_part('{BAGF_SEP}', 1)"
-            f"   AS rollup_{ba_id_column_name},"
-            f"  bagf_id.split_part('{BAGF_SEP}', 2)"
-            f"   AS rollup_{gf_id_column_name}"
-            f" FROM {duck_table_name}"
-        )
-        duckdb_replace_column(
-            duck_conn=duck_conn,
-            duck_table_name=duck_table_name,
-            column_name=ba_id_column_name,
-            new_values_column_name=f"rollup_{ba_id_column_name}",
-        )
-        duckdb_replace_column(
-            duck_conn=duck_conn,
-            duck_table_name=duck_table_name,
-            column_name=gf_id_column_name,
-            new_values_column_name=f"rollup_{gf_id_column_name}",
-        )
-
-        # Don't need the combined BAGF column anymore.
-        duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP bagf_id")
-
-
-class CNSourceFilter(CsvSpec):
-    column_specs = [
-        ColumnSpec(name="id", allow_blank=False),
-    ]
-
-    source_id_list: list[str]
-
-    def __init__(self, csv_file: typing.TextIO):
-        """
-        Initialize using a CSV file that specifies a set
-        of CoralNet sources.
-        """
-        self.source_id_list = []
-
-        super().__init__(csv_file=csv_file)
-
-    def per_row_init_action(self, row: dict[str, str | None]) -> None:
-        self.source_id_list.append(row["id"] or "")
-
-    def is_empty(self) -> bool:
-        return len(self.source_id_list) == 0
-
-
-class Artifacts:
-    """
-    Namespace to make it easier to track artifacts that we're
-    logging later.
-    """
-
-    ba_counts: pd.DataFrame
-    bagf_counts: pd.DataFrame
-    coralnet_label_mapping: pd.DataFrame
-    coralnet_project_stats: pd.DataFrame
-    mermaid_project_stats: pd.DataFrame
-    profiled_sections: list[dict[str, object]]
-    train_summary_stats: dict[str, object]
-    unmapped_labels: pd.DataFrame
-
-
-@dataclasses.dataclass
-class DatasetOptions:
-    """
-    include_mermaid
-
-    Whether to include MERMAID annotations or not. False can be useful for
-    any troubleshooting which is CoralNet specific.
-
-    coralnet_sources_csv
-
-    Local filepath of a CSV file, specifying CoralNet sources to include in
-    the training data.
-    Recognized columns:
-      id -- CoralNet source ID number.
-      Other informational columns can also be present and will be ignored.
-    If not specified, no CoralNet sources are included (so only MERMAID
-    projects go into training).
-
-    drop_growthforms
-
-    If True, discard all growth forms from the training data.
-    This is applied *before* rollups.
-    This can make it easier to define certain large rollup operations,
-    such as rolling everything up to top level categories, since your
-    CSV spec would only need row per BA instead of one row per BA+GF combo.
-
-    label_rollup_spec_csv
-
-    Local filepath of a CSV file, specifying what MERMAID BA+GF combos to
-    roll up to what other BA+GF combos. For example, roll up
-    Acropora::Branching to Hard coral::Branching; or roll up
-    Porites::Massive to Porites (without growth form specified).
-    - If this file isn't specified, then nothing gets rolled up.
-    - Recognized columns:
-      from_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
-        roll up from.
-      from_gf_id -- MERMAID growth form ID (a UUID) of a combo to
-        roll up from.
-      to_ba_id -- MERMAID benthic attribute ID (a UUID) of a combo to
-        roll up to.
-      to_gf_id -- MERMAID growth form ID (a UUID) of a combo to
-        roll up to.
-      Other informational columns can also be present and will be ignored.
-
-    included_labels_csv
-    excluded_labels_csv
-
-    Local filepath of a CSV file, specifying either the MERMAID benthic
-    attribute + growth form combos to accept into the training data
-    (excluding all others), or the ones to leave out from the training
-    data (including all others).
-    - Specify at most one of these files, not both. If neither file is
-      specified, then all MERMAID benthic attribute + growth form combos
-      are accepted.
-    - Mapping from CoralNet label IDs to MERMAID BAGFs, and rolling up
-      BAGFs, will be done before applying these inclusions/exclusions.
-    - Recognized columns:
-      ba_id -- A MERMAID benthic attribute ID (a UUID).
-      gf_id -- A MERMAID growth form ID (a UUID).
-      Other informational columns can also be present and will be ignored.
-    - This is applied *after* rollups.
-
-    ref_val_ratios
-
-    Determines the ratios of training annotations that will go into
-    the train, ref (reference), and val (validation) sets.
-    This is a tuple of two floats. For example, specifying (0.05, 0.1)
-    means 5% into ref, 10% into val, and the rest (85%) into train.
-    PySpacer has an explanation of the three sets here:
-    https://github.com/coralnet/pyspacer?tab=readme-ov-file#train_classifier
-
-    subsample
-
-    Optional per-class subsampling applied after rollup + included-labels
-    filter and before the train/ref/val split. Replaces the old
-    ``annotation_limit`` knob, which was non-deterministic under DuckDB's
-    parallel scans (LIMIT without ORDER BY) and so produced different
-    subsets across processes.
-
-    Today's strategies:
-      * SubsampleOptions(strategy='stratified', total_annotations=N)
-        -- proportional subsample preserving class distribution.
-      * SubsampleOptions(strategy='balanced', total_annotations=N)
-        -- equalize counts per class (capped at available rows).
-    See ``mermaid_classifier.training.subsample`` for the full list and
-    instructions on adding new strategies.
-    """
-
-    include_mermaid: bool = True
-    coralnet_sources_csv: str | None = None
-    drop_growthforms: bool = False
-    label_rollup_spec_csv: str | None = None
-    included_labels_csv: str | None = None
-    excluded_labels_csv: str | None = None
-    ref_val_ratios: tuple[float, float] = (0.1, 0.1)
-    # Optional per-class subsampling. None means use all annotations.
-    # See mermaid_classifier.training.subsample for available strategies
-    # and how to add new ones (e.g. effective-number, log-balanced).
-    subsample: SubsampleOptions | None = None
-    # Optional sample-weighting layer applied to TorchMLP cross-entropy
-    # loss. None means no weighting (vanilla CE). See
-    # mermaid_classifier.training.sample_weighting for available
-    # strategies.
-    weighting: SampleWeightingOptions | None = None
-
-
-@dataclasses.dataclass
-class TrainingOptions:
-    """
-    epochs
-
-    Number of pyspacer training epochs to run. Acts as the upper bound:
-    if ``early_stopping_patience`` is set and triggered, training stops
-    earlier and the best-val_loss classifier is restored.
-
-    The MLP architecture and learning rate are fixed at the production
-    values baked into ``MermaidTrainer`` (``hidden_layer_sizes=(500,
-    300, 100)`` @ ``learning_rate_init=1e-4``; see
-    docs/research/hidden-layer-experiments.md), so they are not configurable here.
-
-    early_stopping_patience
-
-    If set to a positive int, training stops once ``epoch/val_loss`` has
-    not improved for this many consecutive epochs, AND the classifier
-    is restored to its state at the epoch with the lowest val_loss
-    (rather than the latest epoch's state). None disables early
-    stopping; the loop runs for the full ``epochs`` budget.
-
-    Recommended starting value: 3. Lower (1-2) is too jumpy given the
-    natural epoch-to-epoch noise in val_loss; higher (>5) wastes wall
-    time on epochs that are unlikely to recover.
-    """
-
-    epochs: int = 10
-    early_stopping_patience: int | None = None
-
-
-@dataclasses.dataclass
-class MLflowOptions:
-    """
-    experiment_name
-
-    Name of the MLflow experiment in which to register the training run. If not
-    given, then it's taken from the MLFLOW_DEFAULT_EXPERIMENT_NAME setting.
-
-    model_name
-
-    Name of this MLflow experiment run's model. If not given, then a model
-    name will be constructed based on the experiment parameters.
-    The run name is based on this too.
-    This name gets truncated at 50 characters to avoid a potential crash when
-    logging the model.
-
-    extra_annotations_to_log
-
-    In addition to the validation-split annotations (which are always logged
-    as the `annotations_val` artifact so others can independently re-evaluate
-    the model), optionally log a further set of training annotations as an
-    MLflow artifact, in tabular form. One table row per point-annotation.
-    This can serve as a sanity check or debugging aid, but the artifact can
-    get quite large.
-    Supported formats:
-    'all': log all annotations
-    's123': log annotations from CoralNet source of ID 123
-    'i456': log annotations from CoralNet image of ID 456
-    <not specified>: log nothing extra
-    """
-
-    experiment_name: str | None = settings.mlflow_default_experiment_name
-    model_name: str | None = None
-    extra_annotations_to_log: str | None = None
 
 
 class TrainingDataset:
