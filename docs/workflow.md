@@ -47,7 +47,9 @@ EfficientNet extractor over every annotated image in a set of CoralNet sources
 and writes a CoralNet-layout feature-vector bucket
 (`s{source_id}/features/i{image_id}.featurevector`) that training then points at
 via `CORALNET_TRAIN_DATA_BUCKET`. It's the heavy, scale-sensitive step — a large
-CoralNet source set is a lot of images to run through the extractor.
+CoralNet source set is a lot of images to run through the extractor — and the
+**only GPU-accelerated step** (the EfficientNet backbone). Generating the config
+(Step 1), training (Step 3), and inference all run on CPU.
 
 The two scripts do the *same* extraction; they differ in how they run it:
 

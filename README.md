@@ -152,6 +152,12 @@ superset. Trained models ship as a portable, pickle-free **TorchScript head +
 lockstep across both extras because calibration semantics can shift between
 releases.
 
+**Compute:** the classifier this repo trains and serves runs entirely on **CPU**
+(it's an MLP head over precomputed feature vectors, plus TorchScript inference).
+The only GPU-accelerated step is the one-off **feature extraction** — running the
+fixed pretrained EfficientNet backbone over images to produce those feature
+vectors (see [docs/feature_extraction_at_scale.md](docs/feature_extraction_at_scale.md)).
+
 For the full architecture, conventions, training-pipeline flow, settings, and
 testing patterns, see **[CLAUDE.md](CLAUDE.md)** — it is the source of truth and
 is kept current.

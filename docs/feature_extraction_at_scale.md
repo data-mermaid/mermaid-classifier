@@ -1,5 +1,10 @@
 # Feature extraction at scale (SageMaker ProcessingJobs)
 
+Feature extraction is the **only GPU-accelerated step** in the pipeline: it runs
+the fixed pretrained EfficientNet backbone over images to produce the feature
+vectors that training consumes. The classifier trained on those vectors — and
+inference with it — runs entirely on CPU (see [training_at_scale.md](training_at_scale.md)).
+
 `scripts/build_feature_bucket.py` is GPU-bound and single-process: it
 walks N CoralNet sources sequentially. To run in parallel, use
 `scripts/launch_processing.py` with `processing.shard:` set — it
