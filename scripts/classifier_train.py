@@ -42,12 +42,21 @@ def _resolve_local_aws_credentials() -> None:
     """
     os.environ["AWS_PROFILE"] = "wcs"
     credentials = boto3.Session().get_credentials()
-    if credentials:
-        creds = credentials.get_frozen_credentials()
-        os.environ["SPACER_AWS_ACCESS_KEY_ID"] = creds.access_key
-        os.environ["SPACER_AWS_SECRET_ACCESS_KEY"] = creds.secret_key
-        if creds.token:
-            os.environ["SPACER_AWS_SESSION_TOKEN"] = creds.token
+    if credentials is None:
+        raise RuntimeError(
+            "Could not resolve AWS credentials for the 'wcs' profile. Run "
+            "`aws sso login --profile wcs` (or set the SPACER_AWS_* env vars) "
+            "before training locally."
+        )
+    creds = credentials.get_frozen_credentials()
+    os.environ["SPACER_AWS_ACCESS_KEY_ID"] = creds.access_key
+    os.environ["SPACER_AWS_SECRET_ACCESS_KEY"] = creds.secret_key
+    if creds.token:
+        os.environ["SPACER_AWS_SESSION_TOKEN"] = creds.token
+    else:
+        # Clear any stale token from a previous session — a mismatched token
+        # breaks auth even with a valid key/secret.
+        os.environ.pop("SPACER_AWS_SESSION_TOKEN", None)
 
 
 def _resolve_runner_factory():
@@ -69,7 +78,13 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     args = parser.parse_args(argv)
-    config_dir = Path(args.config_dir).resolve()
+    # Interpret a relative --config-dir against the repo root (the documented
+    # convention), not the cwd, so it resolves correctly regardless of where the
+    # script is invoked from. The default is already absolute.
+    config_dir = Path(args.config_dir)
+    if not config_dir.is_absolute():
+        config_dir = REPO_ROOT / config_dir
+    config_dir = config_dir.resolve()
 
     # Resolve local AWS creds before any pyspacer import (Settings() reads env
     # at import time).

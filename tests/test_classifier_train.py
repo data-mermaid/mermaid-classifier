@@ -28,7 +28,8 @@ EXAMPLE_CONFIG_DIR = REPO_ROOT / "sagemaker" / "configs" / "example"
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("classifier_train", SCRIPT_PATH)
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load module spec from {SCRIPT_PATH}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
