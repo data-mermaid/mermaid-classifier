@@ -12,7 +12,7 @@ and conventions live in **[../CLAUDE.md](../CLAUDE.md)**.
 - [mermaid_sagemaker.md](mermaid_sagemaker.md) — access SageMaker for the MERMAID team (IDEs, kernels, gotchas).
 
 ## Runbooks
-- [pyspacer/train.md](pyspacer/train.md) — train a PySpacer classifier (runners, data sources, label rollup/filtering).
+- [pyspacer/train.md](pyspacer/train.md) — train a PySpacer classifier: the YAML training config, data sources, label rollup/filtering, subsampling/weighting, and the programmatic API.
 - [pyspacer/annotation.md](pyspacer/annotation.md) — run classification and view annotations on images.
 - [feature_extraction_at_scale.md](feature_extraction_at_scale.md) — feature extraction via parallel SageMaker Processing Jobs.
 - [training_at_scale.md](training_at_scale.md) — training via a SageMaker TrainingJob.

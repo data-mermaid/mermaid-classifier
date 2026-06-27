@@ -1,35 +1,72 @@
 # Training a PySpacer model
 
+Training is driven by a **committed config directory** — a `training_config.yaml`
+plus the CSVs it references — under `sagemaker/configs/<name>/`. The *same* config
+drives both local and SageMaker runs, so there's a single source of truth and the
+two paths can't drift:
 
-## Basic training run with or without MLflow
+- **Local:** `uv run python scripts/classifier_train.py --config-dir sagemaker/configs/<name>`
+  (defaults to `coralnet_top108_best`). Requires AWS SSO + an MLflow tracking server.
+- **SageMaker:** `scripts/launch_training.py` uploads the config dir and runs it in a
+  TrainingJob — see [training_at_scale.md](../training_at_scale.md).
 
-There are two training runner classes available:
+Generate a fresh config dir (CoralNet→MERMAID label mapping + rollups + included
+labels) with `scripts/generate_training_config.py`; see
+[../workflow.md](../workflow.md) for where this sits in the overall pipeline.
 
-- `TrainingRunner`, which runs training but doesn't save any results.
-- `MLflowTrainingRunner`, which logs the model and associated artifacts to MLflow. Requires an MLflow installation and an MLflow tracking server to be running.
+For programmatic / library use (driving training from Python without a YAML file),
+see [Programmatic use](#programmatic--library-use) at the end.
 
-By default, either runner gets all MERMAID annotations and passes them directly into training, without excluding or rolling up any of the labels.
 
-```python
-from mermaid_classifier.pyspacer.train import TrainingRunner
+## The config file
 
-runner = TrainingRunner()
-return_msg, model_loc = runner.run()
+A `training_config.yaml` has four blocks — `dataset`, `training`, `mlflow`, and
+`env`. CSV paths are **bare filenames resolved as siblings of the YAML file**.
+A representative config (see `sagemaker/configs/example/training_config.yaml`):
+
+```yaml
+dataset:
+  include_mermaid: false          # false = train on CoralNet sources only
+  coralnet_sources_csv: sources.csv
+  drop_growthforms: false
+  label_rollup_spec_csv: rollups.csv
+  included_labels_csv: included_labels.csv
+  ref_val_ratios: [0.1, 0.1]      # 10% ref, 10% val, 80% train
+  subsample:                       # omit the block to disable subsampling
+    strategy: balanced             # 'stratified' or 'balanced'
+    total_annotations: 1000
+    min_per_class: 10
+  weighting:                       # omit (or enabled: false) to disable
+    enabled: true
+    weight_ratio_cap: 5000.0
+
+training:
+  epochs: 1                        # upper bound; early stopping may end sooner
+  early_stopping_patience: 3
+  # The MLP architecture and learning rate are fixed at MermaidTrainer's
+  # production values, so only epochs / early stopping are configurable.
+
+mlflow:
+  experiment_name: example-smoke-test
+  model_name: ExampleModel
+  # annotations_to_log: all        # log all annotations as an artifact (not just the val split)
+
+env:                               # applied before importing mermaid_classifier
+  MLFLOW_TRACKING_SERVER: file:./mlruns
+  WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
+  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
+  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
 ```
 
-```python
-from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
-
-runner = MLflowTrainingRunner()
-# This returns a message and model location too, but the runner already
-# logs most of the message's contents and the model.
-runner.run()
-```
+The full schema (every accepted key + validation) lives in
+`mermaid_classifier/sagemaker/config.py` (`TrainingRunConfig`).
 
 
 ## Choosing data sources
 
-You can create a CSV file which lists IDs of public CoralNet sources to get training data (annotations of confirmed images) from:
+Set `dataset.include_mermaid` to include/exclude the MERMAID annotation set, and
+point `dataset.coralnet_sources_csv` at a CSV listing the public CoralNet source
+IDs to pull training data from:
 
 ```
 id
@@ -38,24 +75,15 @@ id
 3064
 ```
 
-Supposing that the above CSV content is entered into a file located at `sources/sample.csv`, the following code would run training on all MERMAID data plus the data from these three CoralNet sources:
-
-```python
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions, MLflowTrainingRunner)
-
-runner = MLflowTrainingRunner(
-    dataset_options=DatasetOptions(
-        coralnet_sources_csv='sources/sample.csv',
-    ),
-)
-runner.run()
-```
+With `include_mermaid: true` and that `sources.csv`, training runs on all MERMAID
+data **plus** those three CoralNet sources.
 
 
 ## Rolling up annotations of certain labels
 
-You can create a CSV file which says what MERMAID benthic attribute + growth form combinations to roll up to what other combinations:
+`dataset.label_rollup_spec_csv` points at a CSV mapping MERMAID benthic-attribute +
+growth-form (BA+GF) combos onto other combos. Only the IDs (MERMAID UUIDs) are
+parsed; the `*_name` columns are purely for human readability:
 
 ```
 from_ba_id,from_ba_name,from_gf_id,from_gf_name,to_ba_id,to_ba_name,to_gf_id,to_gf_name
@@ -63,28 +91,16 @@ from_ba_id,from_ba_name,from_gf_id,from_gf_name,to_ba_id,to_ba_name,to_gf_id,to_
 2b55697f-f26e-433e-9070-f1fe9748bf7b,Porites,888609b5-b58a-4d57-addc-a6935bba284b,Massive,2b55697f-f26e-433e-9070-f1fe9748bf7b,Porites,,
 ```
 
-Only the IDs (MERMAID UUIDs) are actually parsed; the names are purely for human readability in this example.
-
-In this example, any annotations labeled as Acropora::Branching will be fed into training as Hard coral::Branching. Similarly, any annotations of Porites::Massive will be fed into training as Porites (without growth form specified).
-
-Supposing that the above CSV content is entered into a file located at `labels/coral_rollups.csv`, running training would go like this:
-
-```python
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions, MLflowTrainingRunner)
-
-runner = MLflowTrainingRunner(
-    dataset_options=DatasetOptions(
-        label_rollup_spec_csv='labels/coral_rollups.csv',
-    ),
-)
-runner.run()
-```
+Here, annotations labeled `Acropora::Branching` are fed into training as
+`Hard coral::Branching`, and `Porites::Massive` becomes `Porites` (no growth form).
 
 
-## Excluding annotations of certain labels
+## Including or excluding certain labels
 
-You can create a CSV file specifying either the MERMAID benthic attribute + growth form combos to accept into the training data (excluding all others), or the ones to leave out from the training data (including all others). Either way, one BA + GF combo would be specified per row:
+Point `dataset.included_labels_csv` **or** `dataset.excluded_labels_csv` (at most
+one) at a CSV with one BA+GF combo per row. `included_labels_csv` keeps only the
+listed combos; `excluded_labels_csv` keeps everything *except* them. Only the IDs
+are read; the `*_name` columns are for readability:
 
 ```
 ba_id,ba_name,gf_id,gf_name
@@ -92,79 +108,79 @@ ba_id,ba_name,gf_id,gf_name
 31c5af16-30d7-4966-97f4-01889a5cf973,Other,,
 ```
 
-Only the IDs are read in; the names are purely for human readability in this example.
 
-Supposing that the above CSV content is entered into a file located at `labels/exclusions.csv`, and we want to exclude these BA+GF combos while including all others, running training would go like this:
+## Subsampling and class weighting
+
+- **`dataset.subsample`** caps the training set for long-tailed taxonomies.
+  `strategy: stratified` keeps the original class distribution; `strategy: balanced`
+  equalizes toward `total_annotations / num_classes`, with `min_per_class` flooring
+  rare classes. (This replaced the old non-deterministic `annotation_limit` knob.)
+- **`dataset.weighting`** applies effective-number-of-samples class weights;
+  `weight_ratio_cap` bounds the max:min weight ratio.
+
+See [../research/balancing-experiments.md](../research/balancing-experiments.md)
+for the experiments behind the production defaults.
+
+
+## Programmatic / library use
+
+The config path is the recommended workflow, but you can also drive training from
+Python — this is exactly the machinery the config path uses under the hood
+(`TrainingRunConfig.build_options()` turns a YAML config into the option dataclasses
+below). Two runner classes are available:
+
+- `TrainingRunner` — runs training but saves no results (no MLflow dependency;
+  handy for tests).
+- `MLflowTrainingRunner` — logs the model, metrics, and artifacts to MLflow
+  (needs an MLflow installation and a running tracking server).
+
+With no arguments, either runner trains on all MERMAID annotations with no
+filtering or rollup:
 
 ```python
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions, MLflowTrainingRunner)
+from mermaid_classifier.pyspacer.runner import MLflowTrainingRunner
 
-runner = MLflowTrainingRunner(
-    dataset_options=DatasetOptions(
-        excluded_labels_csv='labels/exclusions.csv',
-    ),
-)
-runner.run()
+MLflowTrainingRunner().run()
 ```
 
-As a result, if any annotations are found using either of the above BA+GF combos, those annotations will not go into training.
-
-
-## More available parameters
-
-Here are examples demonstrating other available parameters. For more details, browse [train.py](../../mermaid_classifier/pyspacer/train.py) for the `DatasetOptions`, `MLflowOptions`, and `TrainingOptions` classes.
+To configure it, construct the option dataclasses directly (note the modules:
+runners live in `pyspacer.runner`, the option dataclasses in `pyspacer.options`,
+and `SubsampleOptions` in `training.subsample`):
 
 ```python
-from mermaid_classifier.pyspacer.train import (
-    DatasetOptions, MLflowOptions, MLflowTrainingRunner, TrainingOptions)
-
-runner = MLflowTrainingRunner(
-    mlflow_options=MLflowOptions(
-        model_name='CustomModelNameHere',
-    ),
+from mermaid_classifier.pyspacer.runner import MLflowTrainingRunner
+from mermaid_classifier.pyspacer.options import (
+    DatasetOptions,
+    MLflowOptions,
+    TrainingOptions,
 )
-runner.run()
+from mermaid_classifier.training.subsample import SubsampleOptions
 
-runner = MLflowTrainingRunner(
-    # These options can be useful for quick tests.
-    dataset_options=DatasetOptions(
-        annotation_limit=2000,
-    ),
-    training_options=TrainingOptions(
-        epochs=2,
-    ),
-)
-runner.run()
-
-# The rest of the parameters available.
 runner = MLflowTrainingRunner(
     dataset_options=DatasetOptions(
-        # Specifying False here means you're only training on CoralNet sources.
-        include_mermaid=False,
-        coralnet_sources_csv='sources/sample.csv',
+        include_mermaid=False,            # CoralNet sources only
+        coralnet_sources_csv="sources/sample.csv",
         drop_growthforms=True,
-        label_rollup_spec_csv='labels/rollups.csv',
-        included_labels_csv='labels/inclusions.csv',
-        # Specify at most one of included and excluded, not both.
-        # excluded_labels_csv='labels/exclusions.csv',
-        # 7.5% ref, 12.5% val, 80% train.
-        ref_val_ratios=(0.075, 0.125),
-        annotation_limit=5000,
+        label_rollup_spec_csv="labels/rollups.csv",
+        included_labels_csv="labels/inclusions.csv",
+        # Specify at most one of included / excluded, not both.
+        # excluded_labels_csv="labels/exclusions.csv",
+        ref_val_ratios=(0.075, 0.125),    # 7.5% ref, 12.5% val, 80% train
+        # Subsample for a quick test (replaces the old annotation_limit knob).
+        subsample=SubsampleOptions(
+            strategy="balanced", total_annotations=5000, min_per_class=10
+        ),
     ),
-    training_options=TrainingOptions(
-        epochs=5,
-    ),
+    training_options=TrainingOptions(epochs=5, early_stopping_patience=3),
     mlflow_options=MLflowOptions(
-        # This basically helps to group models.
         experiment_name="My Experiment 1",
-        # This gets date/time appended to the end of it.
-        model_name='my-model',
-        # Logs all input annotations to MLflow, in addition to the
-        # validation-split annotations that are always logged. Also possible
-        # to just log a subset.
-        extra_annotations_to_log='all',
+        model_name="my-model",            # date/time is appended
+        extra_annotations_to_log="all",   # YAML key for this is `annotations_to_log`
     ),
 )
 runner.run()
 ```
+
+For the complete set of fields, see the `DatasetOptions`, `TrainingOptions`, and
+`MLflowOptions` dataclasses in
+[`mermaid_classifier/pyspacer/options.py`](../../mermaid_classifier/pyspacer/options.py).
