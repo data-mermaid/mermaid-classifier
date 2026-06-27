@@ -79,13 +79,24 @@ class ClassifierTrainMainTest(unittest.TestCase):
         # from the YAML's dataset block into DatasetOptions.
         self.assertEqual(dataset_options.include_mermaid, expected.dataset.include_mermaid)
 
-    def test_default_config_dir_is_coralnet_top108_best(self):
-        """With no --config-dir, the default points at the committed best config."""
-        self.assertEqual(self.module.DEFAULT_CONFIG_DIR.name, "coralnet_top108_best")
+    def test_default_config_dir_is_in_repo_and_loads(self):
+        """The default config dir is repo-root-relative and its config loads.
+
+        Asserts the behavioral invariant (in-repo + a loadable config) rather
+        than a magic directory name, so renaming the default config doesn't
+        break this test while a broken/missing default still would.
+        """
+        from mermaid_classifier.sagemaker.config import TrainingRunConfig
+
+        default_dir = self.module.DEFAULT_CONFIG_DIR
         self.assertTrue(
-            self.module.DEFAULT_CONFIG_DIR.is_relative_to(REPO_ROOT),
+            default_dir.is_relative_to(REPO_ROOT),
             msg="default config dir must be in-repo (repo-root-relative)",
         )
+        config_path = default_dir / self.module.CONFIG_FILENAME
+        self.assertTrue(config_path.is_file(), msg=f"missing {config_path}")
+        # A malformed default config is a real regression; from_yaml_path raises.
+        TrainingRunConfig.from_yaml_path(config_path)
 
 
 if __name__ == "__main__":
