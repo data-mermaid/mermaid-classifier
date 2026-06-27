@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Mirrors the MLflow registered-model name regex enforced by the
 # SageMaker MLflow registry. Validating at config load fails the job
@@ -32,27 +31,27 @@ _MLFLOW_MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,56}$")
 class SubsampleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Keep in sync with SUBSAMPLE_STRATEGIES in
-    # mermaid_classifier.training.subsample.options when adding a strategy.
-    # Duplicated here as a Literal so this module avoids importing the
-    # pyspacer subtree at load time.
-    strategy: Literal["stratified", "balanced"]
+    # Field shape only — all validation (allowed strategies, numeric
+    # bounds, cross-field rules) is delegated to SubsampleOptions so there
+    # is a single source of truth. SubsampleOptions is imported lazily in
+    # the validator to keep this module free of pyspacer-subtree imports at
+    # load time.
+    strategy: str = "stratified"
     total_annotations: int | None = None
     min_per_class: int = 0
 
-    @field_validator("total_annotations")
-    @classmethod
-    def _positive_total(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("total_annotations must be > 0 or None")
-        return v
+    @model_validator(mode="after")
+    def _validate_via_options(self) -> SubsampleConfig:
+        from mermaid_classifier.training.subsample.options import SubsampleOptions
 
-    @field_validator("min_per_class")
-    @classmethod
-    def _non_negative_floor(cls, v: int) -> int:
-        if v < 0:
-            raise ValueError("min_per_class must be >= 0")
-        return v
+        # Constructing SubsampleOptions runs its __post_init__ validation.
+        # Re-raise any ValueError so pydantic surfaces it as a ValidationError.
+        SubsampleOptions(
+            strategy=self.strategy,
+            total_annotations=self.total_annotations,
+            min_per_class=self.min_per_class,
+        )
+        return self
 
 
 class WeightingConfig(BaseModel):
@@ -61,12 +60,12 @@ class WeightingConfig(BaseModel):
     enabled: bool = True
     weight_ratio_cap: float | None = None
 
-    @field_validator("weight_ratio_cap")
-    @classmethod
-    def _cap_at_least_one(cls, v: float | None) -> float | None:
-        if v is not None and v < 1.0:
-            raise ValueError("weight_ratio_cap must be None or >= 1.0")
-        return v
+    @model_validator(mode="after")
+    def _validate_via_options(self) -> WeightingConfig:
+        from mermaid_classifier.training.sample_weighting import SampleWeightingOptions
+
+        SampleWeightingOptions(enabled=self.enabled, weight_ratio_cap=self.weight_ratio_cap)
+        return self
 
 
 class DatasetConfig(BaseModel):

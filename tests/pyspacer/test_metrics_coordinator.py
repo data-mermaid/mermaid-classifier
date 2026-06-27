@@ -16,18 +16,44 @@ No clf or dataset is provided in any test, so only the always-available groups r
 calibration). This keeps the test offline and dependency-free.
 """
 
+import dataclasses
 import unittest
 from unittest import mock
 
 import duckdb
 
 from mermaid_classifier.pyspacer.metrics import MetricsContext, MetricsCoordinator
+from mermaid_classifier.pyspacer.metrics import registry as metrics_registry
 from pyspacer.metrics_test_helpers import (
     MockBALibrary,
     MockGFLibrary,
     format_metric,
     make_val_results,
 )
+
+
+def _registry_with_failing_group(name: str):
+    """Patch the metric registry so the named group's func raises when called.
+
+    Injects the failure at the registry seam (where the coordinator now looks
+    metric groups up) rather than patching an import in the coordinator module.
+    """
+
+    def _raise(_ctx):
+        raise RuntimeError("injected failure")
+
+    known = {spec.name for spec in metrics_registry.METRIC_GROUPS}
+    if name not in known:
+        raise ValueError(
+            f"unknown metric group {name!r}; cannot inject failure. Known groups: {sorted(known)}"
+        )
+
+    patched = [
+        dataclasses.replace(spec, func=_raise) if spec.name == name else spec
+        for spec in metrics_registry.METRIC_GROUPS
+    ]
+    return mock.patch.object(metrics_registry, "METRIC_GROUPS", patched)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -146,10 +172,7 @@ class ErrorIsolationTest(unittest.TestCase):
         with (
             mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow"),
             mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-            mock.patch(
-                "mermaid_classifier.pyspacer.metrics.coordinator.compute_calibration",
-                side_effect=RuntimeError("injected failure"),
-            ),
+            _registry_with_failing_group("calibration"),
         ):
             coord = MetricsCoordinator(self.ctx, self.conn)
             # Must not raise even though calibration fails.
@@ -160,10 +183,7 @@ class ErrorIsolationTest(unittest.TestCase):
         with (
             mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_mlflow,
             mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-            mock.patch(
-                "mermaid_classifier.pyspacer.metrics.coordinator.compute_calibration",
-                side_effect=RuntimeError("injected failure"),
-            ),
+            _registry_with_failing_group("calibration"),
         ):
             coord = MetricsCoordinator(self.ctx, self.conn)
             coord.compute_and_log_all()
@@ -194,10 +214,7 @@ class ErrorIsolationTest(unittest.TestCase):
         with (
             mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_broken,
             mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-            mock.patch(
-                "mermaid_classifier.pyspacer.metrics.coordinator.compute_calibration",
-                side_effect=RuntimeError("injected failure"),
-            ),
+            _registry_with_failing_group("calibration"),
         ):
             MetricsCoordinator(self.ctx, self.conn).compute_and_log_all()
         broken_count = len(mock_broken.log_metric.call_args_list)

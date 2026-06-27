@@ -17,17 +17,7 @@ from mermaid_classifier.pyspacer.metrics._taxonomy_helpers import (
     build_ba_paths,
     build_ba_to_top,
 )
-from mermaid_classifier.pyspacer.metrics.calibration import compute_calibration
-from mermaid_classifier.pyspacer.metrics.classification import (
-    compute_balanced_accuracy_mcc,
-    compute_confusion_matrices,
-    compute_precision_recall_f1,
-)
-from mermaid_classifier.pyspacer.metrics.cover import compute_cover
-from mermaid_classifier.pyspacer.metrics.per_source import compute_per_source
-from mermaid_classifier.pyspacer.metrics.probability import compute_probability
-from mermaid_classifier.pyspacer.metrics.ranking import compute_ranking
-from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
+from mermaid_classifier.pyspacer.metrics.registry import applicable_metric_groups
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +49,7 @@ class MetricsCoordinator:
         if self.ctx.clf is not None and self.ctx.dataset is not None:
             self._precompute_probabilities()
 
-        for name, func in self._get_metric_groups():
+        for name, func in applicable_metric_groups(self.ctx):
             try:
                 result = func(self.ctx)
                 self._log_result(result)
@@ -90,32 +80,6 @@ class MetricsCoordinator:
                 "probability and ranking metrics will be skipped",
                 exc_info=True,
             )
-
-    def _get_metric_groups(self):
-        """Return ordered list of (name, func).
-
-        Skip groups whose required inputs aren't available.
-        """
-        # Always available (only need ValResults + libraries):
-        groups = [
-            ("confusion_matrices", compute_confusion_matrices),
-            ("precision_recall_f1", compute_precision_recall_f1),
-            ("balanced_accuracy_mcc", compute_balanced_accuracy_mcc),
-            ("taxonomic", compute_taxonomic),
-            ("calibration", compute_calibration),
-        ]
-
-        # Need dataset:
-        if self.ctx.dataset is not None:
-            groups.append(("cover", compute_cover))
-            groups.append(("per_source", compute_per_source))
-
-        # Need pre-computed probability matrix:
-        if self.ctx.val_proba is not None:
-            groups.append(("probability", compute_probability))
-            groups.append(("ranking", compute_ranking))
-
-        return groups
 
     def _log_result(self, result: MetricGroupResult):
         """Log all parts of a MetricGroupResult to MLflow."""
