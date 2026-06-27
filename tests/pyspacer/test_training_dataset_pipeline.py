@@ -390,5 +390,107 @@ class AddTrainingSetNamesTest(unittest.TestCase):
         self.assertEqual(counts["val"], labels.val.label_count)
 
 
+# ---------------------------------------------------------------------------
+# 6. set_train_summary_stats / describe_train_summary_stats
+# ---------------------------------------------------------------------------
+
+
+class _FakeBALibrary:
+    """Minimal BA library: just the id_to_name(...) set_train_summary_stats uses."""
+
+    def id_to_name(self, ba_id: str | None) -> str | None:
+        return None if ba_id is None else f"BA[{ba_id}]"
+
+
+class _FakeGFLibrary:
+    def id_to_name(self, gf_id: str | None) -> str | None:
+        if gf_id is None:
+            return None
+        return "" if gf_id == "" else f"GF[{gf_id}]"
+
+
+class SetTrainSummaryStatsTest(unittest.TestCase):
+    """Characterize set_train_summary_stats / describe_train_summary_stats.
+
+    Runs the pipeline through add_training_set_names on the seeded 30-row,
+    3-class table (all rows survive the split → nothing dropped), then mocks the
+    BA/GF libraries (the only MERMAID-API touch) and computes the summary.
+    """
+
+    def setUp(self):
+        self.override = override_settings(aws_anonymous="True", download_max_workers=1)
+        self.override.__enter__()
+        self.dataset = _make_dataset(self)
+        _seed_annotations(self.dataset)
+
+        with mock.patch(
+            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
+            return_value=set(),
+        ):
+            self.dataset.labels = self.dataset.prep_annotations_for_pyspacer()
+        self.dataset.add_training_set_names()
+
+        with (
+            mock.patch(
+                "mermaid_classifier.pyspacer.dataset.get_benthic_attribute_library",
+                return_value=_FakeBALibrary(),
+            ),
+            mock.patch(
+                "mermaid_classifier.pyspacer.dataset.get_growth_form_library",
+                return_value=_FakeGFLibrary(),
+            ),
+        ):
+            self.dataset.set_train_summary_stats()
+
+    def tearDown(self):
+        self.override.__exit__(None, None, None)
+
+    def test_summary_stats_dict(self):
+        """The computed train_summary_stats matches the seeded 30-row dataset."""
+        stats = self.dataset.artifacts.train_summary_stats
+        labels = self.dataset.labels
+
+        self.assertEqual(stats["annotations"], 30)
+        self.assertEqual(stats["images"], 30)
+        self.assertEqual(stats["bas"], 3)
+        self.assertEqual(stats["bagfs"], 3)
+        # Nothing is dropped: 10 per class clears the stratified-split threshold.
+        self.assertEqual(stats["annotations_dropped"], 0)
+        self.assertEqual(stats["bas_dropped"], 0)
+        self.assertEqual(stats["bagfs_dropped"], 0)
+        # Per-set counts come straight from the split labels and sum to the total.
+        self.assertEqual(stats["annotations_train"], labels.train.label_count)
+        self.assertEqual(stats["annotations_ref"], labels.ref.label_count)
+        self.assertEqual(stats["annotations_val"], labels.val.label_count)
+        self.assertEqual(
+            stats["annotations_train"] + stats["annotations_ref"] + stats["annotations_val"],
+            30,
+        )
+
+    def test_ba_and_bagf_counts_carry_mocked_names(self):
+        """ba_counts / bagf_counts are populated and resolve names via the libraries."""
+        ba_counts = self.dataset.artifacts.ba_counts
+        bagf_counts = self.dataset.artifacts.bagf_counts
+
+        self.assertEqual(ba_counts.shape[0], 3)
+        self.assertEqual(bagf_counts.shape[0], 3)
+        self.assertEqual(
+            set(ba_counts["benthic_attribute_name"]),
+            {"BA[ba_a]", "BA[ba_b]", "BA[ba_c]"},
+        )
+        self.assertIn("growth_form_name", bagf_counts.columns)
+        # num_annotations per BA totals the 30 seeded rows.
+        self.assertEqual(int(ba_counts["num_annotations"].sum()), 30)
+
+    def test_describe_renders_counts(self):
+        """describe_train_summary_stats renders the computed numbers into its sentence."""
+        described = self.dataset.describe_train_summary_stats()
+        self.assertIn("30 annotations", described)
+        self.assertIn("from 30 images", described)
+        self.assertIn("3 BAs and 3 BA-GF combos", described)
+        self.assertIn("0 dropped during stratification", described)
+        self.assertIn("dropped: 0 BAs, 0 BA-GFs", described)
+
+
 if __name__ == "__main__":
     unittest.main()
