@@ -42,6 +42,12 @@ def _registry_with_failing_group(name: str):
     def _raise(_ctx):
         raise RuntimeError("injected failure")
 
+    known = {spec.name for spec in metrics_registry.METRIC_GROUPS}
+    if name not in known:
+        raise ValueError(
+            f"unknown metric group {name!r}; cannot inject failure. Known groups: {sorted(known)}"
+        )
+
     patched = [
         dataclasses.replace(spec, func=_raise) if spec.name == name else spec
         for spec in metrics_registry.METRIC_GROUPS
