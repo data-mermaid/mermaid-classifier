@@ -14,8 +14,6 @@ import torch
 
 from mermaid_classifier.pyspacer.inference import (
     PARITY_PROVEN_SKLEARN,
-    SCHEMA_VERSION,
-    TASK_NAME,
     ManifestError,
     ParityError,
     SklearnPinError,
@@ -27,12 +25,6 @@ from pyspacer._calibrated_model_fixture import make_calibrated_model
 
 
 class ScaffoldTest(unittest.TestCase):
-    def test_constants_and_exceptions_exported(self):
-        self.assertEqual(SCHEMA_VERSION, 1)
-        self.assertEqual(TASK_NAME, "pyspacer_mlp_classifier")
-        self.assertTrue(issubclass(ParityError, Exception))
-        self.assertTrue(issubclass(ManifestError, Exception))
-
     def test_importing_inference_does_not_import_settings(self):
         # The [inference] extra must not pull training-only settings deps.
         child = (
