@@ -14,7 +14,7 @@ Run from the repo root with AWS SSO access to the training buckets:
 Defaults to the committed ``coralnet_top108_best`` config. Config dirs are
 repo-root-relative (``sagemaker/configs/<name>/``). Local AWS credentials come
 from the ``wcs`` SSO profile; the MLflow tracking server comes from the ``.env``
-in the cwd (see ``pyspacer_example/.env``); the chosen config's ``env`` block
+in the cwd (copy ``.env.example`` from the repo root); the chosen config's ``env`` block
 supplies bucket names / weights location. For the SageMaker equivalent see
 ``scripts/launch_training.py`` + ``docs/training_at_scale.md``; for the overall
 script order see ``docs/workflow.md``.

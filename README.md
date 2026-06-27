@@ -56,9 +56,13 @@ JupyterLab support.
 To consume this package from another project, `pip install` the git URL with the
 extra you need, e.g. `pip install "mermaid-classifier[inference] @ git+https://github.com/data-mermaid/mermaid-classifier.git"`.
 
-### Additional steps for PySpacer classifiers
+### Configuration
 
-1. You'll need to specify configuration values, using either an `.env` file in the directory that you're running your script or notebook from, or by setting environment variables. See the `pyspacer_example` directory for a full example.
+Training a classifier (or running inference) needs a few configuration values —
+S3 buckets, the feature-extractor weights location, the MLflow tracking server,
+etc. Provide them with an `.env` file in the directory you run from, or as
+environment variables. Copy [`.env.example`](.env.example) at the repo root for
+a full, annotated set.
 
 ### Installation environment
 

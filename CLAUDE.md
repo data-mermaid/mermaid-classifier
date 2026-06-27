@@ -113,7 +113,7 @@ render from MLflow runs via `scripts/generate_report.py` +
   BA+GF separator is `::` and the trailing `::` stays even with no GF
   (`Hard coral::`). Tests assert this.
 - **Settings**: pydantic `Settings` reads an `.env` from the cwd; names are
-  lowercase in code, UPPERCASE in `.env`. See `pyspacer_example/.env` for the
+  lowercase in code, UPPERCASE in `.env`. See `.env.example` (repo root) for the
   full set (`CORALNET_TRAIN_DATA_BUCKET`, `WEIGHTS_LOCATION`, `AWS_ANONYMOUS`,
   `MLFLOW_TRACKING_SERVER`, `SPACER_BATCH_SIZE`, …). `SPACER_BATCH_SIZE` is
   auto-derived from available RAM when unset.
