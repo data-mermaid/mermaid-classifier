@@ -543,7 +543,7 @@ Porites is the only exception (see above).
 
 def validate_outputs(out_dir: Path) -> None:
     """Round-trip the produced CSVs through the pipeline's CsvSpec subclasses."""
-    from mermaid_classifier.pyspacer.train import (
+    from mermaid_classifier.pyspacer.label_specs import (
         CNSourceFilter,
         LabelFilter,
         LabelRollupSpec,

@@ -13,7 +13,7 @@ from io import StringIO
 import duckdb
 import pandas as pd
 
-from mermaid_classifier.pyspacer.train import CNSourceFilter, LabelFilter, LabelRollupSpec
+from mermaid_classifier.pyspacer.label_specs import CNSourceFilter, LabelFilter, LabelRollupSpec
 
 
 def _make_conn() -> duckdb.DuckDBPyConnection:
