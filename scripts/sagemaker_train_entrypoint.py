@@ -106,7 +106,7 @@ def _resolve_runner_factory():
     Factored into a function so tests can patch it without triggering
     the pyspacer import side effects.
     """
-    from mermaid_classifier.pyspacer.train import MLflowTrainingRunner
+    from mermaid_classifier.pyspacer.runner import MLflowTrainingRunner
 
     return MLflowTrainingRunner
 
@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> None:
             dataset_options, training_options, mlflow_options = config.build_options(
                 config_dir=config_dir
             )
-            # build_options imports mermaid_classifier.pyspacer.train,
+            # build_options imports mermaid_classifier.pyspacer.options,
             # whose module-level logging.config.dictConfig call sets
             # disable_existing_loggers=True (the default), which marks
             # any logger created before that dictConfig call as disabled.

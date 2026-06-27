@@ -1,6 +1,6 @@
 """Characterization tests for LabelFilter, LabelRollupSpec, and CNSourceFilter.
 
-All three classes live in mermaid_classifier.pyspacer.train and subclass CsvSpec.
+All three classes live in mermaid_classifier.pyspacer.label_specs and subclass CsvSpec.
 Tests cover both the pure-Python methods and the in-DuckDB pipeline methods.
 
 Empty growth form is the empty string '' (never NULL) per the BA+GF convention.

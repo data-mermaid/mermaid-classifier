@@ -457,11 +457,11 @@ class LazyLibraryTest(BaseTrainTest):
     def test_importing_train_does_not_call_the_mermaid_api(self):
         module_names = [
             "mermaid_classifier.pyspacer.dataset",
-            "mermaid_classifier.pyspacer.train",
+            "mermaid_classifier.pyspacer.runner",
         ]
 
         def fail(*args, **kwargs):
-            raise AssertionError("Importing train/dataset made a network call to the MERMAID API")
+            raise AssertionError("Importing dataset/runner made a network call to the MERMAID API")
 
         original_modules = {name: sys.modules.get(name) for name in module_names}
         try:
