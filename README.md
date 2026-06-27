@@ -1,6 +1,6 @@
 # mermaid-classifier
 
-This Python repository enables data scientists to experiment with PySpacer-based classifiers. It also has MERMAID-relevant utilities which aren't specific to the type of classifier being developed.
+Everything needed to **train** the MERMAID coral-reef image classifier and **deploy it for inference**: the PySpacer-based training pipeline and the portable, pickle-free model artifact (and loader) it produces. Also includes shared MERMAID taxonomy/data utilities used along the way.
 
 
 ## Overview
@@ -59,8 +59,9 @@ extra you need, e.g. `pip install "mermaid-classifier[inference] @ git+https://g
 ### Configuration
 
 Training a classifier (or running inference) needs a few configuration values —
-S3 buckets, the feature-extractor weights location, the MLflow tracking server,
-etc. Provide them with an `.env` file in the directory you run from (copy
+S3 buckets, the feature-extractor weights location, the MLflow tracking
+destination (`MLFLOW_TRACKING_SERVER` — note: not MLflow's standard
+`MLFLOW_TRACKING_URI`), etc. Provide them with an `.env` file in the directory you run from (copy
 [`.env.example`](.env.example) from the repo root to `.env` and fill it in —
 `Settings` only reads a file literally named `.env`), or set the values as
 environment variables.
@@ -73,14 +74,14 @@ AWS SageMaker advantages over local:
 
 - Easily and securely access private S3 files through spaces, as long as the SageMaker domain is set up with an applicable Space execution role.
 - Web-based IDE spaces with real-time collaboration.
-- MLflow tracking servers can be shared by everyone who can access the SageMaker domain.
+- The always-running SageMaker MLflow App is shared by everyone who can access the SageMaker domain (point `MLFLOW_TRACKING_SERVER` at its ARN — no server to start).
 - Default distribution image already has many Python packages relevant to this project. This could be preferable over maintaining a 3 GB local venv.
 
 Local env advantages over SageMaker:
 
 - Don't have to worry about the AWS web session expiring every so often, and don't need constant internet to keep working.
 - More IDE choices, not just VSCode (Code Editor spaces) or JupyterLab.
-- Can run a local MLflow tracking server with very low startup and cost.
+- MLflow logs to a local SQLite DB with no tracking server to run; start the MLflow UI only when you want to browse results.
 - Easier to customize and persist the packages that are installed in the environment.
 
 If you're on a local dev machine and accessing public S3 files, the `AWS_ANONYMOUS` setting may be useful.
@@ -151,6 +152,12 @@ superset. Trained models ship as a portable, pickle-free **TorchScript head +
 `model.json` manifest** (not a sklearn pickle); `scikit-learn` is pinned in
 lockstep across both extras because calibration semantics can shift between
 releases.
+
+**Compute:** the classifier this repo trains and serves runs entirely on **CPU**
+(it's an MLP head over precomputed feature vectors, plus TorchScript inference).
+The only GPU-accelerated step is the one-off **feature extraction** — running the
+fixed pretrained EfficientNet backbone over images to produce those feature
+vectors (see [docs/feature_extraction_at_scale.md](docs/feature_extraction_at_scale.md)).
 
 For the full architecture, conventions, training-pipeline flow, settings, and
 testing patterns, see **[CLAUDE.md](CLAUDE.md)** — it is the source of truth and

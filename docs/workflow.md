@@ -40,14 +40,23 @@ uv run python scripts/generate_training_config.py \
 
 ---
 
-## Step 2 — Extract / build features
+## Step 2 — Extract features (build the feature-vector bucket)
 
-Choose one path based on scale:
+Training reads **feature vectors**, not raw images. This step runs pyspacer's
+EfficientNet extractor over every annotated image in a set of CoralNet sources
+and writes a CoralNet-layout feature-vector bucket
+(`s{source_id}/features/i{image_id}.featurevector`) that training then points at
+via `CORALNET_TRAIN_DATA_BUCKET`. It's the heavy, scale-sensitive step — a large
+CoralNet source set is a lot of images to run through the extractor — and the
+**only GPU-accelerated step** (the EfficientNet backbone). Generating the config
+(Step 1), training (Step 3), and inference all run on CPU.
 
-| Path | Script | When |
-| - | - | - |
-| **Local** | `build_feature_bucket.py` | Building or updating a CoralNet-layout feature-vector bucket for a small/medium source set. Idempotent and resumable. |
-| **SageMaker** | `launch_processing.py` | Full-dataset feature extraction via parallel SageMaker ProcessingJobs (optional sharding). See [feature_extraction_at_scale.md](feature_extraction_at_scale.md). |
+The two scripts do the *same* extraction; they differ in how they run it:
+
+| Script | Role |
+| - | - |
+| `build_feature_bucket.py` | The extractor itself. Runs on a **single machine** (no SageMaker sharding) — threaded S3 I/O (`--max-io-workers`), one process for the EfficientNet forward pass. Idempotent and resumable (a re-run skips images already extracted), so it can grind through a large source set across restarts. Run it directly to build or update the bucket. |
+| `launch_processing.py` | Runs that same extraction **in parallel** for throughput: fans out N sharded SageMaker ProcessingJobs over the source set. Reach for this when a single process would take too long. See [feature_extraction_at_scale.md](feature_extraction_at_scale.md). |
 
 > `extract_reference_features.py` is a one-off maintenance script: it stacks
 > real EfficientNet feature vectors into a `.npy` for the TorchScript-vs-sklearn

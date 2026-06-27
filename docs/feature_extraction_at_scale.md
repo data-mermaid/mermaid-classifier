@@ -1,10 +1,16 @@
 # Feature extraction at scale (SageMaker ProcessingJobs)
 
-`scripts/build_feature_bucket.py` is GPU-bound and single-process: it
-walks N CoralNet sources sequentially. To run in parallel, use
-`scripts/launch_processing.py` with `processing.shard:` set — it
-submits N parallel SageMaker ProcessingJobs, each handling a sharded
-subset of source IDs.
+Feature extraction is the **only GPU-accelerated step** in the pipeline: it runs
+the fixed pretrained EfficientNet backbone over images to produce the feature
+vectors that training consumes. The classifier trained on those vectors — and
+inference with it — runs entirely on CPU (see [training_at_scale.md](training_at_scale.md)).
+
+`scripts/build_feature_bucket.py` is GPU-bound and runs on a single
+machine: it processes the CoralNet sources with threaded S3 I/O
+(`--max-io-workers`) but a single process for the GPU forward pass. To
+parallelize across machines, use `scripts/launch_processing.py` with
+`processing.shard:` set — it submits N parallel SageMaker ProcessingJobs,
+each handling a sharded subset of source IDs.
 
 > The launcher convention (role ARN, bucket, schema, ECR tagging) is
 > defined in

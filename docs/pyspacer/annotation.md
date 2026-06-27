@@ -19,7 +19,7 @@ row,column
 
 The classifier location can be specified as any of the following strings:
 
-- An MLflow registered Model ID; starts with `m-`. Resolves the logged model's `model.pt` + `model.json` artifact. Requires the applicable MLflow tracking server to be running.
+- An MLflow registered Model ID; starts with `m-`. Resolves the logged model's `model.pt` + `model.json` artifact. Requires `MLFLOW_TRACKING_SERVER` to point at wherever the model was logged — a local SQLite DB/store, or the SageMaker MLflow App's ARN (the App is always running). No server process needs to be started for a local store.
 - An S3 URI to the **directory** containing `model.pt` + `model.json`; starts with `s3://` (e.g. `s3://bucket/models/run-abc/`). Both files are downloaded to a temp dir.
 - A local **directory** path containing `model.pt` + `model.json`.
 

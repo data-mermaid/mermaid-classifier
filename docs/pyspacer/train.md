@@ -6,8 +6,9 @@ drives both local and SageMaker runs, so there's a single source of truth and th
 two paths can't drift:
 
 - **Local:** `uv run python scripts/classifier_train.py --config-dir sagemaker/configs/<name>`
-  (defaults to `coralnet_top108_best`). Requires AWS SSO and an MLflow tracking
-  destination — a tracking server, or a local `file:` URI (e.g. `file:./mlruns`).
+  (defaults to `coralnet_top108_best`). Requires AWS SSO and an
+  `MLFLOW_TRACKING_SERVER` to log to — a local SQLite DB / store
+  (e.g. `sqlite:///mlflow.db`, no server to run) or the SageMaker MLflow App ARN.
 - **SageMaker:** `scripts/launch_training.py` uploads the config dir and runs it in a
   TrainingJob — see [training_at_scale.md](../training_at_scale.md).
 
@@ -136,7 +137,8 @@ below). Two runner classes are available:
   server or experiment needed; handy for tests). The `mlflow` package is still a
   dependency of the training install either way.
 - `MLflowTrainingRunner` — logs the model, metrics, and artifacts to MLflow. Set
-  `MLFLOW_TRACKING_SERVER` to a tracking server or a local `file:` URI.
+  `MLFLOW_TRACKING_SERVER` to where it should log — a local SQLite DB/store or the
+  SageMaker MLflow App ARN (no server to run; see [../mlflow.md](../mlflow.md)).
 
 With no arguments, either runner trains on all MERMAID annotations with no
 filtering or rollup:

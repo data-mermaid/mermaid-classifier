@@ -338,8 +338,8 @@ restarts from epoch zero. Use only for runs you're OK retrying.
 
 ## MLflow
 
-The container needs to reach the MLflow tracking server. The URI
-flows through the launcher's `--mlflow-tracking-uri` flag into the
+The container needs to reach MLflow (the always-on SageMaker MLflow App).
+The URI flows through the launcher's `--mlflow-tracking-uri` flag into the
 `MLFLOW_TRACKING_SERVER` env var on the Estimator. The training run
 appears under whatever `experiment_name` is set in the YAML.
 
