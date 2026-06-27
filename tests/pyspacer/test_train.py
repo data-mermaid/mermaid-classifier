@@ -450,11 +450,11 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
 class LazyLibraryTest(BaseTrainTest):
     """
     The BA and GF libraries hit the MERMAID API in their __init__. Importing
-    the train module must not trigger those network calls (it used to, via
-    module-level singletons), so unit tests can run offline.
+    the training modules (dataset/runner) must not trigger those network calls
+    (it used to, via module-level singletons), so unit tests can run offline.
     """
 
-    def test_importing_train_does_not_call_the_mermaid_api(self):
+    def test_importing_training_modules_does_not_call_the_mermaid_api(self):
         module_names = [
             "mermaid_classifier.pyspacer.dataset",
             "mermaid_classifier.pyspacer.runner",
