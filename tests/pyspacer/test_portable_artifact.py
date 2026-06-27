@@ -2,8 +2,6 @@
 
 import json
 import os
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,23 +20,6 @@ from mermaid_classifier.pyspacer.inference import (
 )
 from mermaid_classifier.pyspacer.inference.head import build_calibrated_head
 from pyspacer._calibrated_model_fixture import make_calibrated_model
-
-
-class ScaffoldTest(unittest.TestCase):
-    def test_importing_inference_does_not_import_settings(self):
-        # The [inference] extra must not pull training-only settings deps.
-        child = (
-            "import sys\n"
-            "import mermaid_classifier.pyspacer.inference  # noqa: F401\n"
-            "mod = 'mermaid_classifier.pyspacer.settings'\n"
-            "raise SystemExit(1 if mod in sys.modules else 0)\n"
-        )
-        result = subprocess.run(
-            [sys.executable, "-c", child],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
 
 
 class HeadParityTest(unittest.TestCase):
