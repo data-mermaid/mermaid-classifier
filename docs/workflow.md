@@ -55,7 +55,7 @@ The two scripts do the *same* extraction; they differ in how they run it:
 
 | Script | Role |
 | - | - |
-| `build_feature_bucket.py` | The extractor itself. Single-process: walks the given CoralNet sources sequentially and writes their feature vectors. Idempotent and resumable (a re-run skips images already extracted), so it can grind through a large source set across restarts. Run it directly to build or update the bucket. |
+| `build_feature_bucket.py` | The extractor itself. Runs on a **single machine** (no SageMaker sharding) — threaded S3 I/O (`--max-io-workers`), one process for the EfficientNet forward pass. Idempotent and resumable (a re-run skips images already extracted), so it can grind through a large source set across restarts. Run it directly to build or update the bucket. |
 | `launch_processing.py` | Runs that same extraction **in parallel** for throughput: fans out N sharded SageMaker ProcessingJobs over the source set. Reach for this when a single process would take too long. See [feature_extraction_at_scale.md](feature_extraction_at_scale.md). |
 
 > `extract_reference_features.py` is a one-off maintenance script: it stacks

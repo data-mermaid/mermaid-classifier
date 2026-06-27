@@ -24,7 +24,10 @@ Set `MLFLOW_TRACKING_SERVER` in your `.env` (see `.env.example`):
 - **SageMaker** — point it at MERMAID's **SageMaker-managed MLflow App** by its
   ARN:
 
-      MLFLOW_TRACKING_SERVER=arn:aws:sagemaker:<region>:<account>:mlflow-tracking-server/<name>
+      MLFLOW_TRACKING_SERVER=arn:aws:sagemaker:<region>:<account>:mlflow-app/<app-id>
+
+  (discover the exact ARN with `aws sagemaker list-mlflow-apps` — see
+  [training_at_scale.md](training_at_scale.md))
 
   The App is always running (provisioned by IaC — see
   [training_at_scale.md](training_at_scale.md)), so there's **nothing to start or
