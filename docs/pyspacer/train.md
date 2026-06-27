@@ -6,7 +6,8 @@ drives both local and SageMaker runs, so there's a single source of truth and th
 two paths can't drift:
 
 - **Local:** `uv run python scripts/classifier_train.py --config-dir sagemaker/configs/<name>`
-  (defaults to `coralnet_top108_best`). Requires AWS SSO + an MLflow tracking server.
+  (defaults to `coralnet_top108_best`). Requires AWS SSO and an MLflow tracking
+  destination — a tracking server, or a local `file:` URI (e.g. `file:./mlruns`).
 - **SageMaker:** `scripts/launch_training.py` uploads the config dir and runs it in a
   TrainingJob — see [training_at_scale.md](../training_at_scale.md).
 
@@ -22,7 +23,9 @@ see [Programmatic use](#programmatic--library-use) at the end.
 
 A `training_config.yaml` has four blocks — `dataset`, `training`, `mlflow`, and
 `env`. CSV paths are **bare filenames resolved as siblings of the YAML file**.
-A representative config (see `sagemaker/configs/example/training_config.yaml`):
+An illustrative config (the committed `sagemaker/configs/example/training_config.yaml`
+is a runnable 2-source fixture; the values below are illustrative, not a verbatim
+copy):
 
 ```yaml
 dataset:
@@ -51,7 +54,7 @@ mlflow:
   model_name: ExampleModel
   # annotations_to_log: all        # log all annotations as an artifact (not just the val split)
 
-env:                               # applied before importing mermaid_classifier
+env:                               # applied before pyspacer is imported (so Settings() picks them up)
   MLFLOW_TRACKING_SERVER: file:./mlruns
   WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
@@ -129,10 +132,11 @@ Python — this is exactly the machinery the config path uses under the hood
 (`TrainingRunConfig.build_options()` turns a YAML config into the option dataclasses
 below). Two runner classes are available:
 
-- `TrainingRunner` — runs training but saves no results (no MLflow dependency;
-  handy for tests).
-- `MLflowTrainingRunner` — logs the model, metrics, and artifacts to MLflow
-  (needs an MLflow installation and a running tracking server).
+- `TrainingRunner` — runs training but doesn't log anything to MLflow (no tracking
+  server or experiment needed; handy for tests). The `mlflow` package is still a
+  dependency of the training install either way.
+- `MLflowTrainingRunner` — logs the model, metrics, and artifacts to MLflow. Set
+  `MLFLOW_TRACKING_SERVER` to a tracking server or a local `file:` URI.
 
 With no arguments, either runner trains on all MERMAID annotations with no
 filtering or rollup:
