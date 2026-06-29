@@ -418,24 +418,33 @@ class TrainingDataset:
         # site, bucket, project_id, feature_vector). The manifest is a
         # per-annotation-point dataset; label mapping, rollups, and filtering
         # happen downstream below, exactly as for the old per-source CSV path.
-        self.duck_conn.execute(
-            f"CREATE TABLE annotations AS"
-            f" SELECT"
-            f"  row,"
-            f"  col,"
-            f"  CAST(image_id AS VARCHAR) AS image_id,"
-            f"  CAST(coralnet_id AS VARCHAR) AS label_id,"
-            f"  '{Sites.CORALNET.value}' AS site,"
-            f"  '{settings.coralnet_train_data_bucket}' AS bucket,"
-            f"  CAST(source_id AS VARCHAR) AS project_id,"
-            # e.g. s123/features/i456.featurevector
-            f"  's' || CAST(source_id AS VARCHAR) || '/features/i' || CAST(image_id AS VARCHAR)"
-            f"   || '.featurevector' AS feature_vector"
-            f" FROM read_parquet('{manifest_uri}')"
-            # Drop rows with missing image_id, which would propagate into
-            # feature_vector and crash os.path.join downstream.
-            f" WHERE image_id IS NOT NULL AND image_id <> ''"
-        )
+        try:
+            self.duck_conn.execute(
+                f"CREATE TABLE annotations AS"
+                f" SELECT"
+                f"  row,"
+                f"  col,"
+                f"  CAST(image_id AS VARCHAR) AS image_id,"
+                f"  CAST(coralnet_id AS VARCHAR) AS label_id,"
+                f"  '{Sites.CORALNET.value}' AS site,"
+                f"  '{settings.coralnet_train_data_bucket}' AS bucket,"
+                f"  CAST(source_id AS VARCHAR) AS project_id,"
+                # e.g. s123/features/i456.featurevector
+                f"  's' || CAST(source_id AS VARCHAR) || '/features/i' || CAST(image_id AS VARCHAR)"
+                f"   || '.featurevector' AS feature_vector"
+                f" FROM read_parquet('{manifest_uri}')"
+                # Defense-in-depth: the inner join in build_manifest_relation
+                # already excludes null image_id, but guard here in case the
+                # parquet was produced by another path.
+                f" WHERE image_id IS NOT NULL AND image_id <> ''"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to read CoralNet manifest parquet at '{manifest_uri}'. "
+                f"It must be readable and contain columns: "
+                f"source_id, image_id, row, col, coralnet_id. "
+                f"Underlying error: {exc}"
+            ) from exc
 
         self.coralnet_source_ids = [
             str(r[0])

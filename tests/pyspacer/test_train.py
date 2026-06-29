@@ -195,6 +195,43 @@ class ReadCoralNetDataTest(BaseTrainTest):
         # Distinct source IDs are recorded for MLflow logging.
         self.assertEqual(dataset.coralnet_source_ids, [str(source_id)])
 
+    def test_missing_column_raises_friendly_error(self):
+        """
+        A parquet missing the required 'coralnet_id' column must raise a
+        RuntimeError with a message that names the manifest path and the
+        missing column, not a raw DuckDB error.
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        dataset = NoInitDataset()
+
+        # Build a parquet that is intentionally missing 'coralnet_id'.
+        bad_table = pa.table(
+            {
+                "source_id": pa.array([1], pa.int32()),
+                "image_id": pa.array(["abc"], pa.string()),
+                "row": pa.array([10], pa.int32()),
+                "col": pa.array([11], pa.int32()),
+                # coralnet_id is deliberately absent
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".parquet",
+            delete_on_close=False,
+        ) as manifest_f:
+            manifest_f.close()
+            pq.write_table(bad_table, manifest_f.name)
+            dataset.options = DatasetOptions(coralnet_manifest_uri=manifest_f.name)
+
+            with self.assertRaises(RuntimeError) as ctx:
+                dataset.read_coralnet_manifest()
+
+        msg = str(ctx.exception)
+        self.assertIn(manifest_f.name, msg)
+        self.assertIn("coralnet_id", msg)
+
 
 class ReadMermaidDataTest(BaseTrainTest):
     """
