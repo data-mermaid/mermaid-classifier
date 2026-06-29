@@ -62,11 +62,11 @@ def main(argv: list[str] | None = None) -> None:
         summary["sources_out"],
     )
     if args.audit_uri:
-        flagged = conn.sql(
-            f"SELECT source_id FROM read_parquet('{args.audit_uri}')"
-            " WHERE is_complete = FALSE OR image_count_match = FALSE"
+        flagged = conn.execute(
+            "SELECT source_id FROM read_parquet(?) WHERE is_complete = FALSE OR image_count_match = FALSE",
+            [args.audit_uri],
         ).df()
-        if len(flagged):
+        if not flagged.empty:
             log.warning(
                 "audit-flagged sources (reported, not filtered): %s",
                 list(flagged["source_id"]),
