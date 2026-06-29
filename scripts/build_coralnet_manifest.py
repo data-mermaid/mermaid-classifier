@@ -27,6 +27,25 @@ from mermaid_classifier.coralnet.manifest import (
 log = logging.getLogger("build_coralnet_manifest")
 
 
+def _configure_duckdb_s3(conn: duckdb.DuckDBPyConnection, region: str) -> None:
+    """Load the httpfs extension and configure credential_chain-based S3 auth.
+
+    Mirrors the pattern in mermaid_classifier/pyspacer/dataset.py (~lines 711-749).
+    The credential_chain provider resolves AWS credentials from the environment or
+    instance role at query time — no key/secret arguments are needed here.
+    """
+    try:
+        conn.load_extension("httpfs")
+    except duckdb.IOException:
+        # Extension not yet installed in this DuckDB installation.
+        conn.install_extension("httpfs")
+        conn.load_extension("httpfs")
+
+    conn.execute(
+        f"CREATE OR REPLACE SECRET secret ( TYPE s3, PROVIDER credential_chain, REGION '{region}')"
+    )
+
+
 def _load_source_ids(sources_csv: str | None, source_ids: str | None) -> list[str] | None:
     if sources_csv:
         with open(sources_csv, newline="") as f:
@@ -45,6 +64,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--images-uri", required=True)
     p.add_argument("--audit-uri")
     p.add_argument("--output-uri", required=True)
+    p.add_argument(
+        "--aws-region", default="us-east-1", help="AWS region for S3 access (default: us-east-1)"
+    )
     g = p.add_mutually_exclusive_group()
     g.add_argument("--sources-csv")
     g.add_argument("--source-ids")
@@ -52,6 +74,12 @@ def main(argv: list[str] | None = None) -> None:
 
     source_ids = _load_source_ids(args.sources_csv, args.source_ids)
     conn = duckdb.connect()
+
+    s3_uris = [args.annotations_uri, args.images_uri, args.output_uri]
+    if args.audit_uri:
+        s3_uris.append(args.audit_uri)
+    if any(uri.startswith("s3://") for uri in s3_uris):
+        _configure_duckdb_s3(conn, args.aws_region)
 
     summary = summarize_build(conn, args.annotations_uri, args.images_uri, source_ids)
     log.info(

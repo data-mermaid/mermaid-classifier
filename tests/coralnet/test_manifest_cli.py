@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import duckdb
 import pyarrow.parquet as pq
@@ -17,9 +18,32 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from build_coralnet_manifest import main  # noqa: E402
+from build_coralnet_manifest import _configure_duckdb_s3, main  # noqa: E402
 
 from coralnet.test_manifest import _annotations, _images  # noqa: E402
+
+
+class ConfigureDuckdbS3Test(unittest.TestCase):
+    """_configure_duckdb_s3 should load httpfs and create the credential_chain secret offline.
+
+    The credential_chain provider validates credentials at secret-creation time, so
+    executing the real SQL without AWS creds would raise. We therefore verify that
+    _configure_duckdb_s3 issues the correct SQL rather than running live against AWS.
+    """
+
+    def test_secret_sql_is_well_formed(self):
+        """The credential_chain CREATE SECRET SQL must use TYPE s3, PROVIDER credential_chain, and the given region."""
+        conn = MagicMock(spec=duckdb.DuckDBPyConnection)
+        _configure_duckdb_s3(conn, "ap-southeast-2")
+        # httpfs must be loaded first.
+        conn.load_extension.assert_called_once_with("httpfs")
+        # A single execute call must follow.
+        conn.execute.assert_called_once()
+        sql: str = conn.execute.call_args[0][0]
+        self.assertIn("TYPE s3", sql)
+        self.assertIn("PROVIDER credential_chain", sql)
+        self.assertIn("ap-southeast-2", sql)
+        self.assertIn("CREATE OR REPLACE SECRET", sql)
 
 
 class CliTest(unittest.TestCase):
