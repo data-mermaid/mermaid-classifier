@@ -21,7 +21,7 @@ from mermaid_classifier.sagemaker.config import TrainingRunConfig
 MINIMAL_YAML = textwrap.dedent("""
     dataset:
       include_mermaid: true
-      coralnet_sources_csv: sources.csv
+      coralnet_manifest_uri: s3://bucket/coralnet_manifest.parquet
       label_rollup_spec_csv: rollups.csv
       included_labels_csv: included_labels.csv
       subsample:
@@ -65,8 +65,17 @@ class LoadHappyPathTest(unittest.TestCase):
             path = _write(Path(td), MINIMAL_YAML)
             config = TrainingRunConfig.from_yaml_path(path)
             self.assertEqual(
-                config.dataset.coralnet_sources_csv_path(path.parent),
-                Path(td) / "sources.csv",
+                config.dataset.label_rollup_spec_csv_path(path.parent),
+                Path(td) / "rollups.csv",
+            )
+
+    def test_manifest_uri_is_verbatim(self):
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), MINIMAL_YAML)
+            config = TrainingRunConfig.from_yaml_path(path)
+            self.assertEqual(
+                config.dataset.coralnet_manifest_uri,
+                "s3://bucket/coralnet_manifest.parquet",
             )
 
 
@@ -226,7 +235,6 @@ class BuildOptionsTest(unittest.TestCase):
             self.skipTest("pyspacer extras not installed")
         with TemporaryDirectory() as td:
             tmp = Path(td)
-            (tmp / "sources.csv").write_text("id\n123\n")
             (tmp / "rollups.csv").write_text("from_ba_id,from_gf_id,to_ba_id,to_gf_id\n")
             (tmp / "included_labels.csv").write_text("ba_id,gf_id\n")
             path = _write(tmp, MINIMAL_YAML)
@@ -235,7 +243,7 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertIsInstance(dataset, DatasetOptions)
         self.assertIsInstance(training, TrainingOptions)
         self.assertIsInstance(mlflow, MLflowOptions)
-        self.assertEqual(dataset.coralnet_sources_csv, str(tmp / "sources.csv"))
+        self.assertEqual(dataset.coralnet_manifest_uri, "s3://bucket/coralnet_manifest.parquet")
         self.assertEqual(training.epochs, 5)
         self.assertEqual(training.early_stopping_patience, 3)
 

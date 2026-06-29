@@ -302,9 +302,7 @@ class MLflowTrainingRunner(TrainingRunner):
 
             dataset_options_to_log = {
                 "include_mermaid": self.dataset_options.include_mermaid,
-                "coralnet_sources_csv": os.path.basename(
-                    self.dataset_options.coralnet_sources_csv or ""
-                ),
+                "coralnet_manifest_uri": self.dataset_options.coralnet_manifest_uri or "",
                 "drop_growthforms": self.dataset_options.drop_growthforms,
                 "label_rollup_spec_csv": os.path.basename(
                     self.dataset_options.label_rollup_spec_csv or ""
@@ -501,8 +499,8 @@ class MLflowTrainingRunner(TrainingRunner):
                 as_path = Path(self.dataset_options.label_rollup_spec_csv)
                 model_name += f"-Rollup{self.alphanumeric_only_str(as_path.stem)}"
 
-            if self.dataset_options.coralnet_sources_csv:
-                as_path = Path(self.dataset_options.coralnet_sources_csv)
+            if self.dataset_options.coralnet_manifest_uri:
+                as_path = Path(self.dataset_options.coralnet_manifest_uri)
                 model_name += f"-{self.alphanumeric_only_str(as_path.stem)}"
 
             if (subsample := self.dataset_options.subsample) is not None:
@@ -658,7 +656,10 @@ class MLflowTrainingRunner(TrainingRunner):
 
         artifacts = self.dataset.artifacts
 
-        mlflow.log_text(self.dataset.cn_source_filter.csv_text, "coralnet_sources_included.csv")
+        mlflow.log_text(
+            "id\n" + "\n".join(self.dataset.coralnet_source_ids),
+            "coralnet_sources_included.csv",
+        )
 
         if self.dataset.label_filter.inclusion:
             csv_filename = "labels_included.csv"
@@ -691,7 +692,7 @@ class MLflowTrainingRunner(TrainingRunner):
         self.log_dataframe(artifacts.ba_counts, "ba_counts")
         self.log_dataframe(artifacts.bagf_counts, "bagf_counts")
 
-        if not self.dataset.cn_source_filter.is_empty():
+        if self.dataset.coralnet_source_ids:
             # These only apply if CoralNet data is included.
             self.log_dataframe(artifacts.coralnet_label_mapping, "coralnet_label_mapping")
             self.log_dataframe(artifacts.unmapped_labels, "unmapped_labels")

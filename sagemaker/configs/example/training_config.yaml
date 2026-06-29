@@ -11,8 +11,9 @@
 
 dataset:
   include_mermaid: false
-  # 2-source fixture; replace with your sources.csv for real runs.
-  coralnet_sources_csv: sources.csv
+  # Manifest parquet built by scripts/build_coralnet_manifest.py; this is a
+  # verbatim S3 URI, not a sibling file. Replace for real runs.
+  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/example/coralnet_classifier_manifest_example.parquet
   drop_growthforms: false
   label_rollup_spec_csv: rollups.csv
   included_labels_csv: included_labels.csv

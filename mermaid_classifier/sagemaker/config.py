@@ -76,7 +76,7 @@ class DatasetConfig(BaseModel):
     # *_path() helpers. The launcher uploads the YAML and CSVs together
     # to the same S3 prefix so the same resolution works in the
     # container.
-    coralnet_sources_csv: str | None = None
+    coralnet_manifest_uri: str | None = None
     drop_growthforms: bool = False
     label_rollup_spec_csv: str | None = None
     included_labels_csv: str | None = None
@@ -84,9 +84,6 @@ class DatasetConfig(BaseModel):
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     subsample: SubsampleConfig | None = None
     weighting: WeightingConfig | None = None
-
-    def coralnet_sources_csv_path(self, base: Path) -> Path | None:
-        return None if self.coralnet_sources_csv is None else base / self.coralnet_sources_csv
 
     def label_rollup_spec_csv_path(self, base: Path) -> Path | None:
         return None if self.label_rollup_spec_csv is None else base / self.label_rollup_spec_csv
@@ -206,7 +203,7 @@ class TrainingRunConfig(BaseModel):
 
         dataset_options = DatasetOptions(
             include_mermaid=d.include_mermaid,
-            coralnet_sources_csv=_resolve(d.coralnet_sources_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            coralnet_manifest_uri=d.coralnet_manifest_uri,
             drop_growthforms=d.drop_growthforms,
             label_rollup_spec_csv=_resolve(d.label_rollup_spec_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None

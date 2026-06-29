@@ -8,7 +8,8 @@
 
 dataset:
   include_mermaid: false
-  coralnet_sources_csv: sources.csv
+  # Verbatim S3 URI of the manifest parquet (scripts/build_coralnet_manifest.py).
+  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/top108_best/coralnet_classifier_manifest_top108_best.parquet
   drop_growthforms: false
   label_rollup_spec_csv: rollups.csv
   included_labels_csv: included_labels.csv

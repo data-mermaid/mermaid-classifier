@@ -36,7 +36,6 @@ from mermaid_classifier.pyspacer._pipeline_utils import (
     section_profiling,
 )
 from mermaid_classifier.pyspacer.label_specs import (
-    CNSourceFilter,
     LabelFilter,
     LabelRollupSpec,
 )
@@ -79,12 +78,8 @@ class TrainingDataset:
         # this to match the labels to the annotations table.
         self._feature_path_to_s3_location: dict[str, tuple[str, str]] = {}
 
-        if options.coralnet_sources_csv:
-            with open(options.coralnet_sources_csv) as csv_f:
-                self.cn_source_filter = CNSourceFilter(csv_f)
-        else:
-            # Empty set of CoralNet sources.
-            self.cn_source_filter = CNSourceFilter(StringIO(""))
+        # CoralNet data is defined by a manifest parquet (None disables it).
+        self.coralnet_source_ids: list[str] = []
 
         if options.label_rollup_spec_csv:
             with open(options.label_rollup_spec_csv) as csv_f:
@@ -119,9 +114,9 @@ class TrainingDataset:
 
         self.feature_loc_to_source: dict[DataLocation, tuple[str, str]] = {}
 
-        if not self.cn_source_filter.is_empty():
+        if self.options.coralnet_manifest_uri:
             with self.section_profiling("Reading CoralNet annotations"):
-                self.read_coralnet_data()
+                self.read_coralnet_manifest()
         else:
             # An empty dataframe
             self.artifacts.coralnet_project_stats = pd.DataFrame()
@@ -402,39 +397,7 @@ class TrainingDataset:
             transform_func=transform_func,
         )
 
-    def read_coralnet_data(self):
-        annotations_uri_list = []
-        missing_source_ids = []
-
-        s3 = S3FileSystem(anon=False)
-        for source_id in self.cn_source_filter.source_id_list:
-            # One row per point annotation,
-            # with columns including Image ID, Row, Column, Label ID
-            annotations_uri = settings.coralnet_annotations_csv_pattern.format(
-                coralnet_train_data_bucket=settings.coralnet_train_data_bucket,
-                source_id=source_id,
-            )
-            # Some sources in the input source list may not have data laid
-            # out in S3 yet. Skip them with a log warning rather than letting
-            # DuckDB 404 on the whole batch.
-            if not s3.exists(annotations_uri.removeprefix("s3://")):
-                missing_source_ids.append(source_id)
-                continue
-            annotations_uri_list.append(annotations_uri)
-
-        if missing_source_ids:
-            logger.warning(
-                "Skipping %d source(s) with no annotations.csv in S3: %s",
-                len(missing_source_ids),
-                missing_source_ids,
-            )
-        if not annotations_uri_list:
-            raise RuntimeError(
-                "No CoralNet sources have annotations.csv in S3. "
-                "Check the source-list CSV against bucket "
-                f"'{settings.coralnet_train_data_bucket}'."
-            )
-
+    def read_coralnet_manifest(self):
         if self.duckdb_annotations_table_exists():
             # Since CoralNet's data is not formatted to the open data
             # bucket's specs yet, it's easier to read in CN data first,
@@ -448,88 +411,38 @@ class TrainingDataset:
                 "Due to format technicalities, CoralNet data must be read in before MERMAID data."
             )
 
-        # Read each selected source's annotations-CSV into a single
-        # DuckDB table.
-        #
-        # `CREATE TABLE ... AS SELECT ...` is from:
-        # https://duckdb.org/docs/stable/data/csv/overview
-        #
-        # Passing a list of CSV files into read_csv() is from:
-        # https://duckdb.org/docs/stable/data/multiple_files/overview
-        #
-        # CSV options:
-        # https://duckdb.org/docs/stable/data/csv/overview#parameters
-        # union_by_name=true: CoralNet sources define their own image-metadata
-        # columns (Reef, Site, Transect, etc.) and the set varies per source.
-        # Without this, DuckDB requires identical schemas across all files in
-        # the list and fails when any column is missing in any source.
-        #
-        # all_varchar=true: user-defined columns can contain anything (a
-        # 'Plot_ID' column may be integers in 99% of rows and a test string
-        # like 'SM_TEST_01' in the rest). DuckDB's type inference samples
-        # only the first ~20k rows and crashes when later rows violate the
-        # inferred type. Read everything as text; columns we actually use
-        # (Row, Column, Image ID, Label ID) are cast explicitly downstream.
-        #
-        # quote='"', escape='"': force standard CSV quote handling. The
-        # auto-detector samples the first ~20k rows and may infer
-        # quote=None if those rows don't happen to contain quoted fields,
-        # then choke when later rows DO use quoting (e.g. site metadata
-        # like "Sheltered fringing reef, steep" with an embedded comma).
+        manifest_uri = self.options.coralnet_manifest_uri
+
+        # Read the manifest parquet into the `annotations` table, normalizing
+        # to the open data bucket column layout (row, col, image_id, label_id,
+        # site, bucket, project_id, feature_vector). The manifest is a
+        # per-annotation-point dataset; label mapping, rollups, and filtering
+        # happen downstream below, exactly as for the old per-source CSV path.
         self.duck_conn.execute(
             f"CREATE TABLE annotations AS"
-            f" SELECT *"
-            f" FROM read_csv({annotations_uri_list}, filename = true,"
-            f" union_by_name = true, all_varchar = true,"
-            f" quote = '\"', escape = '\"')"
+            f" SELECT"
+            f"  row,"
+            f"  col,"
+            f"  CAST(image_id AS VARCHAR) AS image_id,"
+            f"  CAST(coralnet_id AS VARCHAR) AS label_id,"
+            f"  '{Sites.CORALNET.value}' AS site,"
+            f"  '{settings.coralnet_train_data_bucket}' AS bucket,"
+            f"  CAST(source_id AS VARCHAR) AS project_id,"
+            # e.g. s123/features/i456.featurevector
+            f"  's' || CAST(source_id AS VARCHAR) || '/features/i' || CAST(image_id AS VARCHAR)"
+            f"   || '.featurevector' AS feature_vector"
+            f" FROM read_parquet('{manifest_uri}')"
+            # Drop rows with missing image_id, which would propagate into
+            # feature_vector and crash os.path.join downstream.
+            f" WHERE image_id IS NOT NULL AND image_id <> ''"
         )
 
-        # 1) Normalize the column names with the open data bucket parquet
-        #  format, and
-        # 2) Create some new columns derived from the existing ones, based
-        #  on how the CoralNet data is organized. We want to do this while
-        #  still in DuckDB format, because we'd like to have data-proc
-        #  steps after a certain point to not have site-specific cases.
-        #
-        # CREATE OR REPLACE TABLE:
-        # https://duckdb.org/2024/10/11/duckdb-tricks-part-2#repeated-data-transformation-steps
-        # regexp_extract and || (concat):
-        # https://duckdb.org/docs/stable/sql/functions/text
-        # Also potentially helpful:
-        # https://betterstack.com/community/guides/scaling-python/duckdb-python/
-        self.duck_conn.execute(
-            f"CREATE OR REPLACE TABLE annotations AS"
-            f" SELECT"
-            # Fix the case of this column name to match open data bucket
-            # format. Row is read as VARCHAR (all_varchar=true on read_csv)
-            # but pyspacer expects pixel coordinates as integers.
-            f' CAST("Row" AS INTEGER) AS row,'
-            # Make this column name match open data bucket format, and use
-            # quotes to avoid keyword clashing. Be sure to wrap in double
-            # quotes. Single quotes would get it interpreted as
-            # "give every row this constant string value". Cast to int for
-            # the same reason as the "Row" column above.
-            f' CAST("Column" AS INTEGER) AS col,'
-            # Later we find it easier to assume these are text, not integers.
-            # And quotes help again, this time since the name has spaces in it.
-            f' CAST("Image ID" AS VARCHAR) AS image_id,'
-            f' CAST("Label ID" AS VARCHAR) AS label_id,'
-            # Here we DO want to give every row this constant string value.
-            f" '{Sites.CORALNET.value}' AS site,"
-            f" '{settings.coralnet_train_data_bucket}' AS bucket,"
-            # Extract the source ID, and name it 'project_id' as a
-            # site-inspecific term.
-            rf" filename.regexp_extract('/s(\d+)/', 1) AS project_id,"
-            # e.g. s123/features/i456.featurevector
-            f" 's' || project_id || '/features/i' || image_id"
-            f"  || '.featurevector' AS feature_vector"
-            f" FROM annotations"
-            # Drop rows with missing Image ID. With union_by_name +
-            # all_varchar, files missing this column (or individual rows
-            # without a value) come through as NULL, which propagates
-            # into feature_vector and crashes os.path.join downstream.
-            f' WHERE "Image ID" IS NOT NULL AND "Image ID" <> \'\''
-        )
+        self.coralnet_source_ids = [
+            str(r[0])
+            for r in self.duck_conn.execute(
+                "SELECT DISTINCT project_id FROM annotations ORDER BY project_id"
+            ).fetchall()
+        ]
 
         # Get project-level stats before applying any further filters.
         self.artifacts.coralnet_project_stats = self.compute_project_stats(

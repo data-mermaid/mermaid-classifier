@@ -445,8 +445,8 @@ class NameToImageIdMappingTest(unittest.TestCase):
         self.assertEqual(prepared.images["1750080"], [(5, 5)])
 
         # The transformed CSV body must contain an `Image ID` column whose
-        # values are the looked-up numeric IDs -- this is what the
-        # classifier's read_coralnet_data expects.
+        # values are the looked-up numeric IDs -- this is the CoralNet
+        # annotations.csv format the feature-bucket build consumes.
         out_df = pd.read_csv(io.BytesIO(prepared.transformed_csv))
         self.assertIn("Image ID", out_df.columns)
         self.assertEqual(set(out_df["Image ID"].astype(str)), {"1719202", "1750080"})
