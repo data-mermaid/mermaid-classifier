@@ -28,7 +28,10 @@ MANIFEST_COLUMNS: list[str] = [
 def _source_filter_sql(source_ids: list[str] | None) -> str:
     if not source_ids:
         return ""
-    ids = ", ".join(str(int(s)) for s in source_ids)  # int() guards against injection
+    try:
+        ids = ", ".join(str(int(s)) for s in source_ids)
+    except ValueError as exc:
+        raise ValueError(f"source_ids must be integer-valued strings; got: {source_ids}") from exc
     return f" AND a.source_id IN ({ids})"
 
 
@@ -42,6 +45,10 @@ def build_manifest_relation(
 
     Inclusion: ``header_status = 'ok'`` and ``s3_key`` non-null. No
     feature-vector / audit / label filtering.
+
+    Note: ``annotations_uri`` and ``images_uri`` are interpolated directly into
+    SQL (DuckDB cannot parameterize file paths); callers must pass trusted,
+    validated URIs — never raw end-user input.
     """
     sql = f"""
         SELECT
@@ -80,6 +87,10 @@ def summarize_build(
 
     Returns a dict with keys: points_in, points_kept, points_dropped_no_image,
     sources_out.
+
+    Note: ``annotations_uri`` and ``images_uri`` are interpolated directly into
+    SQL (DuckDB cannot parameterize file paths); callers must pass trusted,
+    validated URIs — never raw end-user input.
     """
     source_filter = _source_filter_sql(source_ids)
     points_in = conn.sql(

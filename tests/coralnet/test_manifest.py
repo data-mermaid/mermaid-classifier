@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -9,6 +10,7 @@ import pyarrow.parquet as pq
 from mermaid_classifier.coralnet.manifest import (
     MANIFEST_COLUMNS,
     build_manifest_relation,
+    summarize_build,
 )
 
 
@@ -59,6 +61,7 @@ def _images():
 class BuildManifestTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.ann = _write(self.tmp, "ann.parquet", _annotations())
         self.img = _write(self.tmp, "img.parquet", _images())
         self.conn = duckdb.connect()
@@ -81,12 +84,16 @@ class BuildManifestTest(unittest.TestCase):
         rel = build_manifest_relation(self.conn, self.ann, self.img, source_ids=["2"])
         df = rel.df()
         self.assertEqual(list(df["image_id"]), ["c"])
+        self.assertEqual(list(df["source_id"]), [2])
 
     def test_summary_counts(self):
-        from mermaid_classifier.coralnet.manifest import summarize_build
-
         s = summarize_build(self.conn, self.ann, self.img)
         self.assertEqual(s["points_in"], 3)
         self.assertEqual(s["points_kept"], 2)
         self.assertEqual(s["points_dropped_no_image"], 1)
         self.assertEqual(s["sources_out"], 2)
+
+    def test_source_id_non_integer_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_manifest_relation(self.conn, self.ann, self.img, source_ids=["abc"])
+        self.assertIn("integer-valued", str(ctx.exception))
