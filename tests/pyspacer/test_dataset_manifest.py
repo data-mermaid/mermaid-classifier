@@ -11,7 +11,9 @@ from mermaid_classifier.coralnet.manifest import build_manifest_relation, write_
 
 class ManifestNormalizationTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+        self.tmp = self.tmp_dir.name
         ann = os.path.join(self.tmp, "a.parquet")
         pq.write_table(_annotations(), ann)
         img = os.path.join(self.tmp, "i.parquet")

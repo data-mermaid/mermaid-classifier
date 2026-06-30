@@ -11,6 +11,18 @@ from __future__ import annotations
 
 import duckdb
 
+
+def _sql_str(s: str) -> str:
+    """Escape single quotes in a string for safe interpolation into DuckDB SQL.
+
+    The DuckDB Relation API (``conn.sql()``) does not accept bind parameters,
+    so URI literals must be interpolated directly.  This helper escapes any
+    embedded single quotes (``'`` → ``''``) so that a URI containing a single
+    quote cannot break out of the SQL string literal.
+    """
+    return s.replace("'", "''")
+
+
 MANIFEST_COLUMNS: list[str] = [
     "source_id",
     "image_id",
@@ -48,7 +60,8 @@ def build_manifest_relation(
 
     Note: ``annotations_uri`` and ``images_uri`` are interpolated directly into
     SQL (DuckDB cannot parameterize file paths); callers must pass trusted,
-    validated URIs — never raw end-user input.
+    validated URIs — never raw end-user input.  Single quotes in URIs are
+    escaped via ``_sql_str`` to prevent SQL string-literal breakage.
     """
     sql = f"""
         SELECT
@@ -62,8 +75,8 @@ def build_manifest_relation(
             i.width                           AS load_width,
             i.height                          AS load_height,
             CAST(FALSE AS BOOLEAN)            AS uses_resized_image
-        FROM read_parquet('{annotations_uri}') a
-        JOIN read_parquet('{images_uri}') i
+        FROM read_parquet('{_sql_str(annotations_uri)}') a
+        JOIN read_parquet('{_sql_str(images_uri)}') i
           ON a.source_id = i.source_id AND a.image_id = i.image_id
         WHERE i.header_status = 'ok'
           AND i.s3_key IS NOT NULL
@@ -85,16 +98,18 @@ def summarize_build(
 ) -> dict[str, int]:
     """Return point and source counts for the manifest build.
 
-    Returns a dict with keys: points_in, points_kept, points_dropped_no_image,
-    sources_out.
+    Returns a dict with keys: points_in, points_kept,
+    points_dropped_invalid_image (counts all drops: missing image row,
+    ``header_status != 'ok'``, and ``s3_key IS NULL``), sources_out.
 
     Note: ``annotations_uri`` and ``images_uri`` are interpolated directly into
     SQL (DuckDB cannot parameterize file paths); callers must pass trusted,
-    validated URIs — never raw end-user input.
+    validated URIs — never raw end-user input.  Single quotes in URIs are
+    escaped via ``_sql_str`` to prevent SQL string-literal breakage.
     """
     source_filter = _source_filter_sql(source_ids)
     row = conn.sql(
-        f"SELECT count(*) FROM read_parquet('{annotations_uri}') a WHERE TRUE {source_filter}"
+        f"SELECT count(*) FROM read_parquet('{_sql_str(annotations_uri)}') a WHERE TRUE {source_filter}"
     ).fetchone()
     points_in = row[0] if row is not None else 0
     rel = build_manifest_relation(conn, annotations_uri, images_uri, source_ids)
@@ -105,6 +120,6 @@ def summarize_build(
     return {
         "points_in": int(points_in),
         "points_kept": int(points_kept),
-        "points_dropped_no_image": int(points_in) - int(points_kept),
+        "points_dropped_invalid_image": int(points_in) - int(points_kept),
         "sources_out": int(sources_out),
     }

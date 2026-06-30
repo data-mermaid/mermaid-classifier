@@ -420,23 +420,24 @@ class TrainingDataset:
         # happen downstream below, exactly as for the old per-source CSV path.
         try:
             self.duck_conn.execute(
-                f"CREATE TABLE annotations AS"
-                f" SELECT"
-                f"  row,"
-                f"  col,"
-                f"  CAST(image_id AS VARCHAR) AS image_id,"
-                f"  CAST(coralnet_id AS VARCHAR) AS label_id,"
+                "CREATE TABLE annotations AS"
+                " SELECT"
+                "  row,"
+                "  col,"
+                "  CAST(image_id AS VARCHAR) AS image_id,"
+                "  CAST(coralnet_id AS VARCHAR) AS label_id,"
                 f"  '{Sites.CORALNET.value}' AS site,"
                 f"  '{settings.coralnet_train_data_bucket}' AS bucket,"
-                f"  CAST(source_id AS VARCHAR) AS project_id,"
+                "  CAST(source_id AS VARCHAR) AS project_id,"
                 # e.g. s123/features/i456.featurevector
-                f"  's' || CAST(source_id AS VARCHAR) || '/features/i' || CAST(image_id AS VARCHAR)"
-                f"   || '.featurevector' AS feature_vector"
-                f" FROM read_parquet('{manifest_uri}')"
+                "  's' || CAST(source_id AS VARCHAR) || '/features/i' || CAST(image_id AS VARCHAR)"
+                "   || '.featurevector' AS feature_vector"
+                " FROM read_parquet(?)"
                 # Defense-in-depth: the inner join in build_manifest_relation
                 # already excludes null image_id, but guard here in case the
                 # parquet was produced by another path.
-                f" WHERE image_id IS NOT NULL AND image_id <> ''"
+                " WHERE image_id IS NOT NULL AND image_id <> ''",
+                [manifest_uri],
             )
         except Exception as exc:
             raise RuntimeError(
@@ -449,7 +450,7 @@ class TrainingDataset:
         self.coralnet_source_ids = [
             str(r[0])
             for r in self.duck_conn.execute(
-                "SELECT DISTINCT project_id FROM annotations ORDER BY project_id"
+                "SELECT DISTINCT project_id FROM annotations ORDER BY CAST(project_id AS INTEGER)"
             ).fetchall()
         ]
 

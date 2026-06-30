@@ -50,8 +50,12 @@ def _load_source_ids(sources_csv: str | None, source_ids: str | None) -> list[st
     if sources_csv:
         with open(sources_csv, newline="") as f:
             reader = csv.DictReader(f)
-            col = (reader.fieldnames or ["id"])[0]
-            return [r[col] for r in reader if r[col]]
+            if reader.fieldnames is None or "id" not in reader.fieldnames:
+                raise ValueError(
+                    f"--sources-csv '{sources_csv}' must contain an 'id' column"
+                    f" (got columns: {list(reader.fieldnames or [])})"
+                )
+            return [r["id"] for r in reader if r["id"]]
     if source_ids:
         return [s.strip() for s in source_ids.split(",") if s.strip()]
     return None
@@ -83,10 +87,10 @@ def main(argv: list[str] | None = None) -> None:
 
     summary = summarize_build(conn, args.annotations_uri, args.images_uri, source_ids)
     log.info(
-        "points_in=%d kept=%d dropped_no_image=%d sources_out=%d",
+        "points_in=%d kept=%d dropped_invalid_image=%d sources_out=%d",
         summary["points_in"],
         summary["points_kept"],
-        summary["points_dropped_no_image"],
+        summary["points_dropped_invalid_image"],
         summary["sources_out"],
     )
     if args.audit_uri:
