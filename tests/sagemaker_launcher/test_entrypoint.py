@@ -40,7 +40,7 @@ def _load_entrypoint():
 MINIMAL_YAML = textwrap.dedent("""
     dataset:
       include_mermaid: false
-      coralnet_sources_csv: sources.csv
+      coralnet_manifest_uri: s3://bucket/coralnet_manifest.parquet
       label_rollup_spec_csv: rollups.csv
       included_labels_csv: included_labels.csv
       subsample:
@@ -62,7 +62,6 @@ def _config_dir():
     with TemporaryDirectory() as td:
         tmp = Path(td)
         (tmp / "training_config.yaml").write_text(MINIMAL_YAML)
-        (tmp / "sources.csv").write_text("id\n123\n")
         (tmp / "rollups.csv").write_text("from_ba_id,from_gf_id,to_ba_id,to_gf_id\n")
         (tmp / "included_labels.csv").write_text("ba_id,gf_id\n")
         yield tmp

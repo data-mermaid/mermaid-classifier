@@ -3,7 +3,6 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
-from io import StringIO
 from types import SimpleNamespace
 from unittest import mock
 
@@ -12,8 +11,7 @@ from spacer.data_classes import DataLocation, ImageLabels
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
 from mermaid_classifier.pyspacer.dataset import TrainingDataset
-from mermaid_classifier.pyspacer.label_specs import CNSourceFilter
-from mermaid_classifier.pyspacer.options import Artifacts, Sites
+from mermaid_classifier.pyspacer.options import Artifacts, DatasetOptions, Sites
 from mermaid_classifier.pyspacer.settings import settings
 
 
@@ -107,7 +105,7 @@ def same_char_uuid(char: str):
 
 class ReadCoralNetDataTest(BaseTrainTest):
     """
-    Test read_coralnet_data().
+    Test read_coralnet_manifest().
     """
 
     def test_gfs_present_and_empty(self):
@@ -122,14 +120,24 @@ class ReadCoralNetDataTest(BaseTrainTest):
         in DuckDB.
         And test alongside with-GF annotations.
         """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
         dataset = NoInitDataset()
 
         source_id = 23
-        dataset.cn_source_filter = CNSourceFilter(StringIO(f"id\n{source_id}\n"))
 
-        # CoralNet annotations are read in as CSV.
-        cn_annotations_csv_content = (
-            "Image ID,Row,Column,Label ID\n12345,2000,1200,123\n67890,1500,2800,456\n"
+        # CoralNet annotations come from the manifest parquet, one row per
+        # annotation point with columns source_id, image_id, row, col,
+        # coralnet_id (see mermaid_classifier.coralnet.manifest).
+        manifest_table = pa.table(
+            {
+                "source_id": pa.array([source_id, source_id], pa.int32()),
+                "image_id": pa.array(["12345", "67890"], pa.string()),
+                "row": pa.array([2000, 1500], pa.int32()),
+                "col": pa.array([1200, 2800], pa.int32()),
+                "coralnet_id": pa.array([123, 456], pa.int32()),
+            }
         )
 
         # Mock CN-MM mapping to use.
@@ -154,37 +162,21 @@ class ReadCoralNetDataTest(BaseTrainTest):
             },
         ]
 
-        prefix_pattern = "s{source_id}_"
-        prefix = prefix_pattern.format(source_id=source_id)
-
         with tempfile.NamedTemporaryFile(
-            prefix=prefix,
-            mode="w",
+            suffix=".parquet",
             delete_on_close=False,
-        ) as csv_f:
-            csv_f.write(cn_annotations_csv_content)
-            csv_f.close()
+        ) as manifest_f:
+            manifest_f.close()
+            pq.write_table(manifest_table, manifest_f.name)
+            dataset.options = DatasetOptions(coralnet_manifest_uri=manifest_f.name)
 
-            with (
-                override_settings(
-                    coralnet_annotations_csv_pattern=csv_f.name,
-                ),
-                mock.patch.object(
-                    CoralNetMermaidMapping,
-                    "_download_mapping",
-                ) as mock_download_mapping,
-                # read_coralnet_data uses S3FileSystem.exists to skip
-                # sources whose annotations.csv isn't in S3. The test
-                # serves its CSV from a local tempfile, so short-circuit
-                # that check.
-                mock.patch(
-                    "mermaid_classifier.pyspacer.dataset.S3FileSystem",
-                ) as mock_s3fs_cls,
-            ):
+            with mock.patch.object(
+                CoralNetMermaidMapping,
+                "_download_mapping",
+            ) as mock_download_mapping:
                 mock_download_mapping.return_value = mapping
-                mock_s3fs_cls.return_value.exists.return_value = True
 
-                dataset.read_coralnet_data()
+                dataset.read_coralnet_manifest()
 
         result_tuples = dataset.duck_conn.execute(
             "SELECT image_id, row, col, benthic_attribute_id, growth_form_id FROM annotations"
@@ -200,6 +192,45 @@ class ReadCoralNetDataTest(BaseTrainTest):
             list(result_tuples[1]),
             ["67890", 1500, 2800, same_char_uuid("2"), ""],
         )
+        # Distinct source IDs are recorded for MLflow logging.
+        self.assertEqual(dataset.coralnet_source_ids, [str(source_id)])
+
+    def test_missing_column_raises_friendly_error(self):
+        """
+        A parquet missing the required 'coralnet_id' column must raise a
+        RuntimeError with a message that names the manifest path and the
+        missing column, not a raw DuckDB error.
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        dataset = NoInitDataset()
+
+        # Build a parquet that is intentionally missing 'coralnet_id'.
+        bad_table = pa.table(
+            {
+                "source_id": pa.array([1], pa.int32()),
+                "image_id": pa.array(["abc"], pa.string()),
+                "row": pa.array([10], pa.int32()),
+                "col": pa.array([11], pa.int32()),
+                # coralnet_id is deliberately absent
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".parquet",
+            delete_on_close=False,
+        ) as manifest_f:
+            manifest_f.close()
+            pq.write_table(bad_table, manifest_f.name)
+            dataset.options = DatasetOptions(coralnet_manifest_uri=manifest_f.name)
+
+            with self.assertRaises(RuntimeError) as ctx:
+                dataset.read_coralnet_manifest()
+
+        msg = str(ctx.exception)
+        self.assertIn(manifest_f.name, msg)
+        self.assertIn("coralnet_id", msg)
 
 
 class ReadMermaidDataTest(BaseTrainTest):

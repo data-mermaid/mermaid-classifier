@@ -47,15 +47,10 @@ class DatasetOptions:
     Whether to include MERMAID annotations or not. False can be useful for
     any troubleshooting which is CoralNet specific.
 
-    coralnet_sources_csv
+    coralnet_manifest_uri
 
-    Local filepath of a CSV file, specifying CoralNet sources to include in
-    the training data.
-    Recognized columns:
-      id -- CoralNet source ID number.
-      Other informational columns can also be present and will be ignored.
-    If not specified, no CoralNet sources are included (so only MERMAID
-    projects go into training).
+    S3 URI (or local path) of the CoralNet manifest parquet; None disables
+    CoralNet.
 
     drop_growthforms
 
@@ -128,7 +123,7 @@ class DatasetOptions:
     """
 
     include_mermaid: bool = True
-    coralnet_sources_csv: str | None = None
+    coralnet_manifest_uri: str | None = None
     drop_growthforms: bool = False
     label_rollup_spec_csv: str | None = None
     included_labels_csv: str | None = None
