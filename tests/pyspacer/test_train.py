@@ -477,6 +477,105 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
         self.assertIn("my-bucket/05.fv", message)
         self.assertIn("You can configure the tolerance for missing feature vectors", message)
 
+    def test_coralnet_missing_filtered(self):
+        """
+        CoralNet annotations whose feature vectors are absent from the
+        present-paths set must now be filtered out (previously they were
+        always kept) and a warning logged.
+        """
+        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "site": [Sites.CORALNET.value] * 4,
+                "bucket": ["cn-bucket"] * 4,
+                "feature_vector": [
+                    "s1/features/i01.featurevector",
+                    "s1/features/i01.featurevector",
+                    "s1/features/i02.featurevector",
+                    "s1/features/i02.featurevector",
+                ],
+            }
+        )
+        # S3 doesn't have i02.
+        s3_paths = {
+            "cn-bucket/s1/features/i01.featurevector",
+            "cn-bucket/s1/features/i05.featurevector",
+        }
+
+        dataset = NoInitDataset()
+        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
+        with (
+            self.assertLogs(logger="train", level="WARN") as warn_cm,
+            override_settings(training_inputs_percent_missing_allowed=50),
+        ):
+            dataset.handle_missing_feature_vectors(s3_paths)
+
+        self.assertListEqual(
+            self.annotations_fvs(dataset),
+            ["s1/features/i01.featurevector", "s1/features/i01.featurevector"],
+            msg="i02 CoralNet feature vector should have been filtered out",
+        )
+
+        self.assertEqual(
+            warn_cm.output[0],
+            "WARNING:train:Skipping 1 feature vector(s) because the files"
+            " aren't in S3. Example(s):"
+            "\ncn-bucket/s1/features/i02.featurevector",
+        )
+
+    def test_mixed_sites_missing_filtered_and_abort(self):
+        """
+        With both MERMAID and CoralNet annotations missing feature vectors,
+        both sites' missing rows are filtered, and the abort triggers when
+        the combined missing count exceeds the threshold (counted over the
+        union of distinct feature vectors across all sites).
+        """
+        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "site": [Sites.MERMAID.value, Sites.MERMAID.value]
+                + [Sites.CORALNET.value, Sites.CORALNET.value],
+                "bucket": ["mm-bucket", "mm-bucket", "cn-bucket", "cn-bucket"],
+                "feature_vector": [
+                    "01.fv",
+                    "02.fv",
+                    "s1/features/i01.featurevector",
+                    "s1/features/i02.featurevector",
+                ],
+            }
+        )
+        # Present: only one MERMAID and one CoralNet feature vector.
+        # Missing: mm 02.fv and cn i02 -> 2 of 4 distinct (50%).
+        s3_paths = {
+            "mm-bucket/01.fv",
+            "cn-bucket/s1/features/i01.featurevector",
+        }
+
+        dataset = NoInitDataset()
+        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
+        # First, with a generous tolerance: both missing rows filtered, no abort.
+        with (
+            self.assertLogs(logger="train", level="WARN"),
+            override_settings(training_inputs_percent_missing_allowed=60),
+        ):
+            dataset.handle_missing_feature_vectors(s3_paths)
+
+        self.assertListEqual(
+            self.annotations_fvs(dataset),
+            ["01.fv", "s1/features/i01.featurevector"],
+            msg="Both MERMAID and CoralNet missing rows should be filtered out",
+        )
+
+        # Now prove the abort triggers when combined missing exceeds threshold.
+        dataset2 = NoInitDataset()
+        dataset2.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
+        with (
+            self.assertRaises(RuntimeError) as error_cm,
+            override_settings(training_inputs_percent_missing_allowed=49),
+        ):
+            dataset2.handle_missing_feature_vectors(s3_paths)
+
+        message = str(error_cm.exception)
+        self.assertIn("Too many feature vectors are missing (2), such as:", message)
+
 
 class LazyLibraryTest(BaseTrainTest):
     """
