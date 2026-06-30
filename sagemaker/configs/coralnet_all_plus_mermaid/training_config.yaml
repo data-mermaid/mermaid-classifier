@@ -1,0 +1,47 @@
+# Training run: ALL CoralNet sources/images/annotations available in the
+# 20260623_nogit ETL outputs (built with no source subset), PLUS MERMAID data.
+#
+# Dataset/label/sampling settings match coralnet_top108_full verbatim EXCEPT
+# include_mermaid=true and the all-sources manifest URI. included_labels.csv
+# and rollups.csv are verbatim copies from coralnet_top108_full/ (top-108
+# benthic-attribute hierarchy).
+#
+# NOTE: training reads feature vectors from 2605-coralnet-public-sources, so
+# every source in the manifest must have its featurevectors present.
+# TRAINING_INPUTS_PERCENT_MISSING_ALLOWED="5" tolerates a 5% gap; sources whose
+# feature extraction has not completed will count against that budget.
+
+dataset:
+  include_mermaid: true
+  # Verbatim S3 URI of the all-sources manifest parquet
+  # (scripts/build_coralnet_manifest.py run with no --sources-csv/--source-ids).
+  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/all/coralnet_classifier_manifest_all.parquet
+  drop_growthforms: false
+  label_rollup_spec_csv: rollups.csv
+  included_labels_csv: included_labels.csv
+  ref_val_ratios: [0.1, 0.1]
+  # Class-balanced subsampling, matching coralnet_top108_full.
+  subsample:
+    strategy: balanced
+    total_annotations: 7400000
+    min_per_class: 200
+  weighting:
+    enabled: true
+    weight_ratio_cap: 5000.0
+
+training:
+  epochs: 40
+  early_stopping_patience: 3
+
+mlflow:
+  experiment_name: coralnet-all-mermaid
+  model_name: coralnet-all-mermaid-v1
+
+env:
+  # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
+  # do not override here.
+  WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
+  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
+  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
+  TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "5"
+  MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

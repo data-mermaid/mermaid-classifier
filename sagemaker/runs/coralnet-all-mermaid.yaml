@@ -1,0 +1,27 @@
+# Launcher config for the all-sources + MERMAID training run.
+#
+# The dataset/training/mlflow blocks live in
+# sagemaker/configs/coralnet_all_plus_mermaid/training_config.yaml
+# (mounted into the container as /opt/ml/input/data/config/training_config.yaml).
+# This file describes ONLY the launcher's job: block.
+#
+# Submit with:
+#   uv run python scripts/launch_training.py \
+#       --run-config sagemaker/runs/coralnet-all-mermaid.yaml \
+#       --config-dir sagemaker/configs/coralnet_all_plus_mermaid/ \
+#       --mlflow-tracking-uri <arn>
+#
+# Compute mirrors coralnet-top108-full.yaml: the balanced subsample caps the
+# training set at ~7.4M annotations, so size is comparable despite the larger
+# (all-sources + MERMAID) input.
+
+job:
+  name_prefix: mermaid-classifier-all-mermaid
+  image: mermaid-classifier-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.c5.9xlarge
+  volume_gb: 400
+  max_runtime_hours: 36
+  env:
+    FEATURE_CACHE_DIR: /tmp/feature_cache
+    SPACER_EXTRACTORS_CACHE_DIR: /tmp/spacer_extractors
