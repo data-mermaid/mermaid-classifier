@@ -544,16 +544,9 @@ class TrainingDataset:
         )
 
         with (
-            duckdb_temp_table_name(self.duck_conn) as anno_features_table_name,
             duckdb_temp_table_name(self.duck_conn) as s3_features_table_name,
             duckdb_temp_table_name(self.duck_conn) as missing_features_table_name,
         ):
-            # Get the annotation data's unique feature paths into a table.
-            self.duck_conn.execute(
-                f"CREATE TABLE {anno_features_table_name} AS"
-                f" SELECT DISTINCT feature_full FROM annotations"
-            )
-
             # Get the S3 feature paths into another table.
             s3_paths_df = pd.DataFrame({"feature_full": list(present_feature_paths)})  # noqa: F841  # pyright: ignore[reportUnusedVariable]  # referenced by name in DuckDB SQL via Python-scope scanning
             self.duck_conn.execute(
