@@ -576,6 +576,21 @@ class TrainingDataset:
             ).fetchall()
             missing_examples = [tup[0] for tup in result_tuples]
 
+            # Abort if too many are missing (check before mutating).
+            examples_str = "\n".join(missing_examples)
+            missing_threshold = (
+                in_annotations_count * settings.training_inputs_percent_missing_allowed / 100
+            )
+            if missing_count > missing_threshold:
+                raise RuntimeError(
+                    f"Too many feature vectors are missing"
+                    f" ({missing_count}), such as:"
+                    f"\n{examples_str}"
+                    f"\nYou can configure the tolerance for missing"
+                    f" feature vectors with the"
+                    f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
+                )
+
             # Filter out missing feature vectors from annotations table.
             self.duck_conn.execute(
                 f"CREATE OR REPLACE TABLE annotations AS"
@@ -587,21 +602,6 @@ class TrainingDataset:
 
         # Don't need the feature_full column anymore.
         self.duck_conn.execute("ALTER TABLE annotations DROP feature_full")
-
-        # Abort if too many are missing.
-        examples_str = "\n".join(missing_examples)
-        missing_threshold = (
-            in_annotations_count * settings.training_inputs_percent_missing_allowed / 100
-        )
-        if missing_count > missing_threshold:
-            raise RuntimeError(
-                f"Too many feature vectors are missing"
-                f" ({missing_count}), such as:"
-                f"\n{examples_str}"
-                f"\nYou can configure the tolerance for missing"
-                f" feature vectors with the"
-                f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
-            )
 
         # Log a warning if any are missing.
         if missing_count > 0:
