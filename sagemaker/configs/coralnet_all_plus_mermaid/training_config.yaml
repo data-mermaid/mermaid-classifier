@@ -20,10 +20,16 @@ dataset:
   label_rollup_spec_csv: rollups.csv
   included_labels_csv: included_labels.csv
   ref_val_ratios: [0.1, 0.1]
-  # Class-balanced subsampling, matching coralnet_top108_full.
+  # Class-balanced subsampling. total_annotations sets the per-class cap
+  # (= total // n_classes); with ~111 classes this is the ceiling each class
+  # is trimmed to. At 7.4M the cap was ~66.7k/class and the head-heavy
+  # distribution only realized ~2.48M. Raised to 22.2M (cap ~200k/class, 3x)
+  # to train on more data for an initial run; balancing still applies (head
+  # classes capped) and weighting still compensates. Realized total TBD by the
+  # subsample dry run; raise/lower this number to tune it.
   subsample:
     strategy: balanced
-    total_annotations: 7400000
+    total_annotations: 22200000
     min_per_class: 200
   weighting:
     enabled: true
