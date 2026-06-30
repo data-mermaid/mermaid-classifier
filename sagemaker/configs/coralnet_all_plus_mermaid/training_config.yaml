@@ -43,5 +43,9 @@ env:
   WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
   MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
-  TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "5"
+  # The measured upstream gap is ~7.3% of distinct CoralNet feature vectors
+  # (raw images absent upstream — unfixable). The threshold is measured on
+  # distinct feature vectors, so "5" would abort the run; "10" tolerates the
+  # gap and drops the unbacked annotations.
+  TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "10"
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
