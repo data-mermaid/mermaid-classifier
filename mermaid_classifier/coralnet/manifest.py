@@ -93,12 +93,15 @@ def summarize_build(
     validated URIs — never raw end-user input.
     """
     source_filter = _source_filter_sql(source_ids)
-    points_in = conn.sql(
+    row = conn.sql(
         f"SELECT count(*) FROM read_parquet('{annotations_uri}') a WHERE TRUE {source_filter}"
-    ).fetchone()[0]
+    ).fetchone()
+    points_in = row[0] if row is not None else 0
     rel = build_manifest_relation(conn, annotations_uri, images_uri, source_ids)
-    points_kept = rel.count("*").fetchone()[0]
-    sources_out = rel.aggregate("count(DISTINCT source_id)").fetchone()[0]
+    row = rel.count("*").fetchone()
+    points_kept = row[0] if row is not None else 0
+    row = rel.aggregate("count(DISTINCT source_id)").fetchone()
+    sources_out = row[0] if row is not None else 0
     return {
         "points_in": int(points_in),
         "points_kept": int(points_kept),
