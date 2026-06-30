@@ -37,12 +37,12 @@ WORKDIR /opt/ml/code
 # pyproject.toml) so no CUDA wheels are downloaded.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --extra pyspacer
+    uv sync --frozen --no-install-project --extra training
 
 # Layer 2: install the project itself (non-editable).
 COPY mermaid_classifier/ ./mermaid_classifier/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-editable --extra pyspacer
+    uv sync --frozen --no-editable --extra training
 
 # Layer 3: entrypoint + SageMaker scripts.
 COPY scripts/sagemaker_train_entrypoint.py ./scripts/
