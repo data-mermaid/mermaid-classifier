@@ -36,6 +36,12 @@ DEFAULT_WEIGHTS_URI = "s3://mermaid-config/classifier/efficientnet.pt"
 
 _VERSION_RE = re.compile(r"^v\d+$")
 
+# The serving runtime's compat gate (mermaid-inference pyspacer_function/compat.py)
+# refuses to score unless model.json records all three of these in trained_with.
+# Enforce their presence at release so a stale/incomplete MLflow artifact fails
+# here, loudly, instead of only when the Lambda first tries to serve it.
+_REQUIRED_PROVENANCE = ("torch", "sklearn", "pyspacer")
+
 
 def validate_version(version: str) -> None:
     """Raise ValueError unless version matches ^v\\d+$ (e.g. v3)."""
@@ -66,8 +72,14 @@ def validate_artifact(model_pt: Path, model_json: Path) -> dict[str, Any]:
         raise ValueError(f"manifest task={manifest.get('task')!r} != {TASK_NAME!r}")
     if not manifest.get("classes"):
         raise ValueError("manifest has empty/missing 'classes'")
-    if not manifest.get("trained_with"):
-        raise ValueError("manifest missing 'trained_with' provenance")
+    trained_with = manifest.get("trained_with") or {}
+    missing = [k for k in _REQUIRED_PROVENANCE if not trained_with.get(k)]
+    if missing:
+        raise ValueError(
+            "manifest 'trained_with' provenance missing key(s): "
+            f"{', '.join(missing)} — the serving runtime requires "
+            f"{'/'.join(_REQUIRED_PROVENANCE)}"
+        )
     # SCHEMA_VERSION is enforced by load_predictor; assert it stays referenced
     # so a future loader change that drops the check is caught here too.
     if manifest.get("schema_version") != SCHEMA_VERSION:
