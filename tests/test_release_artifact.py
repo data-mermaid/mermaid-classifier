@@ -81,6 +81,19 @@ class ValidateArtifactTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ra.validate_artifact(model_pt, model_json)
 
+    def test_rejects_incomplete_provenance(self):
+        # The v2 regression (issue #91): trained_with is present but missing the
+        # `pyspacer` key. The serving compat gate requires torch/sklearn/pyspacer,
+        # so the release gate must reject it rather than defer the failure to
+        # the Lambda's first invocation.
+        with tempfile.TemporaryDirectory() as tmp:
+            model_pt, model_json = self._export(tmp)
+            m = json.loads(model_json.read_text())
+            del m["trained_with"]["pyspacer"]
+            model_json.write_text(json.dumps(m))
+            with self.assertRaises(ValueError):
+                ra.validate_artifact(model_pt, model_json)
+
     def test_rejects_bad_class_count(self):
         # load_predictor probes the graph: a manifest claiming the wrong class
         # count must raise (ManifestError is a subclass-agnostic failure here).
