@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> None:
 
     b = sub.add_parser("build-tasks")
     b.add_argument(
-        "--heldout-csv", default="../../reports/model_benchmark/data/v1_annotations_val.csv"
+        "--heldout-csv", default="../reports/model_benchmark/data/v1_annotations_val.csv"
     )
     b.add_argument("--n-images", type=int, default=15)
     b.add_argument("--seed", type=int, default=1)
