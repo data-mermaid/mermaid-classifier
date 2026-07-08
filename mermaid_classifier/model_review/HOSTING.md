@@ -32,6 +32,13 @@ its transitive deps out of the shared `uv.lock`.
    (so every expert labels every image).
 3. Import `review_tasks.json` (Import button, or the SDK in the seeding step).
 
+> **Presigned-URL lifetime caveat.** `build-tasks` presigns image URLs for 7 days,
+> but if you ran it under **SSO / STS temporary credentials** (`wcs-admin`), the URL
+> is only valid until the **session token** expires (hours), not 7 days — remote
+> experts will then get 403s on the images. For a multi-day review, either presign
+> with long-lived IAM credentials, make `coralnet-public-images` readable to the
+> reviewers another way, or re-run `build-tasks` + re-import before each session.
+
 ## Teardown (one step)
 
 Export first (the `synthesize` step needs the export), then:
