@@ -29,7 +29,12 @@ def parse_export(tasks: list[dict[str, Any]]) -> tuple[list[ExpertLabel], list[E
         for ann in task.get("annotations", []):
             expert = str(ann.get("completed_by"))
             keypoints = [r for r in ann["result"] if r.get("type") == "keypointlabels"]
-            for point, region in zip(original, keypoints, strict=False):
+            if len(keypoints) != len(original):
+                raise ValueError(
+                    f"annotation for image {image_id} by expert {expert} has "
+                    f"{len(keypoints)} keypoints but {len(original)} original points"
+                )
+            for point, region in zip(original, keypoints, strict=True):
                 labels.append(
                     ExpertLabel(
                         image_id=image_id,

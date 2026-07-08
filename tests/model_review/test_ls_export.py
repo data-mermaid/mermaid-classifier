@@ -45,3 +45,32 @@ class LsExportTest(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0].note, "GT looks wrong on point 2")
         self.assertEqual(notes[0].image_id, "A")
+
+    def test_keypoint_count_mismatch_raises(self):
+        export = [
+            {
+                "data": {
+                    "image_id": "A",
+                    "original_points": [
+                        {"row": 100, "col": 200, "gt": "g1::", "v1": "v1::"},
+                        {"row": 300, "col": 400, "gt": "g2::", "v1": "v2::"},
+                    ],
+                },
+                "annotations": [
+                    {
+                        "completed_by": 7,
+                        "result": [
+                            {
+                                "type": "keypointlabels",
+                                "value": {"keypointlabels": ["exp1::"]},
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            ls_export.parse_export(export)
+        message = str(ctx.exception)
+        self.assertIn("A", message)
+        self.assertIn("7", message)
