@@ -131,8 +131,11 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument(
         "--classifier", required=True, help="MLflow model id, S3 dir, or local dir for V1"
     )
-    b.add_argument("--image-bucket", default="2605-coralnet-public-sources")
-    b.add_argument("--image-key-template", default="s{source_id}/images/i{image_id}.jpg")
+    b.add_argument("--image-bucket", default="dev-datamermaid-sm-sources")
+    b.add_argument(
+        "--image-key-template",
+        default="coralnet-public-images/s{source_id}/images/{image_id}.jpg",
+    )
     b.add_argument("--tasks-out", default="review_tasks.json")
     b.add_argument("--config-out", default="review_config.xml")
     b.set_defaults(func=build_tasks_command)
