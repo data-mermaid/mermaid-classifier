@@ -15,10 +15,15 @@ _ROWS = [
 ]
 
 
-def _write_csv() -> str:
+def _write_csv(extra_rows: list[str] | None = None) -> str:
+    rows = _ROWS + (extra_rows or [])
     with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as tmp:
-        tmp.write(_HEADER + "\n" + "\n".join(_ROWS) + "\n")
+        tmp.write(_HEADER + "\n" + "\n".join(rows) + "\n")
         return tmp.name
+
+
+# A MERMAID row whose feature key would NOT parse as a CoralNet source id.
+_MERMAID_ROW = "5,6,M,0,mermaid,coral-reef-training,,mermaid/abc_featurevector,ba9,,val"
 
 
 class SampleTest(unittest.TestCase):
@@ -44,3 +49,10 @@ class SampleTest(unittest.TestCase):
         pts = sample.select_images(path, n_images=3, seed=1)
         by = {p.image_id: p for p in pts}
         self.assertEqual(by["B"].gt_bagf, "ba2::")
+
+    def test_non_coralnet_rows_excluded_and_do_not_crash(self):
+        # The raw val CSV mixes MERMAID rows whose feature key would not parse;
+        # the default coralnet site filter must skip them without raising.
+        path = _write_csv(extra_rows=[_MERMAID_ROW])
+        pts = sample.select_images(path, n_images=10, seed=1)  # site defaults to coralnet
+        self.assertEqual({p.image_id for p in pts}, {"A", "B", "C"})

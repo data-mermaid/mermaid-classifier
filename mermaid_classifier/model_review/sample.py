@@ -28,10 +28,14 @@ def source_id_from_feature_key(feature_key: str) -> str:
     return m.group(1)
 
 
-def select_images(csv_path: str, n_images: int, seed: int) -> list[ReviewPoint]:
+def select_images(
+    csv_path: str, n_images: int, seed: int, site: str = "coralnet"
+) -> list[ReviewPoint]:
     by_image: dict[str, list[ReviewPoint]] = {}
     with open(csv_path, newline="") as f:
         for r in csv.DictReader(f):
+            if r["site"] != site:
+                continue
             image_id = r["image_id"]
             point = ReviewPoint(
                 image_id=image_id,
