@@ -70,6 +70,17 @@ jupyterlab = [
 sagemaker = [
     "sagemaker>=2.0,<3.0",
 ]
+review = [
+    "duckdb",
+    "pandas",
+    "pyarrow",
+    "boto3",
+    "torch",
+    "torchvision",
+    "scikit-learn==1.5.2",
+    "label-studio-sdk",
+    "pillow",
+]
 
 # On Linux (i.e. the SageMaker training image) pull torch + torchvision from
 # PyTorch's CPU wheel index. Without this, uv resolves them from PyPI which
