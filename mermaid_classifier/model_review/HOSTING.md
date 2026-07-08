@@ -20,6 +20,12 @@ Single, tagged, throwaway host. **Tear down in one step when done.**
 
 ## Load the project
 
+The review CLI and the SDK seeding step are run ephemerally, not from an
+installed extra: `uv run --extra training --with label-studio-sdk --with
+pillow python -m mermaid_classifier.model_review.cli ...` (the seeding helper
+likewise needs `--with label-studio-sdk`). This keeps `label-studio-sdk` and
+its transitive deps out of the shared `uv.lock`.
+
 1. Create a project. Paste `review_config.xml` (from `build-tasks`) into
    Settings → Labeling Interface.
 2. Settings → General → set **Annotations per task minimum** = number of experts
