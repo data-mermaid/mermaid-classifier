@@ -17,7 +17,7 @@ def split_bagf(bagf: str) -> tuple[str, str]:
 
 def load_toplevel() -> dict[str, str]:
     out: dict[str, str] = {}
-    with open(TOPLEVEL_CSV) as f:
+    with open(TOPLEVEL_CSV, encoding="utf-8") as f:
         for row in csv.DictReader(f):
             out[row["id"]] = row["name"]
     return out
@@ -25,7 +25,7 @@ def load_toplevel() -> dict[str, str]:
 
 def load_rollup() -> dict[tuple[str, str], tuple[str, str]]:
     lookup: dict[tuple[str, str], tuple[str, str]] = {}
-    with open(ROLLUP_CSV) as f:
+    with open(ROLLUP_CSV, encoding="utf-8") as f:
         for row in csv.DictReader(f):
             lookup[(row["from_ba_id"], row["from_gf_id"])] = (
                 row["to_ba_id"],

@@ -49,6 +49,17 @@ def _match_rate(a: list[Any], b: list[Any]) -> float:
 
 
 def agreement_summary(df: pd.DataFrame) -> dict[str, float]:
+    expert_tops = [
+        expert_top
+        for expert, expert_top in zip(df["expert"], df["expert_top"], strict=True)
+        if expert is not None
+    ]
+    if expert_tops and all(t is None for t in expert_tops):
+        raise ValueError(
+            "no expert labels rolled up to a top-level category — check the "
+            "name-vs-id mapping between the Label Studio config and the rollup"
+        )
+
     # #1 V1 vs GT — one row per distinct point (dedupe experts)
     points = df.drop_duplicates(subset=["image_id", "row", "col"])
     v1_vs_gt = _match_rate(points["gt_top"].tolist(), points["v1_top"].tolist())
