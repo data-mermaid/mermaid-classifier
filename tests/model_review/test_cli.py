@@ -51,3 +51,12 @@ class CliTest(unittest.TestCase):
         to_bagf = cli.make_path_to_bagf(_fake_ba(), _fake_gf())
         for bagf in ("acr::br", "hc::", "acr::"):
             self.assertEqual(to_bagf(path(bagf)), bagf)
+
+    def test_v1_label_mapper_rolls_and_filters_to_classes(self):
+        raw = {"1": "ba1::", "2": "baX::gf", "3": None}  # coralnet "3" is unmappable
+        rollup = {"ba1::": "ROLLED::", "baX::gf": "OUT::"}  # baX::gf rolls outside V1
+        classes = {"ROLLED::"}
+        m = cli.make_v1_label_mapper(lambda c: raw.get(c), lambda b: rollup.get(b, b), classes)
+        self.assertEqual(m("1"), "ROLLED::")  # mapped, rolled, in V1 classes
+        self.assertIsNone(m("2"))  # rolls to a non-class -> dropped (like training)
+        self.assertIsNone(m("3"))  # unmappable coralnet id -> dropped

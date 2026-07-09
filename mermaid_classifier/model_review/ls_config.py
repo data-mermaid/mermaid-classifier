@@ -63,11 +63,33 @@ def _add_ba_subtree(
                 ET.SubElement(choice, "Choice", {"value": gf_name})
 
 
+def _add_paths(parent_el: ET.Element, paths: list[list[str]]) -> None:
+    """Build a Choice tree that is exactly the union of the given name paths.
+
+    Used to restrict the taxonomy to a specific label set (e.g. V1's classes):
+    only paths reachable to an allowed leaf appear.
+    """
+    groups: dict[str, list[list[str]]] = {}
+    for path in paths:
+        if not path:
+            continue
+        groups.setdefault(path[0], [])
+        if path[1:]:
+            groups[path[0]].append(path[1:])
+    for name in sorted(groups):
+        choice = ET.SubElement(parent_el, "Choice", {"value": name})
+        _add_paths(choice, groups[name])
+
+
 def build_taxonomy_config(
     ba_lib: BenthicAttributeLibrary,
     gf_lib: GrowthFormLibrary,
     image_value: str = "$image_url",
+    restrict_paths: list[list[str]] | None = None,
 ) -> str:
+    """Labeling config. If ``restrict_paths`` is given, the Taxonomy is limited to
+    exactly those root->leaf name paths (e.g. V1's label set); otherwise the full
+    benthic-attribute tree is emitted."""
     view = ET.Element("View")
     ET.SubElement(view, "Image", {"name": "image", "value": image_value, "zoom": "true"})
     # Colored top-level control: creates the keypoint regions and colours each
@@ -87,7 +109,10 @@ def build_taxonomy_config(
             "pathSeparator": "::",
         },
     )
-    _add_ba_subtree(tax, ba_lib, gf_lib, None)
+    if restrict_paths is not None:
+        _add_paths(tax, restrict_paths)
+    else:
+        _add_ba_subtree(tax, ba_lib, gf_lib, None)
     ET.SubElement(
         view,
         "TextArea",

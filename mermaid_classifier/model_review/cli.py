@@ -76,6 +76,25 @@ def make_path_to_bagf(
     return path_to_bagf
 
 
+def make_v1_label_mapper(
+    raw_mapper: Callable[[str], str | None],
+    roll_up: Callable[[str | None], str | None],
+    classes: set[str],
+) -> Callable[[str], str | None]:
+    """coralnet_id -> V1-label-set BA::GF: map to raw BA::GF, apply V1's training
+    rollup, and keep only labels that are actually V1 classes (drop the rest, exactly
+    as V1's training filter did)."""
+
+    def v1_label(coralnet_id: str) -> str | None:
+        raw = raw_mapper(coralnet_id)
+        if raw is None:
+            return None
+        rolled = roll_up(raw)
+        return rolled if rolled in classes else None
+
+    return v1_label
+
+
 def make_presigner(
     s3_client: Any, image_bucket: str, key_template: str
 ) -> Callable[[str, str], str]:
@@ -109,8 +128,22 @@ def _image_sizer(
 def build_tasks_command(args: argparse.Namespace) -> None:
     import boto3
 
+    from mermaid_classifier.pyspacer.annotation import resolve_classifier_artifact
+    from mermaid_classifier.pyspacer.inference import load_predictor
+    from mermaid_classifier.pyspacer.label_specs import LabelRollupSpec
+
     ba_lib = get_benthic_attribute_library()
     gf_lib = get_growth_form_library()
+    label_path = make_label_path(ba_lib, gf_lib)
+
+    # V1's label set = its class list; GT is rolled into it with V1's training rollup
+    # and any label outside V1's classes is dropped (exactly as V1's training filter did).
+    model_pt, model_json = resolve_classifier_artifact(args.classifier)
+    predictor = load_predictor(model_pt, model_json)
+    classes = set(predictor.classes)
+    with open(args.v1_rollup_csv) as f:
+        rollup = LabelRollupSpec(f)
+    v1_mapper = make_v1_label_mapper(sample.default_coralnet_mapper(), rollup.roll_up, classes)
 
     points = sample.select_images_full_gt(
         val_csv=args.heldout_csv,
@@ -119,11 +152,11 @@ def build_tasks_command(args: argparse.Namespace) -> None:
         n_images=args.n_images,
         seed=args.seed,
         min_points_per_image=args.min_points,
+        map_coralnet=v1_mapper,
     )
-    v1_preds = v1_infer.predict_points(points, classifier_location=args.classifier)
+    v1_preds = v1_infer.predict_points(points, args.classifier, predictor=predictor)
 
     s3 = boto3.client("s3")
-    label_path = make_label_path(ba_lib, gf_lib)
     toplevel_name = make_toplevel_name()
     image_url = make_presigner(s3, args.image_bucket, args.image_key_template)
     image_size = _image_sizer(s3, args.image_bucket, args.image_key_template)
@@ -132,7 +165,9 @@ def build_tasks_command(args: argparse.Namespace) -> None:
     with open(args.tasks_out, "w") as f:
         json.dump(tasks, f, indent=2)
 
-    config = ls_config.build_taxonomy_config(ba_lib, gf_lib)
+    # Restrict the expert taxonomy to V1's label set (one path per V1 class).
+    restrict_paths = sorted(label_path(c) for c in classes)
+    config = ls_config.build_taxonomy_config(ba_lib, gf_lib, restrict_paths=restrict_paths)
     with open(args.config_out, "w") as f:
         f.write(config)
     print(f"Wrote {len(tasks)} tasks -> {args.tasks_out} and config -> {args.config_out}")
@@ -197,6 +232,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     b.add_argument(
         "--classifier", required=True, help="MLflow model id, S3 dir, or local dir for V1"
+    )
+    b.add_argument(
+        "--v1-rollup-csv",
+        default="sagemaker/configs/coralnet_top108_full/rollups.csv",
+        help="V1 training rollup (from_ba_id,from_gf_id,to_ba_id,to_gf_id) to map GT into V1's label set",
     )
     b.add_argument("--image-bucket", default="dev-datamermaid-sm-sources")
     b.add_argument(

@@ -64,6 +64,16 @@ class LsConfigTest(unittest.TestCase):
         self.assertIn("Acropora", names)
         self.assertIn("Branching", names)  # growth forms attached as leaves
 
+    def test_taxonomy_restricted_to_given_paths(self):
+        paths = [["Hard coral", "Acropora", "Branching"], ["Bare substrate"]]
+        xml = ls_config.build_taxonomy_config(_fake_ba(), _fake_gf(), restrict_paths=paths)
+        root = ET.fromstring(xml)
+        tax = root.find("Taxonomy")
+        assert tax is not None
+        names = {c.get("value") for c in tax.iter("Choice")}
+        # only the nodes on the given paths appear (not the full BA tree / all GFs)
+        self.assertEqual(names, {"Hard coral", "Acropora", "Branching", "Bare substrate"})
+
     def test_flat_config_lists_labels(self):
         xml = ls_config.build_flat_config(["Hard coral", "Sand"])
         root = ET.fromstring(xml)

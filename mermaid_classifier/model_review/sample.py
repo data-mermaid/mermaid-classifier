@@ -145,7 +145,7 @@ def sample_full_gt_images(
     return points
 
 
-def _default_coralnet_mapper() -> Callable[[str], str | None]:
+def default_coralnet_mapper() -> Callable[[str], str | None]:
     from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
 
     mapping = CoralNetMermaidMapping()
@@ -179,7 +179,7 @@ def select_images_full_gt(
     import pandas as pd
 
     if map_coralnet is None:
-        map_coralnet = _default_coralnet_mapper()
+        map_coralnet = default_coralnet_mapper()
 
     eligible = eligible_image_ids_from_val(val_csv)
 
