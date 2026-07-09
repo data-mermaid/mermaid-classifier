@@ -1,24 +1,33 @@
 """Pre-seed one blank annotation per task x expert.
 
-The blank layer is the fixed keypoints WITHOUT any taxonomy label — each expert
-opens their own copy and assigns a label to every point via the Taxonomy tree.
-A point the expert never labels stays a bare keypoint (no taxonomy result) and is
-reported as unlabeled on export.
+Each expert opens their own copy of the fixed points, coloured grey (top-level
+``Unlabeled``), and assigns a fine label to every point via the Taxonomy tree. A
+point the expert never labels stays grey with no taxonomy result and is reported
+as unlabeled on export.
 """
 
 import copy
 from typing import Any
 
+from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
+
 
 def blank_annotation_result(reference_result: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep only the keypoint geometry from a reference result, dropping labels.
+    """Keep the keypoint regions from a reference result but blank their labels.
 
-    The reference (a GT/V1 prediction) carries paired ``keypoint`` + ``taxonomy``
-    entries per point; the blank expert layer keeps the ``keypoint`` regions so the
-    fixed points are present, but drops the ``taxonomy`` labels so the expert fills
-    them in independently.
+    The reference (a GT/V1 prediction) carries paired ``keypointlabels`` (top-level
+    colour) + ``taxonomy`` (fine) entries per point. The blank expert layer keeps
+    the keypoint regions so the fixed points are present, resets the top-level label
+    to the grey ``Unlabeled`` placeholder, and drops the taxonomy so the expert
+    fills in the fine label independently.
     """
-    return [copy.deepcopy(r) for r in reference_result if r.get("type") == "keypoint"]
+    blank: list[dict[str, Any]] = []
+    for r in reference_result:
+        if r.get("type") == "keypointlabels":
+            region = copy.deepcopy(r)
+            region["value"]["keypointlabels"] = [UNLABELED_TOPLEVEL]
+            blank.append(region)
+    return blank
 
 
 def seed_all(client: Any, project_id: int, expert_user_ids: list[int]) -> int:

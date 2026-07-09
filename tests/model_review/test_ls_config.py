@@ -39,8 +39,22 @@ class LsConfigTest(unittest.TestCase):
         self.assertIsNotNone(tax)
         self.assertEqual(tax.get("perRegion"), "true")
         self.assertEqual(tax.get("pathSeparator"), "::")
-        self.assertIsNotNone(root.find("KeyPoint"))
         self.assertIsNotNone(root.find("TextArea"))
+
+    def test_config_has_colored_toplevel_keypointlabels(self):
+        xml = ls_config.build_taxonomy_config(_fake_ba(), _fake_gf())
+        root = ET.fromstring(xml)
+        kpl = root.find("KeyPointLabels")
+        self.assertIsNotNone(kpl)
+        self.assertEqual(kpl.get("name"), "toplevel")
+        labels = list(kpl.iter("Label"))
+        # every top-level label carries a distinct background colour
+        self.assertTrue(all(lbl.get("background") for lbl in labels))
+        values = {lbl.get("value") for lbl in labels}
+        self.assertIn(ls_config.UNLABELED_TOPLEVEL, values)  # seeding placeholder
+        # distinct colours across the real (non-placeholder) categories
+        real = [lbl for lbl in labels if lbl.get("value") != ls_config.UNLABELED_TOPLEVEL]
+        self.assertEqual(len({lbl.get("background") for lbl in real}), len(real))
 
     def test_taxonomy_nests_children_and_growth_forms(self):
         xml = ls_config.build_taxonomy_config(_fake_ba(), _fake_gf())

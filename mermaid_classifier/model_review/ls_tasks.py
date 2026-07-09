@@ -15,19 +15,30 @@ from mermaid_classifier.model_review.sample import ReviewPoint
 
 
 def _point_results(
-    idx: int, x: float, y: float, width: int, height: int, path: list[str]
+    idx: int,
+    x: float,
+    y: float,
+    width: int,
+    height: int,
+    toplevel: str,
+    path: list[str],
 ) -> list[dict[str, Any]]:
-    """A keypoint region + its perRegion taxonomy label, sharing one region id."""
+    """A colored top-level keypoint region + its perRegion taxonomy label.
+
+    Both entries share one region id: the ``keypointlabels`` result (bound to the
+    ``toplevel`` control) carries the geometry and the top-level colour label; the
+    ``taxonomy`` result (bound to ``label``) carries the fine BA::GF path.
+    """
     region_id = f"pt-{idx}"
     return [
         {
             "id": region_id,
-            "type": "keypoint",
-            "from_name": "kp",
+            "type": "keypointlabels",
+            "from_name": "toplevel",
             "to_name": "image",
             "original_width": width,
             "original_height": height,
-            "value": {"x": x, "y": y, "width": 0.5},
+            "value": {"x": x, "y": y, "width": 0.5, "keypointlabels": [toplevel]},
         },
         {
             "id": region_id,
@@ -44,6 +55,7 @@ def build_task(
     points: list[ReviewPoint],
     v1_preds: dict[tuple[str, int, int], str],
     label_path: Callable[[str], list[str]],
+    toplevel_name: Callable[[str], str],
     image_url: Callable[[str, str], str],
     image_size: Callable[[str, str], tuple[int, int]],
 ) -> dict[str, Any]:
@@ -59,8 +71,14 @@ def build_task(
         y = p.row / height * 100
         v1_bagf = v1_preds[(p.image_id, p.row, p.col)]
         original_points.append({"row": p.row, "col": p.col, "gt": p.gt_bagf, "v1": v1_bagf})
-        gt_result.extend(_point_results(idx, x, y, width, height, label_path(p.gt_bagf)))
-        v1_result.extend(_point_results(idx, x, y, width, height, label_path(v1_bagf)))
+        gt_result.extend(
+            _point_results(
+                idx, x, y, width, height, toplevel_name(p.gt_bagf), label_path(p.gt_bagf)
+            )
+        )
+        v1_result.extend(
+            _point_results(idx, x, y, width, height, toplevel_name(v1_bagf), label_path(v1_bagf))
+        )
 
     return {
         "data": {
@@ -81,11 +99,12 @@ def build_tasks(
     points: list[ReviewPoint],
     v1_preds: dict[tuple[str, int, int], str],
     label_path: Callable[[str], list[str]],
+    toplevel_name: Callable[[str], str],
     image_url: Callable[[str, str], str],
     image_size: Callable[[str, str], tuple[int, int]],
 ) -> list[dict[str, Any]]:
     image_ids = sorted({p.image_id for p in points})
     return [
-        build_task(image_id, points, v1_preds, label_path, image_url, image_size)
+        build_task(image_id, points, v1_preds, label_path, toplevel_name, image_url, image_size)
         for image_id in image_ids
     ]

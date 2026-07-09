@@ -7,8 +7,14 @@ def _path_to_bagf(path):  # test resolver: last element is the "bagf"
     return path[-1]
 
 
-def _kp(idx):
-    return {"id": f"pt-{idx}", "type": "keypoint", "value": {"x": 1.0, "y": 2.0}}
+def _kp(idx, toplevel="Hard coral"):
+    # region is created by the colored top-level KeyPointLabels control
+    return {
+        "id": f"pt-{idx}",
+        "type": "keypointlabels",
+        "from_name": "toplevel",
+        "value": {"x": 1.0, "y": 2.0, "keypointlabels": [toplevel]},
+    }
 
 
 def _tax(idx, path):

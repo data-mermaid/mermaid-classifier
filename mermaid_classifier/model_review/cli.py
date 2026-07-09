@@ -22,7 +22,20 @@ from mermaid_classifier.model_review import (
     synthesis,
     v1_infer,
 )
-from mermaid_classifier.model_review.rollup import make_rollup_fn
+from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
+from mermaid_classifier.model_review.rollup import load_toplevel, make_rollup_fn
+
+
+def make_toplevel_name() -> Callable[[str], str]:
+    """BA_ID::GF_ID -> its top-level category NAME (for the colored keypoint label)."""
+    roll = make_rollup_fn(strict=False)
+    toplevel = load_toplevel()  # top-level id -> name
+
+    def toplevel_name(bagf: str) -> str:
+        top_id = roll(bagf)
+        return toplevel.get(top_id, UNLABELED_TOPLEVEL) if top_id else UNLABELED_TOPLEVEL
+
+    return toplevel_name
 
 
 def make_label_path(
@@ -109,10 +122,11 @@ def build_tasks_command(args: argparse.Namespace) -> None:
 
     s3 = boto3.client("s3")
     label_path = make_label_path(ba_lib, gf_lib)
+    toplevel_name = make_toplevel_name()
     image_url = make_presigner(s3, args.image_bucket, args.image_key_template)
     image_size = _image_sizer(s3, args.image_bucket, args.image_key_template)
 
-    tasks = ls_tasks.build_tasks(points, v1_preds, label_path, image_url, image_size)
+    tasks = ls_tasks.build_tasks(points, v1_preds, label_path, toplevel_name, image_url, image_size)
     with open(args.tasks_out, "w") as f:
         json.dump(tasks, f, indent=2)
 

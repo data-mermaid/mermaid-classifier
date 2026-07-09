@@ -44,7 +44,9 @@ def parse_export(
         for ann in task.get("annotations", []):
             expert = str(ann.get("completed_by"))
             result = ann["result"]
-            keypoint_ids = {r["id"] for r in result if r.get("type") == "keypoint"}
+            keypoint_ids = {
+                r["id"] for r in result if r.get("type") in ("keypoint", "keypointlabels")
+            }
             tax_by_id = {
                 r["id"]: r["value"]["taxonomy"]
                 for r in result
