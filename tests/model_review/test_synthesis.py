@@ -42,25 +42,36 @@ class SynthesisTest(unittest.TestCase):
 
     def test_v1_vs_gt_match_rate(self):
         df = synthesis.build_point_table(_TASKS, _EXPERTS, _roll)
-        summary = synthesis.agreement_summary(df)
+        summary = synthesis.agreement_summary(df, _TASKS, _roll)
         self.assertAlmostEqual(summary["v1_vs_gt"], 0.5)  # 1 of 2 points match
+
+    def test_v1_vs_gt_covers_points_no_expert_reviewed(self):
+        # Experts labeled only point (1,1); v1_vs_gt must still cover BOTH points
+        # (it comes from the tasks, not the expert df).
+        experts = [ExpertLabel("A", "e1", 1, 1, "hc::")]
+        df = synthesis.build_point_table(_TASKS, experts, _roll)
+        summary = synthesis.agreement_summary(df, _TASKS, _roll)
+        self.assertAlmostEqual(summary["v1_vs_gt"], 0.5)  # 1 of 2, not 1 of 1
+
+    def test_v1_vs_gt_rate_dedupes_and_uses_all_tasks(self):
+        # standalone helper, no experts involved at all
+        self.assertAlmostEqual(synthesis.v1_vs_gt_rate(_TASKS, _roll), 0.5)
 
     def test_expert_vs_gt_match_rate(self):
         df = synthesis.build_point_table(_TASKS, _EXPERTS, _roll)
-        summary = synthesis.agreement_summary(df)
+        summary = synthesis.agreement_summary(df, _TASKS, _roll)
         # e1: 2/2 match gt; e2: 1/2 match gt -> 3/4
         self.assertAlmostEqual(summary["expert_vs_gt"], 0.75)
 
     def test_expert_vs_expert_agreement(self):
         df = synthesis.build_point_table(_TASKS, _EXPERTS, _roll)
-        summary = synthesis.agreement_summary(df)
+        summary = synthesis.agreement_summary(df, _TASKS, _roll)
         # 2 shared points; agree on point1, disagree on point2 -> 0.5
         self.assertAlmostEqual(summary["expert_vs_expert"], 0.5)
 
     def test_all_expert_top_none_raises(self):
         # Simulates the name<->id rollup collapse: every expert label rolls to
-        # None, so all three comparisons involving experts would silently
-        # become NaN. This must raise instead of silently collapsing.
+        # None, so the expert comparisons would silently become NaN. Must raise.
         records = [
             {
                 "image_id": "A",
@@ -83,19 +94,14 @@ class SynthesisTest(unittest.TestCase):
         ]
         df = pd.DataFrame.from_records(records)
         with self.assertRaises(ValueError):
-            synthesis.agreement_summary(df)
+            synthesis.agreement_summary(df, _TASKS, _roll)
 
     def test_worked_example_does_not_raise(self):
-        # The existing worked-example fixture has non-None expert_top values,
-        # so the total-collapse guard must not trip on legitimate data.
         df = synthesis.build_point_table(_TASKS, _EXPERTS, _roll)
-        synthesis.agreement_summary(df)  # should not raise
+        synthesis.agreement_summary(df, _TASKS, _roll)  # should not raise
 
     def test_none_expert_top_excluded_from_match_rates(self):
-        # An expert label that rolls to None (e.g. "Unlabeled") must be
-        # excluded from the match-rate denominators entirely -- it should not
-        # count as agreement nor disagreement. At least one expert_top stays
-        # non-None so Fix 1's total-collapse guard does not trip.
+        # An expert label that rolls to None must be excluded from denominators.
         records = [
             {
                 "image_id": "A",
@@ -131,15 +137,13 @@ class SynthesisTest(unittest.TestCase):
                 "gt_top": "hc",
                 "v1_top": "hc",
                 "expert": "e3",
-                "expert_top": None,  # e.g. rolled from bagf "Unlabeled"
-            },
+                "expert_top": None,
+            },  # e.g. rolled from "Unlabeled"
         ]
         df = pd.DataFrame.from_records(records)
-        summary = synthesis.agreement_summary(df)
-        # expert_vs_gt: 3 valid (expert_top, gt_top) pairs (e3's None excluded),
-        # 2 match ((A,1,1)/e1 and (A,2,2)/e1) -> 2/3, not 2/4.
+        summary = synthesis.agreement_summary(df, _TASKS, _roll)
+        # expert_vs_gt: 3 valid pairs (e3's None excluded), 2 match -> 2/3
         self.assertAlmostEqual(summary["expert_vs_gt"], 2 / 3)
-        # expert_vs_expert: point (A,1,1) pair (e1,e2) -> disagree, counted.
-        # point (A,2,2) pair (e1,e3) -> e3 is None, pair skipped entirely.
-        # So total=1, agree=0 -> 0.0, not nan and not 0.5.
+        # expert_vs_expert: (A,1,1) pair (e1,e2) disagree; (A,2,2) pair has e3=None
+        # -> skipped. total=1, agree=0 -> 0.0.
         self.assertAlmostEqual(summary["expert_vs_expert"], 0.0)

@@ -138,7 +138,7 @@ def synthesize_command(args: argparse.Namespace) -> None:
     df = synthesis.build_point_table(tasks, expert_labels, roll)
     df.to_csv(args.points_out, index=False)
 
-    summary = synthesis.agreement_summary(df)
+    summary = synthesis.agreement_summary(df, tasks, roll)
     with open(args.summary_out, "w") as f:
         json.dump(summary, f, indent=2)
 

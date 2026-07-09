@@ -48,7 +48,29 @@ def _match_rate(a: list[Any], b: list[Any]) -> float:
     return sum(1 for x, y in pairs if x == y) / len(pairs)
 
 
-def agreement_summary(df: pd.DataFrame) -> dict[str, float]:
+def v1_vs_gt_rate(tasks: list[dict[str, Any]], roll: Callable[[str], str | None]) -> float:
+    """V1-vs-GT match rate over ALL distinct held-out points, independent of
+    whether an expert reviewed them (GT/V1 come from the tasks, not the experts)."""
+    seen: set[tuple[str, int, int]] = set()
+    gts: list[str | None] = []
+    v1s: list[str | None] = []
+    for task in tasks:
+        image_id = task["data"]["image_id"]
+        for p in task["data"]["original_points"]:
+            key = (image_id, p["row"], p["col"])
+            if key in seen:
+                continue
+            seen.add(key)
+            gts.append(roll(p["gt"]))
+            v1s.append(roll(p["v1"]))
+    return _match_rate(gts, v1s)
+
+
+def agreement_summary(
+    df: pd.DataFrame,
+    tasks: list[dict[str, Any]],
+    roll: Callable[[str], str | None],
+) -> dict[str, float]:
     expert_tops = [
         expert_top
         for expert, expert_top in zip(df["expert"], df["expert_top"], strict=True)
@@ -60,9 +82,8 @@ def agreement_summary(df: pd.DataFrame) -> dict[str, float]:
             "name-vs-id mapping between the Label Studio config and the rollup"
         )
 
-    # #1 V1 vs GT — one row per distinct point (dedupe experts)
-    points = df.drop_duplicates(subset=["image_id", "row", "col"])
-    v1_vs_gt = _match_rate(points["gt_top"].tolist(), points["v1_top"].tolist())
+    # #1 V1 vs GT — over ALL held-out points (not limited to expert-reviewed ones)
+    v1_vs_gt = v1_vs_gt_rate(tasks, roll)
 
     # #2 Expert vs GT — every expert label vs the point's GT
     expert_vs_gt = _match_rate(df["expert_top"].tolist(), df["gt_top"].tolist())
