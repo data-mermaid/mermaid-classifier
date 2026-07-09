@@ -81,7 +81,10 @@ Resources:
 
           # Accessed only via an SSM tunnel to localhost on the operator's
           # machine, so LABEL_STUDIO_HOST is the local forwarded address.
+          # LS runs as uid 1001 inside the container; the bind-mounted host dir
+          # must be writable by that uid or LS crash-loops on /data/media.
           mkdir -p /opt/ls_data
+          chown -R 1001:1001 /opt/ls_data
           docker run -d --restart unless-stopped --name ls \
             -p 8080:8080 \
             -e LABEL_STUDIO_HOST="http://localhost:8080" \
