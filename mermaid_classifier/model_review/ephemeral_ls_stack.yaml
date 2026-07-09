@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Ephemeral Label Studio host for the model-review experiment. Single self-contained
+  stack: every resource it creates is deleted by `delete-stack`, so teardown is
+  atomic and verifiable. No S3 buckets, no Route53 records, no ALB/ACM, no
+  CloudWatch log groups are created. HTTPS is served by Caddy (auto Let's Encrypt)
+  on <public-ip>.sslip.io, with the cert living on the instance (dies with it).
+
+Parameters:
+  Ami:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI (resolved from SSM public parameter).
+  InstanceType:
+    Type: String
+    Default: t3.medium
+  IngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to reach 80/443 (tighten to reviewer IPs if you can).
+  LabelStudioImage:
+    Type: String
+    Default: heartexlabs/label-studio:1.13.1
+
+Resources:
+  # Shell access is via SSM Session Manager (no SSH key pair, no inbound 22),
+  # which keeps the stack self-contained (no key-pair resource to orphan).
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - { Key: Project, Value: model-review }
+        - { Key: Ephemeral, Value: "true" }
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref InstanceRole ]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: model-review ephemeral Label Studio (HTTP/HTTPS in)
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref IngressCidr, Description: "ACME http-01 + redirect" }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref IngressCidr, Description: "Label Studio via Caddy TLS" }
+      Tags:
+        - { Key: Project, Value: model-review }
+        - { Key: Ephemeral, Value: "true" }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref Ami
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [ !GetAtt SecurityGroup.GroupId ]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true   # data volume goes with the instance
+      Tags:
+        - { Key: Project, Value: model-review }
+        - { Key: Ephemeral, Value: "true" }
+        - { Key: Name, Value: model-review-label-studio }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+
+          # Discover this instance's public IP (IMDSv2) -> sslip.io hostname.
+          TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/public-ipv4)
+          HOST="$${IP}.sslip.io"
+          echo "$HOST" > /opt/ls_host.txt
+
+          # Label Studio (data under /opt/ls_data, on the root EBS volume).
+          mkdir -p /opt/ls_data
+          docker run -d --restart unless-stopped --name ls \
+            -p 127.0.0.1:8080:8080 \
+            -e LABEL_STUDIO_HOST="https://$${HOST}" \
+            -v /opt/ls_data:/label-studio/data \
+            ${LabelStudioImage}
+
+          # Caddy terminates TLS (auto Let's Encrypt for <ip>.sslip.io) and
+          # reverse-proxies to LS. Cert data lives in a docker volume on this
+          # instance and is destroyed with it.
+          mkdir -p /opt/caddy
+          cat >/opt/caddy/Caddyfile <<EOF
+          $${HOST} {
+            reverse_proxy 127.0.0.1:8080
+          }
+          EOF
+          docker run -d --restart unless-stopped --name caddy \
+            --network host \
+            -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+            -v caddy_data:/data \
+            caddy:2
+
+Outputs:
+  Url:
+    Description: Label Studio URL (ready ~2-3 min after stack completes, once Caddy obtains its cert).
+    Value: !Sub "https://${Instance.PublicIp}.sslip.io"
+  PublicIp:
+    Value: !GetAtt Instance.PublicIp
+  ShellCommand:
+    Description: Open a shell without SSH keys (needs the SSM plugin locally).
+    Value: !Sub "aws ssm start-session --target ${Instance}"

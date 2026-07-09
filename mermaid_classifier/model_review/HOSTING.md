@@ -1,30 +1,45 @@
 # Ephemeral Label Studio hosting for the model-review experiment
 
-Single, tagged, throwaway host. **Tear down in one step when done.**
+Everything runs inside **one CloudFormation stack** (`ephemeral_ls_stack.yaml`), so
+teardown is atomic and **verifiable**: `delete-stack` removes exactly what the stack
+created, and a tag scan afterward proves nothing is left. No S3 buckets, Route 53
+records, ALB/ACM, key pairs, or CloudWatch log groups are created.
 
-## Deploy (small EC2 + Docker)
+*(Agent: run all AWS calls via the `aws-mcp` server, not the `aws` CLI.)*
 
-1. Launch one `t3.medium` Ubuntu instance, tagged `Project=model-review Ephemeral=true`,
-   security group allowing inbound 443 (and 22 for you). *(Agent: use the aws-mcp server
-   for these API calls, not the aws CLI.)*
-2. On the instance:
-   ```bash
-   docker run -d --name ls -p 80:8080 \
-     -v /opt/ls_data:/label-studio/data \
-     -e LABEL_STUDIO_HOST=https://<your-domain-or-ip> \
-     heartexlabs/label-studio:1.13.1
-   ```
-   Put HTTPS in front (Caddy one-liner or an ALB) so external experts get a valid cert.
-3. Open the URL, create the admin account, then create each expert's account
-   (Organization → People → invite / add). Community edition: everyone shares one org.
+## What the stack contains (the complete inventory)
+
+- 1 EC2 instance (`t3.medium`, Amazon Linux 2023), root EBS volume `DeleteOnTermination=true`
+- 1 security group (inbound 80 + 443)
+- 1 IAM role + instance profile (SSM Session Manager only — no SSH key pair)
+
+TLS is served by Caddy (auto Let's Encrypt) on `<public-ip>.sslip.io`; the cert lives
+on the instance and dies with it. Shell access is `aws ssm start-session` (no key pair).
+
+## Deploy
+
+```bash
+aws cloudformation create-stack \
+  --stack-name model-review-ls \
+  --template-body <ephemeral_ls_stack.yaml> \
+  --capabilities CAPABILITY_IAM \
+  --tags Key=Project,Value=model-review Key=Ephemeral,Value=true
+
+aws cloudformation wait stack-create-complete --stack-name model-review-ls
+aws cloudformation describe-stacks --stack-name model-review-ls \
+  --query "Stacks[0].Outputs"        # -> Url (https://<ip>.sslip.io), ShellCommand
+```
+
+Wait ~2-3 min after `CREATE_COMPLETE` for Caddy to obtain its cert, then open the `Url`.
+Create the admin account, then each expert's account (Organization → People). Community
+edition: everyone shares one org.
 
 ## Load the project
 
-The review CLI and the SDK seeding step are run ephemerally, not from an
-installed extra: `uv run --extra training --with label-studio-sdk --with
-pillow python -m mermaid_classifier.model_review.cli ...` (the seeding helper
-likewise needs `--with label-studio-sdk`). This keeps `label-studio-sdk` and
-its transitive deps out of the shared `uv.lock`.
+The review CLI and the SDK seeding step are run ephemerally, not from an installed
+extra: `uv run --extra training --with label-studio-sdk --with pillow python -m
+mermaid_classifier.model_review.cli ...` (the seeding helper likewise needs
+`--with label-studio-sdk`). This keeps `label-studio-sdk` out of the shared `uv.lock`.
 
 1. Create a project. Paste `review_config.xml` (from `build-tasks`) into
    Settings → Labeling Interface.
@@ -39,12 +54,22 @@ its transitive deps out of the shared `uv.lock`.
 > with long-lived IAM credentials, make `coralnet-public-images` readable to the
 > reviewers another way, or re-run `build-tasks` + re-import before each session.
 
-## Teardown (one step)
+## Teardown (one step) + verification
 
-Export first (the `synthesize` step needs the export), then:
 ```bash
-# Agent: via aws-mcp — terminate the single tagged instance.
-# Nothing else persists; presigned URLs expire on their own.
+# 1) Export first (the synthesize step needs review_export.json), THEN:
+aws cloudformation delete-stack --stack-name model-review-ls
+aws cloudformation wait stack-delete-complete --stack-name model-review-ls
+
+# 2) Prove the stack is gone (this call should ERROR "does not exist"):
+aws cloudformation describe-stacks --stack-name model-review-ls
+
+# 3) Prove nothing tagged Project=model-review remains anywhere (must be empty):
+aws resourcegroupstaggingapi get-resources \
+  --tag-filters Key=Project,Values=model-review \
+  --query "ResourceTagMappingList[].ResourceARN"
 ```
-Confirm no instance with tag `Project=model-review` remains. There is no CDK stack,
-load balancer left running, or bucket to clean beyond the ephemeral instance.
+
+If step 2 errors with "Stack ... does not exist" **and** step 3 returns `[]`, teardown
+is complete and verified. Presigned URLs simply expire on their own; nothing else was
+created outside the stack.
