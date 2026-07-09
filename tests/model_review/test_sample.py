@@ -50,6 +50,12 @@ class SampleTest(unittest.TestCase):
         by = {p.image_id: p for p in pts}
         self.assertEqual(by["B"].gt_bagf, "ba2::")
 
+    def test_min_points_per_image_filters_sparse_images(self):
+        # A has 2 points, B and C have 1 each; require >=2 -> only A eligible.
+        path = _write_csv()
+        pts = sample.select_images(path, n_images=10, seed=1, min_points_per_image=2)
+        self.assertEqual({p.image_id for p in pts}, {"A"})
+
     def test_non_coralnet_rows_excluded_and_do_not_crash(self):
         # The raw val CSV mixes MERMAID rows whose feature key would not parse;
         # the default coralnet site filter must skip them without raising.

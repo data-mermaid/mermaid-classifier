@@ -4,8 +4,8 @@ from mermaid_classifier.model_review import ls_tasks
 from mermaid_classifier.model_review.sample import ReviewPoint
 
 
-def _label_name(bagf):  # identity for test
-    return bagf
+def _label_path(bagf):  # test resolver: a single-element name path
+    return [bagf]
 
 
 def _url(source_id, image_id):
@@ -24,26 +24,39 @@ class LsTasksTest(unittest.TestCase):
         ]
         self.v1 = {("A", 250, 500): "v1A1::", ("A", 100, 200): "v1A2::"}
 
+    def _task(self, label_path=_label_path):
+        return ls_tasks.build_task("A", self.points, self.v1, label_path, _url, _size)
+
     def test_task_has_two_prediction_sets(self):
-        task = ls_tasks.build_task("A", self.points, self.v1, _label_name, _url, _size)
-        versions = {p["model_version"] for p in task["predictions"]}
+        versions = {p["model_version"] for p in self._task()["predictions"]}
         self.assertEqual(versions, {"ground-truth", "v1"})
 
-    def test_coordinates_converted_to_percent(self):
-        task = ls_tasks.build_task("A", self.points, self.v1, _label_name, _url, _size)
-        gt = next(p for p in task["predictions"] if p["model_version"] == "ground-truth")
-        first = gt["result"][0]  # points sorted by (row,col): (100,200) first
-        self.assertAlmostEqual(first["value"]["x"], 200 / 1000 * 100)  # col/width
-        self.assertAlmostEqual(first["value"]["y"], 100 / 500 * 100)  # row/height
-        self.assertEqual(first["original_width"], 1000)
-        self.assertEqual(first["original_height"], 500)
+    def test_each_point_has_keypoint_and_taxonomy_sharing_id(self):
+        gt = next(p for p in self._task()["predictions"] if p["model_version"] == "ground-truth")
+        kps = [r for r in gt["result"] if r["type"] == "keypoint"]
+        taxes = [r for r in gt["result"] if r["type"] == "taxonomy"]
+        self.assertEqual(len(kps), 2)  # 2 points
+        self.assertEqual(len(taxes), 2)
+        # first point (100,200 after sort) shares region id pt-0 across both entries
+        self.assertEqual(kps[0]["id"], "pt-0")
+        self.assertEqual(taxes[0]["id"], "pt-0")
+        self.assertEqual(kps[0]["from_name"], "kp")
+        self.assertEqual(taxes[0]["from_name"], "label")
 
-    def test_original_points_preserved_in_pixels(self):
-        task = ls_tasks.build_task("A", self.points, self.v1, _label_name, _url, _size)
-        op = task["data"]["original_points"]
-        self.assertEqual(op[0], {"row": 100, "col": 200, "gt": "gtA2::", "v1": "v1A2::"})
+    def test_coordinates_on_keypoint_in_percent(self):
+        gt = next(p for p in self._task()["predictions"] if p["model_version"] == "ground-truth")
+        kp0 = next(r for r in gt["result"] if r["type"] == "keypoint")  # pt-0 = (100,200)
+        self.assertAlmostEqual(kp0["value"]["x"], 200 / 1000 * 100)  # col/width
+        self.assertAlmostEqual(kp0["value"]["y"], 100 / 500 * 100)  # row/height
+        self.assertEqual(kp0["original_width"], 1000)
+        self.assertEqual(kp0["original_height"], 500)
 
-    def test_gt_and_v1_labels_come_from_resolver(self):
-        task = ls_tasks.build_task("A", self.points, self.v1, str.upper, _url, _size)
+    def test_taxonomy_value_is_wrapped_path_from_resolver(self):
+        task = self._task(label_path=lambda b: ["Root", b])
         v1 = next(p for p in task["predictions"] if p["model_version"] == "v1")
-        self.assertEqual(v1["result"][0]["value"]["keypointlabels"], ["V1A2::"])
+        tax0 = next(r for r in v1["result"] if r["type"] == "taxonomy")  # pt-0 -> v1A2
+        self.assertEqual(tax0["value"]["taxonomy"], [["Root", "v1A2::"]])
+
+    def test_original_points_preserved_in_pixels_with_both_labels(self):
+        op = self._task()["data"]["original_points"]
+        self.assertEqual(op[0], {"row": 100, "col": 200, "gt": "gtA2::", "v1": "v1A2::"})

@@ -2,6 +2,19 @@ import unittest
 
 from mermaid_classifier.model_review import ls_export
 
+
+def _path_to_bagf(path):  # test resolver: last element is the "bagf"
+    return path[-1]
+
+
+def _kp(idx):
+    return {"id": f"pt-{idx}", "type": "keypoint", "value": {"x": 1.0, "y": 2.0}}
+
+
+def _tax(idx, path):
+    return {"id": f"pt-{idx}", "type": "taxonomy", "value": {"taxonomy": [path]}}
+
+
 _EXPORT = [
     {
         "data": {
@@ -15,8 +28,9 @@ _EXPORT = [
             {
                 "completed_by": 7,
                 "result": [
-                    {"type": "keypointlabels", "value": {"keypointlabels": ["exp1::"]}},
-                    {"type": "keypointlabels", "value": {"keypointlabels": ["Unlabeled"]}},
+                    _kp(0),
+                    _tax(0, ["Hard coral", "exp1::"]),  # pt-0 labeled
+                    _kp(1),  # pt-1 keypoint present but NO taxonomy -> unlabeled
                     {
                         "type": "textarea",
                         "from_name": "notes",
@@ -30,47 +44,40 @@ _EXPORT = [
 
 
 class LsExportTest(unittest.TestCase):
-    def test_labels_zip_positionally_with_original_points(self):
-        labels, _ = ls_export.parse_export(_EXPORT)
+    def test_labels_join_by_id_and_reconstruct_bagf(self):
+        labels, _ = ls_export.parse_export(_EXPORT, _path_to_bagf)
         by_rc = {(lbl.row, lbl.col): lbl.bagf for lbl in labels}
-        self.assertEqual(by_rc[(100, 200)], "exp1::")
-        self.assertEqual(by_rc[(300, 400)], "Unlabeled")  # kept, not dropped
+        self.assertEqual(by_rc[(100, 200)], "exp1::")  # pt-0 via resolver
+        self.assertEqual(by_rc[(300, 400)], ls_export.UNLABELED)  # pt-1 unlabeled, kept
 
-    def test_expert_id_captured(self):
-        labels, _ = ls_export.parse_export(_EXPORT)
-        self.assertTrue(all(lbl.expert == "7" for lbl in labels))
+    def test_every_original_point_yields_one_label(self):
+        labels, _ = ls_export.parse_export(_EXPORT, _path_to_bagf)
+        self.assertEqual(len(labels), 2)  # one per original point
 
-    def test_notes_extracted(self):
-        _, notes = ls_export.parse_export(_EXPORT)
-        self.assertEqual(len(notes), 1)
-        self.assertEqual(notes[0].note, "GT looks wrong on point 2")
-        self.assertEqual(notes[0].image_id, "A")
-
-    def test_keypoint_count_mismatch_raises(self):
+    def test_deleted_keypoint_becomes_unlabeled_not_dropped(self):
         export = [
             {
                 "data": {
                     "image_id": "A",
                     "original_points": [
-                        {"row": 100, "col": 200, "gt": "g1::", "v1": "v1::"},
-                        {"row": 300, "col": 400, "gt": "g2::", "v1": "v2::"},
+                        {"row": 1, "col": 1, "gt": "g::", "v1": "v::"},
+                        {"row": 2, "col": 2, "gt": "g::", "v1": "v::"},
                     ],
                 },
-                "annotations": [
-                    {
-                        "completed_by": 7,
-                        "result": [
-                            {
-                                "type": "keypointlabels",
-                                "value": {"keypointlabels": ["exp1::"]},
-                            },
-                        ],
-                    }
-                ],
+                "annotations": [{"completed_by": 7, "result": [_kp(0), _tax(0, ["x::"])]}],
             }
         ]
-        with self.assertRaises(ValueError) as ctx:
-            ls_export.parse_export(export)
-        message = str(ctx.exception)
-        self.assertIn("A", message)
-        self.assertIn("7", message)
+        labels, _ = ls_export.parse_export(export, _path_to_bagf)
+        by_rc = {(lbl.row, lbl.col): lbl.bagf for lbl in labels}
+        self.assertEqual(by_rc[(1, 1)], "x::")
+        self.assertEqual(by_rc[(2, 2)], ls_export.UNLABELED)
+
+    def test_expert_id_captured(self):
+        labels, _ = ls_export.parse_export(_EXPORT, _path_to_bagf)
+        self.assertTrue(all(lbl.expert == "7" for lbl in labels))
+
+    def test_notes_extracted(self):
+        _, notes = ls_export.parse_export(_EXPORT, _path_to_bagf)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].note, "GT looks wrong on point 2")
+        self.assertEqual(notes[0].image_id, "A")

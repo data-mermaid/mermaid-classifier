@@ -1,4 +1,12 @@
-"""Build Label Studio tasks: image + fixed points + GT/V1 reference predictions."""
+"""Build Label Studio tasks: image + fixed points + GT/V1 reference predictions.
+
+Each point is rendered as a Label Studio keypoint region carrying a perRegion
+Taxonomy label. That requires TWO result entries sharing one region id: a
+``keypoint`` result (the geometry, bound to the KeyPoint control ``kp``) and a
+``taxonomy`` result (the label path, bound to the Taxonomy control ``label``).
+A plain ``keypointlabels`` result does NOT bind to a Taxonomy control, so the
+label would not render (verified in the pilot).
+"""
 
 from collections.abc import Callable
 from typing import Any
@@ -6,25 +14,36 @@ from typing import Any
 from mermaid_classifier.model_review.sample import ReviewPoint
 
 
-def _keypoint_result(
-    idx: int, x: float, y: float, width: int, height: int, label: str
-) -> dict[str, Any]:
-    return {
-        "id": f"pt-{idx}",
-        "type": "keypointlabels",
-        "from_name": "label",
-        "to_name": "image",
-        "original_width": width,
-        "original_height": height,
-        "value": {"x": x, "y": y, "width": 0.5, "keypointlabels": [label]},
-    }
+def _point_results(
+    idx: int, x: float, y: float, width: int, height: int, path: list[str]
+) -> list[dict[str, Any]]:
+    """A keypoint region + its perRegion taxonomy label, sharing one region id."""
+    region_id = f"pt-{idx}"
+    return [
+        {
+            "id": region_id,
+            "type": "keypoint",
+            "from_name": "kp",
+            "to_name": "image",
+            "original_width": width,
+            "original_height": height,
+            "value": {"x": x, "y": y, "width": 0.5},
+        },
+        {
+            "id": region_id,
+            "type": "taxonomy",
+            "from_name": "label",
+            "to_name": "image",
+            "value": {"taxonomy": [path]},
+        },
+    ]
 
 
 def build_task(
     image_id: str,
     points: list[ReviewPoint],
     v1_preds: dict[tuple[str, int, int], str],
-    label_name: Callable[[str], str],
+    label_path: Callable[[str], list[str]],
     image_url: Callable[[str, str], str],
     image_size: Callable[[str, str], tuple[int, int]],
 ) -> dict[str, Any]:
@@ -33,15 +52,15 @@ def build_task(
     width, height = image_size(source_id, image_id)
 
     original_points = []
-    gt_result = []
-    v1_result = []
+    gt_result: list[dict[str, Any]] = []
+    v1_result: list[dict[str, Any]] = []
     for idx, p in enumerate(img_points):
         x = p.col / width * 100
         y = p.row / height * 100
         v1_bagf = v1_preds[(p.image_id, p.row, p.col)]
         original_points.append({"row": p.row, "col": p.col, "gt": p.gt_bagf, "v1": v1_bagf})
-        gt_result.append(_keypoint_result(idx, x, y, width, height, label_name(p.gt_bagf)))
-        v1_result.append(_keypoint_result(idx, x, y, width, height, label_name(v1_bagf)))
+        gt_result.extend(_point_results(idx, x, y, width, height, label_path(p.gt_bagf)))
+        v1_result.extend(_point_results(idx, x, y, width, height, label_path(v1_bagf)))
 
     return {
         "data": {
@@ -61,12 +80,12 @@ def build_task(
 def build_tasks(
     points: list[ReviewPoint],
     v1_preds: dict[tuple[str, int, int], str],
-    label_name: Callable[[str], str],
+    label_path: Callable[[str], list[str]],
     image_url: Callable[[str, str], str],
     image_size: Callable[[str, str], tuple[int, int]],
 ) -> list[dict[str, Any]]:
     image_ids = sorted({p.image_id for p in points})
     return [
-        build_task(image_id, points, v1_preds, label_name, image_url, image_size)
+        build_task(image_id, points, v1_preds, label_path, image_url, image_size)
         for image_id in image_ids
     ]

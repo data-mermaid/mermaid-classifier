@@ -30,10 +30,24 @@ def _fake_gf():
 
 
 class CliTest(unittest.TestCase):
-    def test_label_name_builds_full_path(self):
-        name = cli.make_label_name(_fake_ba(), _fake_gf())
-        self.assertEqual(name("acr::br"), "Hard coral::Acropora::Branching")
+    def test_label_path_builds_full_path_list(self):
+        path = cli.make_label_path(_fake_ba(), _fake_gf())
+        self.assertEqual(path("acr::br"), ["Hard coral", "Acropora", "Branching"])
 
-    def test_label_name_ba_only(self):
-        name = cli.make_label_name(_fake_ba(), _fake_gf())
-        self.assertEqual(name("hc::"), "Hard coral")
+    def test_label_path_ba_only(self):
+        path = cli.make_label_path(_fake_ba(), _fake_gf())
+        self.assertEqual(path("hc::"), ["Hard coral"])
+
+    def test_path_to_bagf_roundtrips_with_growth_form(self):
+        to_bagf = cli.make_path_to_bagf(_fake_ba(), _fake_gf())
+        self.assertEqual(to_bagf(["Hard coral", "Acropora", "Branching"]), "acr::br")
+
+    def test_path_to_bagf_ba_only(self):
+        to_bagf = cli.make_path_to_bagf(_fake_ba(), _fake_gf())
+        self.assertEqual(to_bagf(["Hard coral"]), "hc::")
+
+    def test_label_path_and_inverse_roundtrip(self):
+        path = cli.make_label_path(_fake_ba(), _fake_gf())
+        to_bagf = cli.make_path_to_bagf(_fake_ba(), _fake_gf())
+        for bagf in ("acr::br", "hc::", "acr::"):
+            self.assertEqual(to_bagf(path(bagf)), bagf)

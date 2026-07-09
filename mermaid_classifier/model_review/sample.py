@@ -29,7 +29,11 @@ def source_id_from_feature_key(feature_key: str) -> str:
 
 
 def select_images(
-    csv_path: str, n_images: int, seed: int, site: str = "coralnet"
+    csv_path: str,
+    n_images: int,
+    seed: int,
+    site: str = "coralnet",
+    min_points_per_image: int = 1,
 ) -> list[ReviewPoint]:
     by_image: dict[str, list[ReviewPoint]] = {}
     with open(csv_path, newline="") as f:
@@ -48,7 +52,9 @@ def select_images(
             )
             by_image.setdefault(image_id, []).append(point)
 
-    image_ids = sorted(by_image)  # stable universe
+    # Only consider images with enough points to be worth reviewing (the val
+    # split leaves most images with 1-2 points; a useful review needs a grid).
+    image_ids = sorted(img for img, pts in by_image.items() if len(pts) >= min_points_per_image)
     rng = random.Random(seed)
     chosen = sorted(rng.sample(image_ids, min(n_images, len(image_ids))))
 

@@ -9,6 +9,7 @@ from typing import Any
 from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary,
     GrowthFormLibrary,
+    combine_ba_gf,
     get_benthic_attribute_library,
     get_growth_form_library,
     split_ba_gf,
@@ -24,19 +25,42 @@ from mermaid_classifier.model_review import (
 from mermaid_classifier.model_review.rollup import make_rollup_fn
 
 
-def make_label_name(
+def make_label_path(
     ba_lib: BenthicAttributeLibrary, gf_lib: GrowthFormLibrary
-) -> Callable[[str], str]:
-    def label_name(bagf: str) -> str:
+) -> Callable[[str], list[str]]:
+    """BA_ID::GF_ID -> taxonomy name path (root..leaf, plus growth form leaf)."""
+
+    def label_path(bagf: str) -> list[str]:
         ba_id, gf_id = split_ba_gf(bagf)
-        # BA path root->leaf
         path_ids = ba_lib.get_ancestor_ids(ba_id) + [ba_id]
         parts = [ba_lib.id_to_name(i) for i in path_ids]
         if gf_id:
             parts.append(gf_lib.id_to_name(gf_id))
-        return "::".join(parts)
+        return parts
 
-    return label_name
+    return label_path
+
+
+def make_path_to_bagf(
+    ba_lib: BenthicAttributeLibrary, gf_lib: GrowthFormLibrary
+) -> Callable[[list[str]], str]:
+    """Inverse of label_path: a taxonomy name path -> BA_ID::GF_ID.
+
+    A trailing element that matches a growth-form name is taken as the growth form;
+    the element before it (or the last element otherwise) is the benthic-attribute leaf.
+    """
+    gf_name_to_id = {name: gid for gid, name in gf_lib.by_id.items()}
+
+    def path_to_bagf(path: list[str]) -> str:
+        parts = list(path)
+        gf_id = ""
+        if len(parts) > 1 and parts[-1] in gf_name_to_id:
+            gf_id = gf_name_to_id[parts[-1]]
+            parts = parts[:-1]
+        ba_id = ba_lib.name_to_id(parts[-1]) if parts else ""
+        return combine_ba_gf(ba_id, gf_id)
+
+    return path_to_bagf
 
 
 def make_presigner(
@@ -75,15 +99,20 @@ def build_tasks_command(args: argparse.Namespace) -> None:
     ba_lib = get_benthic_attribute_library()
     gf_lib = get_growth_form_library()
 
-    points = sample.select_images(args.heldout_csv, n_images=args.n_images, seed=args.seed)
+    points = sample.select_images(
+        args.heldout_csv,
+        n_images=args.n_images,
+        seed=args.seed,
+        min_points_per_image=args.min_points,
+    )
     v1_preds = v1_infer.predict_points(points, classifier_location=args.classifier)
 
     s3 = boto3.client("s3")
-    label_name = make_label_name(ba_lib, gf_lib)
+    label_path = make_label_path(ba_lib, gf_lib)
     image_url = make_presigner(s3, args.image_bucket, args.image_key_template)
     image_size = _image_sizer(s3, args.image_bucket, args.image_key_template)
 
-    tasks = ls_tasks.build_tasks(points, v1_preds, label_name, image_url, image_size)
+    tasks = ls_tasks.build_tasks(points, v1_preds, label_path, image_url, image_size)
     with open(args.tasks_out, "w") as f:
         json.dump(tasks, f, indent=2)
 
@@ -99,8 +128,11 @@ def synthesize_command(args: argparse.Namespace) -> None:
     with open(args.export) as f:
         export = json.load(f)
 
-    expert_labels, notes = ls_export.parse_export(export)
-    # strict=False: "Unlabeled"/unmapped labels roll to None rather than
+    ba_lib = get_benthic_attribute_library()
+    gf_lib = get_growth_form_library()
+    path_to_bagf = make_path_to_bagf(ba_lib, gf_lib)
+    expert_labels, notes = ls_export.parse_export(export, path_to_bagf)
+    # strict=False: UNLABELED/unmapped labels roll to None rather than
     # raising, matching synthesis's handling of unrollable points.
     roll = make_rollup_fn(strict=False)
     df = synthesis.build_point_table(tasks, expert_labels, roll)
@@ -127,6 +159,12 @@ def main(argv: list[str] | None = None) -> None:
         "--heldout-csv", default="../reports/model_benchmark/data/v1_annotations_val.csv"
     )
     b.add_argument("--n-images", type=int, default=15)
+    b.add_argument(
+        "--min-points",
+        type=int,
+        default=15,
+        help="only sample images with at least this many val points (grid, not 1-2)",
+    )
     b.add_argument("--seed", type=int, default=1)
     b.add_argument(
         "--classifier", required=True, help="MLflow model id, S3 dir, or local dir for V1"
