@@ -112,8 +112,10 @@ def build_tasks_command(args: argparse.Namespace) -> None:
     ba_lib = get_benthic_attribute_library()
     gf_lib = get_growth_form_library()
 
-    points = sample.select_images(
-        args.heldout_csv,
+    points = sample.select_images_full_gt(
+        val_csv=args.heldout_csv,
+        manifest_uri=args.manifest_uri,
+        coralnet_bucket=args.feature_bucket,
         n_images=args.n_images,
         seed=args.seed,
         min_points_per_image=args.min_points,
@@ -172,14 +174,27 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument(
         "--heldout-csv", default="../reports/model_benchmark/data/v1_annotations_val.csv"
     )
-    b.add_argument("--n-images", type=int, default=15)
+    b.add_argument("--n-images", type=int, default=50)
     b.add_argument(
         "--min-points",
         type=int,
         default=15,
-        help="only sample images with at least this many val points (grid, not 1-2)",
+        help="only sample images with at least this many total ground-truth points",
     )
     b.add_argument("--seed", type=int, default=1)
+    b.add_argument(
+        "--manifest-uri",
+        default=(
+            "s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/top108_full/"
+            "coralnet_classifier_manifest_top108_full.parquet"
+        ),
+        help="CoralNet manifest parquet: the full ground-truth points per image",
+    )
+    b.add_argument(
+        "--feature-bucket",
+        default="2605-coralnet-public-sources",
+        help="S3 bucket holding the per-image .featurevector files",
+    )
     b.add_argument(
         "--classifier", required=True, help="MLflow model id, S3 dir, or local dir for V1"
     )

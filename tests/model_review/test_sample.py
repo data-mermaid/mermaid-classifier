@@ -69,3 +69,48 @@ class SampleTest(unittest.TestCase):
         path = _write_csv(extra_rows=[_MERMAID_ROW])
         pts = sample.select_images(path, n_images=10, seed=1)  # site defaults to coralnet
         self.assertEqual({p.image_id for p in pts}, {"A", "B", "C"})
+
+
+def _fake_mapper(coralnet_id):
+    # cn "999" is unmappable; others map to "ba<id>::"
+    return None if coralnet_id == "999" else f"ba{coralnet_id}::"
+
+
+def _mrow(source_id, image_id, row, col, coralnet_id):
+    return {
+        "source_id": source_id,
+        "image_id": image_id,
+        "row": row,
+        "col": col,
+        "coralnet_id": coralnet_id,
+    }
+
+
+class FullGtTest(unittest.TestCase):
+    def test_eligible_ids_are_distinct_coralnet_images(self):
+        path = _write_csv(extra_rows=[_MERMAID_ROW])
+        self.assertEqual(sample.eligible_image_ids_from_val(path), {"A", "B", "C"})
+
+    def test_manifest_rows_mapped_deduped_and_unmapped_dropped(self):
+        rows = [
+            _mrow(7, "X", 1, 1, "444"),
+            _mrow(7, "X", 1, 1, "444"),  # duplicate (row,col) -> deduped
+            _mrow(7, "X", 2, 2, "999"),  # unmappable -> dropped
+            _mrow(7, "X", 3, 3, "12"),
+        ]
+        by_image = sample.review_points_from_manifest_rows(rows, _fake_mapper, "feat-bucket")
+        pts = by_image["X"]
+        self.assertEqual(
+            sorted((p.row, p.col, p.gt_bagf) for p in pts), [(1, 1, "ba444::"), (3, 3, "ba12::")]
+        )
+        self.assertEqual(pts[0].feature_key, "s7/features/iX.featurevector")
+        self.assertEqual(pts[0].bucket, "feat-bucket")
+
+    def test_sample_full_gt_filters_and_returns_all_points(self):
+        by_image = {
+            "big": [sample.ReviewPoint("big", "1", r, r, "ba::", "k", "b") for r in range(20)],
+            "small": [sample.ReviewPoint("small", "1", 0, 0, "ba::", "k", "b")],
+        }
+        pts = sample.sample_full_gt_images(by_image, n_images=5, seed=1, min_points_per_image=15)
+        self.assertEqual({p.image_id for p in pts}, {"big"})  # 'small' excluded (<15)
+        self.assertEqual(len(pts), 20)  # all points of the selected image
