@@ -43,14 +43,14 @@ Resources:
       Roles: [ !Ref InstanceRole ]
 
   # No ingress rules at all -> nothing is reachable from outside the VPC.
-  # Default egress (all) lets the instance pull Docker images and reach the
-  # SSM service endpoints over outbound 443.
+  # Egress is left at the SG default (allow-all), which lets the instance pull
+  # Docker images and reach the SSM service endpoints over outbound 443.
+  # (Customizing SecurityGroupEgress would require an explicit VpcId; the
+  # default is exactly what we want, so we omit it and stay VPC-agnostic.)
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: model-review ephemeral Label Studio (NO inbound; SSM only)
-      SecurityGroupEgress:
-        - { IpProtocol: -1, CidrIp: 0.0.0.0/0, Description: "outbound for docker pull + SSM" }
       Tags:
         - { Key: Project, Value: model-review }
         - { Key: Ephemeral, Value: "true" }
