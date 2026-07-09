@@ -36,16 +36,23 @@ def select_images(
     min_points_per_image: int = 1,
 ) -> list[ReviewPoint]:
     by_image: dict[str, list[ReviewPoint]] = {}
+    seen_rc: dict[str, set[tuple[int, int]]] = {}
     with open(csv_path, newline="") as f:
         for r in csv.DictReader(f):
             if r["site"] != site:
                 continue
             image_id = r["image_id"]
+            row, col = int(r["row"]), int(r["col"])
+            # The val CSV contains duplicate rows per point (an export fan-out);
+            # keep one ReviewPoint per distinct (row, col) so points aren't stacked.
+            if (row, col) in seen_rc.setdefault(image_id, set()):
+                continue
+            seen_rc[image_id].add((row, col))
             point = ReviewPoint(
                 image_id=image_id,
                 source_id=source_id_from_feature_key(r["feature_vector"]),
-                row=int(r["row"]),
-                col=int(r["col"]),
+                row=row,
+                col=col,
                 gt_bagf=combine_ba_gf(r["benthic_attribute_id"], r["growth_form_id"]),
                 feature_key=r["feature_vector"],
                 bucket=r["bucket"],

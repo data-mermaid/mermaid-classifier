@@ -50,6 +50,13 @@ class SampleTest(unittest.TestCase):
         by = {p.image_id: p for p in pts}
         self.assertEqual(by["B"].gt_bagf, "ba2::")
 
+    def test_duplicate_rowcol_rows_are_deduped(self):
+        # image A already has points (10,20) and (30,40); add a duplicate of (10,20)
+        dup = "10,20,A,444,coralnet,2605-coralnet-public-sources,109,s109/features/iA.featurevector,ba1,gf1,val"
+        path = _write_csv(extra_rows=[dup])
+        pts = [p for p in sample.select_images(path, n_images=3, seed=1) if p.image_id == "A"]
+        self.assertEqual(sorted((p.row, p.col) for p in pts), [(10, 20), (30, 40)])  # not 3
+
     def test_min_points_per_image_filters_sparse_images(self):
         # A has 2 points, B and C have 1 each; require >=2 -> only A eligible.
         path = _write_csv()
