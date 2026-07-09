@@ -1,10 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Ephemeral Label Studio host for the model-review experiment. Single self-contained
-  stack: every resource it creates is deleted by `delete-stack`, so teardown is
-  atomic and verifiable. No S3 buckets, no Route53 records, no ALB/ACM, no
-  CloudWatch log groups are created. HTTPS is served by Caddy (auto Let's Encrypt)
-  on <public-ip>.sslip.io, with the cert living on the instance (dies with it).
+  Ephemeral, INTERNAL-ONLY Label Studio host for the model-review experiment.
+  Single self-contained stack: every resource it creates is deleted by
+  `delete-stack`, so teardown is atomic and verifiable. The instance has NO
+  inbound ports open and no public-facing endpoint, DNS, TLS cert, or load
+  balancer. You reach Label Studio through an SSM port-forwarding tunnel to
+  http://localhost on your own machine. Nothing is created outside this stack.
 
 Parameters:
   Ami:
@@ -14,17 +15,13 @@ Parameters:
   InstanceType:
     Type: String
     Default: t3.medium
-  IngressCidr:
-    Type: String
-    Default: 0.0.0.0/0
-    Description: CIDR allowed to reach 80/443 (tighten to reviewer IPs if you can).
   LabelStudioImage:
     Type: String
     Default: heartexlabs/label-studio:1.13.1
 
 Resources:
-  # Shell access is via SSM Session Manager (no SSH key pair, no inbound 22),
-  # which keeps the stack self-contained (no key-pair resource to orphan).
+  # SSM Session Manager is the ONLY access path (shell + port forwarding).
+  # No SSH key pair, no inbound security-group rules.
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -45,13 +42,15 @@ Resources:
     Properties:
       Roles: [ !Ref InstanceRole ]
 
+  # No ingress rules at all -> nothing is reachable from outside the VPC.
+  # Default egress (all) lets the instance pull Docker images and reach the
+  # SSM service endpoints over outbound 443.
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: model-review ephemeral Label Studio (HTTP/HTTPS in)
-      SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref IngressCidr, Description: "ACME http-01 + redirect" }
-        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref IngressCidr, Description: "Label Studio via Caddy TLS" }
+      GroupDescription: model-review ephemeral Label Studio (NO inbound; SSM only)
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0, Description: "outbound for docker pull + SSM" }
       Tags:
         - { Key: Project, Value: model-review }
         - { Key: Ephemeral, Value: "true" }
@@ -80,43 +79,26 @@ Resources:
           dnf install -y docker
           systemctl enable --now docker
 
-          # Discover this instance's public IP (IMDSv2) -> sslip.io hostname.
-          TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
-            -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-          IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
-            http://169.254.169.254/latest/meta-data/public-ipv4)
-          HOST="$${IP}.sslip.io"
-          echo "$HOST" > /opt/ls_host.txt
-
-          # Label Studio (data under /opt/ls_data, on the root EBS volume).
+          # Accessed only via an SSM tunnel to localhost on the operator's
+          # machine, so LABEL_STUDIO_HOST is the local forwarded address.
           mkdir -p /opt/ls_data
           docker run -d --restart unless-stopped --name ls \
-            -p 127.0.0.1:8080:8080 \
-            -e LABEL_STUDIO_HOST="https://$${HOST}" \
+            -p 8080:8080 \
+            -e LABEL_STUDIO_HOST="http://localhost:8080" \
             -v /opt/ls_data:/label-studio/data \
             ${LabelStudioImage}
 
-          # Caddy terminates TLS (auto Let's Encrypt for <ip>.sslip.io) and
-          # reverse-proxies to LS. Cert data lives in a docker volume on this
-          # instance and is destroyed with it.
-          mkdir -p /opt/caddy
-          cat >/opt/caddy/Caddyfile <<EOF
-          $${HOST} {
-            reverse_proxy 127.0.0.1:8080
-          }
-          EOF
-          docker run -d --restart unless-stopped --name caddy \
-            --network host \
-            -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
-            -v caddy_data:/data \
-            caddy:2
-
 Outputs:
-  Url:
-    Description: Label Studio URL (ready ~2-3 min after stack completes, once Caddy obtains its cert).
-    Value: !Sub "https://${Instance.PublicIp}.sslip.io"
-  PublicIp:
-    Value: !GetAtt Instance.PublicIp
+  InstanceId:
+    Value: !Ref Instance
+  PortForwardCommand:
+    Description: Run locally (needs the session-manager-plugin) to tunnel LS to localhost:8080.
+    Value: !Sub >-
+      aws ssm start-session --target ${Instance}
+      --document-name AWS-StartPortForwardingSession
+      --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+  LocalUrl:
+    Description: Open this AFTER the tunnel above is running.
+    Value: http://localhost:8080
   ShellCommand:
-    Description: Open a shell without SSH keys (needs the SSM plugin locally).
     Value: !Sub "aws ssm start-session --target ${Instance}"
