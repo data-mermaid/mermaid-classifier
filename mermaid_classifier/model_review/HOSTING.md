@@ -1,87 +1,148 @@
-# Ephemeral Label Studio hosting for the model-review experiment
+# Model-review Label Studio — run it (and tear it down) another day
 
-**Internal-only.** Everything runs inside **one CloudFormation stack**
-(`ephemeral_ls_stack.yaml`) with **no public endpoint** — no inbound ports, no
-DNS, no TLS cert, no load balancer. You reach Label Studio through an **SSM
-port-forwarding tunnel** to `http://localhost:8080` on your own machine. Teardown
-is atomic and **verifiable**: `delete-stack` removes exactly what the stack made,
-and a tag scan afterward proves nothing is left. Nothing is created outside the
-stack (no S3 buckets, Route 53 records, ALB/ACM, key pairs, or log groups).
+Everything runs in **one ephemeral CloudFormation stack** (`ephemeral_ls_stack.yaml`),
+reached only through an **SSM port-forward** to your own `localhost` — no public
+endpoint, DNS, TLS, or key pair. Teardown is one `delete-stack` and is verifiable.
 
-When the tool is proven useful, a public-facing layer (for external experts) can be
-added as a *separate* opt-in step — not created now.
+Run all commands from the `mermaid-classifier` repo root unless noted. AWS access is
+the `wcs-admin` SSO profile. *(Agent: run stack + S3 API calls via the `aws-mcp`
+server; the operator runs the interactive SSM tunnel and — if used — `aws sso login`.)*
 
-*(Agent: run stack create/delete/describe via the `aws-mcp` server. The interactive
-SSM tunnel is run by the operator locally — see below.)*
-
-## What the stack contains (the complete inventory)
-
-- 1 EC2 instance (`t3.medium`, Amazon Linux 2023), root EBS `DeleteOnTermination=true`
-- 1 security group with **no inbound rules** (egress only, for docker pull + SSM)
-- 1 IAM role + instance profile (SSM Session Manager only — no SSH key pair)
-
-## Deploy
+## 0. Prerequisites (once)
 
 ```bash
-aws cloudformation create-stack \
-  --stack-name model-review-ls \
-  --template-body <ephemeral_ls_stack.yaml> \
+aws sso login --profile wcs-admin              # refresh when the session expires (~1h/session)
+brew install --cask session-manager-plugin     # needed for the SSM tunnel
+export AWS_PROFILE=wcs-admin AWS_REGION=us-east-1
+```
+
+## 1. Deploy the stack (region us-west-2)
+
+The stack = 1 EC2 instance (Amazon Linux 2023, Docker + Label Studio 1.13.1, root
+EBS `DeleteOnTermination`), 1 security group (no inbound), 1 IAM role/profile (SSM
+only). Nothing else is created.
+
+```bash
+aws cloudformation create-stack --stack-name model-review-ls --region us-west-2 \
+  --template-body file://mermaid_classifier/model_review/ephemeral_ls_stack.yaml \
   --capabilities CAPABILITY_IAM \
   --tags Key=Project,Value=model-review Key=Ephemeral,Value=true
 
-aws cloudformation wait stack-create-complete --stack-name model-review-ls
-aws cloudformation describe-stacks --stack-name model-review-ls \
-  --query "Stacks[0].Outputs"     # -> InstanceId, PortForwardCommand, LocalUrl
+aws cloudformation wait stack-create-complete --stack-name model-review-ls --region us-west-2
+aws cloudformation describe-stacks --stack-name model-review-ls --region us-west-2 \
+  --query "Stacks[0].Outputs"    # -> InstanceId, PortForwardCommand
+```
+Wait ~1–2 min after `CREATE_COMPLETE` for the container to pull. Check it's healthy:
+```bash
+aws ssm send-command --region us-west-2 --instance-ids <InstanceId> \
+  --document-name AWS-RunShellScript --parameters commands="docker ps"
+# then: aws ssm get-command-invocation --command-id <id> --instance-id <InstanceId> --region us-west-2
+# expect the `ls` container "Up ..." (it chowns /opt/ls_data to uid 1001 on boot)
 ```
 
-## Connect (SSM tunnel — run locally)
-
-Prereq once: the AWS CLI **session-manager-plugin**
-(`brew install --cask session-manager-plugin`). Then, with `wcs-admin` creds:
+## 2. Connect (SSM tunnel — run locally, leave open)
 
 ```bash
-aws ssm start-session --target <InstanceId> \
+aws ssm start-session --target <InstanceId> --region us-west-2 \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
 ```
+Open **http://localhost:8080**, create the admin account (Community edition: any
+account sees all projects). Get an API token at **http://localhost:8080/api/current-user/token**
+for the scripted steps below.
 
-Leave that running, then open **http://localhost:8080**. Create the admin account
-(and any internal reviewer accounts). Because the tunnel forwards to your own
-`localhost`, the review CLI/SDK can also target `http://localhost:8080` while it is up.
+## 3. Image CORS (required, and REMEMBER to undo)
 
-## Load the project
-
-The review CLI and the SDK seeding step are run ephemerally, not from an installed
-extra: `uv run --extra training --with label-studio-sdk --with pillow python -m
-mermaid_classifier.model_review.cli ...` (the seeding helper likewise needs
-`--with label-studio-sdk`). This keeps `label-studio-sdk` out of the shared `uv.lock`.
-
-1. Create a project. Paste `review_config.xml` (from `build-tasks`) into
-   Settings → Labeling Interface.
-2. Settings → General → set **Annotations per task minimum** = number of experts.
-3. Import `review_tasks.json` (Import button, or the SDK in the seeding step).
-
-> **Presigned-URL lifetime caveat.** `build-tasks` presigns image URLs for 7 days,
-> but if you ran it under **SSO / STS temporary credentials** (`wcs-admin`), the URL
-> is only valid until the **session token** expires (hours), not 7 days — images
-> then 403. For a longer review, presign with long-lived IAM credentials, make
-> `coralnet-public-images` reachable another way, or re-run `build-tasks` + re-import.
-
-## Teardown (one step) + verification
+Label Studio draws each image on a canvas, so the private image bucket must return
+CORS headers for the tunnel origin. The bucket has **no CORS by default**; add a
+scoped GET rule while reviewing, and **remove it when done**. (CORS grants no new
+access — objects still need the presigned signature.)
 
 ```bash
-# 1) Export first (synthesize needs review_export.json), THEN:
-aws cloudformation delete-stack --stack-name model-review-ls
-aws cloudformation wait stack-delete-complete --stack-name model-review-ls
-
-# 2) Prove the stack is gone (this call should ERROR "does not exist"):
-aws cloudformation describe-stacks --stack-name model-review-ls
-
-# 3) Prove nothing tagged Project=model-review remains anywhere (must be empty):
-aws resourcegroupstaggingapi get-resources \
-  --tag-filters Key=Project,Values=model-review \
-  --query "ResourceTagMappingList[].ResourceARN"
+# ON:
+aws s3api put-bucket-cors --bucket dev-datamermaid-sm-sources --cors-configuration '{
+  "CORSRules":[{"AllowedMethods":["GET","HEAD"],"AllowedOrigins":["http://localhost:8080"],"AllowedHeaders":["*"],"MaxAgeSeconds":3000}]}'
+# OFF (undo — restores the original no-CORS state):
+aws s3api delete-bucket-cors --bucket dev-datamermaid-sm-sources
 ```
 
-If step 2 errors with "Stack ... does not exist" **and** step 3 returns `[]`, teardown
-is complete and verified.
+## 4. Build the tasks (full ground truth, in V1's label set)
+
+Produces `<tasks>.json` (per-image points: GT + V1 predictions, colored by top-level
+category) and `<config>.xml` (labeling config: colored top-level `KeyPointLabels` +
+Taxonomy restricted to V1's classes + a notes box). Uses the CoralNet manifest for
+the full GT grid, mapped into V1's label set. ~70s for 50 images.
+
+```bash
+uv run --extra training --with label-studio-sdk --with pillow \
+  python -m mermaid_classifier.model_review.cli build-tasks \
+  --n-images 50 --min-points 15 --seed 1 \
+  --classifier /Users/gregn/Documents/wcs/models/v1 \
+  --v1-rollup-csv sagemaker/configs/coralnet_top108_full/rollups.csv \
+  --heldout-csv /Users/gregn/Documents/wcs/reports/model_benchmark/data/v1_annotations_val.csv \
+  --tasks-out /tmp/review_tasks.json --config-out /tmp/review_config.xml
+```
+Key flags: `--manifest-uri` (default = the top108_full CoralNet manifest parquet),
+`--feature-bucket` (default `2605-coralnet-public-sources`), `--image-bucket` /
+`--image-key-template` (default the CoralNet display images in
+`dev-datamermaid-sm-sources/coralnet-public-images/...`).
+
+> **Presigned-URL lifetime caveat.** Image URLs are presigned for 7 days, but under
+> SSO/STS temporary creds they only work until the session token expires (hours).
+> For a multi-day review, presign with long-lived IAM creds, or re-run `build-tasks`
+> + re-import before each session. (403s on images = expired URLs; re-run build-tasks.)
+
+## 5. Create the project + import (UI or API)
+
+**UI:** create a project → Settings → Labeling Interface → paste `review_config.xml`;
+set Annotations-per-task minimum = number of experts; Import `review_tasks.json`.
+
+**API (token from step 2):**
+```bash
+python - <<'PY'
+import json, urllib.request
+TOKEN="<token>"; LS="http://localhost:8080"
+def post(p,b):
+    r=urllib.request.Request(f"{LS}{p}",data=json.dumps(b).encode(),
+        headers={"Authorization":f"Token {TOKEN}","Content-Type":"application/json"},method="POST")
+    return json.loads(urllib.request.urlopen(r,timeout=120).read())
+pid=post("/api/projects",{"title":"Model Review","label_config":open("/tmp/review_config.xml").read()})["id"]
+post(f"/api/projects/{pid}/import", json.load(open("/tmp/review_tasks.json")))
+print("project", pid)
+PY
+```
+
+Experts label the fine BA::GF via the Taxonomy tree; toggle the `ground-truth` / `v1`
+tabs to view references (colored by top-level category); use the per-image notes box.
+Optional: pre-seed one blank annotation per (task × expert) with
+`mermaid_classifier.model_review.seed.seed_all(client, project_id, expert_user_ids)`.
+
+## 6. Synthesize results
+
+Export the project to `review_export.json` (UI Export → JSON, or `/api/projects/<id>/export?exportType=JSON`), then:
+```bash
+uv run --extra training --with label-studio-sdk --with pillow \
+  python -m mermaid_classifier.model_review.cli synthesize \
+  --tasks /tmp/review_tasks.json --export /tmp/review_export.json \
+  --points-out review_points.csv --summary-out review_summary.json --notes-out review_notes.csv
+```
+Emits the three comparisons at top-level: `v1_vs_gt` (over ALL points),
+`expert_vs_gt`, `expert_vs_expert`, plus per-point table and notes.
+
+## 7. Teardown (one step) + verification
+
+```bash
+# (export first if you want the results). Then:
+aws cloudformation delete-stack --stack-name model-review-ls --region us-west-2
+aws cloudformation wait stack-delete-complete --stack-name model-review-ls --region us-west-2
+
+# verify: this should ERROR "does not exist"
+aws cloudformation describe-stacks --stack-name model-review-ls --region us-west-2
+# verify: this must return []  (nothing tagged Project=model-review remains anywhere)
+aws resourcegroupstaggingapi get-resources --region us-west-2 \
+  --tag-filters Key=Project,Values=model-review --query "ResourceTagMappingList[].ResourceARN"
+
+# and REMOVE the image-bucket CORS rule added in step 3:
+aws s3api delete-bucket-cors --bucket dev-datamermaid-sm-sources
+```
+Presigned URLs expire on their own; the LS data volume dies with the instance.
