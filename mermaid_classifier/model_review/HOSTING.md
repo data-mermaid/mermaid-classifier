@@ -129,20 +129,46 @@ uv run --extra training --with label-studio-sdk --with pillow \
 Emits the three comparisons at top-level: `v1_vs_gt` (over ALL points),
 `expert_vs_gt`, `expert_vs_expert`, plus per-point table and notes.
 
-## 7. Teardown (one step) + verification
+## 7. Durability of expert labels — READ THIS
+
+Annotations are stored in **SQLite** at `/opt/ls_data/label_studio.sqlite3`, on the
+instance's **root EBS volume** (bind-mounted). There is **no automatic off-instance
+backup** in this ephemeral design.
+
+| Event | Labels survive? |
+|---|---|
+| Container restart / crash (`--restart unless-stopped`) | ✅ yes |
+| Instance **reboot** (OS restart) | ✅ yes — Docker auto-starts, EBS persists (just re-run the SSM tunnel, step 2) |
+| Instance **stop → start** | ✅ yes — EBS persists; SSM tunnel still works (uses instance id, not IP) |
+| Instance **termination** (incl. `delete-stack`, spot/hardware) | ❌ **LOST** — root volume is `DeleteOnTermination=true`, no backup |
+
+**Therefore: export the annotations regularly, and ALWAYS before teardown.** The LS
+JSON export is the canonical, restore-independent backup:
+```bash
+# through the tunnel; token from step 2
+curl -s -H "Authorization: Token <token>" \
+  "http://localhost:8080/api/projects/<id>/export?exportType=JSON" -o review_export_$(date +%Y%m%d_%H%M).json
+```
+Keep those files somewhere durable (your machine / S3). Reboots and stop/starts are
+safe, so you do NOT need to export just to restart — only to guard against
+termination. (If you later want automatic durability, add a scoped S3-write policy to
+the instance role + a cron that copies the sqlite to S3, or point LS at RDS Postgres.)
+
+## 8. Teardown (one step) + verification
 
 ```bash
-# (export first if you want the results). Then:
+# 1) EXPORT FIRST — termination destroys the DB (see step 7):
+curl -s -H "Authorization: Token <token>" \
+  "http://localhost:8080/api/projects/<id>/export?exportType=JSON" -o review_export_final.json
+
+# 2) Delete + verify:
 aws cloudformation delete-stack --stack-name model-review-ls --region us-west-2
 aws cloudformation wait stack-delete-complete --stack-name model-review-ls --region us-west-2
-
-# verify: this should ERROR "does not exist"
-aws cloudformation describe-stacks --stack-name model-review-ls --region us-west-2
-# verify: this must return []  (nothing tagged Project=model-review remains anywhere)
+aws cloudformation describe-stacks --stack-name model-review-ls --region us-west-2   # should ERROR "does not exist"
 aws resourcegroupstaggingapi get-resources --region us-west-2 \
-  --tag-filters Key=Project,Values=model-review --query "ResourceTagMappingList[].ResourceARN"
+  --tag-filters Key=Project,Values=model-review --query "ResourceTagMappingList[].ResourceARN"   # must be []
 
-# and REMOVE the image-bucket CORS rule added in step 3:
+# 3) Remove the image-bucket CORS rule added in step 3:
 aws s3api delete-bucket-cors --bucket dev-datamermaid-sm-sources
 ```
 Presigned URLs expire on their own; the LS data volume dies with the instance.
