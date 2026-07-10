@@ -31,9 +31,19 @@ class LsTasksTest(unittest.TestCase):
     def _task(self, label_path=_label_path):
         return ls_tasks.build_task("A", self.points, self.v1, label_path, _toplevel, _url, _size)
 
-    def test_task_has_two_prediction_sets(self):
+    def test_task_has_blank_and_reference_prediction_sets(self):
         versions = {p["model_version"] for p in self._task()["predictions"]}
-        self.assertEqual(versions, {"ground-truth", "v1"})
+        self.assertEqual(versions, {"blank", "ground-truth", "v1"})
+
+    def test_blank_prediction_is_unlabelled_fixed_points(self):
+        blank = next(p for p in self._task()["predictions"] if p["model_version"] == "blank")
+        # one keypoint per point, all Unlabeled, and NO taxonomy (blind starting layer)
+        self.assertEqual(len(blank["result"]), 2)  # 2 points
+        self.assertTrue(all(r["type"] == "keypointlabels" for r in blank["result"]))
+        self.assertTrue(all(r["value"]["keypointlabels"] == ["Unlabeled"] for r in blank["result"]))
+        self.assertFalse(any(r["type"] == "taxonomy" for r in blank["result"]))
+        # geometry preserved (pt-0 = (100,200))
+        self.assertAlmostEqual(blank["result"][0]["value"]["x"], 200 / 1000 * 100)
 
     def test_each_point_has_toplevel_keypoint_and_taxonomy_sharing_id(self):
         gt = next(p for p in self._task()["predictions"] if p["model_version"] == "ground-truth")

@@ -1,17 +1,35 @@
-"""Build Label Studio tasks: image + fixed points + GT/V1 reference predictions.
+"""Build Label Studio tasks: image + fixed points + reference predictions.
 
-Each point is rendered as a Label Studio keypoint region carrying a perRegion
-Taxonomy label. That requires TWO result entries sharing one region id: a
-``keypoint`` result (the geometry, bound to the KeyPoint control ``kp``) and a
-``taxonomy`` result (the label path, bound to the Taxonomy control ``label``).
-A plain ``keypointlabels`` result does NOT bind to a Taxonomy control, so the
-label would not render (verified in the pilot).
+Each point is two result entries sharing one region id: a ``keypointlabels``
+result bound to the colored top-level control ``toplevel`` (the geometry + the
+top-level colour) and a ``taxonomy`` result bound to ``label`` (the fine BA::GF
+path). Each task carries three predictions: ``blank`` (unlabelled fixed points —
+the reviewer's blind starting layer, set as the project model_version),
+``ground-truth`` and ``v1`` (read-only reference tabs).
 """
 
 from collections.abc import Callable
 from typing import Any
 
+from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
 from mermaid_classifier.model_review.sample import ReviewPoint
+
+
+def _blank_keypoint(idx: int, x: float, y: float, width: int, height: int) -> dict[str, Any]:
+    """A fixed keypoint with the grey Unlabeled top-level and NO taxonomy label.
+
+    Used for the 'blank' prediction that seeds each reviewer's starting annotation
+    so they label blind (points present, no label) rather than starting on V1.
+    """
+    return {
+        "id": f"pt-{idx}",
+        "type": "keypointlabels",
+        "from_name": "toplevel",
+        "to_name": "image",
+        "original_width": width,
+        "original_height": height,
+        "value": {"x": x, "y": y, "width": 0.5, "keypointlabels": [UNLABELED_TOPLEVEL]},
+    }
 
 
 def _point_results(
@@ -66,6 +84,7 @@ def build_task(
     original_points = []
     gt_result: list[dict[str, Any]] = []
     v1_result: list[dict[str, Any]] = []
+    blank_result: list[dict[str, Any]] = []
     for idx, p in enumerate(img_points):
         x = p.col / width * 100
         y = p.row / height * 100
@@ -79,7 +98,11 @@ def build_task(
         v1_result.extend(
             _point_results(idx, x, y, width, height, toplevel_name(v1_bagf), label_path(v1_bagf))
         )
+        blank_result.append(_blank_keypoint(idx, x, y, width, height))
 
+    # "blank" is the reviewer's starting layer (set as the project's model_version):
+    # fixed points, unlabelled, so they label blind. ground-truth/v1 are read-only
+    # reference tabs they can toggle to afterwards.
     return {
         "data": {
             "image_url": image_url(source_id, image_id),
@@ -89,6 +112,7 @@ def build_task(
             "original_points": original_points,
         },
         "predictions": [
+            {"model_version": "blank", "result": blank_result},
             {"model_version": "ground-truth", "result": gt_result},
             {"model_version": "v1", "result": v1_result},
         ],
