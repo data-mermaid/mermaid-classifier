@@ -14,7 +14,9 @@ Parameters:
     Description: Latest Amazon Linux 2023 AMI (resolved from SSM public parameter).
   InstanceType:
     Type: String
-    Default: t3.medium
+    # t3.small (2GB) is comfortable: LS uses ~270MB idle, image rendering is
+    # client-side. t3.micro (1GB) works for light use but add swap. t3.nano OOMs.
+    Default: t3.small
   LabelStudioImage:
     Type: String
     Default: heartexlabs/label-studio:1.13.1
