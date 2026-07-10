@@ -33,10 +33,14 @@ class LsTasksTest(unittest.TestCase):
 
     def test_task_has_blank_and_reference_prediction_sets(self):
         versions = {p["model_version"] for p in self._task()["predictions"]}
-        self.assertEqual(versions, {"blank", "ground-truth", "v1"})
+        self.assertEqual(versions, {ls_tasks.BLANK_MODEL_VERSION, "ground-truth", "v1"})
 
     def test_blank_prediction_is_unlabelled_fixed_points(self):
-        blank = next(p for p in self._task()["predictions"] if p["model_version"] == "blank")
+        blank = next(
+            p
+            for p in self._task()["predictions"]
+            if p["model_version"] == ls_tasks.BLANK_MODEL_VERSION
+        )
         # one keypoint per point, all Unlabeled, and NO taxonomy (blind starting layer)
         self.assertEqual(len(blank["result"]), 2)  # 2 points
         self.assertTrue(all(r["type"] == "keypointlabels" for r in blank["result"]))

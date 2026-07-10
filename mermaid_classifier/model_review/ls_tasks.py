@@ -14,6 +14,11 @@ from typing import Any
 from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
 from mermaid_classifier.model_review.sample import ReviewPoint
 
+# The reviewer's blind starting layer, exposed as a prediction and set as the
+# project's model_version so LS copies it into each reviewer's annotation on open.
+# Shown as a (read-only) tab, so the name must read clearly as "your start point".
+BLANK_MODEL_VERSION = "Start here (unlabelled)"
+
 
 def _blank_keypoint(idx: int, x: float, y: float, width: int, height: int) -> dict[str, Any]:
     """A fixed keypoint with the grey Unlabeled top-level and NO taxonomy label.
@@ -112,7 +117,7 @@ def build_task(
             "original_points": original_points,
         },
         "predictions": [
-            {"model_version": "blank", "result": blank_result},
+            {"model_version": BLANK_MODEL_VERSION, "result": blank_result},
             {"model_version": "ground-truth", "result": gt_result},
             {"model_version": "v1", "result": v1_result},
         ],

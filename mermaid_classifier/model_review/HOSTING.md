@@ -108,17 +108,19 @@ def post(p,b):
     return json.loads(urllib.request.urlopen(r,timeout=120).read())
 pid=post("/api/projects",{"title":"Model Review","label_config":open("/tmp/review_config.xml").read()})["id"]
 post(f"/api/projects/{pid}/import", json.load(open("/tmp/review_tasks.json")))
-# Reviewers start BLIND: pre-fill their annotation from the unlabelled 'blank'
-# prediction, not from V1. (Each task ships blank/ground-truth/v1 predictions.)
-patch=urllib.request.Request(f"{LS}/api/projects/{pid}",data=json.dumps({"model_version":"blank"}).encode(),
+# Reviewers start BLIND: pre-fill their annotation from the unlabelled starting
+# layer, not from V1. Its model_version is BLANK_MODEL_VERSION ("Start here
+# (unlabelled)"). (Each task ships that + ground-truth + v1 predictions.)
+from mermaid_classifier.model_review.ls_tasks import BLANK_MODEL_VERSION
+patch=urllib.request.Request(f"{LS}/api/projects/{pid}",data=json.dumps({"model_version":BLANK_MODEL_VERSION}).encode(),
     headers={"Authorization":f"Token {TOKEN}","Content-Type":"application/json"},method="PATCH")
 urllib.request.urlopen(patch,timeout=30)
 print("project", pid)
 PY
 ```
 **UI equivalent of the model_version step:** Settings → Annotation (or Predictions) →
-set the displayed model version to **`blank`** so annotators start from the unlabelled
-layer. Without this, they'd start pre-filled from `v1`.
+set the displayed model version to **"Start here (unlabelled)"** so annotators start
+from the unlabelled layer. Without this, they'd start pre-filled from `v1`.
 
 Experts open each image to **unlabelled (grey) fixed points** and label the fine BA::GF
 via the Taxonomy tree; they can toggle the `ground-truth` / `v1` tabs to view references
