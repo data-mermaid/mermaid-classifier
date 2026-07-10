@@ -108,12 +108,21 @@ def post(p,b):
     return json.loads(urllib.request.urlopen(r,timeout=120).read())
 pid=post("/api/projects",{"title":"Model Review","label_config":open("/tmp/review_config.xml").read()})["id"]
 post(f"/api/projects/{pid}/import", json.load(open("/tmp/review_tasks.json")))
+# Reviewers start BLIND: pre-fill their annotation from the unlabelled 'blank'
+# prediction, not from V1. (Each task ships blank/ground-truth/v1 predictions.)
+patch=urllib.request.Request(f"{LS}/api/projects/{pid}",data=json.dumps({"model_version":"blank"}).encode(),
+    headers={"Authorization":f"Token {TOKEN}","Content-Type":"application/json"},method="PATCH")
+urllib.request.urlopen(patch,timeout=30)
 print("project", pid)
 PY
 ```
+**UI equivalent of the model_version step:** Settings → Annotation (or Predictions) →
+set the displayed model version to **`blank`** so annotators start from the unlabelled
+layer. Without this, they'd start pre-filled from `v1`.
 
-Experts label the fine BA::GF via the Taxonomy tree; toggle the `ground-truth` / `v1`
-tabs to view references (colored by top-level category); use the per-image notes box.
+Experts open each image to **unlabelled (grey) fixed points** and label the fine BA::GF
+via the Taxonomy tree; they can toggle the `ground-truth` / `v1` tabs to view references
+(colored by top-level category) after their pass; use the per-image notes box.
 Optional: pre-seed one blank annotation per (task × expert) with
 `mermaid_classifier.model_review.seed.seed_all(client, project_id, expert_user_ids)`.
 
