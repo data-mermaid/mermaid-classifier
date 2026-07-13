@@ -17,7 +17,7 @@ from mermaid_classifier.model_review.sample import ReviewPoint
 # The reviewer's blind starting layer, exposed as a prediction and set as the
 # project's model_version so LS copies it into each reviewer's annotation on open.
 # Shown as a (read-only) tab, so the name must read clearly as "your start point".
-BLANK_MODEL_VERSION = "Start here (unlabelled)"
+BLANK_MODEL_VERSION = "Unlabelled Starting Set"
 
 
 def _blank_keypoint(idx: int, x: float, y: float, width: int, height: int) -> dict[str, Any]:
