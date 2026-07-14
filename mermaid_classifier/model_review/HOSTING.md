@@ -97,25 +97,35 @@ category) and `<config>.xml` (labeling config: colored top-level `KeyPointLabels
 Taxonomy restricted to V1's classes + a notes box). Uses the CoralNet manifest for
 the full GT grid, mapped into V1's label set. ~70s for 50 images.
 
+**Edit `mermaid_classifier/model_review/image_set.py`** — the single place that defines
+which images (and which model) a review uses. Change `name` (each distinct name makes a new
+project) and any sampling knob, then build:
+
 ```bash
-uv run --extra training --with label-studio-sdk --with pillow \
+uv run --extra training --with pillow \
   python -m mermaid_classifier.model_review.cli build-tasks \
-  --n-images 50 --min-points 15 --seed 1 \
-  --classifier /Users/gregn/Documents/wcs/models/v1 \
-  --v1-rollup-csv sagemaker/configs/coralnet_top108_full/rollups.csv \
-  --heldout-csv /Users/gregn/Documents/wcs/reports/model_benchmark/data/v1_annotations_val.csv \
   --tasks-out /tmp/review_tasks.json --config-out /tmp/review_config.xml
 ```
-Key flags: `--manifest-uri` (default = the top108_full CoralNet manifest parquet),
-`--feature-bucket` (default `2605-coralnet-public-sources`), `--image-bucket` /
-`--image-key-template` (default the CoralNet display images in
-`dev-datamermaid-sm-sources/coralnet-public-images/...`). `build-tasks` needs valid
-AWS creds (`aws sso login --profile wcs-admin`) to read the manifest + image sizes.
-
-Image URLs in the tasks are durable `s3://…` URIs (resolved at view time by LS via
-the source storage in step 5) — there is no presigned-URL expiry to manage.
+All inputs default from `IMAGE_SET`; every field is still overridable with a flag
+(`--n-images`, `--seed`, `--classifier`, …). The reviewed model defaults to
+`s3://mermaid-config/classifier/v2/` and is **downloaded automatically** — no manual copy.
+`build-tasks` needs valid AWS creds (`aws sso login --profile wcs-admin`) to read the
+manifest, image sizes, and the model. Image URLs in the tasks are durable `s3://…` URIs.
 
 ## 5. Create the project + import (UI or API)
+
+**One command (recommended).** With the SSM tunnel up (§2) and a token from §2, this builds
+the tasks from `image_set.py` and creates a **brand-new** project (S3 presign storage, tasks
+imported, blind starting layer set). It **refuses** if a project with the same `name` already
+exists, so existing projects are never touched — change `name` in `image_set.py` for each set:
+
+```bash
+uv run --extra training --with pillow \
+  python -m mermaid_classifier.model_review.cli create-project \
+  --token <token>          # or: export LABEL_STUDIO_TOKEN=<token>
+```
+Then add the image-bucket CORS rule (§3) so reviewers can see the images. The manual
+UI/heredoc steps below remain as a fallback.
 
 **UI:** create a project → Settings → Labeling Interface → paste `review_config.xml`;
 set Annotations-per-task minimum = number of experts; Import `review_tasks.json`.
