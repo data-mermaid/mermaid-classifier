@@ -147,3 +147,44 @@ class SynthesisTest(unittest.TestCase):
         # expert_vs_expert: (A,1,1) pair (e1,e2) disagree; (A,2,2) pair has e3=None
         # -> skipped. total=1, agree=0 -> 0.0.
         self.assertAlmostEqual(summary["expert_vs_expert"], 0.0)
+
+    def test_point_table_carries_image_provenance(self):
+        tasks = [
+            {
+                "data": {
+                    "image_id": "A",
+                    "image_set": "reef-batch-2",
+                    "source_id": "109",
+                    "image_url": "s3://bucket/coralnet-public-images/s109/images/A.jpg",
+                    "original_points": [{"row": 1, "col": 1, "gt": "hc::", "v1": "hc::"}],
+                }
+            }
+        ]
+        experts = [ExpertLabel("A", "e1", 1, 1, "hc::")]
+        df = synthesis.build_point_table(tasks, experts, _roll)
+        row = df.iloc[0]
+        self.assertEqual(row.image_set, "reef-batch-2")
+        self.assertEqual(row.source_id, "109")
+        self.assertEqual(row.image_url, "s3://bucket/coralnet-public-images/s109/images/A.jpg")
+        self.assertEqual(
+            list(df.columns),
+            [
+                "image_set",
+                "image_id",
+                "source_id",
+                "image_url",
+                "row",
+                "col",
+                "gt_top",
+                "v1_top",
+                "expert",
+                "expert_top",
+            ],
+        )
+
+    def test_point_table_defaults_provenance_when_absent(self):
+        # Existing-style tasks without provenance keys must still work (empty strings).
+        df = synthesis.build_point_table(_TASKS, _EXPERTS, _roll)
+        self.assertTrue((df.image_set == "").all())
+        self.assertTrue((df.source_id == "").all())
+        self.assertTrue((df.image_url == "").all())

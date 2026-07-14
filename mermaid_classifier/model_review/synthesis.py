@@ -15,18 +15,31 @@ def build_point_table(
     roll: Callable[[str], str | None],
 ) -> pd.DataFrame:
     ref: dict[tuple[str, int, int], tuple[str | None, str | None]] = {}
+    # Per-image provenance (image set + source + durable s3:// path), recorded next to
+    # each annotation so the image is unambiguous when comparing.
+    meta: dict[str, tuple[str, str, str]] = {}
     for task in tasks:
-        image_id = task["data"]["image_id"]
-        for p in task["data"]["original_points"]:
+        data = task["data"]
+        image_id = data["image_id"]
+        meta[image_id] = (
+            data.get("image_set", ""),
+            data.get("source_id", ""),
+            data.get("image_url", ""),
+        )
+        for p in data["original_points"]:
             ref[(image_id, p["row"], p["col"])] = (roll(p["gt"]), roll(p["v1"]))
 
     records = []
     for el in expert_labels:
         key = (el.image_id, el.row, el.col)
         gt_top, v1_top = ref.get(key, (None, None))
+        image_set, source_id, image_url = meta.get(el.image_id, ("", "", ""))
         records.append(
             {
+                "image_set": image_set,
                 "image_id": el.image_id,
+                "source_id": source_id,
+                "image_url": image_url,
                 "row": el.row,
                 "col": el.col,
                 "gt_top": gt_top,
@@ -37,7 +50,18 @@ def build_point_table(
         )
     return pd.DataFrame.from_records(
         records,
-        columns=["image_id", "row", "col", "gt_top", "v1_top", "expert", "expert_top"],
+        columns=[
+            "image_set",
+            "image_id",
+            "source_id",
+            "image_url",
+            "row",
+            "col",
+            "gt_top",
+            "v1_top",
+            "expert",
+            "expert_top",
+        ],
     )
 
 
