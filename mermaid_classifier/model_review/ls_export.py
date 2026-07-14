@@ -14,6 +14,21 @@ from typing import Any
 UNLABELED = "UNLABELED"
 
 
+def expert_name(completed_by: Any, user_map: dict[str, str] | None) -> str:
+    """Resolve an annotation's ``completed_by`` to a stable expert identity.
+
+    ``completed_by`` is the Label Studio account that made the annotation — usually a
+    numeric user id, but some exports embed a ``{id, email, ...}`` object. Prefer an
+    email (from the object, or from ``user_map`` id->email built from ``/api/users``);
+    fall back to the raw id string so attribution is never lost.
+    """
+    if isinstance(completed_by, dict):
+        return completed_by.get("email") or str(completed_by.get("id"))
+    if user_map:
+        return user_map.get(str(completed_by), str(completed_by))
+    return str(completed_by)
+
+
 @dataclass
 class ExpertLabel:
     image_id: str
@@ -33,16 +48,22 @@ class ExpertNote:
 def parse_export(
     tasks: list[dict[str, Any]],
     path_to_bagf: Callable[[list[str]], str],
+    user_map: dict[str, str] | None = None,
 ) -> tuple[list[ExpertLabel], list[ExpertNote]]:
     """Parse LS tasks-with-annotations. `path_to_bagf` maps a taxonomy name path
-    (root->leaf, optional trailing growth form) to a BA_ID::GF_ID string."""
+    (root->leaf, optional trailing growth form) to a BA_ID::GF_ID string.
+
+    `user_map` (optional id->email, e.g. from `/api/users`) resolves each
+    annotation's author to their email so results are attributable/filterable by
+    reviewer; without it the raw account id is used.
+    """
     labels: list[ExpertLabel] = []
     notes: list[ExpertNote] = []
     for task in tasks:
         image_id = task["data"]["image_id"]
         original = task["data"]["original_points"]
         for ann in task.get("annotations", []):
-            expert = str(ann.get("completed_by"))
+            expert = expert_name(ann.get("completed_by"), user_map)
             result = ann["result"]
             keypoint_ids = {
                 r["id"] for r in result if r.get("type") in ("keypoint", "keypointlabels")

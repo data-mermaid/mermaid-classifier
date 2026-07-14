@@ -9,17 +9,54 @@ Description: >
 
 Parameters:
   Ami:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-    Description: Latest Amazon Linux 2023 AMI (resolved from SSM public parameter).
+    Type: AWS::EC2::Image::Id
+    # PINNED to a fixed AMI id, NOT the SSM "latest AL2023" alias. An SSM-resolved
+    # AMI param re-resolves on every stack op, so an `update-stack` (even one that
+    # only touches the IAM role) can pick up a newer AMI, force an instance
+    # REPLACEMENT, and destroy the data volume. Pinning removes that trigger so
+    # updates are safe. For a fresh deploy in another region/date, look up a current
+    # AL2023 x86_64 AMI for that region and set it here (or via --parameters).
+    Default: ami-0b787142aa56d54db   # AL2023 x86_64, us-west-2 (pinned 2026-07-13)
+    Description: Fixed AL2023 x86_64 AMI id for us-west-2 (pinned to prevent replace-on-update).
   InstanceType:
     Type: String
-    # t3.small (2GB) is comfortable: LS uses ~270MB idle, image rendering is
-    # client-side. t3.micro (1GB) works for light use but add swap. t3.nano OOMs.
-    Default: t3.small
+    # t3.medium (4GB). Proxy-mode S3 storage makes LS resolve image bytes
+    # server-side, which spikes >1GB when the data manager loads many images;
+    # t3.small (2GB) OOM-killed LS even with 4GB swap (swap thrashed / stuck
+    # loading). 4GB + swap is comfortable. Drop to t3.small only for tiny sets.
+    Default: t3.medium
   LabelStudioImage:
     Type: String
     Default: heartexlabs/label-studio:1.13.1
+  ImageBucket:
+    Type: String
+    Default: dev-datamermaid-sm-sources
+    Description: >
+      Bucket holding the CoralNet display images. The instance role gets scoped
+      read on it so Label Studio can serve images itself (no presigned URLs).
+  ImagePrefix:
+    Type: String
+    Default: coralnet-public-images/
+    Description: Key prefix (with trailing slash) the read grant is scoped to.
+  BackupBucket:
+    Type: String
+    Default: model-review-ls-backups-554812291621
+    Description: >
+      Bucket for the Label Studio sqlite backups. Lives OUTSIDE this stack on
+      purpose so backups survive teardown/instance-replacement. Created once,
+      out of band; delete-stack does NOT remove it.
+  BackupPrefix:
+    Type: String
+    Default: sqlite/
+    Description: Key prefix (with trailing slash) under which the sqlite backup is written.
+  BackupRegion:
+    Type: String
+    Default: us-west-2
+    Description: Region of the backup bucket.
+  BackupIntervalMin:
+    Type: Number
+    Default: 10
+    Description: Minutes between sqlite -> S3 backups (also the max data-loss window).
 
 Resources:
   # SSM Session Manager is the ONLY access path (shell + port forwarding).
@@ -35,6 +72,33 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      # Scoped read on the CoralNet display images so Label Studio can serve them
+      # itself (S3 source storage, proxy mode) instead of the tasks carrying
+      # presigned URLs that expire. This is an INLINE policy on the stack-managed
+      # role, so `delete-stack` removes it with the role — no orphaned IAM, and it
+      # grants access only to *this* role, not to the shared bucket's policy/ACLs.
+      Policies:
+        - PolicyName: read-coralnet-images
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${ImageBucket}/${ImagePrefix}*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${ImageBucket}"
+                Condition:
+                  StringLike:
+                    s3:prefix: !Sub "${ImagePrefix}*"
+              # Read+write the sqlite backup (restore-on-boot + periodic backup).
+              # Scoped to the backup prefix; the bucket itself is external and
+              # survives delete-stack, but this grant does not.
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${BackupBucket}/${BackupPrefix}*"
       Tags:
         - { Key: Project, Value: model-review }
         - { Key: Ephemeral, Value: "true" }
@@ -78,20 +142,100 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -euxo pipefail
-          dnf install -y docker
+          dnf install -y docker unzip sqlite
           systemctl enable --now docker
+
+          # 4GB swap: LS resolves S3 images server-side and can spike >1GB when the
+          # data manager loads many images; a 2GB instance OOM-kills LS without it.
+          if [ ! -f /swapfile ]; then
+            fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+
+          # AWS CLI v2 is not preinstalled on AL2023; needed for the sqlite<->S3
+          # backup that makes annotations durable across instance replacement.
+          curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          (cd /tmp && unzip -q awscliv2.zip && ./aws/install)
+
+          # Backup config, sourced by both the boot-restore and the backup script.
+          cat >/etc/ls-backup.env <<ENV
+          BACKUP_S3=s3://${BackupBucket}/${BackupPrefix}label_studio.sqlite3
+          BACKUP_REGION=${BackupRegion}
+          DB=/opt/ls_data/label_studio.sqlite3
+          ENV
 
           # Accessed only via an SSM tunnel to localhost on the operator's
           # machine, so LABEL_STUDIO_HOST is the local forwarded address.
+          mkdir -p /opt/ls_data
+
+          # Restore the latest backup on a fresh instance (e.g. after a
+          # replacement) BEFORE Label Studio starts, so the DB is intact on boot.
+          source /etc/ls-backup.env
+          if [ ! -f "$DB" ]; then
+            /usr/local/bin/aws s3 cp "$BACKUP_S3" "$DB" --region "$BACKUP_REGION" || true
+          fi
+
           # LS runs as uid 1001 inside the container; the bind-mounted host dir
           # must be writable by that uid or LS crash-loops on /data/media.
-          mkdir -p /opt/ls_data
           chown -R 1001:1001 /opt/ls_data
           docker run -d --restart unless-stopped --name ls \
             -p 8080:8080 \
             -e LABEL_STUDIO_HOST="http://localhost:8080" \
             -v /opt/ls_data:/label-studio/data \
             ${LabelStudioImage}
+
+          # Consistent hot backup (sqlite .backup) -> S3, driven by a timer.
+          cat >/usr/local/bin/ls-backup.sh <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          source /etc/ls-backup.env
+          [ -f "$DB" ] || exit 0
+          TMP=$(mktemp)
+          sqlite3 "$DB" ".backup '$TMP'"
+          /usr/local/bin/aws s3 cp "$TMP" "$BACKUP_S3" --region "$BACKUP_REGION" --only-show-errors
+          rm -f "$TMP"
+          SCRIPT
+          chmod +x /usr/local/bin/ls-backup.sh
+
+          cat >/etc/systemd/system/ls-backup.service <<'UNIT'
+          [Unit]
+          Description=Back up Label Studio sqlite to S3
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/ls-backup.sh
+          UNIT
+
+          cat >/etc/systemd/system/ls-backup.timer <<TIMER
+          [Unit]
+          Description=Periodic Label Studio sqlite backup
+          [Timer]
+          OnBootSec=${BackupIntervalMin}min
+          OnUnitActiveSec=${BackupIntervalMin}min
+          Persistent=true
+          [Install]
+          WantedBy=timers.target
+          TIMER
+
+          # Also back up on graceful shutdown (captures work since the last timer
+          # tick before a stop; hard termination stays bounded by the interval).
+          cat >/etc/systemd/system/ls-backup-shutdown.service <<'SHUT'
+          [Unit]
+          Description=Back up Label Studio sqlite to S3 on shutdown
+          DefaultDependencies=no
+          Before=shutdown.target
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/ls-backup.sh
+          [Install]
+          WantedBy=shutdown.target
+          SHUT
+
+          systemctl daemon-reload
+          systemctl enable --now ls-backup.timer
+          systemctl enable ls-backup-shutdown.service
 
 Outputs:
   InstanceId:

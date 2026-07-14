@@ -82,6 +82,29 @@ class LsExportTest(unittest.TestCase):
         labels, _ = ls_export.parse_export(_EXPORT, _path_to_bagf)
         self.assertTrue(all(lbl.expert == "7" for lbl in labels))
 
+    def test_expert_resolved_to_email_via_user_map(self):
+        user_map = {"7": "alice@datamermaid.org"}
+        labels, notes = ls_export.parse_export(_EXPORT, _path_to_bagf, user_map=user_map)
+        self.assertTrue(all(lbl.expert == "alice@datamermaid.org" for lbl in labels))
+        self.assertEqual(notes[0].expert, "alice@datamermaid.org")
+
+    def test_expert_falls_back_to_id_when_unmapped(self):
+        labels, _ = ls_export.parse_export(_EXPORT, _path_to_bagf, user_map={"999": "x@y"})
+        self.assertTrue(all(lbl.expert == "7" for lbl in labels))
+
+    def test_expert_from_embedded_completed_by_object(self):
+        export = [
+            {
+                "data": {"image_id": "A", "original_points": [{"row": 1, "col": 1, "gt": "g::", "v1": "v::"}]},
+                "annotations": [
+                    {"completed_by": {"id": 7, "email": "bob@datamermaid.org"},
+                     "result": [_kp(0), _tax(0, ["x::"])]}
+                ],
+            }
+        ]
+        labels, _ = ls_export.parse_export(export, _path_to_bagf)
+        self.assertEqual(labels[0].expert, "bob@datamermaid.org")
+
     def test_notes_extracted(self):
         _, notes = ls_export.parse_export(_EXPORT, _path_to_bagf)
         self.assertEqual(len(notes), 1)

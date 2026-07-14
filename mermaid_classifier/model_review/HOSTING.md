@@ -18,9 +18,13 @@ export AWS_PROFILE=wcs-admin AWS_REGION=us-east-1
 
 ## 1. Deploy the stack (region us-west-2)
 
-The stack = 1 EC2 instance (Amazon Linux 2023, Docker + Label Studio 1.13.1, root
-EBS `DeleteOnTermination`), 1 security group (no inbound), 1 IAM role/profile (SSM
-only). Nothing else is created.
+The stack = 1 EC2 instance (Amazon Linux 2023 on a **pinned** AMI, Docker + Label
+Studio 1.13.1 + aws-cli + a 10-min sqlite→S3 backup timer, root EBS
+`DeleteOnTermination`), 1 security group (no inbound), 1 IAM role/profile (SSM +
+scoped read on the image prefix + read/write on the backup prefix). Nothing else is
+created **by the stack**. One external prerequisite exists out of band: the
+versioned backup bucket `model-review-ls-backups-554812291621` (see §7), which is
+deliberately not part of the stack so backups survive teardown.
 
 ```bash
 aws cloudformation create-stack --stack-name model-review-ls --region us-west-2 \
@@ -32,6 +36,13 @@ aws cloudformation wait stack-create-complete --stack-name model-review-ls --reg
 aws cloudformation describe-stacks --stack-name model-review-ls --region us-west-2 \
   --query "Stacks[0].Outputs"    # -> InstanceId, PortForwardCommand
 ```
+> **Applying template changes.** UserData runs only at **launch**, so `update-stack`
+> will not re-run boot changes on a live instance — recreate the stack (safe when the
+> instance is empty; the backup/restore in §7 protects data otherwise). The operator's
+> real `aws` CLI accepts `--template-body file://…`; the **agent's `aws-mcp` has no
+> local-file access**, so it must first upload the template to a scratch S3 bucket and
+> use `--template-url` (delete the scratch bucket after).
+
 Wait ~1–2 min after `CREATE_COMPLETE` for the container to pull. Check it's healthy:
 ```bash
 aws ssm send-command --region us-west-2 --instance-ids <InstanceId> \
@@ -51,12 +62,25 @@ Open **http://localhost:8080**, create the admin account (Community edition: any
 account sees all projects). Get an API token at **http://localhost:8080/api/current-user/token**
 for the scripted steps below.
 
-## 3. Image CORS (required, and REMEMBER to undo)
+## 3. Images — durable S3 serving (presign mode) + one CORS rule
 
-Label Studio draws each image on a canvas, so the private image bucket must return
-CORS headers for the tunnel origin. The bucket has **no CORS by default**; add a
-scoped GET rule while reviewing, and **remove it when done**. (CORS grants no new
-access — objects still need the presigned signature.)
+Tasks carry plain **`s3://…`** image URIs (never expire). Label Studio resolves them
+via an **S3 *source storage* in presign mode** (`presign=true`, `use_blob_urls=false`,
+step 5): per view, LS mints a short-lived presigned S3 URL using the instance's IAM
+role (scoped `s3:GetObject`/`ListBucket` on `coralnet-public-images/`, granted by the
+template) and 303-redirects the browser to fetch the image **straight from S3**.
+Nothing is baked into the tasks and nothing expires from the reviewer's side (LS
+re-mints per view).
+
+> We tried **proxy mode** (`presign=false`, no CORS) first, but LS materializes every
+> image server-side and the 50-image data manager **OOM-killed LS even on t3.medium**.
+> Presign keeps LS light by offloading the fetch to the browser — the tradeoff is that
+> the browser now fetches cross-origin and LS draws on a canvas, so the bucket needs a
+> scoped CORS rule for the tunnel origin.
+
+Because the browser reads the image onto a canvas cross-origin, add a scoped GET CORS
+rule while reviewing and **remove it when done** (CORS grants no access — the object
+still needs the presigned signature):
 
 ```bash
 # ON:
@@ -85,12 +109,11 @@ uv run --extra training --with label-studio-sdk --with pillow \
 Key flags: `--manifest-uri` (default = the top108_full CoralNet manifest parquet),
 `--feature-bucket` (default `2605-coralnet-public-sources`), `--image-bucket` /
 `--image-key-template` (default the CoralNet display images in
-`dev-datamermaid-sm-sources/coralnet-public-images/...`).
+`dev-datamermaid-sm-sources/coralnet-public-images/...`). `build-tasks` needs valid
+AWS creds (`aws sso login --profile wcs-admin`) to read the manifest + image sizes.
 
-> **Presigned-URL lifetime caveat.** Image URLs are presigned for 7 days, but under
-> SSO/STS temporary creds they only work until the session token expires (hours).
-> For a multi-day review, presign with long-lived IAM creds, or re-run `build-tasks`
-> + re-import before each session. (403s on images = expired URLs; re-run build-tasks.)
+Image URLs in the tasks are durable `s3://…` URIs (resolved at view time by LS via
+the source storage in step 5) — there is no presigned-URL expiry to manage.
 
 ## 5. Create the project + import (UI or API)
 
@@ -107,6 +130,13 @@ def post(p,b):
         headers={"Authorization":f"Token {TOKEN}","Content-Type":"application/json"},method="POST")
     return json.loads(urllib.request.urlopen(r,timeout=120).read())
 pid=post("/api/projects",{"title":"Model Review","label_config":open("/tmp/review_config.xml").read()})["id"]
+# S3 source storage in PRESIGN mode: LS mints a presigned S3 URL per view (via the
+# instance role) and redirects the browser to fetch from S3 (LS stays light; needs
+# the CORS rule from step 3). Do NOT sync it — it only resolves the s3:// links in
+# the tasks. (presign=False = proxy mode, no CORS but OOMs on the 50-img grid.)
+post("/api/storages/s3",{"project":pid,"bucket":"dev-datamermaid-sm-sources",
+    "prefix":"coralnet-public-images/","region_name":"us-east-1",
+    "use_blob_urls":False,"presign":True,"title":"coralnet-images"})
 post(f"/api/projects/{pid}/import", json.load(open("/tmp/review_tasks.json")))
 # Reviewers start BLIND: pre-fill their annotation from the unlabelled starting
 # layer, not from V1. Its model_version is BLANK_MODEL_VERSION ("Unlabelled
@@ -122,6 +152,12 @@ PY
 set the displayed model version to **"Unlabelled Starting Set"** so annotators start
 from the unlabelled layer. Without this, they'd start pre-filled from `v1`.
 
+**Accounts / attribution:** each reviewer must sign up with **their own account**
+(their email) — LS stamps every annotation with `completed_by` (that account), which
+is how §6 attributes and lets you filter by reviewer. Sharing one login makes the
+work indistinguishable. In Community edition anyone who can reach LS and sign up can
+see all projects, so gate *access* at the front door (see §9), not by hiding the URL.
+
 Experts open each image to **unlabelled (grey) fixed points** and label the fine BA::GF
 via the Taxonomy tree; they can toggle the `ground-truth` / `v1` tabs to view references
 (colored by top-level category) after their pass; use the per-image notes box.
@@ -130,40 +166,59 @@ Optional: pre-seed one blank annotation per (task × expert) with
 
 ## 6. Synthesize results
 
-Export the project to `review_export.json` (UI Export → JSON, or `/api/projects/<id>/export?exportType=JSON`), then:
+Export the project to `review_export.json` (UI Export → JSON, or `/api/projects/<id>/export?exportType=JSON`).
+Also dump the accounts so annotations are attributed to reviewer **email** (each
+annotation records its author as `completed_by`; `--users-json` maps id→email so
+`review_points.csv`/notes carry the email and you can filter by reviewer):
 ```bash
+curl -s -H "Authorization: Token <token>" http://localhost:8080/api/users -o review_users.json
+
 uv run --extra training --with label-studio-sdk --with pillow \
   python -m mermaid_classifier.model_review.cli synthesize \
-  --tasks /tmp/review_tasks.json --export /tmp/review_export.json \
+  --tasks /tmp/review_tasks.json --export /tmp/review_export.json --users-json review_users.json \
   --points-out review_points.csv --summary-out review_summary.json --notes-out review_notes.csv
 ```
 Emits the three comparisons at top-level: `v1_vs_gt` (over ALL points),
-`expert_vs_gt`, `expert_vs_expert`, plus per-point table and notes.
+`expert_vs_gt`, `expert_vs_expert`, plus a per-point table (with the reviewer's
+email in the `expert` column) and notes. **Attribution requires each reviewer to
+use their own account** — see §5.
 
-## 7. Durability of expert labels — READ THIS
+## 7. Durability of expert labels — automatic S3 backup
 
-Annotations are stored in **SQLite** at `/opt/ls_data/label_studio.sqlite3`, on the
-instance's **root EBS volume** (bind-mounted). There is **no automatic off-instance
-backup** in this ephemeral design.
+Annotations live in **SQLite** at `/opt/ls_data/label_studio.sqlite3` on the
+instance's root EBS volume. That volume is `DeleteOnTermination=true`, so the
+instance is **not** the system of record — an **automatic off-instance backup** is:
+
+- A systemd timer (`ls-backup.timer`, default every **10 min**) runs a consistent
+  `sqlite3 .backup` and uploads it to
+  `s3://model-review-ls-backups-554812291621/sqlite/label_studio.sqlite3`
+  (external, **versioned**, private bucket — created once, out of band, and it
+  **survives `delete-stack`** on purpose). A best-effort backup also runs on
+  graceful shutdown (`ls-backup-shutdown.service`).
+- On boot, UserData **restores** that object to `/opt/ls_data` *before* LS starts
+  (only if no DB is present), so a freshly-launched instance comes back with its data.
 
 | Event | Labels survive? |
 |---|---|
-| Container restart / crash (`--restart unless-stopped`) | ✅ yes |
-| Instance **reboot** (OS restart) | ✅ yes — Docker auto-starts, EBS persists (just re-run the SSM tunnel, step 2) |
-| Instance **stop → start** | ✅ yes — EBS persists; SSM tunnel still works (uses instance id, not IP) |
-| Instance **termination** (incl. `delete-stack`, spot/hardware) | ❌ **LOST** — root volume is `DeleteOnTermination=true`, no backup |
+| Container restart / crash (`--restart unless-stopped`) | ✅ yes (EBS) |
+| Instance **reboot** / **stop→start** | ✅ yes (EBS; re-run the SSM tunnel, step 2) |
+| Instance **termination / replacement** (incl. a future `create-stack`) | ✅ **restored on next boot from the last backup** — up to one timer interval (~10 min) of work can be lost |
+| `delete-stack` **and** you never relaunch | ⚠️ the backup object still exists in the external bucket; restore by launching a new stack (UserData pulls it) or importing the LS JSON export |
 
-**Therefore: export the annotations regularly, and ALWAYS before teardown.** The LS
-JSON export is the canonical, restore-independent backup:
+> **The AMI is pinned** (`Parameters.Ami`) precisely so an `update-stack` cannot
+> silently re-resolve "latest AL2023", replace the instance, and rely on the backup.
+> Note UserData only runs at **launch** — changing it via `update-stack` does NOT
+> re-run it on a live instance; recreate the stack (instance empty) to apply boot
+> changes. **History:** an early `update-stack` with an SSM-resolved AMI replaced the
+> instance and lost the pre-pin annotations; pinning + this backup exist to prevent a
+> repeat.
+
+Belt-and-suspenders: a JSON export is still the most portable backup, especially
+before teardown:
 ```bash
-# through the tunnel; token from step 2
 curl -s -H "Authorization: Token <token>" \
   "http://localhost:8080/api/projects/<id>/export?exportType=JSON" -o review_export_$(date +%Y%m%d_%H%M).json
 ```
-Keep those files somewhere durable (your machine / S3). Reboots and stop/starts are
-safe, so you do NOT need to export just to restart — only to guard against
-termination. (If you later want automatic durability, add a scoped S3-write policy to
-the instance role + a cron that copies the sqlite to S3, or point LS at RDS Postgres.)
 
 ## 8. Teardown (one step) + verification
 
@@ -182,4 +237,32 @@ aws resourcegroupstaggingapi get-resources --region us-west-2 \
 # 3) Remove the image-bucket CORS rule added in step 3:
 aws s3api delete-bucket-cors --bucket dev-datamermaid-sm-sources
 ```
-Presigned URLs expire on their own; the LS data volume dies with the instance.
+The LS data volume dies with the instance; the image-bucket read grant and all other
+resources go with the stack. **The external backup bucket
+(`model-review-ls-backups-554812291621`) is intentionally NOT part of the stack and
+survives** — that is where your last sqlite backup lives. Delete it manually only when
+you are certain you no longer need the annotations:
+```bash
+aws s3 rm s3://model-review-ls-backups-554812291621 --recursive --region us-west-2
+aws s3api delete-bucket --bucket model-review-ls-backups-554812291621 --region us-west-2
+```
+
+## 9. Remote access for external reviewers (when you outgrow the SSM tunnel)
+
+The SSM tunnel (§2) is internal-only and fine for one operator, but external experts
+can't easily run it. When you expose LS to reviewers, **don't rely on an obscure
+domain** — LS Community shows every project to any account that can reach it and sign
+up, so a guessable/leaked/crawled URL = open data. Gate access at the front door by
+*identity*, cheapest first:
+
+- **Identity-gated tunnel (recommended, ~free, no public port).** Put the instance on
+  **Tailscale** (reviewers join the tailnet) or front LS with **Cloudflare Tunnel +
+  Cloudflare Access** (allowlist reviewer emails / Google login). No inbound SG rule,
+  no ALB, and you revoke per-person. Reviewers then self-register their LS account
+  behind the gate.
+- **Public URL done properly.** ALB/CloudFront + Route53 + ACM TLS, plus an SG/WAF IP
+  allowlist. Real, but the most billable/standing infra (what we deliberately avoided).
+
+Whichever front door you pick, also set **`LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true`**
+on the container so LS signup requires the org invite link (defense in depth), and keep
+self-registration on so each reviewer makes their own attributable account (§5).

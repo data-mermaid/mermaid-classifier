@@ -95,16 +95,17 @@ def make_v1_label_mapper(
     return v1_label
 
 
-def make_presigner(
-    s3_client: Any, image_bucket: str, key_template: str
-) -> Callable[[str, str], str]:
+def make_s3_uri(image_bucket: str, key_template: str) -> Callable[[str, str], str]:
+    """(source_id, image_id) -> a durable ``s3://bucket/key`` URI.
+
+    Tasks carry the plain S3 URI, not a presigned URL: Label Studio resolves it at
+    view time via its S3 source storage (proxy mode) using the instance IAM role,
+    so nothing in the task data expires. See HOSTING.md §3.
+    """
+
     def image_url(source_id: str, image_id: str) -> str:
         key = key_template.format(source_id=source_id, image_id=image_id)
-        return s3_client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": image_bucket, "Key": key},
-            ExpiresIn=604800,  # 7 days
-        )
+        return f"s3://{image_bucket}/{key}"
 
     return image_url
 
@@ -158,7 +159,9 @@ def build_tasks_command(args: argparse.Namespace) -> None:
 
     s3 = boto3.client("s3")
     toplevel_name = make_toplevel_name()
-    image_url = make_presigner(s3, args.image_bucket, args.image_key_template)
+    # Tasks carry durable s3:// URIs (LS resolves them via S3 source storage); the
+    # image dimensions are still read at build time from the objects themselves.
+    image_url = make_s3_uri(args.image_bucket, args.image_key_template)
     image_size = _image_sizer(s3, args.image_bucket, args.image_key_template)
 
     tasks = ls_tasks.build_tasks(points, v1_preds, label_path, toplevel_name, image_url, image_size)
@@ -182,7 +185,13 @@ def synthesize_command(args: argparse.Namespace) -> None:
     ba_lib = get_benthic_attribute_library()
     gf_lib = get_growth_form_library()
     path_to_bagf = make_path_to_bagf(ba_lib, gf_lib)
-    expert_labels, notes = ls_export.parse_export(export, path_to_bagf)
+    # Resolve each annotation's author id -> email (attribution/filtering by reviewer).
+    user_map: dict[str, str] | None = None
+    if args.users_json:
+        with open(args.users_json) as f:
+            users = json.load(f)
+        user_map = {str(u["id"]): u["email"] for u in users if u.get("email")}
+    expert_labels, notes = ls_export.parse_export(export, path_to_bagf, user_map=user_map)
     # strict=False: UNLABELED/unmapped labels roll to None rather than
     # raising, matching synthesis's handling of unrollable points.
     roll = make_rollup_fn(strict=False)
@@ -250,6 +259,10 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("synthesize")
     s.add_argument("--tasks", required=True)
     s.add_argument("--export", required=True)
+    s.add_argument(
+        "--users-json",
+        help="JSON dump of LS /api/users (id->email) to attribute annotations by reviewer email",
+    )
     s.add_argument("--points-out", default="review_points.csv")
     s.add_argument("--summary-out", default="review_summary.json")
     s.add_argument("--notes-out", default="review_notes.csv")
