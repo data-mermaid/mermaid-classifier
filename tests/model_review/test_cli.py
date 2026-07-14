@@ -60,3 +60,25 @@ class CliTest(unittest.TestCase):
         self.assertEqual(m("1"), "ROLLED::")  # mapped, rolled, in V1 classes
         self.assertIsNone(m("2"))  # rolls to a non-class -> dropped (like training)
         self.assertIsNone(m("3"))  # unmappable coralnet id -> dropped
+
+    def test_build_tasks_defaults_come_from_image_set(self):
+        from mermaid_classifier.model_review.image_set import IMAGE_SET
+
+        parser = cli.build_parser()
+        args = parser.parse_args(["build-tasks"])  # no flags -> all defaults
+        self.assertEqual(args.n_images, IMAGE_SET.n_images)
+        self.assertEqual(args.seed, IMAGE_SET.seed)
+        self.assertEqual(args.min_points, IMAGE_SET.min_points)
+        self.assertEqual(args.classifier, IMAGE_SET.classifier)  # S3, not required
+        self.assertEqual(args.name, IMAGE_SET.name)
+
+    def test_image_set_from_args_roundtrips(self):
+        from mermaid_classifier.model_review.image_set import IMAGE_SET
+
+        parser = cli.build_parser()
+        args = parser.parse_args(["build-tasks", "--n-images", "7", "--name", "custom"])
+        image_set = cli.image_set_from_args(args)
+        self.assertEqual(image_set.n_images, 7)
+        self.assertEqual(image_set.name, "custom")
+        self.assertEqual(image_set.classifier, IMAGE_SET.classifier)  # untouched default
+        self.assertEqual(image_set.image_prefix, IMAGE_SET.image_prefix)

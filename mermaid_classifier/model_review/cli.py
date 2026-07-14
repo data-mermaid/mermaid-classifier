@@ -22,6 +22,7 @@ from mermaid_classifier.model_review import (
     synthesis,
     v1_infer,
 )
+from mermaid_classifier.model_review.image_set import IMAGE_SET, ImageSet
 from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
 from mermaid_classifier.model_review.rollup import load_toplevel, make_rollup_fn
 
@@ -126,7 +127,26 @@ def _image_sizer(
     return image_size
 
 
-def build_tasks_command(args: argparse.Namespace) -> None:
+def image_set_from_args(args: argparse.Namespace) -> ImageSet:
+    return ImageSet(
+        name=args.name,
+        classifier=args.classifier,
+        heldout_csv=args.heldout_csv,
+        manifest_uri=args.manifest_uri,
+        feature_bucket=args.feature_bucket,
+        image_bucket=args.image_bucket,
+        image_prefix=args.image_prefix,
+        image_bucket_region=args.image_bucket_region,
+        image_key_template=args.image_key_template,
+        v1_rollup_csv=args.v1_rollup_csv,
+        n_images=args.n_images,
+        min_points=args.min_points,
+        seed=args.seed,
+    )
+
+
+def build_tasks_and_config(image_set: ImageSet) -> tuple[list[dict[str, Any]], str]:
+    """Build LS tasks + labeling config from an ImageSet (reads S3/model/manifest)."""
     import boto3
 
     from mermaid_classifier.pyspacer.annotation import resolve_classifier_artifact
@@ -139,38 +159,50 @@ def build_tasks_command(args: argparse.Namespace) -> None:
 
     # V1's label set = its class list; GT is rolled into it with V1's training rollup
     # and any label outside V1's classes is dropped (exactly as V1's training filter did).
-    model_pt, model_json = resolve_classifier_artifact(args.classifier)
+    model_pt, model_json = resolve_classifier_artifact(image_set.classifier)
     predictor = load_predictor(model_pt, model_json)
     classes = set(predictor.classes)
-    with open(args.v1_rollup_csv) as f:
+    with open(image_set.v1_rollup_csv) as f:
         rollup = LabelRollupSpec(f)
     v1_mapper = make_v1_label_mapper(sample.default_coralnet_mapper(), rollup.roll_up, classes)
 
     points = sample.select_images_full_gt(
-        val_csv=args.heldout_csv,
-        manifest_uri=args.manifest_uri,
-        coralnet_bucket=args.feature_bucket,
-        n_images=args.n_images,
-        seed=args.seed,
-        min_points_per_image=args.min_points,
+        val_csv=image_set.heldout_csv,
+        manifest_uri=image_set.manifest_uri,
+        coralnet_bucket=image_set.feature_bucket,
+        n_images=image_set.n_images,
+        seed=image_set.seed,
+        min_points_per_image=image_set.min_points,
         map_coralnet=v1_mapper,
     )
-    v1_preds = v1_infer.predict_points(points, args.classifier, predictor=predictor)
+    v1_preds = v1_infer.predict_points(points, image_set.classifier, predictor=predictor)
 
     s3 = boto3.client("s3")
     toplevel_name = make_toplevel_name()
     # Tasks carry durable s3:// URIs (LS resolves them via S3 source storage); the
     # image dimensions are still read at build time from the objects themselves.
-    image_url = make_s3_uri(args.image_bucket, args.image_key_template)
-    image_size = _image_sizer(s3, args.image_bucket, args.image_key_template)
+    image_url = make_s3_uri(image_set.image_bucket, image_set.image_key_template)
+    image_size = _image_sizer(s3, image_set.image_bucket, image_set.image_key_template)
 
-    tasks = ls_tasks.build_tasks(points, v1_preds, label_path, toplevel_name, image_url, image_size)
-    with open(args.tasks_out, "w") as f:
-        json.dump(tasks, f, indent=2)
-
+    tasks = ls_tasks.build_tasks(
+        points,
+        v1_preds,
+        label_path,
+        toplevel_name,
+        image_url,
+        image_size,
+        image_set=image_set.name,
+    )
     # Restrict the expert taxonomy to V1's label set (one path per V1 class).
     restrict_paths = sorted(label_path(c) for c in classes)
     config = ls_config.build_taxonomy_config(ba_lib, gf_lib, restrict_paths=restrict_paths)
+    return tasks, config
+
+
+def build_tasks_command(args: argparse.Namespace) -> None:
+    tasks, config = build_tasks_and_config(image_set_from_args(args))
+    with open(args.tasks_out, "w") as f:
+        json.dump(tasks, f, indent=2)
     with open(args.config_out, "w") as f:
         f.write(config)
     print(f"Wrote {len(tasks)} tasks -> {args.tasks_out} and config -> {args.config_out}")
@@ -210,48 +242,52 @@ def synthesize_command(args: argparse.Namespace) -> None:
     print("Comparison summary:", summary)
 
 
-def main(argv: list[str] | None = None) -> None:
+def _add_image_set_args(p: argparse.ArgumentParser) -> None:
+    """Flags shared by build-tasks and create-project; every default is from IMAGE_SET."""
+    p.add_argument("--name", default=IMAGE_SET.name, help="image-set name / LS project title")
+    p.add_argument("--heldout-csv", default=IMAGE_SET.heldout_csv)
+    p.add_argument("--n-images", type=int, default=IMAGE_SET.n_images)
+    p.add_argument(
+        "--min-points",
+        type=int,
+        default=IMAGE_SET.min_points,
+        help="only sample images with at least this many total ground-truth points",
+    )
+    p.add_argument("--seed", type=int, default=IMAGE_SET.seed)
+    p.add_argument(
+        "--manifest-uri",
+        default=IMAGE_SET.manifest_uri,
+        help="CoralNet manifest parquet: the full ground-truth points per image",
+    )
+    p.add_argument(
+        "--feature-bucket",
+        default=IMAGE_SET.feature_bucket,
+        help="S3 bucket holding the per-image .featurevector files",
+    )
+    p.add_argument(
+        "--classifier",
+        default=IMAGE_SET.classifier,
+        help="MLflow model id, S3 dir, or local dir for the reviewed model (auto-downloaded)",
+    )
+    p.add_argument(
+        "--v1-rollup-csv",
+        default=IMAGE_SET.v1_rollup_csv,
+        help=(
+            "training rollup (from_ba_id,from_gf_id,to_ba_id,to_gf_id) to map GT into the label set"
+        ),
+    )
+    p.add_argument("--image-bucket", default=IMAGE_SET.image_bucket)
+    p.add_argument("--image-prefix", default=IMAGE_SET.image_prefix)
+    p.add_argument("--image-bucket-region", default=IMAGE_SET.image_bucket_region)
+    p.add_argument("--image-key-template", default=IMAGE_SET.image_key_template)
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="model-review")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build-tasks")
-    b.add_argument(
-        "--heldout-csv", default="../reports/model_benchmark/data/v1_annotations_val.csv"
-    )
-    b.add_argument("--n-images", type=int, default=50)
-    b.add_argument(
-        "--min-points",
-        type=int,
-        default=15,
-        help="only sample images with at least this many total ground-truth points",
-    )
-    b.add_argument("--seed", type=int, default=1)
-    b.add_argument(
-        "--manifest-uri",
-        default=(
-            "s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/top108_full/"
-            "coralnet_classifier_manifest_top108_full.parquet"
-        ),
-        help="CoralNet manifest parquet: the full ground-truth points per image",
-    )
-    b.add_argument(
-        "--feature-bucket",
-        default="2605-coralnet-public-sources",
-        help="S3 bucket holding the per-image .featurevector files",
-    )
-    b.add_argument(
-        "--classifier", required=True, help="MLflow model id, S3 dir, or local dir for V1"
-    )
-    b.add_argument(
-        "--v1-rollup-csv",
-        default="sagemaker/configs/coralnet_top108_full/rollups.csv",
-        help="V1 training rollup (from_ba_id,from_gf_id,to_ba_id,to_gf_id) to map GT into V1's label set",
-    )
-    b.add_argument("--image-bucket", default="dev-datamermaid-sm-sources")
-    b.add_argument(
-        "--image-key-template",
-        default="coralnet-public-images/s{source_id}/images/{image_id}.jpg",
-    )
+    _add_image_set_args(b)
     b.add_argument("--tasks-out", default="review_tasks.json")
     b.add_argument("--config-out", default="review_config.xml")
     b.set_defaults(func=build_tasks_command)
@@ -268,7 +304,11 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--notes-out", default="review_notes.csv")
     s.set_defaults(func=synthesize_command)
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
     args.func(args)
 
 
