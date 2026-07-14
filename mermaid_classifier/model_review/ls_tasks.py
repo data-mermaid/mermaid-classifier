@@ -131,9 +131,14 @@ def build_tasks(
     toplevel_name: Callable[[str], str],
     image_url: Callable[[str, str], str],
     image_size: Callable[[str, str], tuple[int, int]],
+    image_set: str = "",
 ) -> list[dict[str, Any]]:
     image_ids = sorted({p.image_id for p in points})
-    return [
+    tasks = [
         build_task(image_id, points, v1_preds, label_path, toplevel_name, image_url, image_size)
         for image_id in image_ids
     ]
+    for task in tasks:
+        # Provenance: which image set this task belongs to (carried through export/synthesis).
+        task["data"]["image_set"] = image_set
+    return tasks

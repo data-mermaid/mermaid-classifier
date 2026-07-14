@@ -83,3 +83,14 @@ class LsTasksTest(unittest.TestCase):
     def test_original_points_preserved_in_pixels_with_both_labels(self):
         op = self._task()["data"]["original_points"]
         self.assertEqual(op[0], {"row": 100, "col": 200, "gt": "gtA2::", "v1": "v1A2::"})
+
+    def test_build_tasks_stamps_image_set_into_data(self):
+        tasks = ls_tasks.build_tasks(
+            self.points, self.v1, _label_path, _toplevel, _url, _size, image_set="reef-batch-2"
+        )
+        self.assertTrue(tasks)
+        self.assertTrue(all(t["data"]["image_set"] == "reef-batch-2" for t in tasks))
+
+    def test_build_tasks_image_set_defaults_empty(self):
+        tasks = ls_tasks.build_tasks(self.points, self.v1, _label_path, _toplevel, _url, _size)
+        self.assertTrue(all(t["data"]["image_set"] == "" for t in tasks))
