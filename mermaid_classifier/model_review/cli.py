@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -23,6 +24,7 @@ from mermaid_classifier.model_review import (
     v1_infer,
 )
 from mermaid_classifier.model_review.image_set import IMAGE_SET, ImageSet
+from mermaid_classifier.model_review.ls_client import LabelStudioClient
 from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
 from mermaid_classifier.model_review.rollup import load_toplevel, make_rollup_fn
 
@@ -208,6 +210,47 @@ def build_tasks_command(args: argparse.Namespace) -> None:
     print(f"Wrote {len(tasks)} tasks -> {args.tasks_out} and config -> {args.config_out}")
 
 
+def orchestrate_create_project(
+    client: Any,
+    image_set: ImageSet,
+    tasks: list[dict[str, Any]],
+    config_xml: str,
+) -> int:
+    """Create a BRAND-NEW LS project for this image set and load it.
+
+    Refuses (SystemExit) if a project with the same title already exists, so existing
+    projects are never touched — to make another set, change `name` in image_set.py.
+    """
+    if image_set.name in client.project_titles():
+        raise SystemExit(
+            f"A Label Studio project titled {image_set.name!r} already exists. "
+            f"Change `name` in image_set.py to create a new image set (existing "
+            f"projects are never modified)."
+        )
+    project_id = client.create_project(image_set.name, config_xml)
+    client.add_s3_presign_storage(
+        project_id, image_set.image_bucket, image_set.image_prefix, image_set.image_bucket_region
+    )
+    client.import_tasks(project_id, tasks)
+    # Reviewers start BLIND from the unlabelled starting layer, not from v1.
+    client.set_model_version(project_id, ls_tasks.BLANK_MODEL_VERSION)
+    return project_id
+
+
+def create_project_command(args: argparse.Namespace) -> None:
+    token = args.token or os.environ.get("LABEL_STUDIO_TOKEN")
+    if not token:
+        raise SystemExit("Provide --token or set LABEL_STUDIO_TOKEN (see HOSTING.md §2).")
+    image_set = image_set_from_args(args)
+    tasks, config_xml = build_tasks_and_config(image_set)
+    client = LabelStudioClient(args.ls_url, token)
+    project_id = orchestrate_create_project(client, image_set, tasks, config_xml)
+    print(
+        f"Created project {project_id!r} ({image_set.name!r}) with {len(tasks)} tasks: "
+        f"{args.ls_url}/projects/{project_id}/data"
+    )
+
+
 def synthesize_command(args: argparse.Namespace) -> None:
     with open(args.tasks) as f:
         tasks = json.load(f)
@@ -291,6 +334,12 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--tasks-out", default="review_tasks.json")
     b.add_argument("--config-out", default="review_config.xml")
     b.set_defaults(func=build_tasks_command)
+
+    c = sub.add_parser("create-project")
+    _add_image_set_args(c)
+    c.add_argument("--ls-url", default="http://localhost:8080")
+    c.add_argument("--token", help="LS API token (or set LABEL_STUDIO_TOKEN)")
+    c.set_defaults(func=create_project_command)
 
     s = sub.add_parser("synthesize")
     s.add_argument("--tasks", required=True)

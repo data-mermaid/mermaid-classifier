@@ -82,3 +82,91 @@ class CliTest(unittest.TestCase):
         self.assertEqual(image_set.name, "custom")
         self.assertEqual(image_set.classifier, IMAGE_SET.classifier)  # untouched default
         self.assertEqual(image_set.image_prefix, IMAGE_SET.image_prefix)
+
+    def _image_set(self, name="model-review"):
+        from mermaid_classifier.model_review.image_set import ImageSet
+
+        return ImageSet(
+            name=name,
+            classifier="s3://x/v2/",
+            heldout_csv="h.csv",
+            manifest_uri="s3://m",
+            feature_bucket="fb",
+            image_bucket="ib",
+            image_prefix="pfx/",
+            image_bucket_region="us-east-1",
+            image_key_template="pfx/s{source_id}/{image_id}.jpg",
+            v1_rollup_csv="r.csv",
+            n_images=3,
+            min_points=1,
+            seed=1,
+        )
+
+    def test_orchestrate_creates_new_project_in_order(self):
+        from mermaid_classifier.model_review.ls_tasks import BLANK_MODEL_VERSION
+
+        calls = []
+
+        class FakeClient:
+            def project_titles(self):
+                calls.append(("titles",))
+                return set()
+
+            def create_project(self, title, config):
+                calls.append(("create", title, config))
+                return 7
+
+            def add_s3_presign_storage(self, pid, bucket, prefix, region):
+                calls.append(("storage", pid, bucket, prefix, region))
+
+            def import_tasks(self, pid, tasks):
+                calls.append(("import", pid, len(tasks)))
+
+            def set_model_version(self, pid, mv):
+                calls.append(("modelversion", pid, mv))
+
+        pid = cli.orchestrate_create_project(
+            FakeClient(), self._image_set(), [{"data": {}}], "<View/>"
+        )
+        self.assertEqual(pid, 7)
+        self.assertEqual(
+            calls,
+            [
+                ("titles",),
+                ("create", "model-review", "<View/>"),
+                ("storage", 7, "ib", "pfx/", "us-east-1"),
+                ("import", 7, 1),
+                ("modelversion", 7, BLANK_MODEL_VERSION),
+            ],
+        )
+
+    def test_orchestrate_refuses_duplicate_title_without_creating(self):
+        calls = []
+
+        class FakeClient:
+            def project_titles(self):
+                return {"model-review"}
+
+            def create_project(self, *a):
+                calls.append("create")
+                return 1
+
+            def add_s3_presign_storage(self, *a):
+                calls.append("storage")
+
+            def import_tasks(self, *a):
+                calls.append("import")
+
+            def set_model_version(self, *a):
+                calls.append("modelversion")
+
+        with self.assertRaises(SystemExit):
+            cli.orchestrate_create_project(FakeClient(), self._image_set(), [{"data": {}}], "<x/>")
+        self.assertEqual(calls, [])  # nothing was created or imported
+
+    def test_create_project_subparser_reads_token_and_url(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(["create-project", "--token", "TT", "--ls-url", "http://h:9"])
+        self.assertEqual(args.token, "TT")
+        self.assertEqual(args.ls_url, "http://h:9")
+        self.assertEqual(args.func, cli.create_project_command)
