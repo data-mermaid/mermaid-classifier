@@ -95,10 +95,15 @@ class LsExportTest(unittest.TestCase):
     def test_expert_from_embedded_completed_by_object(self):
         export = [
             {
-                "data": {"image_id": "A", "original_points": [{"row": 1, "col": 1, "gt": "g::", "v1": "v::"}]},
+                "data": {
+                    "image_id": "A",
+                    "original_points": [{"row": 1, "col": 1, "gt": "g::", "v1": "v::"}],
+                },
                 "annotations": [
-                    {"completed_by": {"id": 7, "email": "bob@datamermaid.org"},
-                     "result": [_kp(0), _tax(0, ["x::"])]}
+                    {
+                        "completed_by": {"id": 7, "email": "bob@datamermaid.org"},
+                        "result": [_kp(0), _tax(0, ["x::"])],
+                    }
                 ],
             }
         ]
