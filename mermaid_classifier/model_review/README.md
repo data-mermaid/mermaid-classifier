@@ -17,19 +17,37 @@ screenshots, for how to log in and annotate.
 
 > This is what you do to put a **new set of images** in front of reviewers. It creates a
 > **brand-new** Label Studio project and never touches existing ones. The app is already
-> deployed and running — you do **not** need any of the infrastructure steps for this.
+> deployed — you only open a short-lived **SSM tunnel** to reach it; you never deploy or tear
+> anything down.
 
 ### What you need first
 
-1. **AWS access.** Log in with your own profile so the tool can read images/manifest/model
-   from S3:
+(Requires the AWS CLI + Session Manager plugin — see [HOSTING.md §0](HOSTING.md).)
+
+1. **AWS access** (your own profile) — reads images/manifest/model from S3 *and* opens the tunnel:
    ```bash
    aws sso login --profile wcs-admin
    export AWS_PROFILE=wcs-admin
    ```
-2. **A Label Studio API token.** Open https://model-review.datamermaid.org/, sign in, and
-   copy your token from **Account & Settings → Access Token** (or
-   `https://model-review.datamermaid.org/api/current-user/token`).
+2. **An SSM tunnel to the app.** The script talks to Label Studio's API over `localhost:8080`;
+   the public URL is browser-only (it sits behind Cloudflare Access). Open the tunnel in a
+   **separate terminal** and leave it running:
+   ```bash
+   IID=$(aws cloudformation describe-stacks --stack-name model-review-ls --region us-west-2 \
+     --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+   aws ssm start-session --target "$IID" --region us-west-2 \
+     --document-name AWS-StartPortForwardingSession \
+     --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+   ```
+   Confirm it's really Label Studio (not some other local server on 8080):
+   ```bash
+   curl -s localhost:8080/api/version/     # expect JSON: {"release": "1.13.1", ...}
+   ```
+   If that 404s, another process owns 8080 — rerun the tunnel with `"localPortNumber":["9091"]`
+   and use `--ls-url http://localhost:9091` in Step 2.
+3. **A Label Studio API token.** In a browser, open https://model-review.datamermaid.org/,
+   sign in, and copy your token from **Account & Settings → Access Token** (or
+   `/api/current-user/token`):
    ```bash
    export LABEL_STUDIO_TOKEN=<your-token>
    ```
@@ -61,7 +79,7 @@ For the common case ("same as before, but a different batch of images") you only
 ```bash
 uv run --extra training --with pillow \
   python -m mermaid_classifier.model_review.cli create-project \
-  --ls-url https://model-review.datamermaid.org
+  --ls-url http://localhost:8080
 ```
 
 This builds the tasks from `image_set.py` and creates the new project: it attaches the S3
