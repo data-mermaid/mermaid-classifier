@@ -8,6 +8,9 @@ predictions.
 
 **Live app: https://model-review.datamermaid.org/**
 
+**Reviewers:** see the **[Reviewer guide](REVIEWER_GUIDE.md)** — step-by-step, with
+screenshots, for how to log in and annotate.
+
 ---
 
 # Change the image set (the common task)

@@ -14,6 +14,8 @@ A Label Studio app for reviewing a classifier against expert annotations, live a
 
 ➡️ **To put a new set of images in front of reviewers, follow [Change the image set](mermaid_classifier/model_review/README.md#change-the-image-set-the-common-task).**
 
+👥 **Reviewers:** the [Reviewer guide](mermaid_classifier/model_review/REVIEWER_GUIDE.md) explains how to log in and annotate, with screenshots.
+
 Full details (how it works, deployment, teardown) are in the
 [model-review runbook](mermaid_classifier/model_review/README.md).
 
