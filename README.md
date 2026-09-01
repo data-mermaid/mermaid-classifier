@@ -7,6 +7,18 @@ Everything needed to **train** the MERMAID coral-reef image classifier and **dep
 
 This project is set up as a Python package, and requires Python 3.12 or higher. Once you have the package installed in your Python environment, you can import anything from `mermaid_classifier` into your own Python modules, notebooks, etc.
 
+### Model-review annotation app
+
+A Label Studio app for reviewing a classifier against expert annotations, live at
+**https://model-review.datamermaid.org/**.
+
+➡️ **To put a new set of images in front of reviewers, follow [Change the image set](mermaid_classifier/model_review/README.md#change-the-image-set-the-common-task).**
+
+👥 **Reviewers:** the [Reviewer guide](mermaid_classifier/model_review/REVIEWER_GUIDE.md) explains how to log in and annotate, with screenshots.
+
+Full details (how it works, deployment, teardown) are in the
+[model-review runbook](mermaid_classifier/model_review/README.md).
+
 ### General utilities
 
 These are found in `mermaid_classifier.common`. Once this package is installed (see Installation section), the utilities can be imported from there.

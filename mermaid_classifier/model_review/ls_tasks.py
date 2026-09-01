@@ -1,0 +1,244 @@
+"""Build Label Studio tasks: image + fixed points + reference predictions.
+
+Each point is two result entries sharing one region id: a ``keypointlabels``
+result bound to the colored top-level control ``toplevel`` (the geometry + the
+top-level colour) and a ``taxonomy`` result bound to ``label`` (the fine BA::GF
+path). Each task carries five predictions: ``blank`` (unlabelled fixed points —
+the reviewer's blind starting layer, set as the project model_version), the
+``Beta``, ``ground-truth`` and ``v1`` reference tabs, and ``Comparison``, which
+holds every set's label for a point in one perRegion text block.
+"""
+
+from collections.abc import Callable
+from typing import Any
+
+from mermaid_classifier.model_review.comparison import (
+    COMPARISON_MODEL_VERSION,
+    GROUND_TRUTH,
+    comparison_text,
+)
+from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
+from mermaid_classifier.model_review.sample import ReviewPoint
+
+# The reviewer's blind starting layer, exposed as a prediction and set as the
+# project's model_version so LS copies it into each reviewer's annotation on open.
+# Shown as a (read-only) tab, so the name must read clearly as "your start point".
+BLANK_MODEL_VERSION = "Unlabelled Starting Set"
+
+# The model currently deployed to the MERMAID API, shown as a read-only reference tab.
+BETA_MODEL_VERSION = "Beta"
+
+
+def _blank_keypoint(idx: int, x: float, y: float, width: int, height: int) -> dict[str, Any]:
+    """A fixed keypoint with the grey Unlabeled top-level and NO taxonomy label.
+
+    Used for the 'blank' prediction that seeds each reviewer's starting annotation
+    so they label blind (points present, no label) rather than starting on V1.
+    """
+    return {
+        "id": f"pt-{idx}",
+        "type": "keypointlabels",
+        "from_name": "toplevel",
+        "to_name": "image",
+        "original_width": width,
+        "original_height": height,
+        "value": {"x": x, "y": y, "width": 0.5, "keypointlabels": [UNLABELED_TOPLEVEL]},
+    }
+
+
+def _compare_results(
+    idx: int,
+    x: float,
+    y: float,
+    width: int,
+    height: int,
+    toplevel: str,
+    text: str,
+) -> list[dict[str, Any]]:
+    """A point coloured by ground truth, carrying every set's label as region text.
+
+    No ``taxonomy`` entry: the text block is the fine label here, and an empty
+    taxonomy control keeps this tab from reading as another single-set reference.
+    """
+    region_id = f"pt-{idx}"
+    return [
+        {
+            "id": region_id,
+            "type": "keypointlabels",
+            "from_name": "toplevel",
+            "to_name": "image",
+            "original_width": width,
+            "original_height": height,
+            "value": {"x": x, "y": y, "width": 0.5, "keypointlabels": [toplevel]},
+        },
+        {
+            "id": region_id,
+            "type": "textarea",
+            "from_name": "compare",
+            "to_name": "image",
+            "value": {"text": [text]},
+        },
+    ]
+
+
+def _point_results(
+    idx: int,
+    x: float,
+    y: float,
+    width: int,
+    height: int,
+    toplevel: str,
+    path: list[str],
+) -> list[dict[str, Any]]:
+    """A colored top-level keypoint region + its perRegion taxonomy label.
+
+    Both entries share one region id: the ``keypointlabels`` result (bound to the
+    ``toplevel`` control) carries the geometry and the top-level colour label; the
+    ``taxonomy`` result (bound to ``label``) carries the fine BA::GF path.
+    """
+    region_id = f"pt-{idx}"
+    return [
+        {
+            "id": region_id,
+            "type": "keypointlabels",
+            "from_name": "toplevel",
+            "to_name": "image",
+            "original_width": width,
+            "original_height": height,
+            "value": {"x": x, "y": y, "width": 0.5, "keypointlabels": [toplevel]},
+        },
+        {
+            "id": region_id,
+            "type": "taxonomy",
+            "from_name": "label",
+            "to_name": "image",
+            "value": {"taxonomy": [path]},
+        },
+    ]
+
+
+def build_task(
+    image_id: str,
+    points: list[ReviewPoint],
+    v1_preds: dict[tuple[str, int, int], str],
+    beta_preds: dict[tuple[str, int, int], str],
+    label_path: Callable[[str], list[str]],
+    toplevel_name: Callable[[str], str],
+    image_url: Callable[[ReviewPoint], str],
+    image_size: Callable[[ReviewPoint], tuple[int, int]],
+) -> dict[str, Any]:
+    def label_name(bagf: str) -> str:
+        return " :: ".join(label_path(bagf))
+
+    img_points = sorted([p for p in points if p.image_id == image_id], key=lambda p: (p.row, p.col))
+    ref = img_points[0]
+    width, height = image_size(ref)
+
+    original_points = []
+    gt_result: list[dict[str, Any]] = []
+    v1_result: list[dict[str, Any]] = []
+    beta_result: list[dict[str, Any]] = []
+    compare_result: list[dict[str, Any]] = []
+    blank_result: list[dict[str, Any]] = []
+    for idx, p in enumerate(img_points):
+        x = p.col / width * 100
+        y = p.row / height * 100
+        v1_bagf = v1_preds[(p.image_id, p.row, p.col)]
+        beta_bagf = beta_preds[(p.image_id, p.row, p.col)]
+        original_points.append(
+            {"row": p.row, "col": p.col, "gt": p.gt_bagf, "v1": v1_bagf, "beta": beta_bagf}
+        )
+        gt_result.extend(
+            _point_results(
+                idx, x, y, width, height, toplevel_name(p.gt_bagf), label_path(p.gt_bagf)
+            )
+        )
+        v1_result.extend(
+            _point_results(idx, x, y, width, height, toplevel_name(v1_bagf), label_path(v1_bagf))
+        )
+        beta_result.extend(
+            _point_results(
+                idx, x, y, width, height, toplevel_name(beta_bagf), label_path(beta_bagf)
+            )
+        )
+        compare_result.extend(
+            _compare_results(
+                idx,
+                x,
+                y,
+                width,
+                height,
+                toplevel_name(p.gt_bagf),
+                comparison_text(
+                    [
+                        (GROUND_TRUTH, p.gt_bagf),
+                        ("v1", v1_bagf),
+                        (BETA_MODEL_VERSION, beta_bagf),
+                    ],
+                    label_name,
+                ),
+            )
+        )
+        blank_result.append(_blank_keypoint(idx, x, y, width, height))
+
+    # Label Studio assigns prediction ids in this array's order at import and lists the
+    # tabs by DESCENDING id, so a reviewer sees: <their annotation>, Comparison, v1,
+    # ground-truth, Beta, Unlabelled Starting Set. "blank" stays first: it is the
+    # project's model_version, copied into each reviewer's annotation so they label
+    # blind. Comparison is last so it sits beside the reviewer's own tab, which is also
+    # where a later-posted prediction lands (a new prediction takes the highest id).
+    return {
+        "data": {
+            "image_url": image_url(ref),
+            "source": ref.site,
+            "image_id": image_id,
+            "source_id": ref.source_id,
+            "original_points": original_points,
+        },
+        "predictions": [
+            {"model_version": BLANK_MODEL_VERSION, "result": blank_result},
+            {"model_version": BETA_MODEL_VERSION, "result": beta_result},
+            {"model_version": "ground-truth", "result": gt_result},
+            {"model_version": "v1", "result": v1_result},
+            {"model_version": COMPARISON_MODEL_VERSION, "result": compare_result},
+        ],
+    }
+
+
+def build_tasks(
+    points: list[ReviewPoint],
+    v1_preds: dict[tuple[str, int, int], str],
+    beta_preds: dict[tuple[str, int, int], str],
+    label_path: Callable[[str], list[str]],
+    toplevel_name: Callable[[str], str],
+    image_url: Callable[[ReviewPoint], str],
+    image_size: Callable[[ReviewPoint], tuple[int, int]],
+    image_set: str = "",
+) -> list[dict[str, Any]]:
+    # Tasks, exports and synthesis all key on image_id alone, so ids must not repeat
+    # across sites. CoralNet ids are integers and MERMAID ids UUIDs, so this cannot fire
+    # today — it is here so the assumption is explicit rather than latent.
+    keyed = {(p.site, p.image_id) for p in points}
+    image_ids = sorted({image_id for _, image_id in keyed})
+    if len(image_ids) != len(keyed):
+        raise ValueError(
+            "an image_id appears under more than one site; tasks/export/synthesis join "
+            "on image_id alone and would merge them"
+        )
+    tasks = [
+        build_task(
+            image_id,
+            points,
+            v1_preds,
+            beta_preds,
+            label_path,
+            toplevel_name,
+            image_url,
+            image_size,
+        )
+        for image_id in image_ids
+    ]
+    for task in tasks:
+        # Provenance: which image set this task belongs to (carried through export/synthesis).
+        task["data"]["image_set"] = image_set
+    return tasks

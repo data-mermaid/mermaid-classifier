@@ -3,10 +3,10 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 This is one project in a multi-repo workspace. The workspace-root `../CLAUDE.md`
-is also in scope and already covers: the **`aws-mcp`-only** AWS policy (never the
-`aws` CLI), the **`github`-MCP-only** GitHub policy (never the `gh` CLI; this repo
-is `data-mermaid/mermaid-classifier`), `uv` as the package manager, BA+GF taxonomy
-basics, and the cross-project data flow. Don't re-derive those here.
+is also in scope and already covers: the **`github`-MCP-only** GitHub policy (never
+the `gh` CLI; this repo is `data-mermaid/mermaid-classifier`), `uv` as the package
+manager, BA+GF taxonomy basics, and the cross-project data flow. Don't re-derive
+those here.
 
 ## Commands
 
