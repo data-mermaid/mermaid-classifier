@@ -171,7 +171,7 @@ post("/api/storages/s3",{"project":pid,"bucket":"coral-reef-training",
 post(f"/api/projects/{pid}/import", json.load(open("/tmp/review_tasks.json")))
 # Reviewers start BLIND: pre-fill their annotation from the unlabelled starting
 # layer, not from V1. Its model_version is BLANK_MODEL_VERSION ("Unlabelled
-# Starting Set"). (Each task ships that + Beta + ground-truth + v1 predictions.)
+# Starting Set"). (Each task ships that + Beta + ground-truth + v1 + Comparison.)
 from mermaid_classifier.model_review.ls_tasks import BLANK_MODEL_VERSION
 patch=urllib.request.Request(f"{LS}/api/projects/{pid}",data=json.dumps({"model_version":BLANK_MODEL_VERSION}).encode(),
     headers={"Authorization":f"Token {TOKEN}","Content-Type":"application/json"},method="PATCH")
@@ -191,7 +191,8 @@ see all projects, so gate *access* at the front door (see §9), not by hiding th
 
 Experts open each image to **unlabelled (grey) fixed points** and label the fine BA::GF
 via the Taxonomy tree; they can toggle the `v1` / `ground-truth` / `Beta` tabs to view
-references (colored by top-level category) after their pass; use the per-image notes box.
+references (colored by top-level category) after their pass, or `Comparison` to read all
+three for one point at once; use the per-image notes box.
 Optional: pre-seed one blank annotation per (task × expert) with
 `mermaid_classifier.model_review.seed.seed_all(client, project_id, expert_user_ids)`.
 

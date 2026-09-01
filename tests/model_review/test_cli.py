@@ -302,3 +302,36 @@ class SiteMixTest(unittest.TestCase):
             {"data": {"source": "coralnet", "original_points": [{}] * 18}},
         ]
         self.assertEqual(cli.site_mix(tasks), {"coralnet": (2, 38), "mermaid": (1, 25)})
+
+
+class ProjectTitleCheckTest(unittest.TestCase):
+    """The title is validated before the build, which downloads features and scores
+    every model — a title problem found afterwards wastes all of it."""
+
+    class _Client:
+        def __init__(self, titles=()):
+            self.titles = set(titles)
+
+        def project_titles(self):
+            return self.titles
+
+    def test_title_over_the_label_studio_limit_is_rejected(self):
+        from mermaid_classifier.model_review.ls_client import PROJECT_TITLE_MAX_LENGTH
+
+        too_long = "M" * (PROJECT_TITLE_MAX_LENGTH + 1)
+        with self.assertRaises(SystemExit) as ctx:
+            cli.check_project_title(self._Client(), too_long)
+        self.assertIn(str(PROJECT_TITLE_MAX_LENGTH), str(ctx.exception))
+
+    def test_existing_title_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            cli.check_project_title(self._Client({"taken"}), "taken")
+
+    def test_shipped_image_set_name_fits_the_limit(self):
+        from mermaid_classifier.model_review.image_set import IMAGE_SET
+        from mermaid_classifier.model_review.ls_client import PROJECT_TITLE_MAX_LENGTH
+
+        self.assertLessEqual(len(IMAGE_SET.name), PROJECT_TITLE_MAX_LENGTH)
+
+    def test_acceptable_title_passes(self):
+        cli.check_project_title(self._Client({"other"}), "fine")

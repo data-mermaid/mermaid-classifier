@@ -3,6 +3,10 @@
 Points are regions of a colored top-level ``KeyPointLabels`` control (``toplevel``)
 so each point renders in its highest-level-category colour, plus a perRegion
 ``Taxonomy`` control (``label``) for the fine BA::GF label the experts assign.
+
+A perRegion ``TextArea`` (``compare``) carries the read-only per-point comparison the
+``Comparison`` prediction fills in. It is empty on a reviewer's own annotation, and
+``ls_export`` keys notes on ``from_name == "notes"``, so it never reaches the export.
 """
 
 import xml.etree.ElementTree as ET
@@ -81,6 +85,24 @@ def _add_paths(parent_el: ET.Element, paths: list[list[str]]) -> None:
         _add_paths(choice, groups[name])
 
 
+def _add_compare_textarea(view_el: ET.Element) -> None:
+    """The perRegion field the ``Comparison`` layer writes each point's labels into.
+
+    Five rows fit ground truth plus two models with room for a reviewer's own label.
+    """
+    ET.SubElement(
+        view_el,
+        "TextArea",
+        {
+            "name": "compare",
+            "toName": "image",
+            "perRegion": "true",
+            "rows": "5",
+            "placeholder": "Select a point on the Comparison tab to see every set's label",
+        },
+    )
+
+
 def build_taxonomy_config(
     ba_lib: BenthicAttributeLibrary,
     gf_lib: GrowthFormLibrary,
@@ -113,6 +135,7 @@ def build_taxonomy_config(
         _add_paths(tax, restrict_paths)
     else:
         _add_ba_subtree(tax, ba_lib, gf_lib, None)
+    _add_compare_textarea(view)
     ET.SubElement(
         view,
         "TextArea",
@@ -121,7 +144,7 @@ def build_taxonomy_config(
             "toName": "image",
             "editable": "true",
             "rows": "4",
-            "placeholder": "Notes on the ground-truth and V1 reference labels…",
+            "placeholder": "Notes on the reference labels…",
         },
     )
     return ET.tostring(view, encoding="unicode")

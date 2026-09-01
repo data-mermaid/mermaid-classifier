@@ -88,3 +88,28 @@ class LsClientTest(unittest.TestCase):
         self.assertEqual(req.full_url, "http://ls/api/projects/3")
         self.assertEqual(req.get_method(), "PATCH")
         self.assertEqual(json.loads(req.data)["model_version"], "Unlabelled Starting Set")
+
+
+class ErrorReportingTest(unittest.TestCase):
+    def test_http_error_body_reaches_the_caller(self):
+        # urllib's own message is only the status line; Label Studio puts the reason
+        # (e.g. which field failed validation) in the body.
+        import io
+        import urllib.error
+
+        def failing_opener(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                400,
+                "Bad Request",
+                {},
+                io.BytesIO(b'{"validation_errors":{"title":["no more than 50 characters"]}}'),
+            )
+
+        client = LabelStudioClient("http://ls", "tok", opener=failing_opener)
+        with self.assertRaises(RuntimeError) as ctx:
+            client.create_project("x" * 60, "<View/>")
+        message = str(ctx.exception)
+        self.assertIn("400", message)
+        self.assertIn("no more than 50 characters", message)
+        self.assertIn("/api/projects", message)

@@ -80,3 +80,21 @@ class LsConfigTest(unittest.TestCase):
         labels = [c.get("value") for c in root.iter("Label")]
         self.assertEqual(labels, ["Hard coral", "Sand"])
         self.assertIsNotNone(root.find("TextArea"))
+
+
+class CompareFieldTest(unittest.TestCase):
+    def _controls(self):
+        xml = ls_config.build_taxonomy_config(None, None, restrict_paths=[["Sand"]])
+        return {el.get("name"): el for el in ET.fromstring(xml)}
+
+    def test_per_region_compare_field_exists_for_the_comparison_layer(self):
+        compare = self._controls()["compare"]
+        self.assertEqual(compare.tag, "TextArea")
+        self.assertEqual(compare.get("perRegion"), "true")
+        self.assertEqual(compare.get("toName"), "image")
+
+    def test_compare_field_is_separate_from_the_notes_field(self):
+        # ls_export keys notes on from_name == "notes", so the two must not collide.
+        controls = self._controls()
+        self.assertIn("notes", controls)
+        self.assertNotEqual(controls["compare"].get("name"), controls["notes"].get("name"))

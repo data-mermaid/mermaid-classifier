@@ -34,7 +34,7 @@ class SiteSpec:
 
 @dataclass(frozen=True)
 class ImageSet:
-    name: str  # LS project title; also stamped into every task's data
+    name: str  # LS project title (Label Studio caps it at 50 chars); stamped into each task
     classifier: str  # reviewed model: S3 dir / MLflow id / local dir (auto-downloaded)
     beta_classifier: str  # Beta pickle; scored in an isolated scikit-learn 1.1.3 subprocess
     heldout_csv: str  # val split defining test-set eligibility (image had >=1 val point)
@@ -76,7 +76,7 @@ MERMAID_SITE = SiteSpec(
 
 # weight 2:1 over 20 images -> 13 CoralNet + 7 MERMAID.
 IMAGE_SET = ImageSet(
-    name="Model Review (13 CoralNet + 7 MERMAID) + Beta",
+    name="Model Review (20 images) + Beta + Comparison",
     classifier="s3://mermaid-config/classifier/v2/",
     # The model deployed to the MERMAID API. It shares V1's EfficientNet extractor, so
     # the same pre-extracted feature vectors score both. Repo-root-relative, like

@@ -80,6 +80,7 @@ selected by default when you open an image. The others are **read-only reference
 | Tab | What it is |
 | --- | --- |
 | **your-name** (e.g. `reviewer-guide-demo`) | **Your annotation — this is the one you fill in.** |
+| `Comparison` | All three reference labels for one point at once — click a point to read them (reference only). |
 | `v1` | The new model's predictions (reference only). |
 | `ground-truth` | The known correct labels (reference only). |
 | `Beta` | What the model currently running in MERMAID predicts (reference only). |
@@ -149,7 +150,11 @@ your work and moves you to the next image.
 - **Do every point.** Each image is only "done" when all its points are labelled and you've
   hit **Submit**.
 - **Label blind first.** Start from the grey points on your own tab. Only look at the
-  `v1` / `ground-truth` / `Beta` reference tabs *after* you've made your own call.
+  `Comparison` / `v1` / `ground-truth` / `Beta` reference tabs *after* you've made your own
+  call.
+- **Use `Comparison` to check one point across all three.** Click a point on that tab and
+  the box below the image lists ground truth, `v1` and `Beta` for that point, with each
+  model marked match or differs. Quicker than switching tabs, which loses your place.
 - **A few labels in the tree only `Beta` uses.** The tree covers every label any reference
   tab can show, so it includes some coarse options (`Hard coral > Massive`, `Hard coral >
   Encrusting`, plain `Other invertebrates`) that only `Beta` predicts. Pick the most specific

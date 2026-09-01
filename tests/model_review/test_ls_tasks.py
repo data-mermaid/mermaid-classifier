@@ -1,6 +1,7 @@
 import unittest
 
 from mermaid_classifier.model_review import ls_tasks
+from mermaid_classifier.model_review.comparison import COMPARISON_MODEL_VERSION
 from mermaid_classifier.model_review.sample import ReviewPoint
 
 
@@ -34,14 +35,55 @@ class LsTasksTest(unittest.TestCase):
             "A", self.points, self.v1, self.beta, label_path, _toplevel, _url, _size
         )
 
-    def test_prediction_order_places_beta_after_ground_truth_in_the_ui(self):
+    def test_prediction_order_determines_the_on_screen_tab_order(self):
         # Label Studio assigns prediction ids in array order and lists the tabs by
-        # DESCENDING id, so this array is what puts Beta between ground-truth and the
-        # blank starting layer on screen. Order, not just membership, is the contract.
+        # DESCENDING id, so this array is what puts Comparison beside the reviewer's own
+        # tab and Beta third. Order, not just membership, is the contract.
         versions = [p["model_version"] for p in self._task()["predictions"]]
         self.assertEqual(
             versions,
-            [ls_tasks.BLANK_MODEL_VERSION, ls_tasks.BETA_MODEL_VERSION, "ground-truth", "v1"],
+            [
+                ls_tasks.BLANK_MODEL_VERSION,
+                ls_tasks.BETA_MODEL_VERSION,
+                "ground-truth",
+                "v1",
+                COMPARISON_MODEL_VERSION,
+            ],
+        )
+
+    def test_comparison_layer_pairs_a_gt_coloured_point_with_region_text(self):
+        comp = next(
+            p for p in self._task()["predictions"] if p["model_version"] == COMPARISON_MODEL_VERSION
+        )
+        kps = [r for r in comp["result"] if r["type"] == "keypointlabels"]
+        texts = [r for r in comp["result"] if r["type"] == "textarea"]
+        self.assertEqual(len(kps), 2)  # 2 points
+        self.assertEqual(len(texts), 2)
+        # keypoint + text share the region id, so selecting the dot reveals the text
+        self.assertEqual(kps[0]["id"], "pt-0")
+        self.assertEqual(texts[0]["id"], "pt-0")
+        self.assertEqual(texts[0]["from_name"], "compare")
+        # coloured by ground truth, so the existing toplevel control is reused as-is
+        self.assertEqual(kps[0]["value"]["keypointlabels"], ["gtA2"])
+
+    def test_comparison_layer_has_no_taxonomy_entry(self):
+        # The text block is the fine label here; an empty taxonomy control would make
+        # this tab read as another single-set reference.
+        comp = next(
+            p for p in self._task()["predictions"] if p["model_version"] == COMPARISON_MODEL_VERSION
+        )
+        self.assertFalse(any(r["type"] == "taxonomy" for r in comp["result"]))
+
+    def test_comparison_text_names_every_set_for_that_point(self):
+        comp = next(
+            p for p in self._task()["predictions"] if p["model_version"] == COMPARISON_MODEL_VERSION
+        )
+        text = next(r for r in comp["result"] if r["id"] == "pt-0" and r["type"] == "textarea")[
+            "value"
+        ]["text"][0]
+        self.assertEqual(
+            text.splitlines(),
+            ["ground-truth: gtA2::", "v1: v1A2::  — differs", "Beta: btA2::  — differs"],
         )
 
     def test_blank_prediction_is_unlabelled_fixed_points(self):

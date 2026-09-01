@@ -152,18 +152,31 @@ directly you can regenerate the same file with the `build-tasks` subcommand — 
 <summary>The Label Studio project model, the CLI, and the modules (click to expand)</summary>
 
 ### The project a reviewer sees
-Each task is one image with a fixed set of points. Every task ships four prediction layers:
+Each task is one image with a fixed set of points. Every task ships five prediction layers:
 - **Unlabelled Starting Set** — the blind starting layer copied into each reviewer's
   annotation so they label from scratch (this is set as the project's `model_version`).
 - **Beta** — what the model currently deployed to the MERMAID API predicts (read-only
   reference), so the reviewed model is judged against the incumbent, not just ground truth.
 - **ground-truth** — the source dataset's ground-truth label per point (read-only reference).
 - **v1** — the reviewed model's prediction per point (read-only reference).
+- **Comparison** — every set's fine label for one point, in a single perRegion text block.
+  Selecting a point shows ground truth, `v1` and `Beta` together, with each model marked
+  match or differs against ground truth. This exists because switching tabs discards the
+  selected region — each annotation is its own store in the editor, and Community edition
+  has no side-by-side compare — so comparing one point across tabs is otherwise a matter of
+  re-finding it after every click.
 
 Label Studio assigns prediction ids in that array order and lists the tabs by **descending**
-id, so on screen a reviewer sees: their own annotation, `v1`, `ground-truth`, `Beta`,
-`Unlabelled Starting Set`. The order of the list in `ls_tasks.build_task` is what controls
-this; there is no per-project tab-order setting.
+id, so on screen a reviewer sees: their own annotation, `Comparison`, `v1`, `ground-truth`,
+`Beta`, `Unlabelled Starting Set`. The order of the list in `ls_tasks.build_task` is what
+controls this; there is no per-project tab-order setting. `Comparison` is last in the array
+so it sits beside the reviewer's own tab — also where a later-posted prediction would land,
+since a new prediction takes the highest id.
+
+The reviewer's own labels are **not** in the comparison block: predictions are baked into the
+task at import, before anyone has annotated. Adding them needs a second pass that reads
+annotations back and posts an updated prediction; `comparison.comparison_text` already takes
+the sets as an ordered sequence, so that is a longer list rather than a new format.
 
 Points are colored by top-level category. The labeling config's taxonomy is the reviewed
 model's label set plus the Beta labels this image set actually shows (one path per class), and
@@ -192,6 +205,7 @@ ground truth is rolled into the reviewed model's label set so the layers are com
 | `v1_infer.py` | Runs the reviewed model over those feature vectors. |
 | `beta_infer.py` | Runs the Beta model out of process (its pickle needs scikit-learn 1.1.3). |
 | `beta_score.py` | The scorer that runs inside that isolated environment. |
+| `comparison.py` | Renders one point's label from every set into a single text block. |
 | `ls_config.py` | Generates the Label Studio labeling config (taxonomy). |
 | `ls_tasks.py` | Builds the tasks (points + GT/model reference layers + provenance). |
 | `ls_client.py` | Thin stdlib-`urllib` Label Studio REST client. |

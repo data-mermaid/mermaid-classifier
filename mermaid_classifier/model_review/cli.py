@@ -26,7 +26,10 @@ from mermaid_classifier.model_review import (
     v1_infer,
 )
 from mermaid_classifier.model_review.image_set import IMAGE_SET, ImageSet, SiteSpec
-from mermaid_classifier.model_review.ls_client import LabelStudioClient
+from mermaid_classifier.model_review.ls_client import (
+    PROJECT_TITLE_MAX_LENGTH,
+    LabelStudioClient,
+)
 from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
 from mermaid_classifier.model_review.rollup import load_toplevel, make_rollup_fn
 from mermaid_classifier.model_review.sample import ReviewPoint
@@ -336,13 +339,33 @@ def orchestrate_create_project(
     return project_id
 
 
+def check_project_title(client: Any, name: str) -> None:
+    """Reject a title Label Studio will not accept, or one already in use.
+
+    Called before the tasks are built: the build downloads features and scores every
+    model, so a title problem found afterwards costs that work for nothing.
+    """
+    if len(name) > PROJECT_TITLE_MAX_LENGTH:
+        raise SystemExit(
+            f"Label Studio project titles are limited to {PROJECT_TITLE_MAX_LENGTH} "
+            f"characters; `name` in image_set.py is {len(name)}: {name!r}"
+        )
+    if name in client.project_titles():
+        raise SystemExit(
+            f"A Label Studio project titled {name!r} already exists. "
+            f"Change `name` in image_set.py to create a new image set (existing "
+            f"projects are never modified)."
+        )
+
+
 def create_project_command(args: argparse.Namespace) -> None:
     token = args.token or os.environ.get("LABEL_STUDIO_TOKEN")
     if not token:
         raise SystemExit("Provide --token or set LABEL_STUDIO_TOKEN (see HOSTING.md §2).")
     image_set = image_set_from_args(args)
-    tasks, config_xml = build_tasks_and_config(image_set)
     client = LabelStudioClient(args.ls_url, token)
+    check_project_title(client, image_set.name)
+    tasks, config_xml = build_tasks_and_config(image_set)
     project_id = orchestrate_create_project(client, image_set, tasks, config_xml)
     print(
         f"Created project {project_id!r} ({image_set.name!r}) with {len(tasks)} tasks: "

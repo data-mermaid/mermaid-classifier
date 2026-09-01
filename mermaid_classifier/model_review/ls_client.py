@@ -6,9 +6,14 @@ unit-testable without a live server.
 """
 
 import json
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from typing import Any
+
+# Label Studio's Project.title column width. Exceeding it fails the create call with a
+# validation error, so the title is checked before a build rather than after.
+PROJECT_TITLE_MAX_LENGTH = 50
 
 
 class LabelStudioClient:
@@ -35,8 +40,14 @@ class LabelStudioClient:
                 "Content-Type": "application/json",
             },
         )
-        with self._opener(req, timeout=self.timeout) as resp:
-            raw = resp.read()
+        try:
+            with self._opener(req, timeout=self.timeout) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as err:
+            # urllib's message is just the status line; Label Studio puts the reason
+            # (validation_errors, and a request id) in the body.
+            detail = err.read().decode(errors="replace")[:1000]
+            raise RuntimeError(f"{method} {path} -> HTTP {err.code}: {detail}") from err
         return json.loads(raw) if raw else None
 
     def project_titles(self) -> set[str]:
