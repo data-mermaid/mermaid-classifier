@@ -1,7 +1,7 @@
 # Model-review annotation app
 
 A tool for evaluating a MERMAID classifier against expert annotations. It samples
-held-out CoralNet images, lays down each image's ground-truth points, and hosts them in
+held-out images from both CoralNet and MERMAID, lays down each image's ground-truth points, and hosts them in
 [**Label Studio**](https://model-review.datamermaid.org/) so reviewers can label each point
 by hand. Their labels are then compared against both the ground truth and the model's
 predictions.
@@ -62,17 +62,38 @@ values. **Always change `name`** — each distinct name becomes its own new proj
 | --- | --- |
 | `name` | The Label Studio project title (and it's recorded with every annotation). **Change this for each new set.** |
 | `classifier` | The model being reviewed. Defaults to `s3://mermaid-config/classifier/v2/` and is **downloaded automatically**. |
-| `n_images` | How many images to sample. |
+| `n_images` | How many images to sample **in total**, split across the sites by their weights. |
 | `min_points` | Only sample images with at least this many ground-truth points. |
 | `seed` | Random seed — change it to draw a different random sample of images. |
 | `heldout_csv` | The held-out validation split that defines which images are eligible. |
-| `manifest_uri` | CoralNet manifest parquet holding the full ground-truth grid per image. |
-| `feature_bucket` | Bucket with the per-image feature vectors (used for model inference). |
-| `image_bucket` / `image_prefix` / `image_key_template` | Where the display images live in S3. |
+| `beta_classifier` | Beta pickle, scored in an isolated scikit-learn 1.1.3 subprocess. |
 | `v1_rollup_csv` | Rollup that maps ground truth into the model's label set. |
+| `sites` | One `SiteSpec` per data source — see below. |
+
+Each `SiteSpec` says where one site's data lives and how big its share is:
+
+| `SiteSpec` field | What it controls |
+| --- | --- |
+| `site` | `coralnet` or `mermaid` — matches the `site` column of `heldout_csv`. |
+| `weight` | Relative share of `n_images`. The shipped `2.0` / `1.0` gives **13 CoralNet + 7 MERMAID** at `n_images=20`. |
+| `manifest_uri` | Parquet holding this site's full ground-truth grid per image. |
+| `feature_bucket` | Bucket with the per-image feature vectors (used for model inference). |
+| `image_bucket` / `image_prefix` / `image_key_template` | Where this site's display images live in S3. |
+| `image_key_extensions` | Extensions to probe for `{ext}` in the key template. Empty means the template is exact. MERMAID needs `("png", "jpg", "jpeg")`. |
+
+**Sampling.** Each site is a separate stratum drawn independently: its candidates are
+shuffled once with a seed derived from `(seed, site)`, then walked in order keeping images
+that have enough usable ground-truth points *and* a display object in S3, until its share
+is filled. That makes each share an exact random sample of its own pool, and means
+changing one site's `weight` never moves another site's draw. If a site cannot fill its
+share, the build fails loudly rather than quietly returning a smaller project.
+
+The quota is on *images*, so the realized point-level split differs from the weights —
+MERMAID grids are a fixed 25 points, CoralNet's average ~20. `build-tasks` prints both.
 
 For the common case ("same as before, but a different batch of images") you only touch
-`name`, `n_images`, and `seed`.
+`name`, `n_images`, and `seed`. Adding a site, or changing where its data lives, is the
+only reason to touch `sites`.
 
 ### Step 2 — run one command
 
@@ -95,8 +116,9 @@ so they aren't biased by the model). It prints the new project URL. It takes ~1 
 
 Each reviewer signs in with **their own account** (annotations are attributed to whoever
 labelled them). They open each image to grey, unlabelled fixed points and assign the fine
-benthic-attribute label to each via the taxonomy tree. They can toggle read-only
-`ground-truth` and `v1` reference layers *after* their pass, and use the per-image notes box.
+benthic-attribute label to each via the taxonomy tree. They can toggle the read-only
+`v1`, `ground-truth` and `Beta` reference layers *after* their pass, and use the per-image
+notes box.
 
 > Images are served straight from S3 to the browser. This relies on a one-time CORS rule on
 > the image bucket for the app's origin (normally already configured for the hosted app);
@@ -113,8 +135,8 @@ uv run --extra training \
   --points-out review_points.csv --summary-out review_summary.json --notes-out review_notes.csv
 ```
 
-- `review_summary.json` — the three top-level agreement rates: `v1_vs_gt`, `expert_vs_gt`,
-  `expert_vs_expert`.
+- `review_summary.json` — the four top-level agreement rates: `v1_vs_gt`, `beta_vs_gt`,
+  `expert_vs_gt`, `expert_vs_expert`.
 - `review_points.csv` — one row per labelled point, **including the image set name, source,
   and the exact `s3://` image path** so every annotation is traceable to its image.
 - `review_notes.csv` — reviewers' per-image notes.
@@ -130,22 +152,33 @@ directly you can regenerate the same file with the `build-tasks` subcommand — 
 <summary>The Label Studio project model, the CLI, and the modules (click to expand)</summary>
 
 ### The project a reviewer sees
-Each task is one image with a fixed set of points. Every task ships three prediction layers:
+Each task is one image with a fixed set of points. Every task ships four prediction layers:
 - **Unlabelled Starting Set** — the blind starting layer copied into each reviewer's
   annotation so they label from scratch (this is set as the project's `model_version`).
-- **ground-truth** — the CoralNet ground-truth label per point (read-only reference).
+- **Beta** — what the model currently deployed to the MERMAID API predicts (read-only
+  reference), so the reviewed model is judged against the incumbent, not just ground truth.
+- **ground-truth** — the source dataset's ground-truth label per point (read-only reference).
 - **v1** — the reviewed model's prediction per point (read-only reference).
 
-Points are colored by top-level category. The labeling config's taxonomy is restricted to
-the reviewed model's label set (one path per class), and ground truth is rolled into that
-same label set so the three layers are directly comparable.
+Label Studio assigns prediction ids in that array order and lists the tabs by **descending**
+id, so on screen a reviewer sees: their own annotation, `v1`, `ground-truth`, `Beta`,
+`Unlabelled Starting Set`. The order of the list in `ls_tasks.build_task` is what controls
+this; there is no per-project tab-order setting.
+
+Points are colored by top-level category. The labeling config's taxonomy is the reviewed
+model's label set plus the Beta labels this image set actually shows (one path per class), and
+ground truth is rolled into the reviewed model's label set so the layers are comparable.
 
 ### The CLI (`python -m mermaid_classifier.model_review.cli ...`)
 - **`create-project`** — the one-command path above: build tasks from `image_set.py` →
-  create a new project → attach S3 storage → import → set the blind starting layer.
+  create a new project → attach one S3 storage per image bucket → import → set the
+  blind starting layer.
 - **`build-tasks`** — just builds `review_tasks.json` + `review_config.xml` from
-  `image_set.py` without touching Label Studio (defaults all come from `IMAGE_SET`; every
-  field is overridable with a flag). Useful for importing by hand, or to regenerate the
+  `image_set.py` without touching Label Studio. Defaults come from `IMAGE_SET`; the
+  sampling knobs (`--name`, `--n-images`, `--seed`, `--min-points`, `--classifier`,
+  `--beta-classifier`, `--heldout-csv`, `--v1-rollup-csv`) are overridable with flags, but
+  the per-site S3
+  layout lives only in `image_set.py`. Useful for importing by hand, or to regenerate the
   tasks file needed by `synthesize`.
 - **`synthesize`** — parse a Label Studio JSON export into the comparison outputs above.
 
@@ -154,8 +187,11 @@ same label set so the three layers are directly comparable.
 | --- | --- |
 | `image_set.py` | The single editable image-set definition (`ImageSet` + `IMAGE_SET`). |
 | `cli.py` | Command-line entry points and the build/orchestration glue. |
-| `sample.py` | Selects held-out CoralNet images and their full ground-truth points. |
-| `v1_infer.py` | Runs the reviewed model over the pre-extracted feature vectors. |
+| `sample.py` | Draws the stratified sample of held-out images and their full ground-truth points. |
+| `features.py` | Loads the pre-extracted feature vectors once, for every model to score. |
+| `v1_infer.py` | Runs the reviewed model over those feature vectors. |
+| `beta_infer.py` | Runs the Beta model out of process (its pickle needs scikit-learn 1.1.3). |
+| `beta_score.py` | The scorer that runs inside that isolated environment. |
 | `ls_config.py` | Generates the Label Studio labeling config (taxonomy). |
 | `ls_tasks.py` | Builds the tasks (points + GT/model reference layers + provenance). |
 | `ls_client.py` | Thin stdlib-`urllib` Label Studio REST client. |

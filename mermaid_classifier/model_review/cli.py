@@ -4,7 +4,7 @@ import argparse
 import csv
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from mermaid_classifier.common.benthic_attributes import (
@@ -16,6 +16,8 @@ from mermaid_classifier.common.benthic_attributes import (
     split_ba_gf,
 )
 from mermaid_classifier.model_review import (
+    beta_infer,
+    features,
     ls_config,
     ls_export,
     ls_tasks,
@@ -23,10 +25,11 @@ from mermaid_classifier.model_review import (
     synthesis,
     v1_infer,
 )
-from mermaid_classifier.model_review.image_set import IMAGE_SET, ImageSet
+from mermaid_classifier.model_review.image_set import IMAGE_SET, ImageSet, SiteSpec
 from mermaid_classifier.model_review.ls_client import LabelStudioClient
 from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
 from mermaid_classifier.model_review.rollup import load_toplevel, make_rollup_fn
+from mermaid_classifier.model_review.sample import ReviewPoint
 
 
 def make_toplevel_name() -> Callable[[str], str]:
@@ -84,12 +87,16 @@ def make_v1_label_mapper(
     roll_up: Callable[[str | None], str | None],
     classes: set[str],
 ) -> Callable[[str], str | None]:
-    """coralnet_id -> V1-label-set BA::GF: map to raw BA::GF, apply V1's training
+    """raw label key -> V1-label-set BA::GF: map to raw BA::GF, apply V1's training
     rollup, and keep only labels that are actually V1 classes (drop the rest, exactly
-    as V1's training filter did)."""
+    as V1's training filter did).
 
-    def v1_label(coralnet_id: str) -> str | None:
-        raw = raw_mapper(coralnet_id)
+    The key is a CoralNet label id for CoralNet points; MERMAID ground truth is already
+    BA::GF, so it passes an identity `raw_mapper` and the key is the BA::GF itself.
+    """
+
+    def v1_label(label_key: str) -> str | None:
+        raw = raw_mapper(label_key)
         if raw is None:
             return None
         rolled = roll_up(raw)
@@ -98,52 +105,99 @@ def make_v1_label_mapper(
     return v1_label
 
 
-def make_s3_uri(image_bucket: str, key_template: str) -> Callable[[str, str], str]:
-    """(source_id, image_id) -> a durable ``s3://bucket/key`` URI.
+class ImageResolver:
+    """Resolves a review point to its durable display image, per site.
 
-    Tasks carry the plain S3 URI, not a presigned URL: Label Studio resolves it at
-    view time via its S3 source storage (proxy mode) using the instance IAM role,
-    so nothing in the task data expires. See HOSTING.md §3.
+    Tasks carry the plain ``s3://bucket/key`` URI, not a presigned URL: Label Studio
+    resolves it at view time via that bucket's S3 source storage using the instance IAM
+    role, so nothing in the task data expires. See HOSTING.md §3.
+
+    A site whose ``image_key_extensions`` is non-empty has its key probed in that order
+    (MERMAID stores ``.png``, and ~0.4% of images have no display object at all).
+    Each image is probed once and the result cached, so ``can_display``, ``uri`` and
+    ``size`` all agree on one key and cost at most one HEAD per image.
     """
 
-    def image_url(source_id: str, image_id: str) -> str:
-        key = key_template.format(source_id=source_id, image_id=image_id)
-        return f"s3://{image_bucket}/{key}"
+    def __init__(self, s3_client: Any, specs: Mapping[str, SiteSpec]):
+        self._s3 = s3_client
+        self._specs = specs
+        self._located: dict[tuple[str, str], tuple[str, str] | None] = {}
 
-    return image_url
+    def _exists(self, bucket: str, key: str) -> bool:
+        from botocore.exceptions import ClientError
 
+        try:
+            self._s3.head_object(Bucket=bucket, Key=key)
+        except ClientError:
+            return False
+        return True
 
-def _image_sizer(
-    s3_client: Any, image_bucket: str, key_template: str
-) -> Callable[[str, str], tuple[int, int]]:
-    import io
+    def locate(self, point: ReviewPoint) -> tuple[str, str] | None:
+        cache_key = (point.site, point.image_id)
+        if cache_key in self._located:
+            return self._located[cache_key]
+        spec = self._specs[point.site]
 
-    from PIL import Image
+        def key_for(ext: str) -> str:
+            return spec.image_key_template.format(
+                source_id=point.source_id, image_id=point.image_id, ext=ext
+            )
 
-    def image_size(source_id: str, image_id: str) -> tuple[int, int]:
-        key = key_template.format(source_id=source_id, image_id=image_id)
-        obj = s3_client.get_object(Bucket=image_bucket, Key=key)
-        img = Image.open(io.BytesIO(obj["Body"].read()))
-        return img.size  # (width, height)
+        located: tuple[str, str] | None = None
+        if not spec.image_key_extensions:
+            located = (spec.image_bucket, key_for(""))
+        else:
+            for ext in spec.image_key_extensions:
+                key = key_for(ext)
+                if self._exists(spec.image_bucket, key):
+                    located = (spec.image_bucket, key)
+                    break
+        self._located[cache_key] = located
+        return located
 
-    return image_size
+    def can_display(self, point: ReviewPoint) -> bool:
+        return self.locate(point) is not None
+
+    def _require(self, point: ReviewPoint) -> tuple[str, str]:
+        located = self.locate(point)
+        if located is None:
+            spec = self._specs[point.site]
+            raise FileNotFoundError(
+                f"no display image for {point.site} image {point.image_id} in "
+                f"s3://{spec.image_bucket}/ (tried {', '.join(spec.image_key_extensions)})"
+            )
+        return located
+
+    def uri(self, point: ReviewPoint) -> str:
+        bucket, key = self._require(point)
+        return f"s3://{bucket}/{key}"
+
+    def size(self, point: ReviewPoint) -> tuple[int, int]:
+        import io
+
+        from PIL import Image
+
+        bucket, key = self._require(point)
+        obj = self._s3.get_object(Bucket=bucket, Key=key)
+        return Image.open(io.BytesIO(obj["Body"].read())).size  # (width, height)
 
 
 def image_set_from_args(args: argparse.Namespace) -> ImageSet:
+    """Build an ImageSet from CLI flags.
+
+    `sites` is not flag-configurable: half-specifying a site's S3 layout from the command
+    line is worse than not offering it, so `image_set.py` stays the single place for it.
+    """
     return ImageSet(
         name=args.name,
         classifier=args.classifier,
+        beta_classifier=args.beta_classifier,
         heldout_csv=args.heldout_csv,
-        manifest_uri=args.manifest_uri,
-        feature_bucket=args.feature_bucket,
-        image_bucket=args.image_bucket,
-        image_prefix=args.image_prefix,
-        image_bucket_region=args.image_bucket_region,
-        image_key_template=args.image_key_template,
         v1_rollup_csv=args.v1_rollup_csv,
         n_images=args.n_images,
         min_points=args.min_points,
         seed=args.seed,
+        sites=IMAGE_SET.sites,
     )
 
 
@@ -166,39 +220,74 @@ def build_tasks_and_config(image_set: ImageSet) -> tuple[list[dict[str, Any]], s
     classes = set(predictor.classes)
     with open(image_set.v1_rollup_csv) as f:
         rollup = LabelRollupSpec(f)
-    v1_mapper = make_v1_label_mapper(sample.default_coralnet_mapper(), rollup.roll_up, classes)
+    coralnet_mapper = make_v1_label_mapper(
+        sample.default_coralnet_mapper(), rollup.roll_up, classes
+    )
+    # MERMAID ground truth is already BA::GF, so it skips the provider-id lookup and
+    # goes straight into the same rollup + class filter.
+    mermaid_mapper = make_v1_label_mapper(lambda bagf: bagf, rollup.roll_up, classes)
 
-    points = sample.select_images_full_gt(
+    s3 = boto3.client("s3")
+    specs = {spec.site: spec for spec in image_set.sites}
+    resolver = ImageResolver(s3, specs)
+    builders = {sample.CORALNET: sample.coralnet_source, sample.MERMAID: sample.mermaid_source}
+    mappers = {sample.CORALNET: coralnet_mapper, sample.MERMAID: mermaid_mapper}
+    sources = [
+        builders[spec.site](
+            manifest_uri=spec.manifest_uri,
+            feature_bucket=spec.feature_bucket,
+            weight=spec.weight,
+            map_label=mappers[spec.site],
+            # An image with no display object cannot be reviewed, so displayability is
+            # part of qualifying — the draw stays an exact SRS of a well-defined pool.
+            keep_image=resolver.can_display,
+        )
+        for spec in image_set.sites
+    ]
+
+    points = sample.select_images_stratified(
         val_csv=image_set.heldout_csv,
-        manifest_uri=image_set.manifest_uri,
-        coralnet_bucket=image_set.feature_bucket,
+        sources=sources,
         n_images=image_set.n_images,
         seed=image_set.seed,
         min_points_per_image=image_set.min_points,
-        map_coralnet=v1_mapper,
     )
-    v1_preds = v1_infer.predict_points(points, image_set.classifier, predictor=predictor)
+    # One S3 read per image feeds both reference models from the same rows.
+    keys, feature_matrix = features.stack_features(points)
+    v1_preds = v1_infer.predict_from_features(keys, feature_matrix, predictor)
+    beta_preds = beta_infer.predict_points(keys, feature_matrix, image_set.beta_classifier)
 
-    s3 = boto3.client("s3")
     toplevel_name = make_toplevel_name()
-    # Tasks carry durable s3:// URIs (LS resolves them via S3 source storage); the
-    # image dimensions are still read at build time from the objects themselves.
-    image_url = make_s3_uri(image_set.image_bucket, image_set.image_key_template)
-    image_size = _image_sizer(s3, image_set.image_bucket, image_set.image_key_template)
-
     tasks = ls_tasks.build_tasks(
         points,
         v1_preds,
+        beta_preds,
         label_path,
         toplevel_name,
-        image_url,
-        image_size,
+        resolver.uri,
+        resolver.size,
         image_set=image_set.name,
     )
-    # Restrict the expert taxonomy to V1's label set (one path per V1 class).
-    restrict_paths = sorted(label_path(c) for c in classes)
+    # Restrict the expert taxonomy to V1's label set plus the Beta labels this set
+    # actually shows, so every reference label a reviewer can see has a selectable path.
+    # Ground truth is already rolled into V1's classes, so it adds nothing.
+    restrict_paths = sorted(label_path(c) for c in classes | set(beta_preds.values()))
     config = ls_config.build_taxonomy_config(ba_lib, gf_lib, restrict_paths=restrict_paths)
     return tasks, config
+
+
+def site_mix(tasks: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
+    """site -> (images, points) for a built task list.
+
+    The quota is on images, so the realized point-level share differs from it: MERMAID
+    grids are a fixed 25 points, CoralNet's average ~20.
+    """
+    mix: dict[str, tuple[int, int]] = {}
+    for task in tasks:
+        site = task["data"]["source"]
+        images, points = mix.get(site, (0, 0))
+        mix[site] = (images + 1, points + len(task["data"]["original_points"]))
+    return dict(sorted(mix.items()))
 
 
 def build_tasks_command(args: argparse.Namespace) -> None:
@@ -208,6 +297,10 @@ def build_tasks_command(args: argparse.Namespace) -> None:
     with open(args.config_out, "w") as f:
         f.write(config)
     print(f"Wrote {len(tasks)} tasks -> {args.tasks_out} and config -> {args.config_out}")
+    mix = site_mix(tasks)
+    total_points = sum(points for _, points in mix.values()) or 1
+    for site, (images, points) in mix.items():
+        print(f"  {site}: {images} images, {points} points ({100 * points / total_points:.1f}%)")
 
 
 def orchestrate_create_project(
@@ -228,9 +321,15 @@ def orchestrate_create_project(
             f"projects are never modified)."
         )
     project_id = client.create_project(image_set.name, config_xml)
-    client.add_s3_presign_storage(
-        project_id, image_set.image_bucket, image_set.image_prefix, image_set.image_bucket_region
-    )
+    # One presign storage per distinct bucket+prefix; LS picks the one matching each
+    # task's s3:// URI. Config order keeps the call sequence deterministic.
+    attached: set[tuple[str, str, str]] = set()
+    for spec in image_set.sites:
+        location = (spec.image_bucket, spec.image_prefix, spec.image_bucket_region)
+        if location in attached:
+            continue
+        attached.add(location)
+        client.add_s3_presign_storage(project_id, *location, title=f"{spec.site}-images")
     client.import_tasks(project_id, tasks)
     # Reviewers start BLIND from the unlabelled starting layer, not from v1.
     client.set_model_version(project_id, ls_tasks.BLANK_MODEL_VERSION)
@@ -273,7 +372,11 @@ def synthesize_command(args: argparse.Namespace) -> None:
     df = synthesis.build_point_table(tasks, expert_labels, roll)
     df.to_csv(args.points_out, index=False)
 
-    summary = synthesis.agreement_summary(df, tasks, roll)
+    summary = {
+        "overall": synthesis.agreement_summary(df, tasks, roll),
+        "by_site": synthesis.agreement_by_site(df, tasks, roll),
+        "images_per_site": synthesis.image_counts_by_site(tasks),
+    }
     with open(args.summary_out, "w") as f:
         json.dump(summary, f, indent=2)
 
@@ -286,31 +389,35 @@ def synthesize_command(args: argparse.Namespace) -> None:
 
 
 def _add_image_set_args(p: argparse.ArgumentParser) -> None:
-    """Flags shared by build-tasks and create-project; every default is from IMAGE_SET."""
+    """Flags shared by build-tasks and create-project; every default is from IMAGE_SET.
+
+    Per-site S3 layout (buckets, prefixes, key templates, manifests, weights) is
+    deliberately not exposed here — it lives only in `image_set.py`.
+    """
     p.add_argument("--name", default=IMAGE_SET.name, help="image-set name / LS project title")
     p.add_argument("--heldout-csv", default=IMAGE_SET.heldout_csv)
-    p.add_argument("--n-images", type=int, default=IMAGE_SET.n_images)
+    p.add_argument(
+        "--n-images",
+        type=int,
+        default=IMAGE_SET.n_images,
+        help="total images, split across sites by their weights in image_set.py",
+    )
     p.add_argument(
         "--min-points",
         type=int,
         default=IMAGE_SET.min_points,
-        help="only sample images with at least this many total ground-truth points",
+        help="only sample images with at least this many ground-truth points",
     )
     p.add_argument("--seed", type=int, default=IMAGE_SET.seed)
-    p.add_argument(
-        "--manifest-uri",
-        default=IMAGE_SET.manifest_uri,
-        help="CoralNet manifest parquet: the full ground-truth points per image",
-    )
-    p.add_argument(
-        "--feature-bucket",
-        default=IMAGE_SET.feature_bucket,
-        help="S3 bucket holding the per-image .featurevector files",
-    )
     p.add_argument(
         "--classifier",
         default=IMAGE_SET.classifier,
         help="MLflow model id, S3 dir, or local dir for the reviewed model (auto-downloaded)",
+    )
+    p.add_argument(
+        "--beta-classifier",
+        default=IMAGE_SET.beta_classifier,
+        help="Beta classifier pickle (scored in an isolated scikit-learn 1.1.3 subprocess)",
     )
     p.add_argument(
         "--v1-rollup-csv",
@@ -319,10 +426,6 @@ def _add_image_set_args(p: argparse.ArgumentParser) -> None:
             "training rollup (from_ba_id,from_gf_id,to_ba_id,to_gf_id) to map GT into the label set"
         ),
     )
-    p.add_argument("--image-bucket", default=IMAGE_SET.image_bucket)
-    p.add_argument("--image-prefix", default=IMAGE_SET.image_prefix)
-    p.add_argument("--image-bucket-region", default=IMAGE_SET.image_bucket_region)
-    p.add_argument("--image-key-template", default=IMAGE_SET.image_key_template)
 
 
 def build_parser() -> argparse.ArgumentParser:

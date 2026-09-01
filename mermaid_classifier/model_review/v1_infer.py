@@ -1,18 +1,32 @@
 """Run the V1 classifier over pre-extracted features for review points."""
 
-from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
+from mermaid_classifier.model_review.features import (
+    PointKey,
+    default_feature_loader,
+    stack_features,
+)
 from mermaid_classifier.model_review.sample import ReviewPoint
 
+__all__ = ["default_feature_loader", "predict_from_features", "predict_points"]
 
-def default_feature_loader(bucket: str, key: str):
-    from spacer.data_classes import DataLocation, ImageFeatures
 
-    return ImageFeatures.load(DataLocation("s3", bucket_name=bucket, key=key))
+def predict_from_features(
+    keys: Sequence[PointKey],
+    features: NDArray[np.float32],
+    predictor: Any,
+) -> dict[PointKey, str]:
+    """Top-1 BA::GF per point, from a matrix whose rows align with ``keys``."""
+    labels = list(predictor.classes)
+    proba = predictor.predict_proba(features)
+    return {
+        key: labels[int(np.argmax(row_proba))] for key, row_proba in zip(keys, proba, strict=True)
+    }
 
 
 def predict_points(
@@ -20,7 +34,7 @@ def predict_points(
     classifier_location: str,
     load_features: Callable[[str, str], Any] = default_feature_loader,
     predictor: Any = None,
-) -> dict[tuple[str, int, int], str]:
+) -> dict[PointKey, str]:
     if predictor is None:
         from mermaid_classifier.pyspacer.annotation import resolve_classifier_artifact
         from mermaid_classifier.pyspacer.inference import load_predictor
@@ -28,18 +42,5 @@ def predict_points(
         model_pt, model_json = resolve_classifier_artifact(classifier_location)
         predictor = load_predictor(model_pt, model_json)
 
-    labels = list(predictor.classes)
-
-    by_image: dict[tuple[str, str], list[ReviewPoint]] = defaultdict(list)
-    for p in points:
-        by_image[(p.bucket, p.feature_key)].append(p)
-
-    results: dict[tuple[str, int, int], str] = {}
-    for (bucket, key), img_points in by_image.items():
-        feats = load_features(bucket, key)
-        batch = np.vstack([feats.get_array((p.row, p.col)) for p in img_points])
-        proba = predictor.predict_proba(batch)
-        for p, row_proba in zip(img_points, proba, strict=True):
-            i = int(np.argmax(row_proba))
-            results[(p.image_id, p.row, p.col)] = labels[i]
-    return results
+    keys, features = stack_features(points, load_features)
+    return predict_from_features(keys, features, predictor)

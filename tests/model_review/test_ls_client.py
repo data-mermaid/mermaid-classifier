@@ -64,6 +64,16 @@ class LsClientTest(unittest.TestCase):
         self.assertTrue(body["presign"])
         self.assertFalse(body["use_blob_urls"])
 
+    def test_storage_title_distinguishes_one_bucket_from_another(self):
+        # A mixed-site project carries one storage per image bucket, so titles must differ.
+        client, recorded = _client([{"id": 1}, {"id": 2}])
+        client.add_s3_presign_storage(
+            5, "cn", "coralnet-public-images/", "us-east-1", title="coralnet-images"
+        )
+        client.add_s3_presign_storage(5, "mm", "mermaid/", "us-east-1", title="mermaid-images")
+        titles = [json.loads(r.data)["title"] for r in recorded[-2:]]
+        self.assertEqual(titles, ["coralnet-images", "mermaid-images"])
+
     def test_import_tasks_posts_list_to_import_endpoint(self):
         client, recorded = _client([{"task_count": 2}])
         client.import_tasks(9, [{"data": {}}, {"data": {}}])

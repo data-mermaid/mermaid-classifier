@@ -3,9 +3,9 @@
 Each point is two result entries sharing one region id: a ``keypointlabels``
 result bound to the colored top-level control ``toplevel`` (the geometry + the
 top-level colour) and a ``taxonomy`` result bound to ``label`` (the fine BA::GF
-path). Each task carries three predictions: ``blank`` (unlabelled fixed points —
-the reviewer's blind starting layer, set as the project model_version),
-``ground-truth`` and ``v1`` (read-only reference tabs).
+path). Each task carries four predictions: ``blank`` (unlabelled fixed points —
+the reviewer's blind starting layer, set as the project model_version), and
+``Beta``, ``ground-truth`` and ``v1`` (read-only reference tabs).
 """
 
 from collections.abc import Callable
@@ -18,6 +18,9 @@ from mermaid_classifier.model_review.sample import ReviewPoint
 # project's model_version so LS copies it into each reviewer's annotation on open.
 # Shown as a (read-only) tab, so the name must read clearly as "your start point".
 BLANK_MODEL_VERSION = "Unlabelled Starting Set"
+
+# The model currently deployed to the MERMAID API, shown as a read-only reference tab.
+BETA_MODEL_VERSION = "Beta"
 
 
 def _blank_keypoint(idx: int, x: float, y: float, width: int, height: int) -> dict[str, Any]:
@@ -77,24 +80,29 @@ def build_task(
     image_id: str,
     points: list[ReviewPoint],
     v1_preds: dict[tuple[str, int, int], str],
+    beta_preds: dict[tuple[str, int, int], str],
     label_path: Callable[[str], list[str]],
     toplevel_name: Callable[[str], str],
-    image_url: Callable[[str, str], str],
-    image_size: Callable[[str, str], tuple[int, int]],
+    image_url: Callable[[ReviewPoint], str],
+    image_size: Callable[[ReviewPoint], tuple[int, int]],
 ) -> dict[str, Any]:
     img_points = sorted([p for p in points if p.image_id == image_id], key=lambda p: (p.row, p.col))
-    source_id = img_points[0].source_id
-    width, height = image_size(source_id, image_id)
+    ref = img_points[0]
+    width, height = image_size(ref)
 
     original_points = []
     gt_result: list[dict[str, Any]] = []
     v1_result: list[dict[str, Any]] = []
+    beta_result: list[dict[str, Any]] = []
     blank_result: list[dict[str, Any]] = []
     for idx, p in enumerate(img_points):
         x = p.col / width * 100
         y = p.row / height * 100
         v1_bagf = v1_preds[(p.image_id, p.row, p.col)]
-        original_points.append({"row": p.row, "col": p.col, "gt": p.gt_bagf, "v1": v1_bagf})
+        beta_bagf = beta_preds[(p.image_id, p.row, p.col)]
+        original_points.append(
+            {"row": p.row, "col": p.col, "gt": p.gt_bagf, "v1": v1_bagf, "beta": beta_bagf}
+        )
         gt_result.extend(
             _point_results(
                 idx, x, y, width, height, toplevel_name(p.gt_bagf), label_path(p.gt_bagf)
@@ -103,21 +111,29 @@ def build_task(
         v1_result.extend(
             _point_results(idx, x, y, width, height, toplevel_name(v1_bagf), label_path(v1_bagf))
         )
+        beta_result.extend(
+            _point_results(
+                idx, x, y, width, height, toplevel_name(beta_bagf), label_path(beta_bagf)
+            )
+        )
         blank_result.append(_blank_keypoint(idx, x, y, width, height))
 
-    # "blank" is the reviewer's starting layer (set as the project's model_version):
-    # fixed points, unlabelled, so they label blind. ground-truth/v1 are read-only
-    # reference tabs they can toggle to afterwards.
+    # Label Studio assigns prediction ids in this array's order at import and lists the
+    # tabs by DESCENDING id, so a reviewer sees: <their annotation>, v1, ground-truth,
+    # Beta, Unlabelled Starting Set. "blank" stays first: it is the project's
+    # model_version, copied into each reviewer's annotation so they label blind. The
+    # other three are read-only reference tabs they can toggle to afterwards.
     return {
         "data": {
-            "image_url": image_url(source_id, image_id),
-            "source": "coralnet",
+            "image_url": image_url(ref),
+            "source": ref.site,
             "image_id": image_id,
-            "source_id": source_id,
+            "source_id": ref.source_id,
             "original_points": original_points,
         },
         "predictions": [
             {"model_version": BLANK_MODEL_VERSION, "result": blank_result},
+            {"model_version": BETA_MODEL_VERSION, "result": beta_result},
             {"model_version": "ground-truth", "result": gt_result},
             {"model_version": "v1", "result": v1_result},
         ],
@@ -127,15 +143,34 @@ def build_task(
 def build_tasks(
     points: list[ReviewPoint],
     v1_preds: dict[tuple[str, int, int], str],
+    beta_preds: dict[tuple[str, int, int], str],
     label_path: Callable[[str], list[str]],
     toplevel_name: Callable[[str], str],
-    image_url: Callable[[str, str], str],
-    image_size: Callable[[str, str], tuple[int, int]],
+    image_url: Callable[[ReviewPoint], str],
+    image_size: Callable[[ReviewPoint], tuple[int, int]],
     image_set: str = "",
 ) -> list[dict[str, Any]]:
-    image_ids = sorted({p.image_id for p in points})
+    # Tasks, exports and synthesis all key on image_id alone, so ids must not repeat
+    # across sites. CoralNet ids are integers and MERMAID ids UUIDs, so this cannot fire
+    # today — it is here so the assumption is explicit rather than latent.
+    keyed = {(p.site, p.image_id) for p in points}
+    image_ids = sorted({image_id for _, image_id in keyed})
+    if len(image_ids) != len(keyed):
+        raise ValueError(
+            "an image_id appears under more than one site; tasks/export/synthesis join "
+            "on image_id alone and would merge them"
+        )
     tasks = [
-        build_task(image_id, points, v1_preds, label_path, toplevel_name, image_url, image_size)
+        build_task(
+            image_id,
+            points,
+            v1_preds,
+            beta_preds,
+            label_path,
+            toplevel_name,
+            image_url,
+            image_size,
+        )
         for image_id in image_ids
     ]
     for task in tasks:

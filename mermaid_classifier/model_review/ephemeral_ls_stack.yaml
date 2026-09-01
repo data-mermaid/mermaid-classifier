@@ -38,6 +38,17 @@ Parameters:
     Type: String
     Default: coralnet-public-images/
     Description: Key prefix (with trailing slash) the read grant is scoped to.
+  MermaidImageBucket:
+    Type: String
+    Default: coral-reef-training
+    Description: >
+      Bucket holding the MERMAID display images. A mixed-site review draws from two
+      buckets, so the role needs a second scoped read grant and the project carries
+      one S3 source storage per bucket.
+  MermaidImagePrefix:
+    Type: String
+    Default: mermaid/
+    Description: Key prefix (with trailing slash) the MERMAID read grant is scoped to.
   BackupBucket:
     Type: String
     Default: model-review-ls-backups-554812291621
@@ -99,6 +110,21 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                 Resource: !Sub "arn:aws:s3:::${BackupBucket}/${BackupPrefix}*"
+        # Separate policy rather than extra statements above: an update then leaves the
+        # CoralNet grant untouched on the live role.
+        - PolicyName: read-mermaid-images
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${MermaidImageBucket}/${MermaidImagePrefix}*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${MermaidImageBucket}"
+                Condition:
+                  StringLike:
+                    s3:prefix: !Sub "${MermaidImagePrefix}*"
       Tags:
         - { Key: Project, Value: model-review }
         - { Key: Ephemeral, Value: "true" }

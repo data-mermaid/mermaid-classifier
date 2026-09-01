@@ -1,3 +1,4 @@
+import io
 import unittest
 
 from mermaid_classifier.common.benthic_attributes import (
@@ -5,6 +6,7 @@ from mermaid_classifier.common.benthic_attributes import (
     GrowthFormLibrary,
 )
 from mermaid_classifier.model_review import cli
+from mermaid_classifier.model_review.sample import ReviewPoint
 
 _BA = [
     {"id": "hc", "name": "Hard coral", "parent": None},
@@ -70,6 +72,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args.seed, IMAGE_SET.seed)
         self.assertEqual(args.min_points, IMAGE_SET.min_points)
         self.assertEqual(args.classifier, IMAGE_SET.classifier)  # S3, not required
+        self.assertEqual(args.beta_classifier, IMAGE_SET.beta_classifier)
         self.assertEqual(args.name, IMAGE_SET.name)
 
     def test_image_set_from_args_roundtrips(self):
@@ -81,25 +84,45 @@ class CliTest(unittest.TestCase):
         self.assertEqual(image_set.n_images, 7)
         self.assertEqual(image_set.name, "custom")
         self.assertEqual(image_set.classifier, IMAGE_SET.classifier)  # untouched default
-        self.assertEqual(image_set.image_prefix, IMAGE_SET.image_prefix)
+        self.assertEqual(image_set.beta_classifier, IMAGE_SET.beta_classifier)
+        self.assertEqual(image_set.min_points, IMAGE_SET.min_points)
+        self.assertEqual(image_set.sites, IMAGE_SET.sites)  # per-site layout is not a flag
 
     def _image_set(self, name="model-review"):
-        from mermaid_classifier.model_review.image_set import ImageSet
+        from mermaid_classifier.model_review.image_set import ImageSet, SiteSpec
 
         return ImageSet(
             name=name,
             classifier="s3://x/v2/",
+            beta_classifier="beta/classifier.pkl",
             heldout_csv="h.csv",
-            manifest_uri="s3://m",
-            feature_bucket="fb",
-            image_bucket="ib",
-            image_prefix="pfx/",
-            image_bucket_region="us-east-1",
-            image_key_template="pfx/s{source_id}/{image_id}.jpg",
             v1_rollup_csv="r.csv",
             n_images=3,
             min_points=1,
             seed=1,
+            sites=(
+                SiteSpec(
+                    site="coralnet",
+                    weight=2.0,
+                    manifest_uri="s3://m",
+                    feature_bucket="fb",
+                    image_bucket="ib",
+                    image_prefix="pfx/",
+                    image_bucket_region="us-east-1",
+                    image_key_template="pfx/s{source_id}/{image_id}.jpg",
+                ),
+                SiteSpec(
+                    site="mermaid",
+                    weight=1.0,
+                    manifest_uri="s3://mm",
+                    feature_bucket="mb",
+                    image_bucket="mib",
+                    image_prefix="mermaid/",
+                    image_bucket_region="us-east-1",
+                    image_key_template="mermaid/{image_id}.{ext}",
+                    image_key_extensions=("png", "jpg"),
+                ),
+            ),
         )
 
     def test_orchestrate_creates_new_project_in_order(self):
@@ -116,8 +139,8 @@ class CliTest(unittest.TestCase):
                 calls.append(("create", title, config))
                 return 7
 
-            def add_s3_presign_storage(self, pid, bucket, prefix, region):
-                calls.append(("storage", pid, bucket, prefix, region))
+            def add_s3_presign_storage(self, pid, bucket, prefix, region, title="images"):
+                calls.append(("storage", pid, bucket, prefix, region, title))
 
             def import_tasks(self, pid, tasks):
                 calls.append(("import", pid, len(tasks)))
@@ -134,7 +157,8 @@ class CliTest(unittest.TestCase):
             [
                 ("titles",),
                 ("create", "model-review", "<View/>"),
-                ("storage", 7, "ib", "pfx/", "us-east-1"),
+                ("storage", 7, "ib", "pfx/", "us-east-1", "coralnet-images"),
+                ("storage", 7, "mib", "mermaid/", "us-east-1", "mermaid-images"),
                 ("import", 7, 1),
                 ("modelversion", 7, BLANK_MODEL_VERSION),
             ],
@@ -170,3 +194,111 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args.token, "TT")
         self.assertEqual(args.ls_url, "http://h:9")
         self.assertEqual(args.func, cli.create_project_command)
+
+
+class _FakeS3:
+    """Records HEAD/GET calls; `present` is the set of keys that exist."""
+
+    def __init__(self, present, image_bytes=b""):
+        self.present = set(present)
+        self.image_bytes = image_bytes
+        self.heads = []
+        self.gets = []
+
+    def head_object(self, Bucket, Key):  # noqa: N803 — boto3's parameter names
+        from botocore.exceptions import ClientError
+
+        self.heads.append((Bucket, Key))
+        if Key not in self.present:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {}
+
+    def get_object(self, Bucket, Key):  # noqa: N803 — boto3's parameter names
+        self.gets.append((Bucket, Key))
+        return {"Body": io.BytesIO(self.image_bytes)}
+
+
+def _png(width, height):
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class ImageResolverTest(unittest.TestCase):
+    def setUp(self):
+        from mermaid_classifier.model_review.image_set import SiteSpec
+
+        self.specs = {
+            "coralnet": SiteSpec(
+                site="coralnet",
+                weight=2.0,
+                manifest_uri="s3://m",
+                feature_bucket="fb",
+                image_bucket="cn-bucket",
+                image_prefix="imgs/",
+                image_bucket_region="us-east-1",
+                image_key_template="imgs/s{source_id}/images/{image_id}.jpg",
+            ),
+            "mermaid": SiteSpec(
+                site="mermaid",
+                weight=1.0,
+                manifest_uri="s3://mm",
+                feature_bucket="mb",
+                image_bucket="mm-bucket",
+                image_prefix="mermaid/",
+                image_bucket_region="us-east-1",
+                image_key_template="mermaid/{image_id}.{ext}",
+                image_key_extensions=("png", "jpg", "jpeg"),
+            ),
+        }
+
+    def _point(self, site, image_id, source_id=""):
+        return ReviewPoint(site, image_id, source_id, 1, 2, "ba::", "k", "b")
+
+    def test_coralnet_key_is_exact_and_never_probed(self):
+        s3 = _FakeS3(present=[])
+        resolver = cli.ImageResolver(s3, self.specs)
+        uri = resolver.uri(self._point("coralnet", "4242", source_id="109"))
+        self.assertEqual(uri, "s3://cn-bucket/imgs/s109/images/4242.jpg")
+        self.assertEqual(s3.heads, [])  # no extension probe for an exact template
+
+    def test_mermaid_probes_extensions_in_order_and_stops_at_the_first_hit(self):
+        s3 = _FakeS3(present=["mermaid/uuid-1.jpg"])
+        resolver = cli.ImageResolver(s3, self.specs)
+        self.assertEqual(
+            resolver.uri(self._point("mermaid", "uuid-1")), "s3://mm-bucket/mermaid/uuid-1.jpg"
+        )
+        self.assertEqual(
+            [key for _, key in s3.heads], ["mermaid/uuid-1.png", "mermaid/uuid-1.jpg"]
+        )  # jpeg never tried
+
+    def test_each_image_is_probed_once_and_the_result_reused(self):
+        s3 = _FakeS3(present=["mermaid/uuid-1.png"], image_bytes=_png(64, 32))
+        resolver = cli.ImageResolver(s3, self.specs)
+        point = self._point("mermaid", "uuid-1")
+        self.assertTrue(resolver.can_display(point))
+        self.assertEqual(resolver.uri(point), "s3://mm-bucket/mermaid/uuid-1.png")
+        self.assertEqual(resolver.size(point), (64, 32))
+        self.assertEqual(len(s3.heads), 1)  # can_display/uri/size share one probe
+        self.assertEqual(s3.gets, [("mm-bucket", "mermaid/uuid-1.png")])
+
+    def test_an_image_with_no_display_object_is_not_displayable(self):
+        s3 = _FakeS3(present=[])
+        resolver = cli.ImageResolver(s3, self.specs)
+        point = self._point("mermaid", "gone")
+        self.assertFalse(resolver.can_display(point))
+        with self.assertRaises(FileNotFoundError) as ctx:
+            resolver.uri(point)
+        self.assertIn("gone", str(ctx.exception))
+
+
+class SiteMixTest(unittest.TestCase):
+    def test_counts_images_and_points_per_site(self):
+        tasks = [
+            {"data": {"source": "mermaid", "original_points": [{}] * 25}},
+            {"data": {"source": "coralnet", "original_points": [{}] * 20}},
+            {"data": {"source": "coralnet", "original_points": [{}] * 18}},
+        ]
+        self.assertEqual(cli.site_mix(tasks), {"coralnet": (2, 38), "mermaid": (1, 25)})

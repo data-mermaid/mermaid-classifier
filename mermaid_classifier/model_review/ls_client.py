@@ -51,11 +51,17 @@ class LabelStudioClient:
         return int(resp["id"])
 
     def add_s3_presign_storage(
-        self, project_id: int, bucket: str, prefix: str, region_name: str
+        self,
+        project_id: int,
+        bucket: str,
+        prefix: str,
+        region_name: str,
+        title: str = "images",
     ) -> None:
         # PRESIGN mode: LS mints a presigned S3 URL per view and redirects the browser to
         # S3 (LS stays light; needs the image-bucket CORS rule). Do NOT sync — it only
-        # resolves the s3:// links already in the tasks.
+        # resolves the s3:// links already in the tasks. A project carries one storage per
+        # image bucket; LS matches each task's s3:// URI to the storage that covers it.
         self._request(
             "POST",
             "/api/storages/s3",
@@ -66,7 +72,7 @@ class LabelStudioClient:
                 "region_name": region_name,
                 "use_blob_urls": False,
                 "presign": True,
-                "title": "coralnet-images",
+                "title": title,
             },
         )
 

@@ -62,15 +62,23 @@ Open **http://localhost:8080**, create the admin account (Community edition: any
 account sees all projects). Get an API token at **http://localhost:8080/api/current-user/token**
 for the scripted steps below.
 
-## 3. Images — durable S3 serving (presign mode) + one CORS rule
+## 3. Images — durable S3 serving (presign mode) + CORS
 
 Tasks carry plain **`s3://…`** image URIs (never expire). Label Studio resolves them
 via an **S3 *source storage* in presign mode** (`presign=true`, `use_blob_urls=false`,
 step 5): per view, LS mints a short-lived presigned S3 URL using the instance's IAM
-role (scoped `s3:GetObject`/`ListBucket` on `coralnet-public-images/`, granted by the
-template) and 303-redirects the browser to fetch the image **straight from S3**.
+role and 303-redirects the browser to fetch the image **straight from S3**.
 Nothing is baked into the tasks and nothing expires from the reviewer's side (LS
 re-mints per view).
+
+A mixed CoralNet + MERMAID set draws from **two buckets**, so the project carries **one
+source storage per bucket** and the instance role carries one scoped read grant per bucket
+(`read-coralnet-images` on `coralnet-public-images/`, `read-mermaid-images` on
+`coral-reef-training/mermaid/` — both in the template). LS matches each task's `s3://` URI
+to the storage that covers it. Adding the MERMAID grant is an `update-stack`: it changes only
+an inline IAM policy, so the instance is **not** replaced and the grant applies immediately.
+Confirm that with a change set first (every `Replacement` must be `False`, and no row for
+the EC2 instance).
 
 > We tried **proxy mode** (`presign=false`, no CORS) first, but LS materializes every
 > image server-side and the 50-image data manager **OOM-killed LS even on t3.medium**.
@@ -78,9 +86,15 @@ re-mints per view).
 > the browser now fetches cross-origin and LS draws on a canvas, so the bucket needs a
 > scoped CORS rule for the tunnel origin.
 
-Because the browser reads the image onto a canvas cross-origin, add a scoped GET CORS
-rule while reviewing and **remove it when done** (CORS grants no access — the object
-still needs the presigned signature):
+Because the browser reads the image onto a canvas cross-origin, the image bucket needs a
+GET CORS rule (CORS grants no access — the object still needs the presigned signature).
+
+**`coral-reef-training` needs nothing:** it already carries a permissive
+`AllowedOrigins: ["*"]` GET/HEAD rule that other consumers depend on. **Never run
+`put-bucket-cors` on it** — that call *replaces* the entire configuration.
+
+For `dev-datamermaid-sm-sources`, add the scoped rule while reviewing and **remove it when
+done**:
 
 ```bash
 # ON:
@@ -94,8 +108,9 @@ aws s3api delete-bucket-cors --bucket dev-datamermaid-sm-sources
 
 Produces `<tasks>.json` (per-image points: GT + V1 predictions, colored by top-level
 category) and `<config>.xml` (labeling config: colored top-level `KeyPointLabels` +
-Taxonomy restricted to V1's classes + a notes box). Uses the CoralNet manifest for
-the full GT grid, mapped into V1's label set. ~70s for 50 images.
+Taxonomy restricted to V1's classes + a notes box). Uses each site's manifest for the
+full GT grid, mapped into V1's label set. ~70s for 50 images. It prints the realized
+per-site image and point counts — check them against the weights in `image_set.py`.
 
 **Edit `mermaid_classifier/model_review/image_set.py`** — the single place that defines
 which images (and which model) a review uses. Change `name` (each distinct name makes a new
@@ -106,8 +121,9 @@ uv run --extra training --with pillow \
   python -m mermaid_classifier.model_review.cli build-tasks \
   --tasks-out /tmp/review_tasks.json --config-out /tmp/review_config.xml
 ```
-All inputs default from `IMAGE_SET`; every field is still overridable with a flag
-(`--n-images`, `--seed`, `--classifier`, …). The reviewed model defaults to
+All inputs default from `IMAGE_SET`. The sampling knobs are overridable with flags
+(`--n-images`, `--seed`, `--min-points`, `--classifier`, …); the per-site S3 layout is
+**not** — it lives only in `image_set.py`. The reviewed model defaults to
 `s3://mermaid-config/classifier/v2/` and is **downloaded automatically** — no manual copy.
 `build-tasks` needs valid AWS creds (`aws sso login --profile wcs-admin`) to read the
 manifest, image sizes, and the model. Image URLs in the tasks are durable `s3://…` URIs.
@@ -124,8 +140,9 @@ uv run --extra training --with pillow \
   python -m mermaid_classifier.model_review.cli create-project \
   --token <token>          # or: export LABEL_STUDIO_TOKEN=<token>
 ```
-Then add the image-bucket CORS rule (§3) so reviewers can see the images. The manual
-UI/heredoc steps below remain as a fallback.
+Then make sure the `dev-datamermaid-sm-sources` CORS rule (§3) is on so reviewers can see
+the CoralNet images; `coral-reef-training` needs nothing. The manual UI/heredoc steps below
+remain as a fallback.
 
 **UI:** create a project → Settings → Labeling Interface → paste `review_config.xml`;
 set Annotations-per-task minimum = number of experts; Import `review_tasks.json`.
@@ -140,17 +157,21 @@ def post(p,b):
         headers={"Authorization":f"Token {TOKEN}","Content-Type":"application/json"},method="POST")
     return json.loads(urllib.request.urlopen(r,timeout=120).read())
 pid=post("/api/projects",{"title":"Model Review","label_config":open("/tmp/review_config.xml").read()})["id"]
-# S3 source storage in PRESIGN mode: LS mints a presigned S3 URL per view (via the
-# instance role) and redirects the browser to fetch from S3 (LS stays light; needs
-# the CORS rule from step 3). Do NOT sync it — it only resolves the s3:// links in
-# the tasks. (presign=False = proxy mode, no CORS but OOMs on the 50-img grid.)
+# One S3 source storage per image bucket, in PRESIGN mode: LS mints a presigned S3 URL
+# per view (via the instance role) and redirects the browser to fetch from S3 (LS stays
+# light; needs the CORS rule from step 3). Do NOT sync them — they only resolve the
+# s3:// links in the tasks. (presign=False = proxy mode, no CORS but OOMs on the 50-img
+# grid.) Titles must differ so the two storages are distinguishable in the UI.
 post("/api/storages/s3",{"project":pid,"bucket":"dev-datamermaid-sm-sources",
     "prefix":"coralnet-public-images/","region_name":"us-east-1",
     "use_blob_urls":False,"presign":True,"title":"coralnet-images"})
+post("/api/storages/s3",{"project":pid,"bucket":"coral-reef-training",
+    "prefix":"mermaid/","region_name":"us-east-1",
+    "use_blob_urls":False,"presign":True,"title":"mermaid-images"})
 post(f"/api/projects/{pid}/import", json.load(open("/tmp/review_tasks.json")))
 # Reviewers start BLIND: pre-fill their annotation from the unlabelled starting
 # layer, not from V1. Its model_version is BLANK_MODEL_VERSION ("Unlabelled
-# Starting Set"). (Each task ships that + ground-truth + v1 predictions.)
+# Starting Set"). (Each task ships that + Beta + ground-truth + v1 predictions.)
 from mermaid_classifier.model_review.ls_tasks import BLANK_MODEL_VERSION
 patch=urllib.request.Request(f"{LS}/api/projects/{pid}",data=json.dumps({"model_version":BLANK_MODEL_VERSION}).encode(),
     headers={"Authorization":f"Token {TOKEN}","Content-Type":"application/json"},method="PATCH")
@@ -169,8 +190,8 @@ work indistinguishable. In Community edition anyone who can reach LS and sign up
 see all projects, so gate *access* at the front door (see §9), not by hiding the URL.
 
 Experts open each image to **unlabelled (grey) fixed points** and label the fine BA::GF
-via the Taxonomy tree; they can toggle the `ground-truth` / `v1` tabs to view references
-(colored by top-level category) after their pass; use the per-image notes box.
+via the Taxonomy tree; they can toggle the `v1` / `ground-truth` / `Beta` tabs to view
+references (colored by top-level category) after their pass; use the per-image notes box.
 Optional: pre-seed one blank annotation per (task × expert) with
 `mermaid_classifier.model_review.seed.seed_all(client, project_id, expert_user_ids)`.
 
