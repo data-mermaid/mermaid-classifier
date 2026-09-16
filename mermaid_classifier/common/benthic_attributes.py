@@ -68,11 +68,14 @@ class BenthicAttributeLibrary:
         self.by_id = {}
         self.by_name = {}
         self.by_parent = defaultdict(list)
+        # Regions arrive with this one response, so the lookup is built eagerly.
+        self.region_ids_by_id: dict[str, frozenset[str]] = {}
 
         for result in self.raw_results:
             self.by_id[result["id"]] = result
             self.by_name[result["name"]] = result
             self.by_parent[result["parent"]].append(result)
+            self.region_ids_by_id[result["id"]] = frozenset(result["regions"] or ())
 
     def id_to_name(self, ba_id: str) -> str:
         if ba_id == "":
@@ -92,6 +95,24 @@ class BenthicAttributeLibrary:
             # for readable names BA-only will have no separator.
             return ba_name
         return BAGF_SEP.join([ba_name, gf_library.by_id[gf_id]])
+
+    def get_region_ids(self, ba_id: str) -> frozenset[str]:
+        """
+        The MERMAID region IDs a benthic attribute is recorded in.
+        An empty set means the regions are unrecorded, not that the attribute
+        belongs nowhere -- 11 of 810 attributes carry no regions. An unknown
+        ba_id raises KeyError so it stays distinguishable from that case.
+        """
+        return self.region_ids_by_id[ba_id]
+
+    def bagf_region_ids(self, bagf_id: str) -> frozenset[str]:
+        """
+        The region IDs of a BA-GF combo, which are the benthic attribute's own.
+        Region is a BA-level property in MERMAID, so the growth form does not
+        narrow the set.
+        """
+        ba_id, _growth_form_id = split_ba_gf(bagf_id)
+        return self.get_region_ids(ba_id)
 
     def get_ancestor_ids(self, ba_id: str) -> list[str]:
         """
