@@ -264,6 +264,8 @@ class ReadMermaidDataTest(BaseTrainTest):
                 "label_id": ["123", "456"],
                 "benthic_attribute_id": [same_char_uuid("0"), same_char_uuid("1")],
                 "growth_form_id": [same_char_uuid("2"), ""],
+                "region_id": ["", ""],
+                "region_name": ["", ""],
             }
         )
 
@@ -280,6 +282,8 @@ class ReadMermaidDataTest(BaseTrainTest):
                     "col": [2200, 1800],
                     "benthic_attribute_id": [same_char_uuid("5"), same_char_uuid("6")],
                     "growth_form_id": [same_char_uuid("7"), "None"],
+                    "region_id": [same_char_uuid("8"), same_char_uuid("9")],
+                    "region_name": ["Region Eight", "Region Nine"],
                 }
             )
             dataset.duck_conn.execute(
