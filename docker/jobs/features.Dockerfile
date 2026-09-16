@@ -7,7 +7,7 @@
 #   docker buildx build --platform linux/amd64 \
 #       -t <ECR_URI>:features-<tag> -f docker/jobs/features.Dockerfile .
 #
-# See docker/jobs/CLAUDE.md for the full build/push recipe.
+# See docs/feature_extraction_at_scale.md for the full build/push recipe.
 
 ARG BASE_IMAGE=pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
 

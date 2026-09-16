@@ -3,10 +3,10 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 This is one project in a multi-repo workspace. The workspace-root `../CLAUDE.md`
-is also in scope and already covers: the **`aws-mcp`-only** AWS policy (never the
-`aws` CLI), the **`github`-MCP-only** GitHub policy (never the `gh` CLI; this repo
-is `data-mermaid/mermaid-classifier`), `uv` as the package manager, BA+GF taxonomy
-basics, and the cross-project data flow. Don't re-derive those here.
+is also in scope and already covers: the **`gh` CLI** GitHub policy (this repo is
+`data-mermaid/mermaid-classifier`), the **`aws-mcp`** AWS policy (the `aws` CLI is
+denied), `uv` as the package manager, BA+GF taxonomy basics, and the cross-project
+data flow. Don't re-derive those here.
 
 ## Commands
 
@@ -23,10 +23,20 @@ cd tests && uv run python -m unittest -v pyspacer.test_train.ReadCoralNetDataTes
 cd tests && uv run python -m unittest -v pyspacer.test_train.ReadCoralNetDataTest.test_method
 
 # Scripts are run from the repo root (see each module docstring for args):
-uv run python scripts/classifier_train.py
-uv run python scripts/generate_report.py        # MLflow run -> self-contained HTML report
-uv run python scripts/generate_training_config.py
-uv run python scripts/release_artifact.py
+uv run python scripts/classifier_train.py            # local training run
+uv run python scripts/generate_report.py             # MLflow run -> self-contained HTML report
+uv run python scripts/generate_training_config.py    # writes a sagemaker/configs/<name>/ dir
+uv run python scripts/release_artifact.py            # validate + stage a vN artifact
+
+# SageMaker (host side) and its in-container counterpart:
+uv run python scripts/launch_training.py             # submit a TrainingJob
+uv run python scripts/launch_processing.py           # submit ProcessingJob(s)
+#   scripts/sagemaker_train_entrypoint.py runs inside the container: YAML -> MLflowTrainingRunner
+
+# CoralNet data preparation:
+uv run python scripts/build_coralnet_manifest.py     # ETL parquets -> raw-image manifest parquet
+uv run python scripts/build_feature_bucket.py        # CoralNet-layout feature-vector bucket
+uv run python scripts/extract_reference_features.py  # stack .fv files into a reference matrix
 ```
 
 CI runs two workflows on every PR — `tests.yml` (unittest suite, Linux/3.12) and
@@ -43,7 +53,7 @@ A library for training and serving PySpacer-based coral-image classifiers, plus
 MERMAID utilities. Flat package layout (no `src/`). Importable code lives under
 `mermaid_classifier/`; `scripts/` are CLI drivers; `tests/` mirror the package.
 
-### The two dependency lanes (`[inference]` vs `[training]`) — load-bearing
+### The two dependency lanes (`[inference]` vs `[training]`)
 
 This split is an architectural invariant, not just packaging. `[inference]` is
 deliberately minimal (`pyspacer` + a **pinned** `scikit-learn==1.5.2`) so serving
@@ -84,8 +94,7 @@ both in memory) → log model, metrics, confusion matrices to MLflow. The
 
 ### Pluggable strategies (`mermaid_classifier/training/`)
 
-Newer than the README. Two strategy families for the long-tailed coral
-taxonomy:
+Two strategy families for the long-tailed coral taxonomy:
 - `sample_weighting/` — class-imbalance weighting via the effective-number
   formulation (Cui et al. 2019). A single `compute_class_weights` factory
   (`effective_number.py` + `options.py`); no registry — there is one strategy.
@@ -104,6 +113,17 @@ metric group is a one-line edit there, not a coordinator change. HTML reports
 render from MLflow runs via `scripts/generate_report.py` +
 `scripts/report_template.html.j2`.
 
+### SageMaker launcher and CoralNet ingest
+
+- `mermaid_classifier/sagemaker/{config,launcher_config}.py` is the host-side config
+  layer behind `scripts/launch_training.py` / `launch_processing.py`. It shares the one
+  `training_config.yaml` with local runs, so there is no recipe duplication between
+  lanes. Cross-repo conventions live in `../mermaid-api/iac/sagemaker-launcher-convention.md`.
+- `mermaid_classifier/coralnet/manifest.py` (+ `scripts/build_coralnet_manifest.py`)
+  builds the raw-image CoralNet manifest Parquet that dataset loading reads from S3.
+- `pyspacer/swap_monitor.py`, `pyspacer/mlflow_model.py`, `pyspacer/annotation.py` and
+  `common/plots.py` support the above; none is an entry point.
+
 ## Conventions and gotchas
 
 - **DuckDB is the ETL engine**, not pandas. SQL transforms via helpers in
@@ -121,8 +141,10 @@ render from MLflow runs via `scripts/generate_report.py` +
   `NoInitDataset` bypasses the S3/API-hitting `TrainingDataset.__init__`;
   `CoralNetMermaidMapping._download_mapping` is mocked.
 - **Config dirs are repo-root-relative**: a committed training config is a
-  `sagemaker/configs/<name>/` dir (`training_config.yaml` + sibling
-  `sources.csv` / `rollups.csv` / `included_labels.csv`). Scripts run from the
+  `sagemaker/configs/<name>/` dir (`training_config.yaml` plus whichever of
+  `sources.csv` / `rollups.csv` / `included_labels.csv` that run needs — the
+  siblings are optional; `coralnet_all_plus_mermaid/` carries no `sources.csv`).
+  Scripts run from the
   repo root; both `classifier_train.py` (local) and the SageMaker launcher load
   a config by repo-root-relative `--config-dir` and share that one
   `training_config.yaml` (single source of truth — no recipe duplication).
@@ -132,21 +154,21 @@ render from MLflow runs via `scripts/generate_report.py` +
 
 ## Releasing a classifier version
 
-Trigger the **Release classifier version** GitHub workflow (`workflow_dispatch`,
-`.github/workflows/release.yml`) with an MLflow model ID and a `vN` tag. It
-fetches `model.pt` + `model.json`, re-validates (load + manifest gate), pushes to
-`s3://mermaid-config/classifier/<vN>/`, and cuts release `vN`. Versions are
-**immutable** — re-running an existing `vN` fails. The inference function image
-is built per model version and tagged `vN-K` (`vN` = model version, `K` =
-serving build): cutting model `vN` is followed by building the inference image
-`vN-1` in mermaid-inference (which bakes `CLASSIFIER_VERSION=vN` and pins the
-matching pyspacer/sklearn). Bump the build `K` for a code/library fix; bump the
-model version `vN` for a retrain. `model.json`'s `trained_with` records the
-torch/sklearn/pyspacer the model was built with, and the function fails loudly
-at load if its runtime doesn't match.
+Run the **Release classifier version** workflow (`.github/workflows/release.yml`);
+`README.md` has the step-by-step. Three invariants matter when reading or changing
+the release path:
+
+- **Versions are immutable.** Re-running an existing `vN` fails.
+- **Two version numbers, not one.** Model version `vN` (a retrain) and serving build
+  `K` (a code/library fix) compose into the inference image tag `vN-K`. Cutting model
+  `vN` is followed by building image `vN-1` in mermaid-inference, which bakes
+  `CLASSIFIER_VERSION=vN`.
+- **`model.json`'s `trained_with`** records the torch/sklearn/pyspacer the model was
+  built with, and the inference function fails loudly at load if its runtime differs.
 
 ## Pointers
 
 - `README.md` — installation matrix, SageMaker vs local tradeoffs, release detail.
 - `docs/` — MLflow setup, SageMaker runbooks, feature-extraction/training-at-scale.
 - `docker/jobs/` — Dockerfiles for SageMaker training (CPU) / feature extraction (GPU).
+- `../docs/adr/` — workspace ADRs behind the compute-lane and artifact-format decisions.

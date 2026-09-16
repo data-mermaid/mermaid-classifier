@@ -3,7 +3,7 @@
 #   docker buildx build --platform linux/amd64 \
 #       -t <ECR_URI>:training-<tag> -f docker/jobs/training.Dockerfile .
 #
-# See docker/jobs/CLAUDE.md for the full build/push recipe.
+# See docs/training_at_scale.md for the full build/push recipe.
 
 FROM python:3.12-slim
 
