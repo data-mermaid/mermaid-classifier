@@ -328,6 +328,63 @@ class ReadMermaidDataTest(BaseTrainTest):
             ["67890", 1500, 2800, same_char_uuid("1"), ""],
         )
 
+    def test_null_growth_form_id_rows_all_survive(self):
+        """
+        growth_form_id arrives from the MERMAID annotations parquet as a
+        real UUID, as NULL (unset growth form), or -- from older exports --
+        as the literal string 'None'. All three row shapes must reach the
+        annotations table (a JOIN USING that fails to match a NULL
+        growth_form_id would silently drop that row), and both the NULL and
+        'None' shapes must normalize to ''.
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        dataset = NoInitDataset()
+
+        mermaid_table = pa.table(
+            {
+                "image_id": pa.array(
+                    [same_char_uuid("3"), same_char_uuid("4"), same_char_uuid("5")],
+                    pa.string(),
+                ),
+                "row": pa.array([3000, 500, 700], pa.int32()),
+                "col": pa.array([2200, 1800, 900], pa.int32()),
+                "benthic_attribute_id": pa.array(
+                    [same_char_uuid("6"), same_char_uuid("7"), same_char_uuid("8")],
+                    pa.string(),
+                ),
+                # Real UUID, NULL, and the legacy 'None' string, in that order.
+                "growth_form_id": pa.array([same_char_uuid("9"), None, "None"], pa.string()),
+                "region_id": pa.array(["", "", ""], pa.string()),
+                "region_name": pa.array(["", "", ""], pa.string()),
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".parquet",
+            delete_on_close=False,
+        ) as parquet_f:
+            parquet_f.close()
+            pq.write_table(mermaid_table, parquet_f.name)
+
+            with override_settings(mermaid_annotations_parquet_pattern=parquet_f.name):
+                dataset.read_mermaid_data()
+
+        result_tuples = dataset.duck_conn.execute(
+            "SELECT image_id, growth_form_id FROM annotations"
+        ).fetchall()
+
+        # All three input rows must survive the read.
+        self.assertEqual(len(result_tuples), 3)
+
+        gf_by_image = dict(result_tuples)
+        self.assertEqual(gf_by_image[same_char_uuid("3")], same_char_uuid("9"))
+        # NULL growth_form_id should have become ''.
+        self.assertEqual(gf_by_image[same_char_uuid("4")], "")
+        # Legacy 'None' growth_form_id should have become ''.
+        self.assertEqual(gf_by_image[same_char_uuid("5")], "")
+
 
 class HandleMissingFeatureVectorsTest(BaseTrainTest):
     @staticmethod
