@@ -37,6 +37,10 @@ uv run python scripts/launch_processing.py           # submit ProcessingJob(s)
 uv run python scripts/build_coralnet_manifest.py     # ETL parquets -> raw-image manifest parquet
 uv run python scripts/build_feature_bucket.py        # CoralNet-layout feature-vector bucket
 uv run python scripts/extract_reference_features.py  # stack .fv files into a reference matrix
+
+# Region-mismatch probe (see region_eval below): build once, evaluate per model
+AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir region_probe/v1 --seed 1
+AWS_PROFILE=wcs-admin uv run python scripts/evaluate_region_probe.py --probe-dir region_probe/v1 --model v1=../models/v1 --out-dir region_probe/reports
 ```
 
 CI runs two workflows on every PR — `tests.yml` (unittest suite, Linux/3.12) and
@@ -105,13 +109,28 @@ Two strategy families for the long-tailed coral taxonomy:
 ### Metrics (`pyspacer/metrics/`)
 
 Post-training metric groups (classification, calibration, cover, probability,
-ranking, taxonomic, per_source) orchestrated by `MetricsCoordinator` /
-`MetricsContext`. The coordinator iterates a declarative registry
-(`registry.py`: the ordered `METRIC_GROUPS` list + `applicable_metric_groups`,
-which gates groups on available context like `dataset`/`val_proba`), so adding a
-metric group is a one-line edit there, not a coordinator change. HTML reports
-render from MLflow runs via `scripts/generate_report.py` +
-`scripts/report_template.html.j2`.
+ranking, taxonomic, per_source, region, region_probe) orchestrated by
+`MetricsCoordinator` / `MetricsContext`. The coordinator iterates a declarative
+registry (`registry.py`: the ordered `METRIC_GROUPS` list +
+`applicable_metric_groups`, which gates groups on available context like
+`dataset`/`val_proba`/`clf`), so adding a metric group is a one-line edit
+there, not a coordinator change. HTML reports render from MLflow runs via
+`scripts/generate_report.py` + `scripts/report_template.html.j2`.
+
+### Region-mismatch evaluation (`mermaid_classifier/region_eval/`)
+
+Measures how often the classifier applies a benthic-attribute label from a
+region that label does not occur in, and prices the candidate fixes —
+a region-blind permutation baseline, a masking counterfactual, within-branch
+share, and confidence stratification (`decisions.py`). Scoring runs against a
+**frozen** probe (`probe_set.py`): the sampled points, the region map, display
+names, taxonomic ancestry, and corpus-wide annotation counts are all pinned
+and hashed, so upstream taxonomy curation cannot move a published score.
+`score.py` separately reports a drift diagnostic when the live region map has
+moved since the probe was frozen. The pure modules (`metrics.py`, `triage.py`,
+`decisions.py`) take the region map as caller-supplied frozen data and never
+import the live benthic-attribute library. Feeds the `region` / `region_probe`
+groups above; commands are in the Commands block.
 
 ### SageMaker launcher and CoralNet ingest
 
@@ -126,6 +145,16 @@ render from MLflow runs via `scripts/generate_report.py` +
 
 ## Conventions and gotchas
 
+- **`unittest -v <package>` silently runs 0 tests**: a bare package name
+  (`region_eval`, `common`, …) exposes nothing to unittest's loader; name
+  modules explicitly (`region_eval.test_metrics`). The full suite does
+  discover them, so a green full-suite run is not evidence that a narrower
+  invocation ran anything.
+- **Importing from `pyspacer/metrics/` pulls in boto3, duckdb, matplotlib,
+  mlflow, sklearn, and spacer** — its `__init__.py` imports
+  `MetricsCoordinator`, which reaches every metric group, including
+  `region_probe`'s reach into `region_eval`. A lightweight consumer must not
+  import a helper from there.
 - **DuckDB is the ETL engine**, not pandas. SQL transforms via helpers in
   `common/duckdb_utils.py` (temp-table context managers, column transforms,
   batched iteration).
