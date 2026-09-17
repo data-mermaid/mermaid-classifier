@@ -49,12 +49,15 @@ import dataclasses
 import json
 import logging
 import math
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import boto3
 import numpy as np
 import pandas as pd
+from botocore.exceptions import ClientError
 from numpy.typing import NDArray
 
 from mermaid_classifier.common.benthic_attributes import (
@@ -62,6 +65,7 @@ from mermaid_classifier.common.benthic_attributes import (
     get_benthic_attribute_library,
     split_ba_gf,
 )
+from mermaid_classifier.common.s3_utils import is_s3_uri, parse_s3_uri
 from mermaid_classifier.pyspacer.inference import load_predictor
 from mermaid_classifier.region_eval.decisions import (
     DEFAULT_N_PERMUTATIONS,
@@ -106,6 +110,7 @@ from mermaid_classifier.region_eval.probe_set import (
     PROBE_REGIONS_FILE,
     NameSnapshot,
     ancestry_snapshot_hash,
+    ground_truth_counts_hash,
     name_snapshot_hash,
     probe_content_hash,
     region_snapshot_hash,
@@ -117,6 +122,8 @@ from mermaid_classifier.region_eval.triage import (
 )
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_REGION = "us-east-1"
 
 SUMMARY_FILE = "summary.csv"
 MANIFEST_FILE = "manifest.json"
@@ -395,21 +402,71 @@ def read_feature_cache(path: Path) -> ProbeFeatures:
     )
 
 
+# Every file scripts/build_region_probe.py may write under --out-dir, in the
+# order an s3:// probe dir is downloaded. probe_points.parquet and
+# ba_regions.json are load_probe's hard requirements; every other name here is
+# optional, exactly as the local path already treats a missing one.
+_PROBE_FILE_NAMES = (
+    PROBE_POINTS_FILE,
+    PROBE_REGIONS_FILE,
+    PROBE_COUNTS_FILE,
+    PROBE_NAMES_FILE,
+    PROBE_ANCESTRY_FILE,
+    PROBE_MANIFEST_FILE,
+    PROBE_FEATURES_FILE,
+)
+_REQUIRED_PROBE_FILE_NAMES = frozenset({PROBE_POINTS_FILE, PROBE_REGIONS_FILE})
+
+_NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
+
+
+def _download_probe_dir(uri: str, destination: Path, *, region_name: str) -> None:
+    """Download every probe file published at `uri` into `destination`.
+
+    A 404 on an optional file is skipped, the same tolerance the local path
+    gives a missing one via `.exists()`; a 404 on `probe_points.parquet` or
+    `ba_regions.json` propagates, since both are read unconditionally below.
+    """
+    bucket, prefix = parse_s3_uri(uri)
+    prefix = prefix.rstrip("/") + "/"
+    client = boto3.client("s3", region_name=region_name)
+    for name in _PROBE_FILE_NAMES:
+        try:
+            client.download_file(bucket, f"{prefix}{name}", str(destination / name))
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            if name in _REQUIRED_PROBE_FILE_NAMES or code not in _NOT_FOUND_CODES:
+                raise
+
+
 def load_probe(
-    probe_dir: Path,
+    probe_dir: Path | str,
     *,
     download_dir: Path | None = None,
     bucket: str = DEFAULT_FEATURE_BUCKET,
     prefix: str = DEFAULT_FEATURE_PREFIX,
     workers: int = DEFAULT_WORKERS,
+    region_name: str = DEFAULT_REGION,
 ) -> LoadedProbe:
     """Load the probe points, the frozen region map and the feature cache.
+
+    `probe_dir` is a local directory, or the s3://bucket/prefix/ one was
+    published to (`scripts/build_region_probe.py --publish`). An s3 one is
+    downloaded into a scratch directory that does not outlive this call, then
+    read exactly as a local directory would be -- the content-hash check
+    below runs unchanged regardless of where the pair came from.
 
     The cache is built into `download_dir` and written back when the probe
     dir has none; without a directory a missing cache raises, since silently
     scoring zero points would read as a model with no incidents. Downloads run
     in parallel into `download_dir` through `download_features_parallel`.
-    `download_dir` is a scratch directory that does not outlive the run.
+    `download_dir` is a scratch directory that does not outlive the run. For
+    an s3:// probe this means the rebuilt cache is written into that same
+    scratch directory and discarded when the call returns, rather than beside
+    `probe_points.parquet` the way a local probe dir keeps it -- a probe
+    published without `probe_features.npz` is rebuilt from S3 on every run
+    that scores it. Publish with features included when the same probe will
+    be scored repeatedly.
 
     The cache carries the hash of the exact rows it was built from. A parquet
     that hashes to something else means the directory holds two selections at
@@ -417,6 +474,45 @@ def load_probe(
     for a different selection, or a `--skip-features` rebuild changed a value
     the cache still carries the old version of -- so the cache is refused
     rather than scored against a point it does not describe.
+    """
+    if is_s3_uri(probe_dir):
+        with tempfile.TemporaryDirectory() as scratch:
+            local_dir = Path(scratch)
+            _download_probe_dir(probe_dir, local_dir, region_name=region_name)
+            return _load_local_probe(
+                local_dir,
+                source=str(probe_dir),
+                download_dir=download_dir,
+                bucket=bucket,
+                prefix=prefix,
+                workers=workers,
+            )
+    return _load_local_probe(
+        Path(probe_dir),
+        source=str(probe_dir),
+        download_dir=download_dir,
+        bucket=bucket,
+        prefix=prefix,
+        workers=workers,
+    )
+
+
+def _load_local_probe(
+    probe_dir: Path,
+    *,
+    source: str,
+    download_dir: Path | None,
+    bucket: str,
+    prefix: str,
+    workers: int,
+) -> LoadedProbe:
+    """`load_probe`'s local-directory path, read from `probe_dir` as is.
+
+    `source` is what the caller passed to `load_probe` -- `probe_dir` itself
+    for a local directory, or the original s3:// URI when `probe_dir` is a
+    scratch download that will not outlive this call. Error messages name
+    `source`, since a caller of the s3 path never saw the scratch path and it
+    no longer exists by the time an error reaches them.
     """
     rows = pd.read_parquet(probe_dir / PROBE_POINTS_FILE)
     missing = [column for column in PROBE_COLUMNS if column not in rows.columns]
@@ -447,9 +543,13 @@ def load_probe(
     if features_path.exists():
         features = read_feature_cache(features_path)
     elif download_dir is None:
+        remedy = (
+            "republish the probe with features included"
+            if is_s3_uri(source)
+            else "build the cache with scripts/build_region_probe.py first"
+        )
         raise FileNotFoundError(
-            f"{features_path} does not exist and no download_dir was given;"
-            " build the cache with scripts/build_region_probe.py first"
+            f"{source} has no {PROBE_FEATURES_FILE} and no download_dir was given; {remedy}"
         )
     else:
         cache = build_feature_cache(
@@ -743,6 +843,12 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
                 else ancestry_snapshot_hash(probe.ancestry_by_attribute)
             ),
             "recorded_ancestry_hash": probe.manifest.get("ancestry_hash"),
+            "ground_truth_counts_hash": (
+                None
+                if probe.ground_truth_counts is None
+                else ground_truth_counts_hash(probe.ground_truth_counts)
+            ),
+            "recorded_ground_truth_counts_hash": probe.manifest.get("ground_truth_counts_hash"),
             "n_points_cached": int(probe.features.n_points),
             "n_rows": int(len(probe.rows)),
         },

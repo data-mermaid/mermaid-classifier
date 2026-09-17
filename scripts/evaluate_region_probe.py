@@ -11,9 +11,10 @@ records; one carrying no names renders ids, and one carrying no ancestry
 leaves the within-branch share uncomputed. Both are recorded there too.
 
 A model path is either a local directory holding model.pt + model.json, or the
-s3:// prefix of a released version. The feature cache is downloaded and
-written back when --probe-dir has none. Nothing is uploaded: publishing a
-score is a deliberate step of its own.
+s3:// prefix of a released version. --probe-dir is likewise a local directory
+or the s3://bucket/prefix/ a probe was published to. The feature cache is
+downloaded and written back when --probe-dir has none. Nothing is uploaded:
+publishing a score is a deliberate step of its own.
 
 Run: AWS_PROFILE=wcs-admin uv run python scripts/evaluate_region_probe.py \
         --probe-dir region_probe/v1 \
@@ -39,10 +40,10 @@ import logging
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
 
 import boto3
 
+from mermaid_classifier.common.s3_utils import is_s3_uri, parse_s3_uri
 from mermaid_classifier.region_eval.features import (
     DEFAULT_FEATURE_BUCKET,
     DEFAULT_FEATURE_PREFIX,
@@ -63,14 +64,6 @@ logger = logging.getLogger("evaluate_region_probe")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGION = "us-east-1"
 ARTIFACT_FILES = ("model.pt", "model.json")
-
-
-def parse_s3_uri(uri: str) -> tuple[str, str]:
-    """Split an s3://bucket/key URI into (bucket, key)."""
-    parsed = urlparse(uri)
-    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
-        raise ValueError(f"not an s3://bucket/key URI: {uri!r}")
-    return parsed.netloc, parsed.path.lstrip("/")
 
 
 def parse_model_spec(spec: str) -> tuple[str, str]:
@@ -114,7 +107,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="a model to score; PATH is a local dir or s3:// prefix holding"
         " model.pt + model.json (repeatable, and repeats are scored paired)",
     )
-    parser.add_argument("--probe-dir", type=Path, required=True)
+    parser.add_argument(
+        "--probe-dir",
+        required=True,
+        help="a local directory or an s3://bucket/prefix/ holding a probe"
+        " scripts/build_region_probe.py wrote (and --publish may have copied to S3)",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--alpha", type=float, default=RegionMetricsOptions().alpha)
     parser.add_argument("--n-resamples", type=int, default=RegionMetricsOptions().n_resamples)
@@ -139,9 +137,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     specs = [parse_model_spec(spec) for spec in args.models]
 
-    features_path = args.probe_dir / PROBE_FEATURES_FILE
-    if not features_path.exists():
-        logger.info("no %s; downloading feature vectors", features_path)
+    if not is_s3_uri(args.probe_dir):
+        features_path = Path(args.probe_dir) / PROBE_FEATURES_FILE
+        if not features_path.exists():
+            logger.info("no %s; downloading feature vectors", features_path)
     with tempfile.TemporaryDirectory() as downloads:
         probe = load_probe(
             args.probe_dir,
@@ -149,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             bucket=args.feature_bucket,
             prefix=args.feature_prefix,
             workers=args.workers,
+            region_name=args.aws_region,
         )
     logger.info(
         "probe %s: %d cached point(s), content_hash=%s",

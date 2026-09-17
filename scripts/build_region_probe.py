@@ -7,8 +7,9 @@ and taxonomic ancestry alongside it, and downloads each selected point's
 feature vector into one aligned matrix. Scoring a model on the probe afterwards
 touches neither S3 nor the MERMAID API.
 
-Everything is written under --out-dir. Nothing is uploaded: publishing a probe
-version is a separate, deliberate step.
+Everything is written under --out-dir. Nothing is uploaded unless --publish
+names an s3://bucket/prefix/ to copy the build to; publishing a probe version
+is a separate, deliberate step and --publish carries no default.
 
 Run: AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir region_probe/v1
 
@@ -31,7 +32,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
 
 import boto3
 
@@ -41,6 +41,7 @@ from mermaid_classifier.common.benthic_attributes import (
     get_growth_form_library,
     get_region_library,
 )
+from mermaid_classifier.common.s3_utils import parse_s3_uri
 from mermaid_classifier.region_eval.features import (
     DEFAULT_FEATURE_BUCKET,
     DEFAULT_FEATURE_PREFIX,
@@ -75,14 +76,6 @@ logger = logging.getLogger("build_region_probe")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SOURCE_URI = "s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet"
 DEFAULT_REGION = "us-east-1"
-
-
-def parse_s3_uri(uri: str) -> tuple[str, str]:
-    """Split an s3://bucket/key URI into (bucket, key)."""
-    parsed = urlparse(uri)
-    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
-        raise ValueError(f"not an s3://bucket/key URI: {uri!r}")
-    return parsed.netloc, parsed.path.lstrip("/")
 
 
 def builder_git_sha() -> str:
@@ -134,6 +127,57 @@ def fetch_source(uri: str, destination: Path, *, region_name: str) -> str | None
     return etag
 
 
+def publish_probe(out_dir: Path, uri: str, *, region_name: str = DEFAULT_REGION) -> list[str]:
+    """Upload every file the build wrote under `out_dir` to `uri`.
+
+    Refuses when the prefix already holds any object: a published probe
+    version is immutable, so two scores can claim a shared baseline only when
+    neither has silently overwritten the other. `probe_features.npz` uploads
+    only when `out_dir` carries one, which a `--skip-features` build never
+    writes.
+
+    Known limitation: the emptiness check above is check-then-act, not
+    atomic, so two `--publish` runs racing on the same fresh prefix can both
+    observe it empty and both proceed, interleaving files from two builds
+    under one version. A per-object conditional write
+    (`ExtraArgs={"IfNoneMatch": "*"}` on `upload_file`) would close that
+    window, but the installed s3transfer rejects `IfNoneMatch` before any
+    request reaches S3 -- it is not in `TransferManager.ALLOWED_UPLOAD_ARGS`
+    -- so `upload_file` cannot carry it. This tool is built for one operator
+    publishing one version at a time; two people, or two automated runs,
+    cutting the same version simultaneously is the race this leaves open.
+    """
+    bucket, prefix = parse_s3_uri(uri)
+    prefix = prefix.rstrip("/") + "/"
+    client = boto3.client("s3", region_name=region_name)
+
+    existing = client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+    found = [item["Key"] for item in existing.get("Contents", [])]
+    if found:
+        raise FileExistsError(
+            f"s3://{bucket}/{prefix} already holds {found[0]!r}; a published probe"
+            " version is immutable. Publish to a new version prefix instead."
+        )
+
+    names = [
+        PROBE_POINTS_FILE,
+        PROBE_REGIONS_FILE,
+        PROBE_COUNTS_FILE,
+        PROBE_NAMES_FILE,
+        PROBE_ANCESTRY_FILE,
+        PROBE_MANIFEST_FILE,
+    ]
+    if (out_dir / PROBE_FEATURES_FILE).exists():
+        names.append(PROBE_FEATURES_FILE)
+
+    uploaded: list[str] = []
+    for name in names:
+        key = f"{prefix}{name}"
+        client.upload_file(str(out_dir / name), bucket, key)
+        uploaded.append(f"s3://{bucket}/{key}")
+    return uploaded
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "region_probe")
@@ -156,6 +200,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--skip-features",
         action="store_true",
         help="select and freeze the points only; download no feature vectors",
+    )
+    parser.add_argument(
+        "--publish",
+        default=None,
+        metavar="S3_URI",
+        help="s3://bucket/prefix/ to upload every file under --out-dir to, once"
+        " the build is complete; refuses if the prefix already holds anything."
+        " No default -- publishing a probe version is a deliberate,"
+        " one-time act, never a fallback destination.",
     )
     return parser.parse_args(argv)
 
@@ -257,6 +310,11 @@ def main(argv: list[str] | None = None) -> int:
         probe.content_hash,
     )
     logger.info("wrote %s", out_dir)
+
+    if args.publish:
+        for uri in publish_probe(out_dir, args.publish, region_name=args.aws_region):
+            logger.info("published %s", uri)
+
     return 0
 
 

@@ -46,6 +46,7 @@ from unittest import mock
 
 import numpy as np
 import pandas as pd
+from botocore.exceptions import ClientError
 from pyspacer._calibrated_model_fixture import make_calibrated_model
 
 from mermaid_classifier.pyspacer.inference import export_artifact
@@ -61,6 +62,7 @@ from mermaid_classifier.region_eval.probe_set import (
     PROBE_COLUMNS,
     NameSnapshot,
     ancestry_snapshot_hash,
+    ground_truth_counts_hash,
     name_snapshot_hash,
     probe_content_hash,
 )
@@ -224,6 +226,20 @@ def _feature_file_bytes(points: list[tuple[int, int]], *, dim: int = FEATURE_DIM
     return buffer.getvalue()
 
 
+def _flat_ground_truth_counts(counts: dict[str, dict[str, int]]) -> dict[tuple[str, str], int]:
+    """Nested (attribute -> region -> count) as the flat mapping the hash helper takes.
+
+    Mirrors `score.read_ground_truth_counts`, so a hash computed here over the
+    same `counts` a probe writes to `ba_region_counts.json` matches the hash
+    `load_probe` recomputes after reading that file back.
+    """
+    return {
+        (attribute_id, region_id): count
+        for attribute_id, by_region in counts.items()
+        for region_id, count in by_region.items()
+    }
+
+
 def _write_probe(
     probe_dir: Path,
     features: np.ndarray,
@@ -265,6 +281,11 @@ def _write_probe(
                 "n_images": rows["image_id"].nunique(),
                 "names_hash": None if names is None else name_snapshot_hash(names),
                 "ancestry_hash": (None if ancestry is None else ancestry_snapshot_hash(ancestry)),
+                "ground_truth_counts_hash": (
+                    None
+                    if counts is None
+                    else ground_truth_counts_hash(_flat_ground_truth_counts(counts))
+                ),
             }
         )
     )
@@ -744,6 +765,154 @@ class ProbeIntegrityTest(unittest.TestCase):
         self.assertEqual(str(archive["content_hash"]), probe_content_hash(rows))
 
 
+class _StubS3Client:
+    """A local double for the `download_file` calls `load_probe` makes.
+
+    A present key writes its bytes to `Filename`; an absent one raises the
+    same `ClientError` shape a missing S3 object does, so `load_probe`'s
+    404-is-optional handling runs against the real exception type rather than
+    an assumption about it. `errors` raises a caller-supplied `ClientError`
+    for a given key regardless of whether it is also present in `objects`,
+    for exercising a code that is not 404 -- a 403 or a throttle -- on a file
+    the 404-only tolerance must not swallow.
+    """
+
+    def __init__(self, objects: dict[str, bytes], *, errors: dict[str, ClientError] | None = None):
+        self.objects = objects
+        self.errors = errors or {}
+        self.download_file_calls: list[tuple[str, str, str]] = []
+
+    def download_file(self, bucket: str, key: str, filename: str) -> None:
+        self.download_file_calls.append((bucket, key, filename))
+        if key in self.errors:
+            raise self.errors[key]
+        if key not in self.objects:
+            raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "GetObject")
+        Path(filename).write_bytes(self.objects[key])
+
+
+def _s3_objects(
+    probe_dir: Path, prefix: str, *, exclude: frozenset[str] = frozenset()
+) -> dict[str, bytes]:
+    """Every file under `probe_dir`, keyed as `load_probe` would look it up."""
+    return {
+        f"{prefix}{path.name}": path.read_bytes()
+        for path in probe_dir.iterdir()
+        if path.is_file() and path.name not in exclude
+    }
+
+
+class S3ProbeLoadingTest(unittest.TestCase):
+    """`load_probe` given an s3://bucket/prefix/ URI instead of a local dir.
+
+    The stub never touches the network; it serves the same bytes a local
+    probe dir holds, so the s3 path is checked against the local path it must
+    reproduce rather than against a guess at what S3 would return.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        _model, batch = make_calibrated_model()
+        self.features = np.asarray(batch)[:N_POINTS]
+        self.probe_dir = self.root / "probe"
+        _write_probe(self.probe_dir, self.features, counts=CORPUS_COUNTS)
+
+    def test_reads_the_same_probe_as_the_local_equivalent(self):
+        local_probe = load_probe(self.probe_dir)
+
+        client = _StubS3Client(_s3_objects(self.probe_dir, "region_probe/v1/"))
+        with mock.patch("mermaid_classifier.region_eval.score.boto3.client", return_value=client):
+            s3_probe = load_probe("s3://bucket/region_probe/v1/")
+
+        self.assertEqual(s3_probe.content_hash, local_probe.content_hash)
+        self.assertEqual(s3_probe.region_snapshot_hash, local_probe.region_snapshot_hash)
+        self.assertEqual(s3_probe.features.n_points, local_probe.features.n_points)
+        self.assertEqual(s3_probe.manifest, local_probe.manifest)
+        pd.testing.assert_frame_equal(s3_probe.rows, local_probe.rows)
+
+        downloaded = {key for _, key, _ in client.download_file_calls}
+        self.assertEqual(
+            downloaded,
+            {
+                f"region_probe/v1/{name}"
+                for name in (
+                    "probe_points.parquet",
+                    "ba_regions.json",
+                    "ba_region_counts.json",
+                    "names.json",
+                    "ba_ancestry.json",
+                    "manifest.json",
+                    "probe_features.npz",
+                )
+            },
+        )
+
+    def test_a_probe_missing_its_optional_snapshots_still_loads_from_s3(self):
+        """A probe published before names/ancestry/counts were frozen has no
+        object at those keys. A 404 on any of the three is exactly what a
+        missing local file already tolerates, so the s3 path must too.
+        """
+        bare_dir = self.root / "probe_bare"
+        _write_probe(bare_dir, self.features, counts=None, names=None, ancestry=None)
+        local_probe = load_probe(bare_dir)
+
+        objects = _s3_objects(
+            bare_dir,
+            "region_probe/v2/",
+            exclude=frozenset({"ba_region_counts.json", "names.json", "ba_ancestry.json"}),
+        )
+        client = _StubS3Client(objects)
+        with mock.patch("mermaid_classifier.region_eval.score.boto3.client", return_value=client):
+            s3_probe = load_probe("s3://bucket/region_probe/v2/")
+
+        self.assertEqual(s3_probe.content_hash, local_probe.content_hash)
+        self.assertIsNone(s3_probe.ground_truth_counts)
+        self.assertFalse(s3_probe.names_present)
+        self.assertIsNone(s3_probe.ancestry_by_attribute)
+
+    def test_a_non_404_error_on_an_optional_file_propagates(self):
+        """A 403 or a throttle on an optional file is not "this probe
+        predates that snapshot" -- only a 404 means absence. `load_probe`
+        must propagate anything else rather than loading a probe that has
+        silently degraded on an error it never diagnosed.
+        """
+        objects = _s3_objects(self.probe_dir, "region_probe/v4/")
+        forbidden = ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "GetObject")
+        client = _StubS3Client(objects, errors={"region_probe/v4/ba_region_counts.json": forbidden})
+        with (
+            mock.patch("mermaid_classifier.region_eval.score.boto3.client", return_value=client),
+            self.assertRaises(ClientError),
+        ):
+            load_probe("s3://bucket/region_probe/v4/")
+
+    def test_the_content_hash_check_fires_on_a_mismatched_pair_from_s3(self):
+        """A parquet from one probe published beside another's feature cache
+        is the two-selections-at-once failure `load_probe` refuses locally;
+        the s3 path must refuse it identically rather than trusting whatever
+        bytes happen to sit under the prefix.
+        """
+        other_points = [
+            (f"o{image_id}", region_id, attribute_id)
+            for image_id, region_id, attribute_id in PROBE_POINTS
+        ]
+        mismatched_dir = self.root / "mismatched"
+        _write_probe(mismatched_dir, self.features, points=other_points)
+
+        objects = _s3_objects(self.probe_dir, "region_probe/v3/")
+        objects["region_probe/v3/probe_features.npz"] = (
+            mismatched_dir / "probe_features.npz"
+        ).read_bytes()
+
+        client = _StubS3Client(objects)
+        with (
+            mock.patch("mermaid_classifier.region_eval.score.boto3.client", return_value=client),
+            self.assertRaisesRegex(ValueError, "content_hash"),
+        ):
+            load_probe("s3://bucket/region_probe/v3/")
+
+
 class NameResolutionTest(unittest.TestCase):
     """The names frozen with the probe, rendered into the artifacts.
 
@@ -830,6 +999,44 @@ class NameResolutionTest(unittest.TestCase):
         self.assertEqual(
             manifest["probe"]["ancestry_hash"], ancestry_snapshot_hash(ONE_BRANCH_ANCESTRY)
         )
+
+    def test_manifest_records_the_frozen_ground_truth_counts_hash(self):
+        """A partial publish dropping only `ba_region_counts.json` must be
+        detectable the same way a dropped names or ancestry snapshot already
+        is: from the recorded hash disagreeing with the computed one, rather
+        than silently falling back and shifting the triage split with only a
+        log line to show for it.
+        """
+        manifest = json.loads((self.out_dir / "manifest.json").read_text())
+        expected = ground_truth_counts_hash(_flat_ground_truth_counts(CORPUS_COUNTS))
+        self.assertEqual(manifest["probe"]["ground_truth_counts_hash"], expected)
+        self.assertEqual(manifest["probe"]["recorded_ground_truth_counts_hash"], expected)
+
+    def test_a_probe_without_frozen_counts_leaves_the_hash_null(self):
+        """A probe built before `ba_region_counts.json` was frozen must leave
+        both hashes null rather than one computed against an empty
+        substitute -- a null reads as absent, where a hash of nothing would
+        read as a real, comparable snapshot.
+        """
+        probe_dir = self.root / "probe_no_counts"
+        _write_probe(probe_dir, self.features, counts=None)
+        probe = load_probe(probe_dir)
+        model_pt, model_json = _export_model(self.root / "model_no_counts")
+        score = score_model(
+            "no_counts",
+            model_pt_path=model_pt,
+            model_json_path=model_json,
+            probe=probe,
+            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+            live_region_map_loader=_live_map(),
+            n_permutations=N_PERMUTATIONS,
+        )
+        out_dir = self.root / "out_no_counts"
+        write_report(score, out_dir)
+
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        self.assertIsNone(manifest["probe"]["ground_truth_counts_hash"])
+        self.assertIsNone(manifest["probe"]["recorded_ground_truth_counts_hash"])
 
     def test_a_probe_frozen_without_names_renders_ids(self):
         """A probe built before the names were frozen still scores; what it
