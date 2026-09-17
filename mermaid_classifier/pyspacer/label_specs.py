@@ -7,6 +7,7 @@ CSV-defined label specifications for the training pipeline.
 - ImageExclusionFilter: withhold specific images from training data.
 """
 
+import logging
 import typing
 
 import duckdb
@@ -24,13 +25,8 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
-from mermaid_classifier.pyspacer.utils import logging_config_for_script
 
-logger = logging_config_for_script("train")
-
-# How many unmatched image ids a warning names. Enough to recognise an id
-# format that has drifted, short enough to read in a training log.
-UNMATCHED_ID_SAMPLE_SIZE = 10
+logger = logging.getLogger(__name__)
 
 
 class LabelFilter(CsvSpec):
@@ -255,14 +251,17 @@ class ImageExclusionFilter(CsvSpec):
     ) -> None:
         """
         Remove rows from the given DuckDB table whose image_id is in
-        this spec's exclusion list.
+        this spec's exclusion list. A NULL image_id can never be a listed
+        exclusion (the image_id column disallows blanks), so it always
+        survives this filter.
 
-        Logs the number of annotations and distinct images removed, and
-        every listed id that matched no row, a sample of them by name.
-        Any unmatched id is a warning: an id format that has drifted from
-        the table's image_id leaves those images in training while the run
-        reads as though they were withheld, and a list that matches nothing
-        at all carries the harder message.
+        Logs how many of the listed ids matched an image_id in this
+        dataset. An id format that has drifted from the table's image_id
+        leaves those images in training while the run reads as though
+        they were withheld, so this count is worth seeing even when it's
+        zero -- and a spec that matches nothing at all logs at WARNING,
+        since that means a held-out set is silently missing from the data
+        it's meant to protect.
         """
         if self.is_empty():
             return
@@ -278,65 +277,28 @@ class ImageExclusionFilter(CsvSpec):
 
             # A COUNT(*) query always returns exactly one row, so fetchall()[0]
             # avoids fetchone()'s `tuple[Any, ...] | None` return type.
-            annotations_removed, images_removed = duck_conn.execute(
-                f"SELECT count(*), count(DISTINCT t.{image_id_column_name})"
+            matched_count = duck_conn.execute(
+                f"SELECT count(DISTINCT t.{image_id_column_name})"
                 f" FROM {duck_table_name} t"
                 f" JOIN {excluded_table_name} e"
                 f"  USING ({image_id_column_name})"
-            ).fetchall()[0]
+            ).fetchall()[0][0]
 
-            unmatched_count = len(self.excluded_image_ids) - images_removed
-            unmatched_sample: list[str] = []
-            if unmatched_count > 0:
-                # Sampled before the delete: afterwards no listed id
-                # matches a row, whether it did or not.
-                unmatched_sample = [
-                    row[0]
-                    for row in duck_conn.execute(
-                        f"SELECT e.{image_id_column_name}"
-                        f" FROM {excluded_table_name} e"
-                        f" LEFT JOIN {duck_table_name} t"
-                        f"  USING ({image_id_column_name})"
-                        f" WHERE t.{image_id_column_name} IS NULL"
-                        f" ORDER BY e.{image_id_column_name}"
-                        f" LIMIT {UNMATCHED_ID_SAMPLE_SIZE}"
-                    ).fetchall()
-                ]
-
+            # An explicit anti-join, not duckdb_filter_on_column: that
+            # helper's JOIN ... USING never matches NULL to NULL, so it
+            # drops a NULL image_id outright. Excluded ids are never NULL
+            # (image_id disallows blanks), so NOT IN against them is safe.
             duck_conn.execute(
                 f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-                f" SELECT t.*"
-                f" FROM {duck_table_name} t"
-                f" LEFT JOIN {excluded_table_name} e"
-                f"  USING ({image_id_column_name})"
-                f" WHERE e.{image_id_column_name} IS NULL"
+                f" SELECT * FROM {duck_table_name}"
+                f" WHERE {image_id_column_name} IS NULL"
+                f"  OR {image_id_column_name} NOT IN"
+                f"   (SELECT {image_id_column_name} FROM {excluded_table_name})"
             )
 
-        if images_removed == 0:
-            logger.warning(
-                "Image exclusion spec listed %s image id(s), but none"
-                " matched an image_id in this dataset — the exclusion"
-                " had no effect. Unmatched ids include: %s",
-                len(self.excluded_image_ids),
-                ", ".join(unmatched_sample),
-            )
-        elif unmatched_count > 0:
-            logger.warning(
-                "Image exclusion spec removed %s annotation(s) across %s"
-                " image(s), but %s of %s listed id(s) matched no image in"
-                " this dataset and stay in the training data."
-                " Unmatched ids include: %s",
-                annotations_removed,
-                images_removed,
-                unmatched_count,
-                len(self.excluded_image_ids),
-                ", ".join(unmatched_sample),
-            )
-        else:
-            logger.info(
-                "Image exclusion spec removed %s annotation(s) across"
-                " %s image(s); every one of the %s listed id(s) matched.",
-                annotations_removed,
-                images_removed,
-                len(self.excluded_image_ids),
-            )
+        logger.log(
+            logging.WARNING if matched_count == 0 else logging.INFO,
+            "Image exclusion spec matched %s of %s listed image id(s) in this dataset.",
+            matched_count,
+            len(self.excluded_image_ids),
+        )

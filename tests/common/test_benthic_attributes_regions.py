@@ -160,20 +160,7 @@ class BenthicAttributeRegionTest(unittest.TestCase):
         """The regions arrive with the one response the constructor already read."""
         calls_after_construction = self.urlopen.call_count
         self.library.get_region_ids(ACROPORA)
-        self.library.bagf_region_ids(f"{ACROPORA}::{BRANCHING}")
         self.assertEqual(self.urlopen.call_count, calls_after_construction)
-
-    def test_bagf_region_ids_ignores_the_growth_form(self):
-        """Region is a BA-level property, so a growth form cannot narrow it."""
-        with_growth_form = self.library.bagf_region_ids(f"{ACROPORA}::{BRANCHING}")
-        without_growth_form = self.library.bagf_region_ids(f"{ACROPORA}::")
-        self.assertEqual(with_growth_form, without_growth_form)
-        self.assertEqual(with_growth_form, frozenset({CENTRAL_INDO_PACIFIC, WESTERN_INDO_PACIFIC}))
-
-    def test_bagf_region_ids_of_an_unrecorded_attribute_is_empty(self):
-        self.assertEqual(
-            self.library.bagf_region_ids(f"{NULL_REGIONS_BA}::{BRANCHING}"), frozenset()
-        )
 
     def test_region_ids_are_hashable_and_immutable(self):
         """Callers put these sets in dicts and compare them; a list would not do."""

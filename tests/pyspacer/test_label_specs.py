@@ -253,6 +253,10 @@ class CNSourceFilterTest(unittest.TestCase):
 # ImageExclusionFilter
 # ---------------------------------------------------------------------------
 
+# label_specs.py logs through its own module logger, not the "train" logger
+# that dataset.py and runner.py configure at import.
+LABEL_SPECS_LOGGER = "mermaid_classifier.pyspacer.label_specs"
+
 
 def _seed_image_annotations(
     conn: duckdb.DuckDBPyConnection,
@@ -276,7 +280,7 @@ class ImageExclusionFilterInDuckDBTest(unittest.TestCase):
         _seed_image_annotations(conn, ["img1", "img2", "img3"])
 
         f = ImageExclusionFilter(StringIO("image_id\nimg1\nimg3\n"))
-        with self.assertLogs(logger="train", level="INFO"):
+        with self.assertLogs(logger=LABEL_SPECS_LOGGER, level="INFO"):
             f.filter_in_duckdb(conn, "annotations")
 
         remaining_ids = {
@@ -308,7 +312,7 @@ class ImageExclusionFilterInDuckDBTest(unittest.TestCase):
         _seed_image_annotations(conn, ["img1", "img2"])
 
         f = ImageExclusionFilter(StringIO("image_id\nimg1\nimg_absent\n"))
-        with self.assertLogs(logger="train", level="INFO") as log_ctx:
+        with self.assertLogs(logger=LABEL_SPECS_LOGGER, level="INFO") as log_ctx:
             f.filter_in_duckdb(conn, "annotations")
 
         remaining_ids = {
@@ -321,53 +325,22 @@ class ImageExclusionFilterInDuckDBTest(unittest.TestCase):
             msg=f"expected unmatched-count info in logs, got: {log_ctx.output}",
         )
 
-    def test_a_partly_unmatched_list_is_loud_and_names_what_it_missed(self):
-        """An id format that has drifted matches a handful and leaves the rest
-        in training, which reads as a held-out population that is not one. The
-        images that did match still go."""
-        conn = _make_conn()
-        _seed_image_annotations(conn, ["img1", "img2"])
-
-        f = ImageExclusionFilter(StringIO("image_id\nimg1\nimg_absent\n"))
-        with self.assertLogs(logger="train", level="WARNING") as log_ctx:
-            f.filter_in_duckdb(conn, "annotations")
-
-        self.assertTrue(
-            any("img_absent" in message for message in log_ctx.output),
-            msg=f"the unmatched id is not named: {log_ctx.output}",
-        )
-        remaining_ids = {
-            row[0] for row in conn.execute("SELECT DISTINCT image_id FROM annotations").fetchall()
-        }
-        self.assertEqual(remaining_ids, {"img2"})
-
-    def test_a_fully_matched_list_stays_quiet(self):
-        """A warning on every healthy run is a warning nobody reads."""
-        conn = _make_conn()
-        _seed_image_annotations(conn, ["img1", "img2"])
-
-        f = ImageExclusionFilter(StringIO("image_id\nimg1\n"))
-        with self.assertLogs(logger="train", level="INFO") as log_ctx:
-            f.filter_in_duckdb(conn, "annotations")
-
-        self.assertEqual(
-            [record.levelno for record in log_ctx.records],
-            [logging.INFO],
-            msg=f"a complete match must not warn: {log_ctx.output}",
-        )
-
-    def test_entirely_unmatched_list_is_loud(self):
-        """A list that matches nothing at all logs a warning, not just info."""
+    def test_a_list_matching_nothing_still_reports_it(self):
+        """A list that matches nothing at all still logs the zero match
+        count, at WARNING rather than the routine INFO level -- a held-out
+        set silently missing from the data it's meant to protect is a
+        correctness failure, not a routine per-stage count."""
         conn = _make_conn()
         _seed_image_annotations(conn, ["img1", "img2"])
 
         f = ImageExclusionFilter(StringIO("image_id\nimg_absent_1\nimg_absent_2\n"))
-        with self.assertLogs(logger="train", level="WARNING") as log_ctx:
+        with self.assertLogs(logger=LABEL_SPECS_LOGGER, level="WARNING") as log_ctx:
             f.filter_in_duckdb(conn, "annotations")
 
+        self.assertEqual(log_ctx.records[0].levelno, logging.WARNING)
         self.assertTrue(
-            any("img_absent_1" in message for message in log_ctx.output),
-            msg=f"the unmatched ids are not named: {log_ctx.output}",
+            any("0" in message and "2" in message for message in log_ctx.output),
+            msg=f"expected the zero-matched count to be reported: {log_ctx.output}",
         )
         count = conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
         self.assertEqual(count, 2, msg="nothing should have been removed")
@@ -410,10 +383,29 @@ class ImageExclusionFilterInDuckDBTest(unittest.TestCase):
         }
         self.assertEqual(remaining_ids, {"456"})
 
+    def test_null_and_empty_image_id_survive_exclusion(self):
+        """A NULL image_id can never be a listed exclusion -- the image_id
+        column disallows blanks -- so it must survive regardless of what's
+        excluded. An empty-string image_id is an ordinary non-NULL value
+        and survives for the same reason: it simply isn't listed."""
+        conn = _make_conn()
+        df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL
+            {"image_id": ["img1", "img2", None, "", "img3"]}
+        )
+        conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
+
+        f = ImageExclusionFilter(StringIO("image_id\nimg2\n"))
+        f.filter_in_duckdb(conn, "annotations")
+
+        remaining_ids = {
+            row[0] for row in conn.execute("SELECT image_id FROM annotations").fetchall()
+        }
+        self.assertEqual(remaining_ids, {"img1", None, "", "img3"})
+
 
 class ScriptLoggingConfigTest(unittest.TestCase):
-    """This module configures logging when it is imported, and a training run
-    reports its degraded states through loggers built before that import."""
+    """A training run reports its degraded states through loggers built
+    before logging_config_for_script's dictConfig call runs."""
 
     def test_configuring_a_script_logger_leaves_other_loggers_working(self):
         """Every warning a metric group or the region evaluation emits goes
