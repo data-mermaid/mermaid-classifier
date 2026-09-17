@@ -194,6 +194,43 @@ class FeatureCacheTest(unittest.TestCase):
         self.assertEqual(second.n_points_missing_image, 0)
         self._assert_aligned(second)
 
+    def test_a_shard_whose_rows_shifted_is_rebuilt_though_its_points_did_not(self):
+        """A rebuild that adds a point to one image slides every later image
+        down a row, leaving a later batch's own points byte-identical. A shard
+        bound only to those identities restores at the previous run's indices,
+        so each vector lands one row early -- carrying the right metadata for a
+        point it does not belong to, and dropping the row that ran off the end.
+        """
+        self._write_feature_file("i1", [(10, 20), (15, 25)])
+        for index in range(2, 5):
+            self._write_feature_file(f"i{index}", [(10 * index, 20 * index)])
+        first = {f"i{index}": [(10 * index, 20 * index)] for index in range(1, 5)}
+        first["i1"] = [(10, 20)]
+        second = {**first, "i1": [(10, 20), (15, 25)]}
+        shards = self.root / "shards"
+
+        build_feature_cache(
+            _probe_rows(first),
+            self._loader,
+            feature_dim=DIM,
+            workers=2,
+            batch_size=2,
+            shard_dir=shards,
+        )
+        cache = build_feature_cache(
+            _probe_rows(second),
+            self._loader,
+            feature_dim=DIM,
+            workers=2,
+            batch_size=2,
+            shard_dir=shards,
+        )
+
+        self.assertEqual(list(cache.point_ids), ["i1-p0", "i1-p1", "i2-p0", "i3-p0", "i4-p0"])
+        self.assertEqual(cache.n_points_missing_row_col, 0)
+        self.assertEqual(cache.n_points_missing_image, 0)
+        self._assert_aligned(cache)
+
     def test_a_shard_written_without_a_points_key_is_rebuilt(self):
         """A shard left by a build that predates the key cannot say which
         points it holds, so restoring it is the same gamble as restoring a

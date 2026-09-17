@@ -823,6 +823,28 @@ class ProbeIntegrityTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not hold the points"):
             load_probe(self.probe_dir)
 
+    def test_a_cache_frozen_against_other_values_of_these_points_is_refused(self):
+        """`--skip-features` rewrites the parquet and the manifest and leaves
+        the npz where it is, so a corrected label, a redrawn region map or a
+        different held-out partition reaches the score at its previous value.
+        The selection never moved, so the identity check and the manifest hash
+        both pass and only the frozen cells give it away.
+        """
+        for column, stale_value in (
+            ("gt_label", "ba9::gf9"),
+            ("region_id", CENTRAL_INDO_PACIFIC),
+            ("held_out", True),
+            ("row", 99),
+            ("col", 99),
+        ):
+            with self.subTest(column=column):
+                stale = self.rows.copy()
+                stale.loc[0, column] = stale_value
+                self._overwrite_cache(stale, self.features)
+
+                with self.assertRaisesRegex(ValueError, "disagrees with"):
+                    load_probe(self.probe_dir)
+
     def test_a_cache_short_by_one_images_points_still_loads(self):
         """An image whose feature file never existed legitimately shrinks the
         cache. A check that refused that would refuse every real probe.

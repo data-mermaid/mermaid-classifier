@@ -372,22 +372,6 @@ class ImageExclusionFilterInDuckDBTest(unittest.TestCase):
         count = conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
         self.assertEqual(count, 2, msg="nothing should have been removed")
 
-
-class ScriptLoggingConfigTest(unittest.TestCase):
-    """This module configures logging when it is imported, and a training run
-    reports its degraded states through loggers built before that import."""
-
-    def test_configuring_a_script_logger_leaves_other_loggers_working(self):
-        """Every warning a metric group or the region evaluation emits goes
-        through a logger created at its own module's import; silencing those
-        leaves a degraded run looking like a clean one."""
-        existing = logging.getLogger("tests.pyspacer.pre_existing_logger")
-
-        logging_config_for_script("train")
-
-        with self.assertLogs(existing, level="WARNING"):
-            existing.warning("a degraded state nobody would otherwise see")
-
     def test_extra_csv_columns_ignored(self):
         conn = _make_conn()
         _seed_image_annotations(conn, ["img1", "img2"])
@@ -425,6 +409,22 @@ class ScriptLoggingConfigTest(unittest.TestCase):
             row[0] for row in conn.execute("SELECT DISTINCT image_id FROM annotations").fetchall()
         }
         self.assertEqual(remaining_ids, {"456"})
+
+
+class ScriptLoggingConfigTest(unittest.TestCase):
+    """This module configures logging when it is imported, and a training run
+    reports its degraded states through loggers built before that import."""
+
+    def test_configuring_a_script_logger_leaves_other_loggers_working(self):
+        """Every warning a metric group or the region evaluation emits goes
+        through a logger created at its own module's import; silencing those
+        leaves a degraded run looking like a clean one."""
+        existing = logging.getLogger("tests.pyspacer.pre_existing_logger")
+
+        logging_config_for_script("train")
+
+        with self.assertLogs(existing, level="WARNING"):
+            existing.warning("a degraded state nobody would otherwise see")
 
 
 if __name__ == "__main__":

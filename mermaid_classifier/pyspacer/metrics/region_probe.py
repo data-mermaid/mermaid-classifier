@@ -11,12 +11,15 @@ Scoring goes through `ctx.clf`, the `Predictor` the run built from the
 exported `model.pt` and `model.json`, so what is measured is the artifact
 that ships rather than the in-memory estimator it was exported from.
 
-`settings.region_probe_dir` locates the probe. Unset, the group does nothing:
-a run with no probe to score against is the common case, not a failure. A
-directory that is configured but not readable raises instead, because
-silently scoring no points would read as a model with no incidents. The
-coordinator catches that raise, leaving `region_probe/scored` at the 0 it
-logged before the group ran.
+`settings.region_probe_dir` locates the probe. Unset, the group does nothing
+and the coordinator logs no status for it: a run with no probe to score
+against is the common case, not a failure, and a 0 logged for those runs too
+would bury the one state the status exists to expose. A directory that is
+configured but not readable raises instead, because silently scoring no points
+would read as a model with no incidents; the coordinator catches that raise,
+leaving `region_probe/scored` at the 0 it logged before the group ran.
+`region_probe_is_configured` is what the coordinator reads to tell the two
+apart.
 
 The rates carry the `region_probe/` prefix throughout. The validation-split
 group measures the same behaviour over a different population with different
@@ -36,6 +39,16 @@ from mermaid_classifier.region_eval.metrics import (
 from mermaid_classifier.region_eval.score import load_probe, predict_with_probabilities
 
 PROBE_PREFIX = "region_probe"
+
+
+def region_probe_is_configured() -> bool:
+    """Whether this run has a probe dir to score against.
+
+    `region_probe_dir` is a setting rather than an MLflow param, so nothing in
+    a finished run says whether one was asked for. Logging the status only for
+    a configured probe is what makes a 0 mean the probe could not be scored.
+    """
+    return bool(settings.region_probe_dir)
 
 
 def compute_region_probe(ctx: MetricsContext) -> MetricGroupResult:

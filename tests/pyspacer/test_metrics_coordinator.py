@@ -20,6 +20,7 @@ dependency-free.
 
 import dataclasses
 import logging
+import tempfile
 import unittest
 from unittest import mock
 
@@ -34,6 +35,7 @@ from pyspacer.metrics_test_helpers import (
     format_metric,
     make_val_results,
 )
+from pyspacer.test_train import override_settings
 
 
 def _registry_with_failing_group(name: str):
@@ -305,7 +307,30 @@ class RegionGroupIsolationTest(unittest.TestCase):
 
     def test_a_failed_probe_group_leaves_its_own_status_at_zero(self):
         self.ctx.clf = MockClf(["A1::", "A2::", "B1::"])
-        self.assertEqual(self._logged_metrics("region_probe")["region_probe/scored"], 0.0)
+        with (
+            tempfile.TemporaryDirectory() as probe_dir,
+            override_settings(region_probe_dir=probe_dir),
+        ):
+            logged = self._logged_metrics("region_probe")
+        self.assertEqual(logged["region_probe/scored"], 0.0)
+
+    def test_an_unconfigured_probe_publishes_no_status_to_stand_at_zero(self):
+        """Most runs configure no probe, and the group returning nothing is
+        the expected outcome there. A 0 logged for them too would make the
+        state the scalar exists to expose -- a probe that was configured and
+        could not be read -- indistinguishable from the common case.
+        """
+        self.ctx.clf = MockClf(["A1::", "A2::", "B1::"])
+        with (
+            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_mlflow,
+            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
+            override_settings(region_probe_dir=None),
+        ):
+            MetricsCoordinator(self.ctx, self.conn).compute_and_log_all()
+
+        logged = [call.args[0] for call in mock_mlflow.log_metric.call_args_list]
+        self.assertNotIn("region_probe/scored", logged)
+        self.assertIn("region_val/scored", logged)
 
     def test_the_failed_group_is_named_in_a_warning(self):
         with (

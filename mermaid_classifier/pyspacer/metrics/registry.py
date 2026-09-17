@@ -31,6 +31,7 @@ from mermaid_classifier.pyspacer.metrics.region import (
 from mermaid_classifier.pyspacer.metrics.region_probe import (
     PROBE_PREFIX,
     compute_region_probe,
+    region_probe_is_configured,
 )
 from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
 
@@ -46,8 +47,11 @@ class MetricGroupSpec:
     requires_clf: bool = False
     # A metric logged as 0 before the group runs and raised to 1 by the
     # group's own result, so a group that fails is distinguishable from one
-    # that was never applicable.
+    # that was never applicable. `is_configured` answers whether the group has
+    # the configuration it needs; where it says no, no status is logged at all,
+    # because a 0 for a group nobody asked for reads like one that failed.
     status_metric: str | None = None
+    is_configured: typing.Callable[[], bool] | None = None
 
 
 # Order is significant — mirrors the historical coordinator ordering.
@@ -72,6 +76,7 @@ METRIC_GROUPS: list[MetricGroupSpec] = [
         compute_region_probe,
         requires_clf=True,
         status_metric=scored_metric_name(PROBE_PREFIX),
+        is_configured=region_probe_is_configured,
     ),
 ]
 

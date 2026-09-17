@@ -21,11 +21,12 @@ Downloads run through a thread pool in batches, each batch checkpointed to a
 shard so an interrupted build restarts where it stopped. The shard records
 which images were missing as well as which points were filled, so a resumed
 build reports the same counts as an uninterrupted one. It also records a hash
-of the `(image_id, point_id, row, col)` its rows were built for: positions are
-indices into one run's probe rows, so a shard reused across a changed
-selection would land the previous selection's vectors on this one's points --
-the very misalignment the (row, col) match exists to prevent. A shard whose
-hash does not match the batch is discarded and the batch downloaded again.
+of the `(position, image_id, point_id, row, col)` its rows were built for:
+positions are indices into one run's probe rows, so a shard reused across a
+changed selection -- or across one whose earlier images gained or lost points
+-- would land the previous selection's vectors on this one's rows, the very
+misalignment the (row, col) match exists to prevent. A shard whose hash does
+not match the batch is discarded and the batch downloaded again.
 """
 
 import dataclasses
@@ -178,8 +179,8 @@ def build_feature_cache(
             restored = _restore_shard(shard, key)
             if restored is None:
                 logger.warning(
-                    "shard %s was built for a different set of probe points;"
-                    " discarding it and downloading this batch again",
+                    "shard %s does not hold this batch's points at this batch's"
+                    " rows; discarding it and downloading this batch again",
                     shard.name,
                 )
             else:
@@ -274,15 +275,18 @@ def _shard_points_key(
     rows: NDArray[np.int64],
     cols: NDArray[np.int64],
 ) -> str:
-    """A hash of the points one shard covers, in the order it stores them.
+    """A hash of the points one shard covers, and the rows it writes them at.
 
-    Identifies the points rather than their row indices, which belong to one
-    run's probe rows and mean nothing in another's.
+    Both halves are load-bearing. The identities say the vectors belong to
+    these points; the positions say they belong at these indices. A rebuild
+    that changes one image's point count slides every later image down a row
+    while leaving its identities untouched, so a key over identities alone
+    still matches and the restored vectors land a row early.
     """
     digest = hashlib.sha256()
     for position in positions:
         digest.update(
-            f"{image_ids[position]}\x1f{point_ids[position]}\x1f"
+            f"{position}\x1f{image_ids[position]}\x1f{point_ids[position]}\x1f"
             f"{int(rows[position])}\x1f{int(cols[position])}\x1e".encode()
         )
     return digest.hexdigest()
@@ -293,8 +297,9 @@ def _restore_shard(
 ) -> tuple[NDArray[np.int64], NDArray[np.float32], set[str]] | None:
     """One shard's filled positions, vectors and missing images, or None.
 
-    None is a shard whose key is not this batch's, and a shard carrying no key
-    at all: neither says its rows are these points.
+    None is a shard whose key is not this batch's -- other points, or these
+    points at other rows -- and a shard carrying no key at all: neither says
+    its rows are these points.
     """
     cached = np.load(shard, allow_pickle=False)
     if "points_key" not in cached.files or str(cached["points_key"]) != key:

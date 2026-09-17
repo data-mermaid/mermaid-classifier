@@ -274,6 +274,8 @@ class ProbeFeatures:
     features: NDArray[np.float32]
     image_ids: tuple[str, ...]
     point_ids: tuple[str, ...]
+    rows: NDArray[np.int64]
+    cols: NDArray[np.int64]
     gt_labels: tuple[str, ...]
     region_ids: tuple[str, ...]
     held_out: NDArray[np.bool_]
@@ -408,6 +410,8 @@ def read_feature_cache(path: Path) -> ProbeFeatures:
         features=np.asarray(archive["features"], dtype=np.float32),
         image_ids=tuple(str(value) for value in archive["image_id"]),
         point_ids=tuple(str(value) for value in archive["point_id"]),
+        rows=np.asarray(archive["row"], dtype=np.int64),
+        cols=np.asarray(archive["col"], dtype=np.int64),
         gt_labels=tuple(str(value) for value in archive["gt_label"]),
         region_ids=tuple(str(value) for value in archive["region_id"]),
         held_out=np.asarray(archive["held_out"], dtype=bool),
@@ -443,10 +447,12 @@ def load_probe(
     one restarts where it stopped.
 
     Two things have to agree before a score means anything: the manifest's
-    recorded content hash against the points on disk, and the cache's points
-    against those same points. Either disagreement is a probe dir holding two
-    selections at once, which scores each point against another point's
-    vector, so both raise.
+    recorded content hash against the points on disk, and the cache against
+    those same points -- their identities, their order, and the ground truth,
+    region, held-out flag and (row, col) frozen beside each vector. Either
+    disagreement is a probe dir holding two selections at once, which scores
+    each point against another point's vector or another point's truth, so
+    both raise.
     """
     rows = pd.read_parquet(probe_dir / PROBE_POINTS_FILE)
     missing = [column for column in PROBE_COLUMNS if column not in rows.columns]
@@ -553,6 +559,47 @@ def _check_features_match_rows(features: ProbeFeatures, rows: pd.DataFrame, path
             f" carries {len(cached)} point(s), {foreign} of which the probe"
             f" does not contain, against {len(expected)} that line up in"
             " order. Rebuild the cache."
+        )
+    kept = [index for index, pair in enumerate(probe_points) if pair in present]
+    _check_frozen_columns(features, rows.iloc[kept], path)
+
+
+def _check_frozen_columns(features: ProbeFeatures, rows: pd.DataFrame, path: Path) -> None:
+    """Refuse a cache whose frozen cells are no longer the parquet's.
+
+    `write_feature_cache` freezes each point's ground truth, region, held-out
+    flag and (row, col) beside its vector, and scoring reads them from there.
+    A probe rebuilt with --skip-features keeps that npz, so a corrected label,
+    a redrawn region map or a different held-out partition would otherwise be
+    scored at the value it carried when the vectors were downloaded.
+    """
+    frozen: dict[str, tuple[tuple[object, ...], tuple[object, ...]]] = {
+        "gt_label": (features.gt_labels, tuple(str(value) for value in rows["gt_label"])),
+        "region_id": (features.region_ids, tuple(str(value) for value in rows["region_id"])),
+        "held_out": (
+            tuple(bool(value) for value in features.held_out),
+            tuple(bool(value) for value in rows["held_out"]),
+        ),
+        "row": (
+            tuple(int(value) for value in features.rows),
+            tuple(int(value) for value in rows["row"]),
+        ),
+        "col": (
+            tuple(int(value) for value in features.cols),
+            tuple(int(value) for value in rows["col"]),
+        ),
+    }
+    disagreeing = [
+        f"{column} ({count} point(s))"
+        for column, (cached, recorded) in frozen.items()
+        if (count := sum(1 for a, b in zip(cached, recorded, strict=True) if a != b))
+    ]
+    if disagreeing:
+        raise ValueError(
+            f"{path} disagrees with {PROBE_POINTS_FILE} on"
+            f" {', '.join(disagreeing)}: the cache carries what these points"
+            " held when it was built, not what the probe now records."
+            " Rebuild the cache."
         )
 
 

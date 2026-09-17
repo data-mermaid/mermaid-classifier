@@ -51,10 +51,11 @@ class MetricsCoordinator:
 
         for spec in applicable_metric_groups(self.ctx):
             try:
-                if spec.status_metric is not None:
-                    # Logged before the work that can raise: a group that
-                    # fails leaves this 0 standing, so absent rates read as a
-                    # failure rather than as a model with no incidents.
+                status_applies = spec.is_configured is None or spec.is_configured()
+                if spec.status_metric is not None and status_applies:
+                    # Logged before the work that can raise, and only where the
+                    # group's configuration is present: a 0 then means the group
+                    # failed, never that nothing asked it to run.
                     mlflow.log_metric(spec.status_metric, 0.0)
                 result = spec.func(self.ctx)
                 self._log_result(result)
