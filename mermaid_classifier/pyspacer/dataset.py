@@ -374,7 +374,8 @@ class TrainingDataset:
         self.duck_conn.execute(
             query_start + f" SELECT"
             f"  image_id, row, col,"
-            f"  benthic_attribute_id, growth_form_id,"
+            f"  benthic_attribute_id,"
+            f"  COALESCE(growth_form_id, '') AS growth_form_id,"
             f" '{Sites.MERMAID.value}' AS site,"
             f" '{settings.mermaid_train_data_bucket}' AS bucket,"
             f" 'all' AS project_id,"
@@ -388,10 +389,8 @@ class TrainingDataset:
             site=Sites.MERMAID.value, has_training_sets=False
         )
 
-        # For growth forms, we get '' from the CoralNet-MERMAID
-        # mapping, but the string 'None' from the MERMAID annotations
-        # parquet.
-        # Normalize the latter to ''.
+        # growth_form_id at this point is a real UUID, '' (for absent growth form),
+        # or the legacy literal string 'None'. Normalize 'None' to ''.
         def transform_func(gf_id: str | None) -> str | None:
             if gf_id == "None":
                 return ""

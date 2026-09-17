@@ -324,6 +324,68 @@ class ReadMermaidDataTest(BaseTrainTest):
             ["67890", 1500, 2800, same_char_uuid("1"), ""],
         )
 
+    def test_null_growth_form_id_rows_all_survive(self):
+        """
+        The MERMAID annotations parquet's growth_form_id arrives in three
+        shapes: a real UUID, NULL, and the legacy string 'None'. A JOIN
+        used to normalize the legacy string does not match NULL to NULL,
+        so a NULL growth_form_id must be coalesced to '' before that join
+        or its row is silently dropped.
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        dataset = NoInitDataset()
+
+        mermaid_table = pa.table(
+            {
+                "image_id": pa.array(
+                    [same_char_uuid("1"), same_char_uuid("2"), same_char_uuid("3")],
+                    pa.string(),
+                ),
+                "row": pa.array([100, 200, 300], pa.int32()),
+                "col": pa.array([10, 20, 30], pa.int32()),
+                "benthic_attribute_id": pa.array(
+                    [same_char_uuid("4"), same_char_uuid("5"), same_char_uuid("6")],
+                    pa.string(),
+                ),
+                "growth_form_id": pa.array([same_char_uuid("7"), None, "None"], pa.string()),
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".parquet",
+            delete_on_close=False,
+        ) as parquet_f:
+            parquet_f.close()
+            pq.write_table(mermaid_table, parquet_f.name)
+
+            with override_settings(
+                mermaid_annotations_parquet_pattern=parquet_f.name,
+            ):
+                dataset.read_mermaid_data()
+
+        result_tuples = dataset.duck_conn.execute(
+            "SELECT image_id, growth_form_id FROM annotations"
+        ).fetchall()
+
+        self.assertEqual(
+            len(result_tuples),
+            3,
+            msg="All three rows should survive, including the NULL growth_form_id row.",
+        )
+
+        results_by_image_id = dict(result_tuples)
+        # Real UUID growth form is preserved unchanged.
+        self.assertEqual(
+            results_by_image_id[same_char_uuid("1")],
+            same_char_uuid("7"),
+        )
+        # NULL growth form normalizes to ''.
+        self.assertEqual(results_by_image_id[same_char_uuid("2")], "")
+        # Legacy 'None' string growth form normalizes to ''.
+        self.assertEqual(results_by_image_id[same_char_uuid("3")], "")
+
 
 class HandleMissingFeatureVectorsTest(BaseTrainTest):
     @staticmethod
