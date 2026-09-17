@@ -46,7 +46,6 @@ score is a deliberate step of its own.
 """
 
 import dataclasses
-import hashlib
 import json
 import logging
 import math
@@ -76,9 +75,9 @@ from mermaid_classifier.region_eval.decisions import (
     within_branch_share,
 )
 from mermaid_classifier.region_eval.features import (
-    DEFAULT_BATCH_SIZE,
+    DEFAULT_FEATURE_BUCKET,
+    DEFAULT_FEATURE_PREFIX,
     DEFAULT_WORKERS,
-    FeatureLoader,
     build_feature_cache,
     write_feature_cache,
 )
@@ -221,7 +220,9 @@ class ProbeFeatures:
 
     `features[i]` belongs to the point every other array describes at index
     `i`, which is the alignment `features.build_feature_cache` establishes by
-    (row, col) rather than by position.
+    (row, col) rather than by position. `content_hash` is the hash of the
+    probe rows the cache was built from, frozen in the npz at write time; an
+    archive written before that field existed reads back with an empty one.
     """
 
     features: NDArray[np.float32]
@@ -232,6 +233,7 @@ class ProbeFeatures:
     gt_labels: tuple[str, ...]
     region_ids: tuple[str, ...]
     held_out: NDArray[np.bool_]
+    content_hash: str
 
     @property
     def n_points(self) -> int:
@@ -258,7 +260,6 @@ class LoadedProbe:
     features: ProbeFeatures
     content_hash: str
     region_snapshot_hash: str
-    points_fingerprint: str
 
     def label_display_name(self, label: str) -> str:
         """A BA-GF label as text, falling back to the id it cannot name.
@@ -357,55 +358,65 @@ def read_ancestry_snapshot(path: Path) -> dict[str, tuple[str, ...]]:
 
 
 def read_feature_cache(path: Path) -> ProbeFeatures:
-    """Read back the npz `features.write_feature_cache` wrote."""
-    archive = np.load(path, allow_pickle=False)
-    return ProbeFeatures(
-        features=np.asarray(archive["features"], dtype=np.float32),
-        image_ids=tuple(str(value) for value in archive["image_id"]),
-        point_ids=tuple(str(value) for value in archive["point_id"]),
-        rows=np.asarray(archive["row"], dtype=np.int64),
-        cols=np.asarray(archive["col"], dtype=np.int64),
-        gt_labels=tuple(str(value) for value in archive["gt_label"]),
-        region_ids=tuple(str(value) for value in archive["region_id"]),
-        held_out=np.asarray(archive["held_out"], dtype=bool),
-    )
+    """Read back the npz `features.write_feature_cache` wrote, in canonical order.
 
+    Every array comes back permuted to the (image_id, point_id) order
+    `probe_content_hash` sorts by before hashing -- the order `_probe_rows`
+    already writes a correctly-built cache in, so the sort is a no-op there.
+    The cluster bootstrap draws resample indices against cluster
+    first-appearance order, so two caches holding the same rows in different
+    orders would otherwise draw different resamples from the same seed
+    despite sharing a `content_hash`.
 
-def points_fingerprint(features: ProbeFeatures) -> str:
-    """A hash of the scored points themselves, in the order they are scored.
-
-    Two scores carrying the same fingerprint were taken on identical points,
-    which is what makes a comparison between them paired rather than a
-    comparison of two differently-composed samples.
+    A cache written before `content_hash` existed reads back with an empty
+    one, which cannot equal a real probe's hash and so still fails the check
+    in `load_probe` rather than passing silently.
     """
-    digest = hashlib.sha256()
-    for image_id, point_id in zip(features.image_ids, features.point_ids, strict=True):
-        digest.update(f"{image_id}\x1f{point_id}\x1e".encode())
-    return digest.hexdigest()
+    archive = np.load(path, allow_pickle=False)
+    image_ids = tuple(str(value) for value in archive["image_id"])
+    point_ids = tuple(str(value) for value in archive["point_id"])
+    order = sorted(
+        range(len(image_ids)), key=lambda position: (image_ids[position], point_ids[position])
+    )
+    index = np.asarray(order, dtype=np.int64)
+
+    gt_labels = tuple(str(value) for value in archive["gt_label"])
+    region_ids = tuple(str(value) for value in archive["region_id"])
+    return ProbeFeatures(
+        features=np.asarray(archive["features"], dtype=np.float32)[index],
+        image_ids=tuple(image_ids[position] for position in order),
+        point_ids=tuple(point_ids[position] for position in order),
+        rows=np.asarray(archive["row"], dtype=np.int64)[index],
+        cols=np.asarray(archive["col"], dtype=np.int64)[index],
+        gt_labels=tuple(gt_labels[position] for position in order),
+        region_ids=tuple(region_ids[position] for position in order),
+        held_out=np.asarray(archive["held_out"], dtype=bool)[index],
+        content_hash=str(archive["content_hash"]) if "content_hash" in archive.files else "",
+    )
 
 
 def load_probe(
     probe_dir: Path,
     *,
-    feature_loader: FeatureLoader | None = None,
+    download_dir: Path | None = None,
+    bucket: str = DEFAULT_FEATURE_BUCKET,
+    prefix: str = DEFAULT_FEATURE_PREFIX,
     workers: int = DEFAULT_WORKERS,
-    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> LoadedProbe:
     """Load the probe points, the frozen region map and the feature cache.
 
-    The cache is built through `feature_loader` and written back when the
-    probe dir has none; without a loader a missing cache raises, since
-    silently scoring zero points would read as a model with no incidents.
-    A build checkpoints into `shards/` beside the cache, so an interrupted
-    one restarts where it stopped.
+    The cache is built into `download_dir` and written back when the probe
+    dir has none; without a directory a missing cache raises, since silently
+    scoring zero points would read as a model with no incidents. Downloads run
+    in parallel into `download_dir` through `download_features_parallel`.
+    `download_dir` is a scratch directory that does not outlive the run.
 
-    Two things have to agree before a score means anything: the manifest's
-    recorded content hash against the points on disk, and the cache against
-    those same points -- their identities, their order, and the ground truth,
-    region, held-out flag and (row, col) frozen beside each vector. Either
-    disagreement is a probe dir holding two selections at once, which scores
-    each point against another point's vector or another point's truth, so
-    both raise.
+    The cache carries the hash of the exact rows it was built from. A parquet
+    that hashes to something else means the directory holds two selections at
+    once -- the points moved since the cache was built, the cache was built
+    for a different selection, or a `--skip-features` rebuild changed a value
+    the cache still carries the old version of -- so the cache is refused
+    rather than scored against a point it does not describe.
     """
     rows = pd.read_parquet(probe_dir / PROBE_POINTS_FILE)
     missing = [column for column in PROBE_COLUMNS if column not in rows.columns]
@@ -431,27 +442,22 @@ def load_probe(
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
 
     content_hash = probe_content_hash(rows)
-    _check_recorded_content_hash(manifest, content_hash, manifest_path)
 
     features_path = probe_dir / PROBE_FEATURES_FILE
     if features_path.exists():
         features = read_feature_cache(features_path)
-    elif feature_loader is None:
+    elif download_dir is None:
         raise FileNotFoundError(
-            f"{features_path} does not exist and no feature loader was given;"
+            f"{features_path} does not exist and no download_dir was given;"
             " build the cache with scripts/build_region_probe.py first"
         )
     else:
         cache = build_feature_cache(
-            rows,
-            feature_loader,
-            workers=workers,
-            batch_size=batch_size,
-            shard_dir=probe_dir / "shards",
+            rows, download_dir, bucket=bucket, prefix=prefix, workers=workers
         )
-        write_feature_cache(cache, features_path)
+        write_feature_cache(cache, rows, features_path)
         features = read_feature_cache(features_path)
-    _check_features_match_rows(features, rows, features_path)
+    _check_feature_cache_content_hash(features, content_hash, features_path)
 
     return LoadedProbe(
         rows=rows,
@@ -464,95 +470,24 @@ def load_probe(
         features=features,
         content_hash=content_hash,
         region_snapshot_hash=region_snapshot_hash(region_ids_by_attribute),
-        points_fingerprint=points_fingerprint(features),
     )
 
 
-def _check_recorded_content_hash(
-    manifest: Mapping[str, Any], content_hash: str, manifest_path: Path
+def _check_feature_cache_content_hash(
+    features: ProbeFeatures, content_hash: str, path: Path
 ) -> None:
-    """Refuse points that have moved since the manifest recorded them.
+    """Refuse a cache that was not built from these exact probe rows.
 
-    A probe frozen before the hash was recorded carries none, and passes.
+    The npz's own hash disagreeing with the parquet just read collapses three
+    causes into one symptom: the points moved since the cache was built, the
+    cache belongs to a different selection, or a `--skip-features` rebuild
+    changed a value the cache still carries the old version of.
     """
-    recorded = manifest.get("content_hash")
-    if recorded is not None and str(recorded) != content_hash:
+    if features.content_hash != content_hash:
         raise ValueError(
-            f"{manifest_path} records content_hash {recorded} but"
-            f" {PROBE_POINTS_FILE} hashes to {content_hash}: the points have"
-            " changed since the probe was frozen, so nothing else in this"
-            " directory describes them"
-        )
-
-
-def _check_features_match_rows(features: ProbeFeatures, rows: pd.DataFrame, path: Path) -> None:
-    """Refuse a feature cache built for points other than these.
-
-    The cache is allowed to be shorter than the parquet -- a point with no
-    matching (row, col) and every point of an image with no feature file are
-    both dropped -- but what it carries has to be these points in their order.
-    A cache left behind by an earlier selection fails here rather than pairing
-    each point with another point's vector.
-    """
-    cached = list(zip(features.image_ids, features.point_ids, strict=True))
-    present = set(cached)
-    probe_points = list(
-        zip(
-            (str(value) for value in rows["image_id"]),
-            (str(value) for value in rows["point_id"]),
-            strict=True,
-        )
-    )
-    expected = [pair for pair in probe_points if pair in present]
-    if expected != cached:
-        wanted = set(probe_points)
-        foreign = sum(1 for pair in cached if pair not in wanted)
-        raise ValueError(
-            f"{path} does not hold the points in {PROBE_POINTS_FILE}: it"
-            f" carries {len(cached)} point(s), {foreign} of which the probe"
-            f" does not contain, against {len(expected)} that line up in"
-            " order. Rebuild the cache."
-        )
-    kept = [index for index, pair in enumerate(probe_points) if pair in present]
-    _check_frozen_columns(features, rows.iloc[kept], path)
-
-
-def _check_frozen_columns(features: ProbeFeatures, rows: pd.DataFrame, path: Path) -> None:
-    """Refuse a cache whose frozen cells are no longer the parquet's.
-
-    `write_feature_cache` freezes each point's ground truth, region, held-out
-    flag and (row, col) beside its vector, and scoring reads them from there.
-    A probe rebuilt with --skip-features keeps that npz, so a corrected label,
-    a redrawn region map or a different held-out partition would otherwise be
-    scored at the value it carried when the vectors were downloaded.
-    """
-    frozen: dict[str, tuple[tuple[object, ...], tuple[object, ...]]] = {
-        "gt_label": (features.gt_labels, tuple(str(value) for value in rows["gt_label"])),
-        "region_id": (features.region_ids, tuple(str(value) for value in rows["region_id"])),
-        "held_out": (
-            tuple(bool(value) for value in features.held_out),
-            tuple(bool(value) for value in rows["held_out"]),
-        ),
-        "row": (
-            tuple(int(value) for value in features.rows),
-            tuple(int(value) for value in rows["row"]),
-        ),
-        "col": (
-            tuple(int(value) for value in features.cols),
-            tuple(int(value) for value in rows["col"]),
-        ),
-    }
-    disagreeing = [
-        f"{column} ({count} point(s))"
-        for column, (cached, recorded) in frozen.items()
-        if (count := sum(1 for a, b in zip(cached, recorded, strict=True) if a != b))
-    ]
-    if disagreeing:
-        raise ValueError(
-            f"{path} disagrees with {PROBE_POINTS_FILE} on"
-            f" {', '.join(disagreeing)}: the cache carries what these points"
-            " held when it was built, not what the probe now records."
-            " Rebuild the cache."
+            f"{path} content_hash {features.content_hash or '(none recorded)'!r} disagrees with"
+            f" {PROBE_POINTS_FILE}'s {content_hash!r}: the cache was not built for these rows."
+            " Rebuild it with scripts/build_region_probe.py."
         )
 
 
@@ -808,7 +743,6 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
                 else ancestry_snapshot_hash(probe.ancestry_by_attribute)
             ),
             "recorded_ancestry_hash": probe.manifest.get("ancestry_hash"),
-            "points_fingerprint": probe.points_fingerprint,
             "n_points_cached": int(probe.features.n_points),
             "n_rows": int(len(probe.rows)),
         },

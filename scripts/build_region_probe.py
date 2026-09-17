@@ -20,7 +20,6 @@ Outputs (in --out-dir):
     ba_ancestry.json       each benthic attribute's root-to-leaf ancestry path
     manifest.json          provenance, realized counts, minimum detectable effects
     probe_features.npz     features[N,1280] float32 + aligned point metadata
-    shards/                per-batch download checkpoints (restartable; deletable after)
 """
 
 from __future__ import annotations
@@ -43,12 +42,10 @@ from mermaid_classifier.common.benthic_attributes import (
     get_region_library,
 )
 from mermaid_classifier.region_eval.features import (
-    DEFAULT_BATCH_SIZE,
     DEFAULT_FEATURE_BUCKET,
     DEFAULT_FEATURE_PREFIX,
     DEFAULT_WORKERS,
     build_feature_cache,
-    s3_feature_loader,
     write_feature_cache,
 )
 from mermaid_classifier.region_eval.probe_set import (
@@ -154,7 +151,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feature-bucket", default=DEFAULT_FEATURE_BUCKET)
     parser.add_argument("--feature-prefix", default=DEFAULT_FEATURE_PREFIX)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="images/shard")
     parser.add_argument("--aws-region", default=DEFAULT_REGION)
     parser.add_argument(
         "--skip-features",
@@ -224,19 +220,15 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if not args.skip_features:
-        cache = build_feature_cache(
-            probe.rows,
-            s3_feature_loader(
+        with tempfile.TemporaryDirectory() as downloads:
+            cache = build_feature_cache(
+                probe.rows,
+                Path(downloads),
                 bucket=args.feature_bucket,
                 prefix=args.feature_prefix,
-                region_name=args.aws_region,
                 workers=args.workers,
-            ),
-            workers=args.workers,
-            batch_size=args.batch_size,
-            shard_dir=out_dir / "shards",
-        )
-        write_feature_cache(cache, out_dir / PROBE_FEATURES_FILE)
+            )
+        write_feature_cache(cache, probe.rows, out_dir / PROBE_FEATURES_FILE)
         manifest["features"] = {
             "n_points_requested": cache.n_points_requested,
             "n_points_cached": int(cache.features.shape[0]),

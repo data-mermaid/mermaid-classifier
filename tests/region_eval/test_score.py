@@ -35,12 +35,14 @@ Counts derived by hand off that table, and asserted as literals:
        class the model happens to pick
 """
 
+import io
 import json
 import math
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -48,7 +50,12 @@ from pyspacer._calibrated_model_fixture import make_calibrated_model
 
 from mermaid_classifier.pyspacer.inference import export_artifact
 from mermaid_classifier.region_eval.decisions import RegionBlindBaseline
-from mermaid_classifier.region_eval.features import FeatureCache, write_feature_cache
+from mermaid_classifier.region_eval.features import (
+    DEFAULT_FEATURE_SUFFIX,
+    FEATURE_DIM,
+    FeatureCache,
+    write_feature_cache,
+)
 from mermaid_classifier.region_eval.metrics import RateEstimate, RegionMetricsOptions
 from mermaid_classifier.region_eval.probe_set import (
     PROBE_COLUMNS,
@@ -59,8 +66,10 @@ from mermaid_classifier.region_eval.probe_set import (
 )
 from mermaid_classifier.region_eval.score import (
     _ratio_to_baseline_interval,
+    decisions_table,
     load_probe,
     score_model,
+    summary_table,
     write_report,
 )
 
@@ -202,6 +211,19 @@ def _probe_rows(points=PROBE_POINTS) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=pd.Index(PROBE_COLUMNS))
 
 
+def _feature_file_bytes(points: list[tuple[int, int]], *, dim: int = FEATURE_DIM) -> bytes:
+    """A minimal real `.featurevector` npz for the given (row, col) points."""
+    buffer = io.BytesIO()
+    np.savez(
+        buffer,
+        meta=np.array([1, len(points), dim], dtype=np.int64),
+        rows=np.array([row for row, _ in points], dtype=np.uint16),
+        cols=np.array([col for _, col in points], dtype=np.uint16),
+        feat=np.zeros((len(points), dim), dtype=np.float64),
+    )
+    return buffer.getvalue()
+
+
 def _write_probe(
     probe_dir: Path,
     features: np.ndarray,
@@ -261,6 +283,7 @@ def _write_probe(
             n_points_missing_image=0,
             missing_image_ids=(),
         ),
+        rows,
         probe_dir / "probe_features.npz",
     )
     return rows
@@ -506,13 +529,12 @@ class ScoreReportTest(unittest.TestCase):
 
 
 class ProbeIntegrityTest(unittest.TestCase):
-    """What binds the parquet, the manifest and the feature cache together.
+    """What binds the parquet and the feature cache together.
 
     A probe dir rebuilt in place after the selection moved holds two
-    selections at once: a fresh parquet beside a cache -- or a shard -- from
-    the previous one. Every integrity counter still reads clean, because the
-    npz's own metadata is written from the new rows, so the only thing that
-    can catch it is a check that the cache's points are the parquet's.
+    selections at once: a fresh parquet beside a cache from the previous one.
+    Nothing about the cache's shape says it is stale -- only the hash it
+    carries of the rows it was built from does.
     """
 
     def setUp(self):
@@ -524,8 +546,15 @@ class ProbeIntegrityTest(unittest.TestCase):
         self.probe_dir = self.root / "probe"
         self.rows = _write_probe(self.probe_dir, self.features)
 
-    def _overwrite_cache(self, rows: pd.DataFrame, features: np.ndarray) -> None:
-        """Replace the probe's cache with one built for `rows`."""
+    def _overwrite_cache(
+        self, rows: pd.DataFrame, features: np.ndarray, *, hash_rows: pd.DataFrame | None = None
+    ) -> None:
+        """Replace the probe's cache with one built for `rows`.
+
+        `hash_rows` is the selection the hash is computed over, and defaults
+        to `rows`; a cache legitimately short by a missing image's points is
+        still hashed against the full selection it was asked to fetch.
+        """
         write_feature_cache(
             FeatureCache(
                 features=features.astype(np.float32),
@@ -541,6 +570,7 @@ class ProbeIntegrityTest(unittest.TestCase):
                 n_points_missing_image=0,
                 missing_image_ids=(),
             ),
+            rows if hash_rows is None else hash_rows,
             self.probe_dir / "probe_features.npz",
         )
 
@@ -558,25 +588,32 @@ class ProbeIntegrityTest(unittest.TestCase):
         )
         self._overwrite_cache(other, self.features)
 
-        with self.assertRaisesRegex(ValueError, "does not hold the points"):
+        with self.assertRaisesRegex(ValueError, "content_hash"):
             load_probe(self.probe_dir)
 
-    def test_a_cache_reordered_against_the_parquet_is_refused(self):
-        """The reversed cache carries the same 25 (image, point) pairs and the
-        same 25 vectors, so every count balances and only the order gives it
-        away.
+    def test_points_replaced_since_the_cache_was_built_are_refused(self):
+        """A probe rebuilt in place -- a new seed, a refreshed export -- can
+        leave the previous run's cache sitting beside the new selection's
+        parquet. The cache is the one that used to be correct; the parquet is
+        the one that changed, and the hash is the only thing that notices.
         """
-        self._overwrite_cache(self.rows.iloc[::-1].reset_index(drop=True), self.features[::-1])
+        other = _probe_rows(
+            [
+                (f"o{image_id}", region_id, attribute_id)
+                for image_id, region_id, attribute_id in PROBE_POINTS
+            ]
+        )
+        other.to_parquet(self.probe_dir / "probe_points.parquet", index=False)
 
-        with self.assertRaisesRegex(ValueError, "does not hold the points"):
+        with self.assertRaisesRegex(ValueError, "content_hash"):
             load_probe(self.probe_dir)
 
     def test_a_cache_frozen_against_other_values_of_these_points_is_refused(self):
-        """`--skip-features` rewrites the parquet and the manifest and leaves
-        the npz where it is, so a corrected label, a redrawn region map or a
-        different held-out partition reaches the score at its previous value.
-        The selection never moved, so the identity check and the manifest hash
-        both pass and only the frozen cells give it away.
+        """`--skip-features` rewrites the parquet and leaves the npz where it
+        is, so a corrected label, a redrawn region map or a different
+        held-out partition reaches the score at its previous value. The
+        selection never moved, so only the hash of the changed column gives
+        it away.
         """
         for column, stale_value in (
             ("gt_label", "ba9::gf9"),
@@ -588,35 +625,123 @@ class ProbeIntegrityTest(unittest.TestCase):
             with self.subTest(column=column):
                 stale = self.rows.copy()
                 stale.loc[0, column] = stale_value
-                self._overwrite_cache(stale, self.features)
+                stale.to_parquet(self.probe_dir / "probe_points.parquet", index=False)
 
-                with self.assertRaisesRegex(ValueError, "disagrees with"):
+                with self.assertRaisesRegex(ValueError, "content_hash"):
                     load_probe(self.probe_dir)
 
     def test_a_cache_short_by_one_images_points_still_loads(self):
         """An image whose feature file never existed legitimately shrinks the
-        cache. A check that refused that would refuse every real probe.
+        cache below the row count its hash was computed over. A check that
+        refused that would refuse every real probe.
         """
         kept = self.rows[self.rows["image_id"] != "ta1"].reset_index(drop=True)
-        self._overwrite_cache(kept, self.features[len(self.rows) - len(kept) :])
+        self._overwrite_cache(
+            kept, self.features[len(self.rows) - len(kept) :], hash_rows=self.rows
+        )
 
         probe = load_probe(self.probe_dir)
 
         self.assertEqual(probe.features.n_points, len(kept))
         self.assertNotIn("ta1", probe.features.image_ids)
 
-    def test_a_manifest_recording_other_points_is_refused(self):
-        """The manifest's content hash and the parquet disagreeing means the
-        points moved after the probe was frozen, which makes every other file
-        in the directory a description of something else.
+    def test_a_permuted_cache_scores_identically_to_the_canonical_one(self):
+        """The cluster bootstrap draws resample indices against the order
+        clusters first appear in, so a cache that shuffles which image comes
+        first draws a different resample from the same seed even though the
+        row set and content_hash are unchanged. Sorting the cache to
+        (image_id, point_id) order on load is what makes the two the same
+        probe.
         """
-        manifest_path = self.probe_dir / "manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["content_hash"] = probe_content_hash(_probe_rows(PROBE_POINTS[:20]))
-        manifest_path.write_text(json.dumps(manifest))
+        canonical_probe = load_probe(self.probe_dir)
 
-        with self.assertRaisesRegex(ValueError, "content_hash"):
-            load_probe(self.probe_dir)
+        reversed_positions = list(range(len(self.rows)))[::-1]
+        permuted_rows = self.rows.iloc[reversed_positions].reset_index(drop=True)
+        permuted_features = self.features[reversed_positions]
+        self._overwrite_cache(permuted_rows, permuted_features, hash_rows=self.rows)
+        permuted_probe = load_probe(self.probe_dir)
+
+        self.assertEqual(permuted_probe.content_hash, canonical_probe.content_hash)
+        self.assertEqual(
+            sorted(
+                zip(
+                    permuted_probe.features.image_ids,
+                    permuted_probe.features.point_ids,
+                    strict=True,
+                )
+            ),
+            sorted(
+                zip(
+                    canonical_probe.features.image_ids,
+                    canonical_probe.features.point_ids,
+                    strict=True,
+                )
+            ),
+        )
+
+        model_pt, model_json = _export_model(self.root / "model_permutation")
+
+        def _score(probe, name):
+            return score_model(
+                name,
+                model_pt_path=model_pt,
+                model_json_path=model_json,
+                probe=probe,
+                options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+                live_region_map_loader=_live_map(),
+                n_permutations=N_PERMUTATIONS,
+            )
+
+        canonical_score = _score(canonical_probe, "canonical")
+        permuted_score = _score(permuted_probe, "permuted")
+
+        pd.testing.assert_frame_equal(
+            summary_table(canonical_score).drop(columns=["model"]),
+            summary_table(permuted_score).drop(columns=["model"]),
+        )
+        pd.testing.assert_frame_equal(
+            decisions_table(canonical_score).drop(columns=["model"]),
+            decisions_table(permuted_score).drop(columns=["model"]),
+        )
+
+    def test_load_probe_build_branch_hashes_the_full_row_set_not_the_survivors(self):
+        """`load_probe`'s build-from-scratch branch is the one production
+        call site of `write_feature_cache`; a test that never passes
+        `download_dir` never reaches it. A cache legitimately short by a
+        missing image's points must still be written against the parquet's
+        full row set -- hashing only the surviving rows would carry a
+        different hash than the one this same call re-reads the parquet at,
+        so an incomplete-but-legitimate cache would refuse to load.
+        """
+        points = [
+            ("kept1", TROPICAL_ATLANTIC, "ba1"),
+            ("kept1", TROPICAL_ATLANTIC, "ba0"),
+            ("absent", TROPICAL_ATLANTIC, "ba0"),
+        ]
+        rows = _probe_rows(points)
+        probe_dir = self.root / "probe_from_scratch"
+        probe_dir.mkdir()
+        rows.to_parquet(probe_dir / "probe_points.parquet", index=False)
+        (probe_dir / "ba_regions.json").write_text(json.dumps(FROZEN_REGIONS, sort_keys=True))
+
+        download_dir = self.root / "downloads"
+        download_dir.mkdir()
+        kept_rows = rows[rows["image_id"] == "kept1"]
+        (download_dir / f"kept1{DEFAULT_FEATURE_SUFFIX}").write_bytes(
+            _feature_file_bytes(list(zip(kept_rows["row"], kept_rows["col"], strict=True)))
+        )
+
+        with mock.patch(
+            "mermaid_classifier.region_eval.features.download_features_parallel",
+            return_value=set(),
+        ):
+            probe = load_probe(probe_dir, download_dir=download_dir)
+
+        self.assertEqual(probe.features.n_points, 2)
+        self.assertNotIn("absent", probe.features.image_ids)
+
+        archive = np.load(probe_dir / "probe_features.npz", allow_pickle=False)
+        self.assertEqual(str(archive["content_hash"]), probe_content_hash(rows))
 
 
 class NameResolutionTest(unittest.TestCase):

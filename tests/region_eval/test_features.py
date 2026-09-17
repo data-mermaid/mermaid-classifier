@@ -1,9 +1,12 @@
 """Unit tests for region_eval/features.py.
 
-Feature files are real npz archives written into a temp dir, in the layout the
-extractor emits: `meta` (version, n_points, dim), `rows`/`cols` as uint16, and
-`feat` as float64. The loader seam is a callable that reads those files, so no
-test here reaches S3.
+Feature files are real npz archives written straight into the temp download
+directory `build_feature_cache` reads from, in the layout the extractor
+emits: `meta` (version, n_points, dim), `rows`/`cols` as uint16, and `feat` as
+float64. Pre-populating that directory is the injection point: the real
+`download_features_parallel` sees every file already on disk and never
+touches S3. A test simulating an image with no feature file at all patches
+`download_features_parallel` instead, since only S3 would otherwise say so.
 
 Every fixture vector is filled with `row * 1000 + col`, which makes alignment
 checkable by hand: if the cache ever paired a point's metadata with a
@@ -16,11 +19,13 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
 
 from mermaid_classifier.region_eval.features import (
+    DEFAULT_FEATURE_SUFFIX,
     build_feature_cache,
     read_feature_file,
     write_feature_cache,
@@ -73,10 +78,18 @@ class FeatureCacheTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
 
     def _write_feature_file(self, image_id: str, points: list[tuple[int, int]]) -> None:
-        (self.root / f"{image_id}.npz").write_bytes(_feature_bytes(points))
+        (self.root / f"{image_id}{DEFAULT_FEATURE_SUFFIX}").write_bytes(_feature_bytes(points))
 
-    def _loader(self, image_id: str) -> bytes:
-        return (self.root / f"{image_id}.npz").read_bytes()
+    def _no_s3(self):
+        """Patch the downloader for a case an image legitimately has no file.
+
+        Without this, `build_feature_cache` would ask the real downloader to
+        fetch it, which reaches for S3.
+        """
+        return mock.patch(
+            "mermaid_classifier.region_eval.features.download_features_parallel",
+            return_value=set(),
+        )
 
     def _assert_aligned(self, cache) -> None:
         for position in range(len(cache.image_ids)):
@@ -90,7 +103,7 @@ class FeatureCacheTest(unittest.TestCase):
         self._write_feature_file("i1", [(10, 20), (50, 60)])
         probe = _probe_rows({"i1": [(10, 20), (30, 40), (50, 60)]})
 
-        cache = build_feature_cache(probe, self._loader, feature_dim=DIM, workers=2)
+        cache = build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
 
         self.assertEqual(cache.n_points_requested, 3)
         self.assertEqual(cache.n_points_missing_row_col, 1)
@@ -103,7 +116,8 @@ class FeatureCacheTest(unittest.TestCase):
         self._write_feature_file("i1", [(10, 20), (30, 40)])
         probe = _probe_rows({"i1": [(10, 20), (30, 40)], "gone": [(70, 80), (90, 100)]})
 
-        cache = build_feature_cache(probe, self._loader, feature_dim=DIM, workers=2)
+        with self._no_s3():
+            cache = build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
 
         self.assertEqual(cache.n_points_missing_image, 2)
         self.assertEqual(cache.n_points_missing_row_col, 0)
@@ -116,7 +130,7 @@ class FeatureCacheTest(unittest.TestCase):
         self._write_feature_file("i2", [(30, 40)])
         probe = _probe_rows({"ta1": [(10, 20)], "i2": [(30, 40)]})
 
-        cache = build_feature_cache(probe, self._loader, feature_dim=DIM, workers=2)
+        cache = build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
 
         self.assertEqual(list(cache.image_ids), ["ta1", "i2"])
         self.assertEqual(list(cache.gt_labels), [LABEL, LABEL])
@@ -127,140 +141,16 @@ class FeatureCacheTest(unittest.TestCase):
     def test_features_are_cast_to_float32(self):
         self._write_feature_file("i1", [(10, 20)])
         cache = build_feature_cache(
-            _probe_rows({"i1": [(10, 20)]}), self._loader, feature_dim=DIM, workers=2
+            _probe_rows({"i1": [(10, 20)]}), self.root, feature_dim=DIM, workers=2
         )
         self.assertEqual(cache.features.dtype, np.float32)
 
     def test_every_point_missing_leaves_an_empty_but_shaped_matrix(self):
         probe = _probe_rows({"gone": [(10, 20)]})
-        cache = build_feature_cache(probe, self._loader, feature_dim=DIM, workers=2)
+        with self._no_s3():
+            cache = build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
         self.assertEqual(cache.features.shape, (0, DIM))
         self.assertEqual(cache.n_points_missing_image, 1)
-
-    def test_a_cached_shard_restarts_the_build_without_the_loader(self):
-        self._write_feature_file("i1", [(10, 20), (50, 60)])
-        probe = _probe_rows({"i1": [(10, 20), (30, 40), (50, 60)], "gone": [(70, 80)]})
-        shards = self.root / "shards"
-
-        first = build_feature_cache(
-            probe, self._loader, feature_dim=DIM, workers=2, shard_dir=shards
-        )
-
-        def refuse(image_id: str) -> bytes:
-            raise AssertionError(f"loader called for {image_id} despite a cached shard")
-
-        second = build_feature_cache(probe, refuse, feature_dim=DIM, workers=2, shard_dir=shards)
-
-        self.assertEqual(list(second.point_ids), list(first.point_ids))
-        self.assertEqual(second.n_points_missing_row_col, first.n_points_missing_row_col)
-        self.assertEqual(second.n_points_missing_image, first.n_points_missing_image)
-        self.assertEqual(second.missing_image_ids, first.missing_image_ids)
-        np.testing.assert_array_equal(second.features, first.features)
-
-    def test_a_shard_built_for_other_points_is_rebuilt_rather_than_restored(self):
-        """Positions in a shard index one run's probe rows. Rebuilding into a
-        directory whose shards came from a different selection -- another seed,
-        another target size, a refreshed export -- would otherwise lay the old
-        run's vectors on the new run's rows: every point scored with another
-        image's features while carrying this image's ground truth, and every
-        missing count reading zero.
-        """
-        first_points = {f"i{index}": [(10 * index, 20 * index)] for index in range(1, 5)}
-        second_points = {f"i{index}": [(10 * index, 20 * index)] for index in range(5, 9)}
-        for points_by_image in (first_points, second_points):
-            for image_id, points in points_by_image.items():
-                self._write_feature_file(image_id, points)
-        shards = self.root / "shards"
-
-        build_feature_cache(
-            _probe_rows(first_points),
-            self._loader,
-            feature_dim=DIM,
-            workers=2,
-            batch_size=2,
-            shard_dir=shards,
-        )
-        second = build_feature_cache(
-            _probe_rows(second_points),
-            self._loader,
-            feature_dim=DIM,
-            workers=2,
-            batch_size=2,
-            shard_dir=shards,
-        )
-
-        self.assertEqual(list(second.image_ids), ["i5", "i6", "i7", "i8"])
-        self.assertEqual(second.n_points_missing_row_col, 0)
-        self.assertEqual(second.n_points_missing_image, 0)
-        self._assert_aligned(second)
-
-    def test_a_shard_whose_rows_shifted_is_rebuilt_though_its_points_did_not(self):
-        """A rebuild that adds a point to one image slides every later image
-        down a row, leaving a later batch's own points byte-identical. A shard
-        bound only to those identities restores at the previous run's indices,
-        so each vector lands one row early -- carrying the right metadata for a
-        point it does not belong to, and dropping the row that ran off the end.
-        """
-        self._write_feature_file("i1", [(10, 20), (15, 25)])
-        for index in range(2, 5):
-            self._write_feature_file(f"i{index}", [(10 * index, 20 * index)])
-        first = {f"i{index}": [(10 * index, 20 * index)] for index in range(1, 5)}
-        first["i1"] = [(10, 20)]
-        second = {**first, "i1": [(10, 20), (15, 25)]}
-        shards = self.root / "shards"
-
-        build_feature_cache(
-            _probe_rows(first),
-            self._loader,
-            feature_dim=DIM,
-            workers=2,
-            batch_size=2,
-            shard_dir=shards,
-        )
-        cache = build_feature_cache(
-            _probe_rows(second),
-            self._loader,
-            feature_dim=DIM,
-            workers=2,
-            batch_size=2,
-            shard_dir=shards,
-        )
-
-        self.assertEqual(list(cache.point_ids), ["i1-p0", "i1-p1", "i2-p0", "i3-p0", "i4-p0"])
-        self.assertEqual(cache.n_points_missing_row_col, 0)
-        self.assertEqual(cache.n_points_missing_image, 0)
-        self._assert_aligned(cache)
-
-    def test_a_shard_written_without_a_points_key_is_rebuilt(self):
-        """A shard left by a build that predates the key cannot say which
-        points it holds, so restoring it is the same gamble as restoring a
-        stale one.
-        """
-        probe = _probe_rows({"i1": [(10, 20)], "i2": [(30, 40)]})
-        for image_id, points in (("i1", [(10, 20)]), ("i2", [(30, 40)])):
-            self._write_feature_file(image_id, points)
-        shards = self.root / "shards"
-        build_feature_cache(
-            probe, self._loader, feature_dim=DIM, workers=2, batch_size=1, shard_dir=shards
-        )
-        stored = np.load(shards / "batch_00000.npz", allow_pickle=False)
-        np.savez_compressed(
-            shards / "batch_00000.npz",
-            **{name: stored[name] for name in stored.files if name != "points_key"},
-        )
-        fetched: list[str] = []
-
-        def recording(image_id: str) -> bytes:
-            fetched.append(image_id)
-            return self._loader(image_id)
-
-        cache = build_feature_cache(
-            probe, recording, feature_dim=DIM, workers=2, batch_size=1, shard_dir=shards
-        )
-
-        self.assertEqual(fetched, ["i1"], "the keyless shard is the only batch downloaded again")
-        self.assertEqual(list(cache.image_ids), ["i1", "i2"])
-        self._assert_aligned(cache)
 
     def test_a_feature_file_that_does_not_parse_raises_rather_than_counting_it_missing(self):
         """A truncated archive that read as a missing image would shrink the
@@ -269,40 +159,37 @@ class FeatureCacheTest(unittest.TestCase):
         """
         self._write_feature_file("i1", [(10, 20)])
         whole = _feature_bytes([(30, 40)])
-        (self.root / "i2.npz").write_bytes(whole[: len(whole) // 2])
+        (self.root / f"i2{DEFAULT_FEATURE_SUFFIX}").write_bytes(whole[: len(whole) // 2])
         probe = _probe_rows({"i1": [(10, 20)], "i2": [(30, 40)]})
 
         with self.assertRaises(zipfile.BadZipFile):
-            build_feature_cache(probe, self._loader, feature_dim=DIM, workers=2)
-
-    def test_batching_covers_every_image(self):
-        images = {f"i{index}": [(10 * index, 20 * index)] for index in range(1, 8)}
-        for image_id, points in images.items():
-            self._write_feature_file(image_id, points)
-
-        cache = build_feature_cache(
-            _probe_rows(images), self._loader, feature_dim=DIM, workers=2, batch_size=2
-        )
-
-        self.assertEqual(len(cache.image_ids), 7)
-        self.assertEqual(cache.n_points_missing_row_col, 0)
-        self._assert_aligned(cache)
+            build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
 
     def test_a_feature_file_of_the_wrong_dimension_raises(self):
-        (self.root / "i1.npz").write_bytes(_feature_bytes([(10, 20)], dim=DIM + 1))
+        (self.root / f"i1{DEFAULT_FEATURE_SUFFIX}").write_bytes(
+            _feature_bytes([(10, 20)], dim=DIM + 1)
+        )
         with self.assertRaises(ValueError):
             build_feature_cache(
-                _probe_rows({"i1": [(10, 20)]}), self._loader, feature_dim=DIM, workers=2
+                _probe_rows({"i1": [(10, 20)]}), self.root, feature_dim=DIM, workers=2
             )
 
     def test_written_cache_round_trips_its_arrays(self):
         self._write_feature_file("i1", [(10, 20)])
-        cache = build_feature_cache(
-            _probe_rows({"i1": [(10, 20)]}), self._loader, feature_dim=DIM, workers=2
+        # write_feature_cache hashes the full PROBE_COLUMNS schema, wider than
+        # the METADATA_COLUMNS build_feature_cache itself needs.
+        rows = _probe_rows({"i1": [(10, 20)]}).assign(
+            benthic_attribute_id="ba1",
+            benthic_attribute_name="BA1",
+            growth_form_id="gf1",
+            growth_form_name="GF1",
+            region_name="Region",
+            site_id="",
         )
+        cache = build_feature_cache(rows, self.root, feature_dim=DIM, workers=2)
         path = self.root / "probe_features.npz"
 
-        write_feature_cache(cache, path)
+        write_feature_cache(cache, rows, path)
 
         stored = np.load(path, allow_pickle=False)
         np.testing.assert_array_equal(stored["features"], cache.features)

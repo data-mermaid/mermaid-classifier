@@ -44,11 +44,9 @@ from urllib.parse import urlparse
 import boto3
 
 from mermaid_classifier.region_eval.features import (
-    DEFAULT_BATCH_SIZE,
     DEFAULT_FEATURE_BUCKET,
     DEFAULT_FEATURE_PREFIX,
     DEFAULT_WORKERS,
-    s3_feature_loader,
 )
 from mermaid_classifier.region_eval.metrics import RegionMetricsOptions
 from mermaid_classifier.region_eval.score import (
@@ -132,7 +130,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feature-bucket", default=DEFAULT_FEATURE_BUCKET)
     parser.add_argument("--feature-prefix", default=DEFAULT_FEATURE_PREFIX)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="images/shard")
     parser.add_argument("--aws-region", default=DEFAULT_REGION)
     return parser.parse_args(argv)
 
@@ -145,17 +142,14 @@ def main(argv: list[str] | None = None) -> int:
     features_path = args.probe_dir / PROBE_FEATURES_FILE
     if not features_path.exists():
         logger.info("no %s; downloading feature vectors", features_path)
-    probe = load_probe(
-        args.probe_dir,
-        feature_loader=s3_feature_loader(
+    with tempfile.TemporaryDirectory() as downloads:
+        probe = load_probe(
+            args.probe_dir,
+            download_dir=Path(downloads),
             bucket=args.feature_bucket,
             prefix=args.feature_prefix,
-            region_name=args.aws_region,
             workers=args.workers,
-        ),
-        workers=args.workers,
-        batch_size=args.batch_size,
-    )
+        )
     logger.info(
         "probe %s: %d cached point(s), content_hash=%s",
         probe.manifest.get("probe_version", "?"),

@@ -17,37 +17,28 @@ is the one failure the counts could not tell you about.
 Features are cast to float32. The extractor writes float64, which doubles the
 cache for precision no downstream head uses.
 
-Downloads run through a thread pool in batches, each batch checkpointed to a
-shard so an interrupted build restarts where it stopped. The shard records
-which images were missing as well as which points were filled, so a resumed
-build reports the same counts as an uninterrupted one. It also records a hash
-of the `(position, image_id, point_id, row, col)` its rows were built for:
-positions are indices into one run's probe rows, so a shard reused across a
-changed selection -- or across one whose earlier images gained or lost points
--- would land the previous selection's vectors on this one's rows, the very
-misalignment the (row, col) match exists to prevent. A shard whose hash does
-not match the batch is discarded and the batch downloaded again.
+Downloads run in parallel into `download_dir` through
+`download_features_parallel`, the training pipeline's own S3 downloader.
+`download_dir` is a scratch directory that does not outlive the run.
 """
 
 import dataclasses
-import hashlib
 import io
 import logging
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import boto3
 import numpy as np
 import pandas as pd
-from botocore.config import Config
 from numpy.typing import NDArray
+
+from mermaid_classifier.pyspacer._pipeline_utils import download_features_parallel
+from mermaid_classifier.region_eval.probe_set import probe_content_hash
 
 logger = logging.getLogger(__name__)
 
 FEATURE_DIM = 1280
 DEFAULT_WORKERS = 32
-DEFAULT_BATCH_SIZE = 500
 DEFAULT_FEATURE_BUCKET = "coral-reef-training"
 DEFAULT_FEATURE_PREFIX = "mermaid/"
 DEFAULT_FEATURE_SUFFIX = "_featurevector"
@@ -102,54 +93,26 @@ def read_feature_file(
     return rows, cols, features
 
 
-def s3_feature_loader(
+def build_feature_cache(
+    probe_rows: pd.DataFrame,
+    download_dir: Path,
     *,
     bucket: str = DEFAULT_FEATURE_BUCKET,
     prefix: str = DEFAULT_FEATURE_PREFIX,
     suffix: str = DEFAULT_FEATURE_SUFFIX,
-    region_name: str = "us-east-1",
     workers: int = DEFAULT_WORKERS,
-) -> FeatureLoader:
-    """A loader that fetches one image's feature file from S3.
-
-    One client serves every worker: botocore clients are thread-safe, and the
-    connection pool is sized to the pool that will share it.
-    """
-    client = boto3.client(
-        "s3",
-        region_name=region_name,
-        config=Config(
-            max_pool_connections=workers + 8,
-            retries={"max_attempts": 5, "mode": "adaptive"},
-        ),
-    )
-
-    def load(image_id: str) -> bytes:
-        key = f"{prefix}{image_id}{suffix}"
-        return client.get_object(Bucket=bucket, Key=key)["Body"].read()
-
-    return load
-
-
-def build_feature_cache(
-    probe_rows: pd.DataFrame,
-    loader: FeatureLoader,
-    *,
-    workers: int = DEFAULT_WORKERS,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    shard_dir: Path | None = None,
     feature_dim: int = FEATURE_DIM,
 ) -> FeatureCache:
     """Fetch every probe point's feature vector into one aligned matrix.
 
     Output rows follow `probe_rows` order, minus the points no vector was
-    found for.
+    found for. Every wanted image's file is downloaded into `download_dir`
+    through `download_features_parallel` before anything is read, so a test
+    that pre-populates the directory never reaches S3.
     """
-    missing = [column for column in METADATA_COLUMNS if column not in probe_rows.columns]
-    if missing:
-        raise ValueError(f"probe rows are missing column(s): {', '.join(missing)}")
-    if batch_size < 1:
-        raise ValueError(f"batch_size must be at least 1, got {batch_size}")
+    missing_columns = [column for column in METADATA_COLUMNS if column not in probe_rows.columns]
+    if missing_columns:
+        raise ValueError(f"probe rows are missing column(s): {', '.join(missing_columns)}")
 
     image_ids = [str(value) for value in probe_rows["image_id"]]
     point_ids = [str(value) for value in probe_rows["point_id"]]
@@ -159,71 +122,30 @@ def build_feature_cache(
     wanted: dict[str, list[int]] = {}
     for position, image_id in enumerate(image_ids):
         wanted.setdefault(image_id, []).append(position)
-    batches = _batches(sorted(wanted), batch_size)
+
+    local_paths = {image_id: download_dir / f"{image_id}{suffix}" for image_id in wanted}
+    s3_keys = {
+        (bucket, f"{prefix}{image_id}{suffix}"): str(local_paths[image_id]) for image_id in wanted
+    }
+    download_features_parallel(s3_keys, max_workers=workers)
+
+    def load(image_id: str) -> bytes:
+        return local_paths[image_id].read_bytes()
 
     n_points = len(image_ids)
     features = np.zeros((n_points, feature_dim), dtype=np.float32)
     filled = np.zeros(n_points, dtype=bool)
     missing_images: set[str] = set()
-
-    for index, batch in enumerate(batches):
-        shard = None if shard_dir is None else shard_dir / f"batch_{index:05d}.npz"
-        key = _shard_points_key(
-            [position for image_id in batch for position in wanted[image_id]],
-            image_ids=image_ids,
-            point_ids=point_ids,
-            rows=rows,
-            cols=cols,
+    for image_id, positions in wanted.items():
+        matched = _image_vectors(
+            load, image_id, positions, rows=rows, cols=cols, feature_dim=feature_dim
         )
-        if shard is not None and shard.exists():
-            restored = _restore_shard(shard, key)
-            if restored is None:
-                logger.warning(
-                    "shard %s does not hold this batch's points at this batch's"
-                    " rows; discarding it and downloading this batch again",
-                    shard.name,
-                )
-            else:
-                positions, vectors, shard_missing = restored
-                features[positions] = vectors
-                filled[positions] = True
-                missing_images.update(shard_missing)
-                continue
-
-        found, batch_missing = _run_batch(
-            loader,
-            batch,
-            wanted=wanted,
-            rows=rows,
-            cols=cols,
-            workers=workers,
-            feature_dim=feature_dim,
-        )
-        positions = np.array([position for position, _ in found], dtype=np.int64)
-        vectors = (
-            np.stack([vector for _, vector in found])
-            if found
-            else np.zeros((0, feature_dim), dtype=np.float32)
-        )
-        features[positions] = vectors
-        filled[positions] = True
-        missing_images.update(batch_missing)
-        if shard is not None:
-            shard.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(
-                shard,
-                positions=positions,
-                vectors=vectors,
-                missing_image_ids=np.array(sorted(batch_missing), dtype=np.str_),
-                points_key=np.array(key, dtype=np.str_),
-            )
-        logger.info(
-            "feature batch %d/%d: %d points, %d image(s) without a feature file",
-            index + 1,
-            len(batches),
-            len(found),
-            len(batch_missing),
-        )
+        if matched is None:
+            missing_images.add(image_id)
+            continue
+        for position, vector in matched:
+            features[position] = vector
+            filled[position] = True
 
     absent_image = np.array([image_id in missing_images for image_id in image_ids], dtype=bool)
     n_missing_image = int((~filled & absent_image).sum())
@@ -233,6 +155,12 @@ def build_feature_cache(
             "%d probe point(s) had no matching (row, col) in their feature file; dropping them",
             n_missing_row_col,
         )
+    logger.info(
+        "cached %d/%d probe point(s); %d image(s) had no feature file",
+        int(filled.sum()),
+        n_points,
+        len(missing_images),
+    )
 
     kept = np.flatnonzero(filled)
     return FeatureCache(
@@ -251,8 +179,14 @@ def build_feature_cache(
     )
 
 
-def write_feature_cache(cache: FeatureCache, path: Path) -> None:
-    """Write the cache as one npz whose arrays stay index-aligned."""
+def write_feature_cache(cache: FeatureCache, rows: pd.DataFrame, path: Path) -> None:
+    """Write the cache as one npz whose arrays stay index-aligned.
+
+    `rows` is the probe selection the cache was built to cover -- not
+    necessarily every row it carries, since an image with no feature file
+    drops out -- and its hash is what lets `load_probe` tell this cache apart
+    from one built for a different selection.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         path,
@@ -264,90 +198,8 @@ def write_feature_cache(cache: FeatureCache, path: Path) -> None:
         gt_label=np.array(cache.gt_labels, dtype=np.str_),
         region_id=np.array(cache.region_ids, dtype=np.str_),
         held_out=cache.held_out,
+        content_hash=np.array(probe_content_hash(rows), dtype=np.str_),
     )
-
-
-def _shard_points_key(
-    positions: Sequence[int],
-    *,
-    image_ids: Sequence[str],
-    point_ids: Sequence[str],
-    rows: NDArray[np.int64],
-    cols: NDArray[np.int64],
-) -> str:
-    """A hash of the points one shard covers, and the rows it writes them at.
-
-    Both halves are load-bearing. The identities say the vectors belong to
-    these points; the positions say they belong at these indices. A rebuild
-    that changes one image's point count slides every later image down a row
-    while leaving its identities untouched, so a key over identities alone
-    still matches and the restored vectors land a row early.
-    """
-    digest = hashlib.sha256()
-    for position in positions:
-        digest.update(
-            f"{position}\x1f{image_ids[position]}\x1f{point_ids[position]}\x1f"
-            f"{int(rows[position])}\x1f{int(cols[position])}\x1e".encode()
-        )
-    return digest.hexdigest()
-
-
-def _restore_shard(
-    shard: Path, key: str
-) -> tuple[NDArray[np.int64], NDArray[np.float32], set[str]] | None:
-    """One shard's filled positions, vectors and missing images, or None.
-
-    None is a shard whose key is not this batch's -- other points, or these
-    points at other rows -- and a shard carrying no key at all: neither says
-    its rows are these points.
-    """
-    cached = np.load(shard, allow_pickle=False)
-    if "points_key" not in cached.files or str(cached["points_key"]) != key:
-        return None
-    return (
-        cached["positions"].astype(np.int64),
-        np.asarray(cached["vectors"], dtype=np.float32),
-        {str(value) for value in cached["missing_image_ids"]},
-    )
-
-
-def _batches(image_ids: Sequence[str], batch_size: int) -> list[Sequence[str]]:
-    return [image_ids[start : start + batch_size] for start in range(0, len(image_ids), batch_size)]
-
-
-def _run_batch(
-    loader: FeatureLoader,
-    batch: Sequence[str],
-    *,
-    wanted: dict[str, list[int]],
-    rows: NDArray[np.int64],
-    cols: NDArray[np.int64],
-    workers: int,
-    feature_dim: int,
-) -> tuple[list[tuple[int, NDArray[np.float32]]], set[str]]:
-    """Download and match one batch of images, in parallel."""
-    found: list[tuple[int, NDArray[np.float32]]] = []
-    missing: set[str] = set()
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(
-                _image_vectors,
-                loader,
-                image_id,
-                wanted[image_id],
-                rows=rows,
-                cols=cols,
-                feature_dim=feature_dim,
-            )
-            for image_id in batch
-        ]
-        for image_id, future in zip(batch, futures, strict=True):
-            matched = future.result()
-            if matched is None:
-                missing.add(image_id)
-            else:
-                found += matched
-    return found, missing
 
 
 def _image_vectors(
