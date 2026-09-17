@@ -20,6 +20,12 @@ the model changed. Fetching the live map is the one network call this module
 makes, and an unreachable API degrades the diagnostic to "not computed"
 rather than failing a run that is otherwise complete.
 
+Triage reads the corpus-wide annotation counts frozen with the probe, for the
+same reason the region map is frozen. A probe built before they were frozen
+falls back to the probe's own ground truth, which counts each pair only as
+often as the probe samples it and so reads the model-error headline high;
+`limitations.yaml` records which of the two a score was taken on.
+
 Outputs are written to a local directory. Nothing is uploaded: publishing a
 score is a deliberate step of its own.
 """
@@ -43,13 +49,9 @@ from mermaid_classifier.common.benthic_attributes import (
     split_ba_gf,
 )
 from mermaid_classifier.common.region_rules import (
-    cluster_bootstrap_ci,
-    design_effect,
     is_region_discriminating,
     mcnemar_paired,
     paired_cluster_bootstrap_diff,
-    rule_of_three,
-    wilson_ci,
 )
 from mermaid_classifier.pyspacer.inference import load_predictor
 from mermaid_classifier.region_eval.features import (
@@ -88,6 +90,7 @@ logger = logging.getLogger(__name__)
 
 PROBE_POINTS_FILE = "probe_points.parquet"
 PROBE_REGIONS_FILE = "ba_regions.json"
+PROBE_COUNTS_FILE = "ba_region_counts.json"
 PROBE_MANIFEST_FILE = "manifest.json"
 PROBE_FEATURES_FILE = "probe_features.npz"
 
@@ -170,6 +173,14 @@ MEOW_N_PAIRS_INTERSECTING = 0
 DRIFT_COMPUTED = "computed"
 DRIFT_NOT_COMPUTED = "not_computed"
 
+# Where the (attribute, region) annotation counts triage reads came from. Only
+# the corpus-wide ones carry the count the list-suspect threshold is set for;
+# the probe's own ground truth counts each pair at most as often as the probe
+# samples it.
+COUNTS_SOURCE_CORPUS = "frozen_corpus"
+COUNTS_SOURCE_PROBE = "probe_lower_bound"
+COUNTS_SOURCE_CALLER = "caller_supplied"
+
 CORE_RATE_METRICS = ("oor_rate", "oor_rate_disc", "oor_rate_disc_gt", "gt_oor_rate")
 
 # Rates a v1-vs-v2 comparison is read on. The ground-truth floor is not one
@@ -203,10 +214,16 @@ class ProbeFeatures:
 
 @dataclasses.dataclass(frozen=True)
 class LoadedProbe:
-    """Everything a scoring run reads off disk, plus the hashes that pin it."""
+    """Everything a scoring run reads off disk, plus the hashes that pin it.
+
+    `ground_truth_counts` is None for a probe built before the corpus-wide
+    counts were frozen beside it, which is a fallback for the caller to
+    resolve rather than a reason to refuse the probe.
+    """
 
     rows: pd.DataFrame
     region_ids_by_attribute: dict[str, frozenset[str]]
+    ground_truth_counts: dict[tuple[str, str], int] | None
     manifest: dict[str, Any]
     features: ProbeFeatures
     content_hash: str
@@ -227,8 +244,8 @@ class ModelScore:
     points: ScoredPoints
     metrics: RegionMismatchMetrics
     triage: TriageResult
-    accuracy_all: RateEstimate
-    accuracy_held_out: RateEstimate | None
+    ground_truth_counts_source: str
+    n_ground_truth_pairs: int
     drift: dict[str, Any]
 
 
@@ -241,6 +258,16 @@ def read_region_snapshot(path: Path) -> dict[str, frozenset[str]]:
     """The frozen `ba_regions.json` as the mapping the predicates expect."""
     payload = json.loads(path.read_text())
     return {str(key): frozenset(str(value) for value in values) for key, values in payload.items()}
+
+
+def read_ground_truth_counts(path: Path) -> dict[tuple[str, str], int]:
+    """The frozen `ba_region_counts.json` keyed the way triage looks counts up."""
+    payload = json.loads(path.read_text())
+    return {
+        (str(attribute_id), str(region_id)): int(count)
+        for attribute_id, by_region in payload.items()
+        for region_id, count in by_region.items()
+    }
 
 
 def read_feature_cache(path: Path) -> ProbeFeatures:
@@ -291,6 +318,9 @@ def load_probe(
 
     region_ids_by_attribute = read_region_snapshot(probe_dir / PROBE_REGIONS_FILE)
 
+    counts_path = probe_dir / PROBE_COUNTS_FILE
+    ground_truth_counts = read_ground_truth_counts(counts_path) if counts_path.exists() else None
+
     manifest_path = probe_dir / PROBE_MANIFEST_FILE
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
 
@@ -316,6 +346,7 @@ def load_probe(
     return LoadedProbe(
         rows=rows,
         region_ids_by_attribute=region_ids_by_attribute,
+        ground_truth_counts=ground_truth_counts,
         manifest=manifest,
         features=features,
         content_hash=probe_content_hash(rows),
@@ -345,10 +376,11 @@ def score_model(
     """Score one portable artifact on the probe and assemble every output.
 
     `ground_truth_counts` maps (benthic attribute id, region id) to confirmed
-    human annotations of that pair. It defaults to the probe's own ground
-    truth, which is a lower bound on the corpus-wide count the triage
-    threshold is meant to read, so a caller holding the full export should
-    pass it.
+    human annotations of that pair corpus-wide, and overrides whatever the
+    probe carries. Left out, the counts frozen with the probe are used, and a
+    probe without them falls back to its own ground truth --
+    `ground_truth_counts_source` says which, because only the first two carry
+    the count the list-suspect threshold is set for.
     """
     resolved = RegionMetricsOptions() if options is None else options
     predictor = load_predictor(model_pt_path, model_json_path)
@@ -365,22 +397,8 @@ def score_model(
         held_out=probe.features.held_out.tolist(),
     )
     metrics = compute_region_metrics(points, options=resolved)
-    triage = triage_events(
-        points,
-        ground_truth_counts=(
-            _probe_ground_truth_counts(points)
-            if ground_truth_counts is None
-            else ground_truth_counts
-        ),
-        threshold=triage_threshold,
-    )
-
-    all_points = np.ones(points.n_points, dtype=bool)
-    accuracy_held_out = (
-        _accuracy_estimate(points, points.held_out, resolved)
-        if bool(points.held_out.any())
-        else None
-    )
+    counts, counts_source = _resolve_ground_truth_counts(points, probe, ground_truth_counts)
+    triage = triage_events(points, ground_truth_counts=counts, threshold=triage_threshold)
 
     return ModelScore(
         name=name,
@@ -392,8 +410,8 @@ def score_model(
         points=points,
         metrics=metrics,
         triage=triage,
-        accuracy_all=_accuracy_estimate(points, all_points, resolved),
-        accuracy_held_out=accuracy_held_out,
+        ground_truth_counts_source=counts_source,
+        n_ground_truth_pairs=len(counts),
         drift=region_list_drift(
             probe=probe,
             predictions=predictions,
@@ -519,8 +537,8 @@ def paired_comparison(
 def summary_table(score: ModelScore) -> pd.DataFrame:
     """One row per metric, each carrying the denominator it was read over."""
     rows: list[dict[str, object]] = []
-    for population, rates, accuracy in _populations(score):
-        rows.extend(_population_summary_rows(score, population, rates, accuracy))
+    for population, rates in _populations(score):
+        rows.extend(_population_summary_rows(score, population, rates))
     table = pd.DataFrame(rows, columns=pd.Index(SUMMARY_COLUMNS))
     # Counts stay integral: a difference row carries no k, and a float column
     # would render every denominator as "25.0".
@@ -537,6 +555,7 @@ def build_limitations(score: ModelScore) -> dict[str, Any]:
     metrics = score.metrics
     points = score.points
     floor = metrics.overall.gt_oor_rate
+    ratio = metrics.overall.ratio_to_gt
     directions = metrics.per_direction
     overall_directions = (
         directions[directions["population"] == ALL_POINTS] if len(directions) else directions
@@ -624,6 +643,26 @@ def build_limitations(score: ModelScore) -> dict[str, Any]:
                     "ci_low": _clean(floor.ci_low),
                     "ci_high": _clean(floor.ci_high),
                     "n_images": int(points.n_images),
+                    "n_ratio_draws": int(ratio.n_draws),
+                    "n_ratio_draws_empty_floor": int(ratio.n_nonfinite_draws),
+                },
+            },
+            {
+                "id": "triage_ground_truth_counts",
+                "statement": (
+                    "An out-of-region event reads as a suspect region list rather"
+                    " than a model error once experts have annotated that"
+                    " (attribute, region) pair at least `threshold` times"
+                    " corpus-wide. Counted on the probe alone the same pair is"
+                    " counted only as often as the probe samples it, which moves"
+                    " events out of list_suspect and into model_error."
+                ),
+                "magnitude": {
+                    "source": score.ground_truth_counts_source,
+                    "is_lower_bound": score.ground_truth_counts_source == COUNTS_SOURCE_PROBE,
+                    "threshold": int(score.triage.threshold),
+                    "n_pairs": int(score.n_ground_truth_pairs),
+                    "bucket_counts": _bucket_counts(score.triage),
                 },
             },
             {
@@ -677,10 +716,9 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
         },
         "triage": {
             "threshold": score.triage.threshold,
-            "bucket_counts": {
-                str(row["bucket"]): int(row["n"])
-                for _, row in score.triage.bucket_counts.iterrows()
-            },
+            "ground_truth_counts_source": score.ground_truth_counts_source,
+            "n_ground_truth_pairs": score.n_ground_truth_pairs,
+            "bucket_counts": _bucket_counts(score.triage),
         },
         "region_list_drift": score.drift,
     }
@@ -715,9 +753,11 @@ def render_markdown(score: ModelScore) -> str:
         "",
         "## Model quality on this probe",
         "",
-        f"- Accuracy: {_rate_text(score.accuracy_all)}",
-        f"- Macro F1 over region-discriminating ground truths (point estimate,"
-        f" no interval): {_number(overall.f1_macro_disc)}"
+        f"- Accuracy: {_rate_text(overall.accuracy)}",
+        f"- Over region-discriminating ground truths, point estimates carrying"
+        f" no interval: macro precision {_number(overall.precision_macro_disc)},"
+        f" macro recall {_number(overall.recall_macro_disc)},"
+        f" macro F1 {_number(overall.f1_macro_disc)},"
         f" over {overall.n_f1_disc_points} points",
         "",
         "## Region list drift",
@@ -857,12 +897,10 @@ def _comparison_row(
     }
 
 
-def _populations(
-    score: ModelScore,
-) -> list[tuple[str, PopulationRates, RateEstimate]]:
-    populations = [(ALL_POINTS, score.metrics.overall, score.accuracy_all)]
-    if score.metrics.held_out is not None and score.accuracy_held_out is not None:
-        populations.append((HELD_OUT, score.metrics.held_out, score.accuracy_held_out))
+def _populations(score: ModelScore) -> list[tuple[str, PopulationRates]]:
+    populations = [(ALL_POINTS, score.metrics.overall)]
+    if score.metrics.held_out is not None:
+        populations.append((HELD_OUT, score.metrics.held_out))
     return populations
 
 
@@ -870,7 +908,6 @@ def _population_summary_rows(
     score: ModelScore,
     population: str,
     rates: PopulationRates,
-    accuracy: RateEstimate,
 ) -> list[dict[str, object]]:
     bootstrap = (
         f"cluster bootstrap over images, percentile,"
@@ -886,11 +923,11 @@ def _population_summary_rows(
             ("oor_rate_disc_gt", rates.oor_rate_disc_gt),
             ("gt_oor_rate", rates.gt_oor_rate),
             ("image_affected_rate", rates.image_affected_rate),
-            ("accuracy", accuracy),
+            ("accuracy", rates.accuracy),
         )
     ]
     rows.append(_diff_row(score.name, population, rates.excess, paired))
-    rows.append(_ratio_row(score.name, population, rates.ratio_to_gt, paired))
+    rows.append(_ratio_row(score.name, population, rates.ratio_to_gt, _ratio_method(rates, paired)))
     rows.extend(
         _macro_row(score.name, population, f"macro_{metric}", estimate, bootstrap)
         for metric, estimate in (
@@ -947,6 +984,20 @@ def _diff_row(
     }
 
 
+def _ratio_method(rates: PopulationRates, paired: str) -> str:
+    """How the multiple's interval was read, and what it is conditional on.
+
+    A draw whose floor holds no event has no multiple, so the interval covers
+    the draws that do and the reader is told how many did not.
+    """
+    ratio = rates.ratio_to_gt
+    return (
+        f"{paired}; interval over the"
+        f" {ratio.n_draws - ratio.n_nonfinite_draws} of {ratio.n_draws} draws"
+        f" whose ground-truth floor held an event, the rest unbounded"
+    )
+
+
 def _ratio_row(
     model: str, population: str, estimate: RatioEstimate, method: str
 ) -> dict[str, object]:
@@ -989,67 +1040,6 @@ def _macro_row(
         "imprecise": None,
         "method": f"{method}, unweighted mean of per-region rates",
     }
-
-
-def _accuracy_estimate(
-    points: ScoredPoints, mask: NDArray[np.bool_], options: RegionMetricsOptions
-) -> RateEstimate:
-    """Accuracy with the same image-clustered interval the rate tables carry.
-
-    The metrics layer reports accuracy as a bare proportion; an interval built
-    on the same primitives keeps `summary.csv` free of a rate with no width.
-    """
-    index = np.flatnonzero(mask)
-    image_ids = tuple(points.image_ids[int(position)] for position in index)
-    numerator = (points.correct & points.gt_in_model_classes)[index]
-    denominator = points.gt_in_model_classes[index]
-
-    k = int(np.count_nonzero(numerator))
-    n = int(np.count_nonzero(denominator))
-    if n == 0 or not image_ids:
-        return RateEstimate(
-            k=k,
-            n=n,
-            rate=math.nan,
-            ci_low=math.nan,
-            ci_high=math.nan,
-            wilson_low=math.nan,
-            wilson_high=math.nan,
-            design_effect=math.nan,
-            upper_bound=rule_of_three(0) if k == 0 else None,
-            upper_bound_n_images=0,
-            imprecise=None,
-        )
-
-    rate = k / n
-    n_images = len(
-        {image for image, counted in zip(image_ids, denominator, strict=True) if bool(counted)}
-    )
-    ci_low, ci_high = cluster_bootstrap_ci(
-        image_ids,
-        _rate_statistic(numerator, denominator, rate),
-        n_resamples=options.n_resamples,
-        alpha=options.alpha,
-        seed=options.seed,
-    )
-    wilson_low, wilson_high = wilson_ci(k, n, options.alpha)
-    return RateEstimate(
-        k=k,
-        n=n,
-        rate=rate,
-        ci_low=ci_low,
-        ci_high=ci_high,
-        wilson_low=wilson_low,
-        wilson_high=wilson_high,
-        design_effect=(
-            design_effect((ci_low, ci_high), k, n, alpha=options.alpha)
-            if ci_high > ci_low
-            else math.nan
-        ),
-        upper_bound=rule_of_three(n_images) if k == 0 else None,
-        upper_bound_n_images=n_images,
-        imprecise=None,
-    )
 
 
 def _rate_statistic(
@@ -1104,6 +1094,36 @@ def _core_counts(points: ScoredPoints) -> dict[str, tuple[int, int]]:
             int(np.count_nonzero(~points.gt_region_unknown)),
         ),
     }
+
+
+def _bucket_counts(triage: TriageResult) -> dict[str, int]:
+    """Events per triage bucket, including the buckets that caught none."""
+    return {str(row["bucket"]): int(row["n"]) for _, row in triage.bucket_counts.iterrows()}
+
+
+def _resolve_ground_truth_counts(
+    points: ScoredPoints,
+    probe: LoadedProbe,
+    supplied: Mapping[tuple[str, str], int] | None,
+) -> tuple[Mapping[tuple[str, str], int], str]:
+    """The counts triage reads, and the name of where they came from.
+
+    The counts frozen with the probe are corpus-wide, which is the population
+    the list-suspect threshold is set against. The probe's own ground truth
+    counts a pair only as often as the probe samples it, so falling back to it
+    buckets as model errors the events a corpus count would call a suspect
+    region list -- the direction that overstates the model-error headline.
+    """
+    if supplied is not None:
+        return supplied, COUNTS_SOURCE_CALLER
+    if probe.ground_truth_counts is not None:
+        return probe.ground_truth_counts, COUNTS_SOURCE_CORPUS
+    logger.warning(
+        "probe carries no %s; triage counts fall back to the probe's own ground"
+        " truth, a lower bound on the corpus count the threshold reads",
+        PROBE_COUNTS_FILE,
+    )
+    return _probe_ground_truth_counts(points), COUNTS_SOURCE_PROBE
 
 
 def _probe_ground_truth_counts(points: ScoredPoints) -> dict[tuple[str, str], int]:

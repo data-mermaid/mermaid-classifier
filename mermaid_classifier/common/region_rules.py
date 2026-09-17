@@ -124,21 +124,24 @@ def rule_of_three(n: int) -> float:
     return min(1.0, 3.0 / n)
 
 
-def cluster_bootstrap_ci(
+def cluster_bootstrap_draws(
     cluster_ids: Sequence[Hashable],
     statistic: Callable[[NDArray[np.intp]], float],
     *,
     n_resamples: int = 2000,
-    alpha: float = 0.05,
     seed: int = 0,
-) -> tuple[float, float]:
-    """Percentile bootstrap confidence interval that resamples whole clusters.
+) -> NDArray[np.float64]:
+    """One estimate per resample, drawn by resampling whole clusters.
 
     `cluster_ids[i]` is the cluster (typically the image) that observation i
     belongs to. Each resample draws len(clusters) clusters with replacement and
     calls `statistic` with the positions of every observation in the drawn
     clusters, repeats included, so the caller supplies its own estimator over
     whichever columns it holds.
+
+    The draws themselves, for a statistic whose distribution a caller must
+    inspect before summarizing it -- an unbounded ratio, say, whose infinite
+    draws no percentile can interpolate between.
 
     Seeded, and deterministic for a given seed and input.
     """
@@ -154,7 +157,28 @@ def cluster_bootstrap_ci(
     for resample in range(n_resamples):
         drawn = rng.integers(0, n_clusters, size=n_clusters)
         estimates[resample] = statistic(_gather(positions, drawn))
-    return _percentile_interval(estimates, alpha)
+    return estimates
+
+
+def cluster_bootstrap_ci(
+    cluster_ids: Sequence[Hashable],
+    statistic: Callable[[NDArray[np.intp]], float],
+    *,
+    n_resamples: int = 2000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """Percentile bootstrap confidence interval that resamples whole clusters.
+
+    The two-sided percentile interval of `cluster_bootstrap_draws`, for a
+    statistic bounded enough that every draw is finite.
+
+    Seeded, and deterministic for a given seed and input.
+    """
+    return _percentile_interval(
+        cluster_bootstrap_draws(cluster_ids, statistic, n_resamples=n_resamples, seed=seed),
+        alpha,
+    )
 
 
 def paired_cluster_bootstrap_diff(

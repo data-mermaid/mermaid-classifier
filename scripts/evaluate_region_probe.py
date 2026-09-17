@@ -1,10 +1,12 @@
 """Score published model artifacts against the frozen region probe, locally.
 
-Loads the probe points, their frozen benthic-attribute region map and the
-cached feature matrix from --probe-dir, runs each --model through the
-production loader, and writes one report directory per model under --out-dir
-(summary.csv, the per-region/label/direction tables, limitations.yaml,
-manifest.json and a Markdown summary).
+Loads the probe points, their frozen benthic-attribute region map, the frozen
+corpus-wide annotation counts triage reads and the cached feature matrix from
+--probe-dir, runs each --model through the production loader, and writes one
+report directory per model under --out-dir (summary.csv, the
+per-region/label/direction tables, limitations.yaml, manifest.json and a
+Markdown summary). A probe carrying no counts file leaves triage reading the
+probe's own ground truth, a lower bound that limitations.yaml records.
 
 Two or more models are scored on identical points, so the comparison between
 them is paired and lands in paired_comparison.csv at the top of --out-dir. An

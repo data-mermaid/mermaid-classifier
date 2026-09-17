@@ -105,6 +105,23 @@ PROBE_POINTS = [
     ("cip4", CENTRAL_INDO_PACIFIC, "ba0"),
 ]
 
+# Corpus-wide confirmed annotations for every (attribute, region) pair a
+# prediction on this probe can be flagged on: an out-of-region prediction of
+# ba1 lands on a Central Indo-Pacific image, of ba2/ba4 on an Atlantic one,
+# and ba3 is recorded only in the Eastern Pacific. The probe's own ground
+# truth carries at most four of any of them, short of a threshold of 5.
+CORPUS_COUNTS = {
+    "ba1": {CENTRAL_INDO_PACIFIC: 605},
+    "ba2": {TROPICAL_ATLANTIC: 605},
+    "ba3": {TROPICAL_ATLANTIC: 605, CENTRAL_INDO_PACIFIC: 605},
+    "ba4": {TROPICAL_ATLANTIC: 605},
+}
+N_CORPUS_COUNT_PAIRS = 5
+
+# Distinct (ground-truth attribute, region) pairs the probe itself carries:
+# {ba0, ba1, ba3, ba9} in the Atlantic and {ba0..ba4} in the Pacific.
+N_PROBE_COUNT_PAIRS = 9
+
 N_POINTS = 25
 N_IMAGES = 6
 N_HELD_OUT = 17
@@ -144,12 +161,20 @@ def _probe_rows(points=PROBE_POINTS) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=pd.Index(PROBE_COLUMNS))
 
 
-def _write_probe(probe_dir: Path, features: np.ndarray, points=PROBE_POINTS) -> pd.DataFrame:
-    """Write the probe dir in the layout build_region_probe.py emits."""
+def _write_probe(
+    probe_dir: Path, features: np.ndarray, points=PROBE_POINTS, counts=None
+) -> pd.DataFrame:
+    """Write the probe dir in the layout build_region_probe.py emits.
+
+    `counts` writes the frozen corpus-wide annotation counts; omitting it is a
+    probe built before they were frozen.
+    """
     probe_dir.mkdir(parents=True, exist_ok=True)
     rows = _probe_rows(points)
     rows.to_parquet(probe_dir / "probe_points.parquet", index=False)
     (probe_dir / "ba_regions.json").write_text(json.dumps(FROZEN_REGIONS, sort_keys=True))
+    if counts is not None:
+        (probe_dir / "ba_region_counts.json").write_text(json.dumps(counts, sort_keys=True))
     (probe_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -206,6 +231,15 @@ def _unreachable_live_map():
     return load
 
 
+def _bucket_counts(score) -> dict[str, int]:
+    return {str(row["bucket"]): int(row["n"]) for _, row in score.triage.bucket_counts.iterrows()}
+
+
+def _limitation(out_dir: Path, entry_id: str) -> dict:
+    payload = yaml.safe_load((out_dir / "limitations.yaml").read_text())
+    return next(entry for entry in payload["limitations"] if entry["id"] == entry_id)["magnitude"]
+
+
 def _read_csv(path: Path) -> pd.DataFrame:
     """The written CSV as text, so an empty cell stays distinguishable."""
     return pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -221,13 +255,19 @@ class ScoreReportTest(unittest.TestCase):
         self.rows = _write_probe(self.root / "probe", self.features)
         self.probe = load_probe(self.root / "probe")
 
-    def _score(self, name: str = "v1", *, seed: int = 0, live_map=None):
+    def _counted_probe(self) -> Path:
+        """A probe dir carrying the frozen corpus-wide annotation counts."""
+        probe_dir = self.root / "probe_counted"
+        _write_probe(probe_dir, self.features, counts=CORPUS_COUNTS)
+        return probe_dir
+
+    def _score(self, name: str = "v1", *, seed: int = 0, live_map=None, probe=None):
         model_pt, model_json = _export_model(self.root / f"model_{name}", seed=seed)
         return score_model(
             name,
             model_pt_path=model_pt,
             model_json_path=model_json,
-            probe=self.probe,
+            probe=self.probe if probe is None else probe,
             options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
             live_region_map_loader=_live_map() if live_map is None else live_map,
         )
@@ -325,6 +365,29 @@ class ScoreReportTest(unittest.TestCase):
                 self.assertNotEqual(cell, "", f"{label} is blank")
                 self.assertFalse(math.isnan(float(cell)), f"{label} is nan")
 
+    def test_accuracy_reaches_the_summary_from_the_metrics_layer(self):
+        """Two implementations of one cluster-bootstrap estimate drift apart.
+        The row in summary.csv is asserted to be the metrics layer's own k, n
+        and bounds, so a second copy here cannot quietly diverge from them.
+        """
+        score = self._score()
+        out_dir = self.root / "out"
+        write_report(score, out_dir)
+
+        summary = _read_csv(out_dir / "summary.csv").set_index(["population", "metric"])
+        self.assertIsNotNone(score.metrics.held_out)
+        for population, rates in (
+            ("all", score.metrics.overall),
+            ("held_out", score.metrics.held_out),
+        ):
+            estimate = rates.accuracy
+            row = summary.loc[(population, "accuracy")]
+            self.assertEqual(int(row["k"]), estimate.k, population)
+            self.assertEqual(int(row["n"]), estimate.n, population)
+            self.assertAlmostEqual(float(row["ci_low"]), estimate.ci_low, msg=population)
+            self.assertAlmostEqual(float(row["ci_high"]), estimate.ci_high, msg=population)
+        self.assertEqual(int(summary.loc[("all", "accuracy"), "n"]), N_IN_MODEL_CLASSES)
+
     def test_limitations_carry_a_measured_magnitude_for_every_caveat(self):
         """A caveat reduced to prose is one a reader can wave away, so each
         entry is asserted to carry numbers -- and the numbers are the ones
@@ -345,6 +408,7 @@ class ScoreReportTest(unittest.TestCase):
                 "model_class_region_coverage",
                 "ground_truth_out_of_region_floor",
                 "region_polygons_disjoint",
+                "triage_ground_truth_counts",
             },
         )
         for name, entry in entries.items():
@@ -379,6 +443,75 @@ class ScoreReportTest(unittest.TestCase):
 
         effects = entries["realized_design_effect"]["magnitude"]
         self.assertEqual(effects["n_measured"] + effects["n_degenerate"], 4)
+
+    def test_frozen_corpus_counts_bucket_events_the_probes_own_counts_call_mistakes(self):
+        """Stypopodium is annotated 605 times in the Western Indo-Pacific, which
+        marks a broadly distributed genus rather than 605 mistakes. A probe
+        carrying a handful of those does not clear a threshold of 5, so counts
+        derived from it push the same events into model_error and read the
+        model-error headline high.
+        """
+        counted = load_probe(self._counted_probe())
+        corpus = self._score(probe=counted)
+        probe_only = self._score()
+
+        events = len(probe_only.triage.events)
+        self.assertGreater(events, 0, "the fixture model must produce out-of-region events")
+        self.assertEqual(len(corpus.triage.events), events)
+
+        before = _bucket_counts(probe_only)
+        after = _bucket_counts(corpus)
+        self.assertEqual(before["unknown_list"], 0)
+        self.assertEqual(before["list_suspect"], 0)
+        self.assertEqual(before["model_error"], events)
+        self.assertEqual(after["list_suspect"], events)
+        self.assertEqual(after["model_error"], 0)
+
+        suspects = corpus.triage.region_list_suspects
+        self.assertGreater(len(suspects), 0)
+        self.assertEqual(set(suspects["n_ground_truth"]), {605})
+
+    def test_limitations_name_the_frozen_counts_as_the_triage_source(self):
+        """A suspect table read off corpus counts is authoritative; one read off
+        the probe is a lower bound. A reader must be able to tell which.
+        """
+        score = self._score(probe=load_probe(self._counted_probe()))
+        write_report(score, self.root / "out")
+
+        magnitude = _limitation(self.root / "out", "triage_ground_truth_counts")
+        self.assertEqual(magnitude["source"], "frozen_corpus")
+        self.assertFalse(magnitude["is_lower_bound"])
+        self.assertEqual(magnitude["n_pairs"], N_CORPUS_COUNT_PAIRS)
+        self.assertEqual(magnitude["threshold"], 5)
+
+    def test_a_probe_without_frozen_counts_falls_back_and_says_so(self):
+        """A probe built before the counts were frozen still scores; what it
+        must not do is present a lower-bound suspect table as the corpus one.
+        """
+        score = self._score()
+        write_report(score, self.root / "out")
+
+        magnitude = _limitation(self.root / "out", "triage_ground_truth_counts")
+        self.assertEqual(magnitude["source"], "probe_lower_bound")
+        self.assertTrue(magnitude["is_lower_bound"])
+        self.assertEqual(magnitude["n_pairs"], N_PROBE_COUNT_PAIRS)
+
+    def test_the_multiple_of_the_floor_reports_how_many_draws_it_was_read_over(self):
+        """The interval is read over the draws whose ground-truth floor was not
+        empty, so it is conditional; without the two counts a reader cannot see
+        on how much, and an infinite bound looks like a defect.
+        """
+        score = self._score()
+        out_dir = self.root / "out"
+        write_report(score, out_dir)
+
+        magnitude = _limitation(out_dir, "ground_truth_out_of_region_floor")
+        self.assertEqual(magnitude["n_ratio_draws"], N_RESAMPLES)
+        self.assertGreaterEqual(magnitude["n_ratio_draws_empty_floor"], 0)
+        self.assertLessEqual(magnitude["n_ratio_draws_empty_floor"], N_RESAMPLES)
+
+        summary = _read_csv(out_dir / "summary.csv").set_index(["population", "metric"])
+        self.assertIn("floor", summary.loc[("all", "ratio_to_gt"), "method"])
 
     def test_markdown_leads_with_the_headline_rate_beside_the_floor(self):
         """The all-points headline has to come first: a reader who stops after

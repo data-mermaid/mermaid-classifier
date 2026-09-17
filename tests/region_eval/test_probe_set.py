@@ -38,6 +38,8 @@ from mermaid_classifier.region_eval.probe_set import (
     ProbeSelectionOptions,
     build_manifest,
     build_probe_set,
+    ground_truth_counts_hash,
+    ground_truth_counts_json,
     minimum_detectable_effect_table,
     probe_content_hash,
     read_annotations,
@@ -278,6 +280,70 @@ class RegionSnapshotTest(unittest.TestCase):
         )
 
 
+class GroundTruthCountsTest(unittest.TestCase):
+    """The counts triage reads to tell an incomplete region list from a mistake.
+
+    Each eligible image carries exactly one BA_PACIFIC annotation, so the
+    corpus holds 40 of them in the Central Indo-Pacific while the probe
+    selects 12 of those images. A count read off the probe is that lower
+    number, and a threshold meant for the corpus one buckets past it.
+    """
+
+    def test_counts_span_the_whole_corpus_rather_than_the_selected_probe(self):
+        probe = _build()
+        selected = probe.rows[
+            (probe.rows["benthic_attribute_id"] == BA_PACIFIC)
+            & (probe.rows["region_id"] == CENTRAL_INDO_PACIFIC)
+        ]
+        self.assertEqual(len(selected), 12)
+        self.assertEqual(probe.ground_truth_counts[(BA_PACIFIC, CENTRAL_INDO_PACIFIC)], 40)
+        self.assertEqual(probe.ground_truth_counts[(BA_PACIFIC, WESTERN_INDO_PACIFIC)], 8)
+        self.assertEqual(probe.ground_truth_counts[(BA_PACIFIC, TROPICAL_ATLANTIC)], 3)
+
+    def test_every_annotated_attribute_is_counted_not_just_discriminating_ones(self):
+        """45 Central Indo-Pacific images: 40 eligible carrying two globals
+        each, 5 plain carrying three.
+        """
+        self.assertEqual(_build().ground_truth_counts[(BA_GLOBAL, CENTRAL_INDO_PACIFIC)], 95)
+
+    def test_annotations_without_a_recorded_region_are_not_counted(self):
+        """A count keyed on an unrecorded region answers no triage question,
+        and would inflate nothing but the pair list.
+        """
+        annotations = _annotations()
+        annotations.loc[annotations["image_id"] == "cip-e000", "region_id"] = ""
+        counts = _build(annotations).ground_truth_counts
+        self.assertEqual(counts[(BA_PACIFIC, CENTRAL_INDO_PACIFIC)], 39)
+        self.assertNotIn((BA_PACIFIC, ""), counts)
+
+    def test_hash_ignores_pair_insertion_order(self):
+        counts = {(BA_PACIFIC, CENTRAL_INDO_PACIFIC): 40, (BA_GLOBAL, TROPICAL_ATLANTIC): 15}
+        self.assertEqual(
+            ground_truth_counts_hash(counts),
+            ground_truth_counts_hash(dict(reversed(list(counts.items())))),
+        )
+
+    def test_hash_changes_when_a_pair_count_changes(self):
+        """The counts are frozen for the same reason the region map is: a
+        score must not move because the corpus grew afterwards.
+        """
+        counts = {(BA_PACIFIC, CENTRAL_INDO_PACIFIC): 40}
+        self.assertNotEqual(
+            ground_truth_counts_hash(counts),
+            ground_truth_counts_hash({(BA_PACIFIC, CENTRAL_INDO_PACIFIC): 41}),
+        )
+
+    def test_the_json_snapshot_round_trips_to_the_same_counts(self):
+        probe = _build()
+        payload = json.loads(ground_truth_counts_json(probe.ground_truth_counts))
+        restored = {
+            (attribute_id, region_id): count
+            for attribute_id, by_region in payload.items()
+            for region_id, count in by_region.items()
+        }
+        self.assertEqual(restored, probe.ground_truth_counts)
+
+
 class MinimumDetectableEffectTest(unittest.TestCase):
     def test_required_n_matches_the_shared_formula(self):
         table = minimum_detectable_effect_table(
@@ -336,6 +402,14 @@ class ManifestTest(unittest.TestCase):
         probe = _build()
         self.assertEqual(manifest_hash := self._manifest(probe)["content_hash"], probe.content_hash)
         self.assertNotEqual(manifest_hash, self._manifest(_build(seed=1))["content_hash"])
+
+    def test_manifest_records_the_frozen_ground_truth_counts(self):
+        """Two scores are comparable only if they read the same corpus counts,
+        so the hash travels beside the region-snapshot one."""
+        probe = _build()
+        manifest = self._manifest(probe)
+        self.assertEqual(manifest["ground_truth_counts_hash"], probe.ground_truth_counts_hash)
+        self.assertEqual(manifest["n_ground_truth_pairs"], len(probe.ground_truth_counts))
 
     def test_manifest_counts_match_the_realized_strata(self):
         manifest = self._manifest()

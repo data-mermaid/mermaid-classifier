@@ -37,6 +37,7 @@ Points 9-16 are held out, which gives the nested population its own 3 of 7.
 
 import math
 import unittest
+import warnings
 from unittest import mock
 
 from mermaid_classifier.region_eval.metrics import (
@@ -186,6 +187,24 @@ RATIO_TO_GT_CLUSTERED_ROWS = tuple(
     for _ in range(5)
 )
 
+# One of four images carries the only ground-truth point out of its region, so
+# a resample drawing none of it has a zero floor and an infinite ratio draw:
+# (3/4)^4 = 32% of draws, far past the 2.5% upper tail. Every image predicts
+# out of region once in four, so the model rate is 4/16 and the ratio 4.0.
+THIN_FLOOR_ROWS = tuple(
+    ("image-t1", CENTRAL_INDO_PACIFIC, truth, prediction)
+    for truth, prediction in (
+        (ATLANTIC_LABEL, ATLANTIC_LABEL),
+        (PACIFIC_LABEL, PACIFIC_LABEL),
+        (PACIFIC_LABEL, PACIFIC_LABEL),
+        (PACIFIC_LABEL, PACIFIC_LABEL),
+    )
+) + tuple(
+    (image_id, CENTRAL_INDO_PACIFIC, PACIFIC_LABEL, prediction)
+    for image_id in ("image-t2", "image-t3", "image-t4")
+    for prediction in (ATLANTIC_LABEL, PACIFIC_LABEL, PACIFIC_LABEL, PACIFIC_LABEL)
+)
+
 OPTIONS = RegionMetricsOptions(n_resamples=200, seed=1)
 
 
@@ -287,11 +306,25 @@ class DenominatorTest(unittest.TestCase):
         self.assertLessEqual(self.rates.ratio_to_gt.ci_low, self.rates.ratio_to_gt.value)
         self.assertGreaterEqual(self.rates.ratio_to_gt.ci_high, self.rates.ratio_to_gt.value)
 
+    def test_accuracy_carries_the_same_clustered_interval_every_other_rate_does(self):
+        """Accuracy reported bare is a rate with no width, which is what drove
+        a second copy of the estimate into the reporting layer. The counts are
+        the hand-derived 5 of 15, and the interval has to arrive with them.
+        """
+        accuracy = self.rates.accuracy
+        self.assertEqual(accuracy.k, 5)
+        self.assertEqual(accuracy.n, 15)
+        self.assertAlmostEqual(accuracy.rate, 5 / 15)
+        self.assertLessEqual(accuracy.ci_low, accuracy.rate)
+        self.assertGreaterEqual(accuracy.ci_high, accuracy.rate)
+        self.assertGreater(accuracy.wilson_high, accuracy.wilson_low)
+        self.assertEqual(accuracy.upper_bound, None)
+
     def test_ground_truth_off_the_label_space_counts_for_region_but_not_accuracy(self):
         """Point 11's truth is not a model class; its prediction is still out of region."""
         self.assertEqual(self.rates.n_gt_outside_model_classes, 1)
         self.assertEqual(self.rates.n_accuracy_points, 15)
-        self.assertAlmostEqual(self.rates.accuracy, 5 / 15)
+        self.assertAlmostEqual(self.rates.accuracy.rate, 5 / 15)
 
         confusion = self.result.confusion
         off_list = confusion[confusion["gt_label"] == OFF_LIST_LABEL]
@@ -484,6 +517,59 @@ class RatioToGtClusteringTest(unittest.TestCase):
         clustered_width = clustered_ratio.ci_high - clustered_ratio.ci_low
         pointwise_width = pointwise_ratio.ci_high - pointwise_ratio.ci_low
         self.assertGreater(clustered_width, 2.0 * pointwise_width)
+
+
+class RatioToGtThinFloorTest(unittest.TestCase):
+    """A floor a resample can miss entirely, which is the Atlantic's situation.
+
+    The catch is silent: percentiling an array holding infinities interpolates
+    inf - inf, which numpy answers with NaN after a RuntimeWarning, and a NaN
+    upper bound reads as "not computed" rather than "unbounded".
+    """
+
+    def _ratio(self, rows, n_resamples: int = 200):
+        options = RegionMetricsOptions(n_resamples=n_resamples, seed=1)
+        return compute_region_metrics(_prepare(rows), options=options).overall.ratio_to_gt
+
+    def test_draws_with_an_empty_floor_are_counted_rather_than_percentiled(self):
+        ratio = self._ratio(THIN_FLOOR_ROWS)
+        self.assertAlmostEqual(ratio.value, 4.0)
+        self.assertEqual(ratio.n_draws, 200)
+        # (3/4)^4 of 200 draws is about 63; anything past 5 of 200 contaminates
+        # the 97.5th percentile.
+        self.assertGreater(ratio.n_nonfinite_draws, 5)
+        self.assertLess(ratio.n_nonfinite_draws, ratio.n_draws)
+
+    def test_an_upper_tail_of_empty_floors_reports_an_unbounded_multiple(self):
+        """A finite upper bound here would be a number the draws do not
+        support: a third of them say the multiple is unbounded.
+        """
+        ratio = self._ratio(THIN_FLOOR_ROWS)
+        self.assertEqual(ratio.ci_high, math.inf)
+        self.assertTrue(math.isfinite(ratio.ci_low), ratio.ci_low)
+        self.assertLessEqual(ratio.ci_low, ratio.value)
+
+    def test_no_runtime_warning_escapes_the_ratio_bootstrap(self):
+        """Asserted explicitly: the interval could be right while numpy still
+        warned on the way, and a test that only reads the bounds would pass
+        through the symptom this fix exists to remove.
+        """
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._ratio(THIN_FLOOR_ROWS)
+        self.assertEqual(
+            [],
+            [f"{entry.category.__name__}: {entry.message}" for entry in caught],
+        )
+
+    def test_a_floor_no_resample_can_empty_reports_no_non_finite_draws(self):
+        """Every ground truth is out of region here, so the floor is 1.0 on
+        every draw and the unbounded-upper-end rule must stay dormant.
+        """
+        ratio = self._ratio(RATIO_TO_GT_CLUSTERED_ROWS)
+        self.assertEqual(ratio.n_nonfinite_draws, 0)
+        self.assertEqual(ratio.n_draws, 200)
+        self.assertTrue(math.isfinite(ratio.ci_high), ratio.ci_high)
 
 
 class MacroF1DiscTest(unittest.TestCase):

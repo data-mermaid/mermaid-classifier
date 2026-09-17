@@ -14,6 +14,7 @@ Run: AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir
 Outputs (in --out-dir):
     probe_points.parquet   one row per probe annotation point, PROBE_COLUMNS
     ba_regions.json        the frozen benthic-attribute -> region-ids snapshot
+    ba_region_counts.json  corpus-wide confirmed annotations per (attribute, region)
     manifest.json          provenance, realized counts, minimum detectable effects
     probe_features.npz     features[N,1280] float32 + aligned point metadata
     shards/                per-batch download checkpoints (restartable; deletable after)
@@ -49,6 +50,7 @@ from mermaid_classifier.region_eval.probe_set import (
     ProbeSelectionOptions,
     build_manifest,
     build_probe_set,
+    ground_truth_counts_json,
     read_annotations,
     region_snapshot_json,
 )
@@ -144,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         annotations, region_ids_by_attribute=region_ids_by_attribute, options=options
     )
     probe.rows.to_parquet(out_dir / "probe_points.parquet", index=False)
+    # Frozen for the same reason as the region map: scoring reads these counts
+    # against a fixed threshold, so a corpus that grows afterwards must not
+    # move a published score.
+    (out_dir / "ba_region_counts.json").write_text(
+        ground_truth_counts_json(probe.ground_truth_counts)
+    )
 
     manifest = build_manifest(
         probe,

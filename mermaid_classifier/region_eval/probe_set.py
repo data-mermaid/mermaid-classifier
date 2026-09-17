@@ -36,6 +36,12 @@ MERMAID curates those region lists; without the freeze, adding a region to one
 coral next month would move a model's score for reasons unrelated to the
 model.
 
+So do the corpus-wide (attribute, region) annotation counts, on the same
+grounds and read over the whole export rather than the selected points. Triage
+reads them to tell an incomplete region list from a model mistake, and the
+probe holds a few of what the corpus holds hundreds of: counted on the probe
+alone, a broadly-annotated pair would not clear the threshold.
+
 Selection is pure: nothing here reaches S3 or the network, and
 `read_annotations` takes a path DuckDB can open.
 """
@@ -145,12 +151,20 @@ class StratumCounts:
 
 @dataclasses.dataclass(frozen=True)
 class ProbeSet:
+    """The selected points, what they were drawn from, and the hashes that pin both.
+
+    `ground_truth_counts` is corpus-wide: every confirmed annotation in the
+    source export, not only the ones selected here.
+    """
+
     rows: pd.DataFrame
     strata: tuple[StratumCounts, ...]
     options: ProbeSelectionOptions
     n_rows_unrecorded_region_dropped: int
     content_hash: str
     region_snapshot_hash: str
+    ground_truth_counts: dict[tuple[str, str], int]
+    ground_truth_counts_hash: str
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -279,6 +293,7 @@ def build_probe_set(
         for region_id in sorted(by_region)
     )
 
+    counts = ground_truth_counts(records)
     return ProbeSet(
         rows=rows,
         strata=strata,
@@ -286,6 +301,8 @@ def build_probe_set(
         n_rows_unrecorded_region_dropped=len(records) - len(recorded),
         content_hash=probe_content_hash(rows),
         region_snapshot_hash=region_snapshot_hash(region_ids_by_attribute),
+        ground_truth_counts=counts,
+        ground_truth_counts_hash=ground_truth_counts_hash(counts),
     )
 
 
@@ -323,6 +340,45 @@ def region_snapshot_json(region_ids_by_attribute: Mapping[str, frozenset[str]]) 
 
 def region_snapshot_hash(region_ids_by_attribute: Mapping[str, frozenset[str]]) -> str:
     return hashlib.sha256(region_snapshot_json(region_ids_by_attribute).encode()).hexdigest()
+
+
+def ground_truth_counts(records: Sequence[_Annotation]) -> dict[tuple[str, str], int]:
+    """Confirmed annotations of each (benthic attribute, region) pair.
+
+    Read over every record given, which is the whole export rather than the
+    probe subset: this is the corpus evidence triage weighs an out-of-region
+    prediction against, and the probe holds too few of any one pair to carry a
+    threshold meant for the corpus.
+
+    A record whose region is unrecorded answers no triage question -- every
+    lookup arrives with an image's recorded region -- and is not counted.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for record in records:
+        if not record.region_id:
+            continue
+        key = (record.benthic_attribute_id, record.region_id)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def ground_truth_counts_snapshot(
+    counts: Mapping[tuple[str, str], int],
+) -> dict[str, dict[str, int]]:
+    """The counts nested by attribute then region, JSON-ready."""
+    nested: dict[str, dict[str, int]] = {}
+    for (attribute_id, region_id), count in counts.items():
+        nested.setdefault(attribute_id, {})[region_id] = int(count)
+    return nested
+
+
+def ground_truth_counts_json(counts: Mapping[tuple[str, str], int]) -> str:
+    """The canonical serialization the counts hash is taken over."""
+    return json.dumps(ground_truth_counts_snapshot(counts), sort_keys=True, separators=(",", ":"))
+
+
+def ground_truth_counts_hash(counts: Mapping[tuple[str, str], int]) -> str:
+    return hashlib.sha256(ground_truth_counts_json(counts).encode()).hexdigest()
 
 
 def minimum_detectable_effect_table(
@@ -401,6 +457,8 @@ def build_manifest(
         "source_rows_unrecorded_region_dropped": int(probe.n_rows_unrecorded_region_dropped),
         "content_hash": probe.content_hash,
         "region_snapshot_hash": probe.region_snapshot_hash,
+        "ground_truth_counts_hash": probe.ground_truth_counts_hash,
+        "n_ground_truth_pairs": len(probe.ground_truth_counts),
         "seed": probe.options.seed,
         "target_images": probe.options.target_images,
         "region_floor": probe.options.region_floor,

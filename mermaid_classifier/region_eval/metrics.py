@@ -25,7 +25,10 @@ rather than a bare zero, read over the images its denominator spans rather
 than over its points: the point-level bound understates by the design effect
 and can land below the ground-truth floor. A bootstrap interval of zero width
 measures no clustering, so the design effect is NaN there and the sample-size
-check falls back to the nominal cluster size.
+check falls back to the nominal cluster size. A resample whose ground-truth
+floor holds no event divides by zero, so `ratio_to_gt` reads its interval over
+the draws that do and reports how many did not: an unbounded upper end where
+the tail is unbounded, rather than a number those draws cannot support.
 
 *Which direction?* Incidents break out per ordered (image region, excluded
 region) pair and are never pooled: opposite directions differ in available
@@ -61,6 +64,7 @@ from sklearn.metrics import precision_recall_fscore_support
 from mermaid_classifier.common.benthic_attributes import split_ba_gf
 from mermaid_classifier.common.region_rules import (
     cluster_bootstrap_ci,
+    cluster_bootstrap_draws,
     design_effect,
     is_out_of_region,
     is_region_discriminating,
@@ -205,11 +209,19 @@ class RatioEstimate:
     both rates. It widens without bound as the denominator rate approaches
     zero, so a thin ground-truth floor reads as an unbounded multiple rather
     than a precise one.
+
+    A resample whose denominator rate is zero has no multiple to report and
+    contributes an infinite draw. `n_nonfinite_draws` of `n_draws` counts
+    those, and the interval is read over the remaining draws alone: it is the
+    multiple conditional on a non-empty floor, and a reader needs the two
+    counts to know how conditional that is.
     """
 
     value: float
     ci_low: float
     ci_high: float
+    n_draws: int
+    n_nonfinite_draws: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -246,7 +258,7 @@ class PopulationRates:
     n_gt_region_unknown: int
     n_gt_outside_model_classes: int
     n_accuracy_points: int
-    accuracy: float
+    accuracy: RateEstimate
     n_f1_disc_points: int
     precision_macro_disc: float
     recall_macro_disc: float
@@ -767,8 +779,7 @@ class _CoreRates:
     oor_rate_disc: RateEstimate
     oor_rate_disc_gt: RateEstimate
     gt_oor_rate: RateEstimate
-    n_accuracy_points: int
-    accuracy: float
+    accuracy: RateEstimate
 
 
 def _core_rates(points: ScoredPoints, options: RegionMetricsOptions) -> _CoreRates:
@@ -780,8 +791,11 @@ def _core_rates(points: ScoredPoints, options: RegionMetricsOptions) -> _CoreRat
     ground truth also discriminates, so it is a proportion of a denominator
     that depends only on the ground truth and the region map, and is
     therefore comparable across model versions.
+
+    Accuracy runs through the same estimator as the rates, so it reaches a
+    reader with the image-clustered interval they carry rather than as a bare
+    proportion a reporting layer has to widen for itself.
     """
-    n_accuracy_points = int(np.count_nonzero(points.gt_in_model_classes))
     return _CoreRates(
         oor_rate=_estimate(
             points.image_ids,
@@ -801,11 +815,11 @@ def _core_rates(points: ScoredPoints, options: RegionMetricsOptions) -> _CoreRat
         gt_oor_rate=_estimate(
             points.image_ids, points.gt_out_of_region, ~points.gt_region_unknown, options
         ),
-        n_accuracy_points=n_accuracy_points,
-        accuracy=(
-            float(np.count_nonzero(points.correct & points.gt_in_model_classes) / n_accuracy_points)
-            if n_accuracy_points
-            else math.nan
+        accuracy=_estimate(
+            points.image_ids,
+            points.correct & points.gt_in_model_classes,
+            points.gt_in_model_classes,
+            options,
         ),
     )
 
@@ -888,7 +902,7 @@ def _population_rates(
         n_pred_region_unknown=int(np.count_nonzero(points.pred_region_unknown)),
         n_gt_region_unknown=int(np.count_nonzero(points.gt_region_unknown)),
         n_gt_outside_model_classes=int(np.count_nonzero(~points.gt_in_model_classes)),
-        n_accuracy_points=core.n_accuracy_points,
+        n_accuracy_points=core.accuracy.n,
         accuracy=core.accuracy,
         n_f1_disc_points=n_f1_disc_points,
         precision_macro_disc=precision_macro_disc,
@@ -940,7 +954,9 @@ def _ratio_to_gt(
     """
     value = oor.rate / gt_oor.rate if gt_oor.rate > 0.0 else math.nan
     if math.isnan(value) or oor.n == 0 or gt_oor.n == 0 or points.n_points == 0:
-        return RatioEstimate(value=value, ci_low=math.nan, ci_high=math.nan)
+        return RatioEstimate(
+            value=value, ci_low=math.nan, ci_high=math.nan, n_draws=0, n_nonfinite_draws=0
+        )
 
     model_rate = _ratio_statistic(points.pred_out_of_region, ~points.pred_region_unknown, oor.rate)
     floor_rate = _ratio_statistic(points.gt_out_of_region, ~points.gt_region_unknown, gt_oor.rate)
@@ -949,19 +965,44 @@ def _ratio_to_gt(
         floor = floor_rate(index)
         return math.inf if floor <= 0.0 else model_rate(index) / floor
 
-    ci_low, ci_high = cluster_bootstrap_ci(
+    draws = cluster_bootstrap_draws(
         points.image_ids,
         ratio,
         n_resamples=options.n_resamples,
-        alpha=options.alpha,
         seed=options.seed,
     )
-    # A percentile interpolated between infinite draws arrives as NaN; the
-    # reading is the same unbounded multiple either way.
+    ci_low, ci_high = _conditional_percentile_interval(draws, options.alpha)
     return RatioEstimate(
         value=value,
-        ci_low=math.inf if math.isnan(ci_low) else ci_low,
-        ci_high=math.inf if math.isnan(ci_high) else ci_high,
+        ci_low=ci_low,
+        ci_high=ci_high,
+        n_draws=int(draws.size),
+        n_nonfinite_draws=int(np.count_nonzero(~np.isfinite(draws))),
+    )
+
+
+def _conditional_percentile_interval(
+    draws: NDArray[np.float64], alpha: float
+) -> tuple[float, float]:
+    """A percentile interval over the finite draws, unbounded where the tail is not.
+
+    Percentiling the whole array would interpolate between infinite draws,
+    which arrives as NaN -- an interval that reads "not computed" where the
+    draws say "unbounded" -- so the infinities are counted out first.
+
+    Each bound is infinite when the infinite draws, which sort above every
+    finite one, reach it: the upper bound sits alpha/2 from the top, the lower
+    bound 1 - alpha/2.
+    """
+    finite = draws[np.isfinite(draws)]
+    nonfinite_share = 1.0 - finite.size / draws.size
+    return (
+        math.inf
+        if nonfinite_share > 1.0 - alpha / 2.0
+        else float(np.percentile(finite, 100.0 * alpha / 2.0)),
+        math.inf
+        if nonfinite_share > alpha / 2.0
+        else float(np.percentile(finite, 100.0 * (1.0 - alpha / 2.0))),
     )
 
 
@@ -1001,8 +1042,8 @@ def _per_region_rows(
             "region_id": region,
             "n_images": slice_.n_images,
             "n_points": slice_.n_points,
-            "n_accuracy_points": core.n_accuracy_points,
-            "accuracy": core.accuracy,
+            "n_accuracy_points": core.accuracy.n,
+            "accuracy": core.accuracy.rate,
         }
         row.update(_prefixed("oor_rate", core.oor_rate))
         row.update(_prefixed("oor_rate_disc", core.oor_rate_disc))
