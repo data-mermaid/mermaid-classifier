@@ -19,7 +19,7 @@ Outputs (in --out-dir):
     ba_region_counts.json  corpus-wide confirmed annotations per (attribute, region)
     names.json             display names for benthic attributes, growth forms, regions
     ba_ancestry.json       each benthic attribute's root-to-leaf ancestry path
-    manifest.json          provenance, realized counts, minimum detectable effects
+    manifest.json          provenance, realized counts
     probe_features.npz     features[N,1280] float32 + aligned point metadata
 """
 

@@ -462,9 +462,7 @@ class ZeroCellTest(unittest.TestCase):
         self.assertTrue(math.isnan(estimate.rate))
 
     def test_an_empty_denominator_reports_no_upper_bound(self):
-        """An empty denominator has no images left to read a bound over, so
-        it must report none rather than rule_of_three(0)'s 100% span of
-        nothing."""
+        """A cell with an empty denominator carries no upper bound at all."""
         result = compute_region_metrics(_prepare(CLEAN_ROWS), options=OPTIONS)
         estimate = result.overall.oor_rate_disc
         self.assertEqual(estimate.n, 0)

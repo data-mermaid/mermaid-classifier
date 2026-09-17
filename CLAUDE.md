@@ -39,8 +39,8 @@ uv run python scripts/build_feature_bucket.py        # CoralNet-layout feature-v
 uv run python scripts/extract_reference_features.py  # stack .fv files into a reference matrix
 
 # Region-mismatch probe (see region_eval below): build once, evaluate per model
-AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir region_probe/v1 --seed 1
-AWS_PROFILE=wcs-admin uv run python scripts/evaluate_region_probe.py --probe-dir region_probe/v1 --model v1=../models/v1 --out-dir region_probe/reports
+AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir region_probe/v1 --seed 1 --publish s3://bucket/prefix/
+AWS_PROFILE=wcs-admin uv run python scripts/evaluate_region_probe.py --probe-dir s3://bucket/prefix/ --model v1=../models/v1 --out-dir region_probe/reports
 ```
 
 CI runs two workflows on every PR — `tests.yml` (unittest suite, Linux/3.12) and
@@ -109,11 +109,11 @@ Two strategy families for the long-tailed coral taxonomy:
 ### Metrics (`pyspacer/metrics/`)
 
 Post-training metric groups (classification, calibration, cover, probability,
-ranking, taxonomic, per_source, region, region_probe) orchestrated by
+ranking, taxonomic, per_source) orchestrated by
 `MetricsCoordinator` / `MetricsContext`. The coordinator iterates a declarative
 registry (`registry.py`: the ordered `METRIC_GROUPS` list +
 `applicable_metric_groups`, which gates groups on available context like
-`dataset`/`val_proba`/`clf`), so adding a metric group is a one-line edit
+`dataset`/`val_proba`), so adding a metric group is a one-line edit
 there, not a coordinator change. HTML reports render from MLflow runs via
 `scripts/generate_report.py` + `scripts/report_template.html.j2`.
 
@@ -128,9 +128,10 @@ names, taxonomic ancestry, and corpus-wide annotation counts are all pinned
 and hashed, so upstream taxonomy curation cannot move a published score.
 `score.py` separately reports a drift diagnostic when the live region map has
 moved since the probe was frozen. The pure modules (`metrics.py`, `triage.py`,
-`decisions.py`) take the region map as caller-supplied frozen data and never
-import the live benthic-attribute library. Feeds the `region` / `region_probe`
-groups above; commands are in the Commands block.
+`decisions.py`, `region_rules.py`) take the region map as caller-supplied
+frozen data and never import the live benthic-attribute library. Reached only
+through the two CLI scripts named in the Commands block above; nothing under
+`pyspacer/` imports it.
 
 ### SageMaker launcher and CoralNet ingest
 
@@ -152,9 +153,8 @@ groups above; commands are in the Commands block.
   invocation ran anything.
 - **Importing from `pyspacer/metrics/` pulls in boto3, duckdb, matplotlib,
   mlflow, sklearn, and spacer** — its `__init__.py` imports
-  `MetricsCoordinator`, which reaches every metric group, including
-  `region_probe`'s reach into `region_eval`. A lightweight consumer must not
-  import a helper from there.
+  `MetricsCoordinator`, which reaches every metric group. A lightweight
+  consumer must not import a helper from there.
 - **DuckDB is the ETL engine**, not pandas. SQL transforms via helpers in
   `common/duckdb_utils.py` (temp-table context managers, column transforms,
   batched iteration).

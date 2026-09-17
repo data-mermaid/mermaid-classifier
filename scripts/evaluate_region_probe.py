@@ -8,7 +8,8 @@ model under --out-dir (summary.csv, the per-region/label/direction tables,
 decisions.csv and manifest.json). A probe carrying no counts file leaves
 triage reading the probe's own ground truth, a lower bound that manifest.json
 records; one carrying no names renders ids, and one carrying no ancestry
-leaves the within-branch share uncomputed. Both are recorded there too.
+leaves the within-branch share uncomputed. The manifest records the presence
+of names and ancestry and the within-branch computation status.
 
 A model path is either a local directory holding model.pt + model.json, or the
 s3:// prefix of a released version. --probe-dir is likewise a local directory
