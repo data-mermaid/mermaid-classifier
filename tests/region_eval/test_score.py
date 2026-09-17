@@ -981,17 +981,17 @@ class RatioIntervalTest(unittest.TestCase):
         self.assertAlmostEqual(low, 0.16 / 0.35)
         self.assertAlmostEqual(high, 0.24 / 0.25)
 
-    def test_a_null_and_a_measurement_with_no_spread_leave_no_bounds(self):
-        """Dividing a point by a point is a zero-width interval on the number
-        the mitigation argument rests on, which reads as certainty nothing
-        measured.
+    def test_agreeing_finite_quotients_report_a_precise_value(self):
+        """Dividing a point by a point still lands both ends on the same
+        finite quotient, which is a real, zero-width answer -- the ratio
+        this null and this measurement agree on -- not an unresolved bound.
         """
         low, high = _ratio_to_baseline_interval(
             self._baseline(observed=0.20, low=0.25, high=0.25),
             self._measured(low=0.20, high=0.20),
         )
-        self.assertTrue(math.isnan(low))
-        self.assertTrue(math.isnan(high))
+        self.assertAlmostEqual(low, 0.8)
+        self.assertAlmostEqual(high, 0.8)
 
     def test_a_null_pinned_to_zero_leaves_an_unbounded_end(self):
         low, high = _ratio_to_baseline_interval(
@@ -1000,6 +1000,19 @@ class RatioIntervalTest(unittest.TestCase):
         )
         self.assertAlmostEqual(low, 0.16 / 0.35)
         self.assertTrue(math.isnan(high))
+
+    def test_zero_out_of_region_predictions_report_a_precise_zero(self):
+        """A model with no out-of-region predictions at all holds the
+        measured rate at 0.0 across the whole bootstrap, so it divides to
+        0.0 against any non-degenerate null -- the best result this metric
+        can report, not an unresolved bound.
+        """
+        low, high = _ratio_to_baseline_interval(
+            self._baseline(observed=0.0, low=0.03, high=0.08),
+            self._measured(low=0.0, high=0.0),
+        )
+        self.assertEqual(low, 0.0)
+        self.assertEqual(high, 0.0)
 
 
 class ModelSpecTest(unittest.TestCase):

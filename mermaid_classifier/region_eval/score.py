@@ -954,14 +954,13 @@ def _ratio_to_baseline_interval(
     ratio's precision, and on a real run the numerator is the larger of the
     two.
 
-    A baseline end of zero leaves that bound unbounded, and a bound neither
-    term resolved collapses the interval to a point; both read as NaN rather
-    than as a number.
+    A baseline end of zero leaves that bound unbounded, and `_quotient`
+    reports it as NaN rather than as a number; the two ends resolve
+    independently, so a measured rate of zero against a non-degenerate null
+    reports a precise (0.0, 0.0) rather than an unresolved bound.
     """
     low = _quotient(measured.ci_low, baseline.baseline_ci_high)
     high = _quotient(measured.ci_high, baseline.baseline_ci_low)
-    if low == high:
-        return math.nan, math.nan
     return low, high
 
 

@@ -126,6 +126,27 @@ CLEAN_ROWS = tuple(
     )
 )
 
+# CLEAN_ROWS with its first prediction flipped to an out-of-region label: the
+# same five images and twenty points, but one event instead of none, which is
+# the boundary the zero-cell upper bound has to disappear across.
+ONE_EVENT_ROWS = (("image-v", CENTRAL_INDO_PACIFIC, PACIFIC_LABEL, ATLANTIC_LABEL),) + CLEAN_ROWS[
+    1:
+]
+
+# Five images predicted into the Central Indo-Pacific; two of them predict a
+# label with no recorded regions on every one of their points, so neither
+# contributes to the evaluable denominator and both must be absent from its
+# image count.
+DENOMINATOR_EXCLUDED_IMAGES_ROWS = (
+    ("image-g1", CENTRAL_INDO_PACIFIC, GLOBAL_LABEL, PACIFIC_LABEL),
+    ("image-g2", CENTRAL_INDO_PACIFIC, GLOBAL_LABEL, ATLANTIC_LABEL),
+    ("image-g3", CENTRAL_INDO_PACIFIC, GLOBAL_LABEL, PACIFIC_LABEL),
+    ("image-g4", CENTRAL_INDO_PACIFIC, GLOBAL_LABEL, NO_REGIONS_LABEL),
+    ("image-g4", CENTRAL_INDO_PACIFIC, GLOBAL_LABEL, NO_REGIONS_LABEL),
+    ("image-g5", CENTRAL_INDO_PACIFIC, GLOBAL_LABEL, NO_REGIONS_LABEL),
+    ("image-g5", CENTRAL_INDO_PACIFIC, GLOBAL_LABEL, NO_REGIONS_LABEL),
+)
+
 # Four all-or-nothing images of five points: two predict out of region
 # throughout and two never do, so resampling images spans the unit interval
 # where resampling points would barely move.
@@ -441,6 +462,34 @@ class ZeroCellTest(unittest.TestCase):
         self.assertEqual(estimate.n, 0)
         self.assertTrue(math.isnan(estimate.rate))
 
+    def test_an_empty_denominator_reports_no_upper_bound(self):
+        """An empty denominator has no images left to read a bound over, so
+        it must report none rather than rule_of_three(0)'s 100% span of
+        nothing."""
+        result = compute_region_metrics(_prepare(CLEAN_ROWS), options=OPTIONS)
+        estimate = result.overall.oor_rate_disc
+        self.assertEqual(estimate.n, 0)
+        self.assertIsNone(estimate.upper_bound)
+        self.assertEqual(estimate.upper_bound_n_images, 0)
+
+    def test_the_bound_disappears_between_zero_and_one_event(self):
+        """ONE_EVENT_ROWS is CLEAN_ROWS with its first prediction flipped to
+        an out-of-region label: the same five images and twenty points, one
+        event instead of none. The rule-of-three stand-in belongs to the
+        zero cell alone; a single event must drop it rather than widen it."""
+        zero_events = compute_region_metrics(_prepare(CLEAN_ROWS), options=OPTIONS).overall.oor_rate
+        one_event = compute_region_metrics(
+            _prepare(ONE_EVENT_ROWS), options=OPTIONS
+        ).overall.oor_rate
+
+        self.assertEqual(zero_events.k, 0)
+        self.assertEqual(zero_events.upper_bound_n_images, 5)
+        self.assertAlmostEqual(zero_events.upper_bound, 3 / 5)
+
+        self.assertEqual(one_event.k, 1)
+        self.assertEqual(one_event.n, zero_events.n)
+        self.assertIsNone(one_event.upper_bound)
+
     def test_per_label_zero_cell_bound_counts_images_not_points(self):
         """Ten points predicting a region-discriminating label across five
         images with no incident: the bound must read five trials, not ten."""
@@ -450,6 +499,21 @@ class ZeroCellTest(unittest.TestCase):
         self.assertEqual(int(row["n_predicted"]), 10)
         self.assertEqual(int(row["upper_bound_n_images"]), 5)
         self.assertAlmostEqual(float(row["upper_bound"]), 3 / 5)
+
+
+class DenominatorClusterCountTest(unittest.TestCase):
+    """The rule-of-three trial count is the images the denominator mask
+    keeps, not every image the points came from."""
+
+    def test_images_excluded_by_the_denominator_mask_do_not_count(self):
+        """Two of five images predict a label with no recorded regions on
+        every point, so neither clears the evaluable-predictions mask; the
+        trial count must be the three images that do, not all five."""
+        result = compute_region_metrics(_prepare(DENOMINATOR_EXCLUDED_IMAGES_ROWS), options=OPTIONS)
+        estimate = result.overall.oor_rate
+        self.assertEqual(estimate.k, 1)
+        self.assertEqual(estimate.n, 3)
+        self.assertEqual(estimate.upper_bound_n_images, 3)
 
 
 class ClusteringTest(unittest.TestCase):

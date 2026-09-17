@@ -178,13 +178,16 @@ class RateEstimate:
     `rate` is `k / n`; `k` is always a count over a subset of the `n`
     denominator, so it is a proportion in [0, 1] and the Wilson interval and
     design effect are defined whenever `n` is positive. An empty denominator
-    reports every field but `k`/`n` as NaN instead.
+    reports `rate`, both intervals and `design_effect` as NaN; `upper_bound`
+    is `None` and `upper_bound_n_images` is 0, since there is no image left
+    to read a bound over; `imprecise` is `None`, the same value it carries
+    whenever the caller supplied no target margin.
 
-    `upper_bound` holds the rule-of-three 95% bound when no event was seen, so
-    a zero cell reads as "none in n, at most this" rather than "0%". It is
-    read over the `upper_bound_n_images` images the denominator spans, not
-    over the points, which travels with it so the bound cannot be mistaken for
-    a point-level one.
+    `upper_bound` holds the rule-of-three 95% bound when a nonempty
+    denominator saw no event, so a zero cell reads as "none in n, at most
+    this" rather than "0%". It is read over the `upper_bound_n_images`
+    images the denominator spans, not over the points, which travels with it
+    so the bound cannot be mistaken for a point-level one.
 
     `design_effect` is NaN where the bootstrap interval has zero width, which
     measures no clustering rather than perfect independence. `imprecise` is
@@ -640,7 +643,7 @@ def _blank_estimate(k: int, n: int) -> RateEstimate:
         wilson_low=math.nan,
         wilson_high=math.nan,
         design_effect=math.nan,
-        upper_bound=rule_of_three(0) if k == 0 else None,
+        upper_bound=None,
         upper_bound_n_images=0,
         imprecise=None,
     )
