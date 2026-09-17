@@ -26,17 +26,6 @@ class MockBALibrary:
         self.by_parent = defaultdict(list)
         for ba in self.by_id.values():
             self.by_parent[ba["parent"]].append(ba)
-        # Regions each attribute is recorded in, mirroring
-        # BenthicAttributeLibrary.region_ids_by_id: A1 is Atlantic-only, A2
-        # Pacific-only, B1 spans both and B2 is unrecorded.
-        self.region_ids_by_id = {
-            "A": frozenset({"region-ta", "region-cip"}),
-            "A1": frozenset({"region-ta"}),
-            "A2": frozenset({"region-cip"}),
-            "B": frozenset({"region-ta", "region-cip"}),
-            "B1": frozenset({"region-ta", "region-cip"}),
-            "B2": frozenset(),
-        }
 
     def get_ancestor_ids(self, ba_id):
         parent = self.by_id[ba_id]["parent"]

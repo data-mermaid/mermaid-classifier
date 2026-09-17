@@ -121,10 +121,6 @@ class TrainingDataset:
         self._duck_conn = None
 
         self.feature_loc_to_source: dict[DataLocation, tuple[str, str]] = {}
-        # Value is (region_id, region_name); CoralNet images (which have no
-        # MERMAID region) map to ('', ''), never omitted, so a consumer can
-        # tell "no region" from "image not in the map".
-        self.feature_loc_to_region: dict[DataLocation, tuple[str, str]] = {}
 
         if self.options.coralnet_manifest_uri:
             with self.section_profiling("Reading CoralNet annotations"):
@@ -403,8 +399,6 @@ class TrainingDataset:
             f"  image_id, row, col,"
             f"  benthic_attribute_id,"
             f"  COALESCE(growth_form_id, '') AS growth_form_id,"
-            f"  COALESCE(region_id, '') AS region_id,"
-            f"  COALESCE(region_name, '') AS region_name,"
             f" '{Sites.MERMAID.value}' AS site,"
             f" '{settings.mermaid_train_data_bucket}' AS bucket,"
             f" 'all' AS project_id,"
@@ -468,13 +462,7 @@ class TrainingDataset:
                 "  CAST(source_id AS VARCHAR) AS project_id,"
                 # e.g. s123/features/i456.featurevector
                 "  's' || CAST(source_id AS VARCHAR) || '/features/i' || CAST(image_id AS VARCHAR)"
-                "   || '.featurevector' AS feature_vector,"
-                # CoralNet images have no MERMAID region. '' (never NULL,
-                # per this repo's convention) keeps the column set matching
-                # MERMAID's so the later `INSERT INTO annotations BY NAME`
-                # (when CoralNet is read first) succeeds.
-                "  '' AS region_id,"
-                "  '' AS region_name"
+                "   || '.featurevector' AS feature_vector"
                 " FROM read_parquet(?)"
                 # Defense-in-depth: the inner join in build_manifest_relation
                 # already excludes null image_id, but guard here in case the
@@ -659,9 +647,6 @@ class TrainingDataset:
 
             # First pass: collect annotations and unique S3 keys.
             s3_keys: dict[tuple[str, str], str] = {}
-            # Side dict for region, keyed the same way as s3_keys so the
-            # second pass below can look it up without widening image_data.
-            region_by_s3_key: dict[tuple[str, str], tuple[str, str]] = {}
             tmp_root = self._feature_dir
             # image_data: list of (bucket, key, annotations)
             image_data = []
@@ -674,17 +659,6 @@ class TrainingDataset:
                 feature_bucket_path = str(first_row["feature_vector"])
                 site = str(first_row["site"])
                 project_id = str(first_row["project_id"])
-
-                # Region is a property of the site, so every annotation on
-                # one image must agree on it; disagreement means the region
-                # can't be trusted for any of this image's rows.
-                row_regions = {(str(row["region_id"]), str(row["region_name"])) for row in rows}
-                if len(row_regions) > 1:
-                    raise ValueError(
-                        f"Image {str(first_row['image_id'])!r} has annotations"
-                        f" with disagreeing regions: {sorted(row_regions)}"
-                    )
-                region_id, region_name = next(iter(row_regions))
 
                 image_annotations = []
 
@@ -708,7 +682,6 @@ class TrainingDataset:
                     # Remember how to get back from the local download path
                     # to the original S3 location, for add_training_set_names.
                     self._feature_path_to_s3_location[local_path] = s3_key
-                region_by_s3_key[s3_key] = (region_id, region_name)
 
                 image_data.append(
                     (bucket, feature_bucket_path, site, project_id, image_annotations)
@@ -740,9 +713,6 @@ class TrainingDataset:
                 )
                 labels_data.add_image(feature_loc, image_annotations)
                 self.feature_loc_to_source[feature_loc] = (site, project_id)
-                self.feature_loc_to_region[feature_loc] = region_by_s3_key[
-                    (bucket, feature_bucket_path)
-                ]
 
             return preprocess_labels(
                 labels_data,

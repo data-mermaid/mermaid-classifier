@@ -67,7 +67,6 @@ def _make_dataset(test_case: unittest.TestCase) -> NoInitDataset:
     dataset.profiled_sections = []
     dataset._feature_path_to_s3_location = {}
     dataset.feature_loc_to_source = {}
-    dataset.feature_loc_to_region = {}
     dataset.options = DatasetOptions(ref_val_ratios=(0.1, 0.1))
     # artifacts is already set by NoInitDataset.__init__ (Artifacts())
     return dataset
@@ -90,8 +89,6 @@ def _seed_annotations(dataset: NoInitDataset) -> None:
                     "bucket": "my-bucket",
                     "project_id": f"p{i}",
                     "feature_vector": f"{ba}/img_{j}.fv",
-                    "region_id": "region-1",
-                    "region_name": "Region One",
                 }
             )
     df = pd.DataFrame(rows)  # noqa: F841 — referenced by name in DuckDB SQL

@@ -23,16 +23,6 @@ from mermaid_classifier.pyspacer.metrics.cover import compute_cover
 from mermaid_classifier.pyspacer.metrics.per_source import compute_per_source
 from mermaid_classifier.pyspacer.metrics.probability import compute_probability
 from mermaid_classifier.pyspacer.metrics.ranking import compute_ranking
-from mermaid_classifier.pyspacer.metrics.region import (
-    VAL_PREFIX,
-    compute_region,
-    scored_metric_name,
-)
-from mermaid_classifier.pyspacer.metrics.region_probe import (
-    PROBE_PREFIX,
-    compute_region_probe,
-    region_probe_is_configured,
-)
 from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
 
 MetricGroupFunc = typing.Callable[[MetricsContext], MetricGroupResult]
@@ -44,14 +34,6 @@ class MetricGroupSpec:
     func: MetricGroupFunc
     requires_dataset: bool = False
     requires_val_proba: bool = False
-    requires_clf: bool = False
-    # A metric logged as 0 before the group runs and raised to 1 by the
-    # group's own result, so a group that fails is distinguishable from one
-    # that was never applicable. `is_configured` answers whether the group has
-    # the configuration it needs; where it says no, no status is logged at all,
-    # because a 0 for a group nobody asked for reads like one that failed.
-    status_metric: str | None = None
-    is_configured: typing.Callable[[], bool] | None = None
 
 
 # Order is significant — mirrors the historical coordinator ordering.
@@ -65,31 +47,16 @@ METRIC_GROUPS: list[MetricGroupSpec] = [
     MetricGroupSpec("per_source", compute_per_source, requires_dataset=True),
     MetricGroupSpec("probability", compute_probability, requires_val_proba=True),
     MetricGroupSpec("ranking", compute_ranking, requires_val_proba=True),
-    MetricGroupSpec(
-        "region",
-        compute_region,
-        requires_dataset=True,
-        status_metric=scored_metric_name(VAL_PREFIX),
-    ),
-    MetricGroupSpec(
-        "region_probe",
-        compute_region_probe,
-        requires_clf=True,
-        status_metric=scored_metric_name(PROBE_PREFIX),
-        is_configured=region_probe_is_configured,
-    ),
 ]
 
 
-def applicable_metric_groups(ctx: MetricsContext) -> list[MetricGroupSpec]:
-    """Ordered specs for groups whose required ctx inputs are present."""
-    groups: list[MetricGroupSpec] = []
+def applicable_metric_groups(ctx: MetricsContext) -> list[tuple[str, MetricGroupFunc]]:
+    """Ordered (name, func) for groups whose required ctx inputs are present."""
+    groups: list[tuple[str, MetricGroupFunc]] = []
     for spec in METRIC_GROUPS:
         if spec.requires_dataset and ctx.dataset is None:
             continue
         if spec.requires_val_proba and ctx.val_proba is None:
             continue
-        if spec.requires_clf and ctx.clf is None:
-            continue
-        groups.append(spec)
+        groups.append((spec.name, spec.func))
     return groups
