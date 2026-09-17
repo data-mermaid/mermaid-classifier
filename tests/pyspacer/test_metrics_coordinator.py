@@ -11,12 +11,15 @@ These tests characterize:
 3. Invalid context: if ctx.validate() fails, compute_and_log_all() returns early
    without raising and logs no metrics.
 
-No clf or dataset is provided in any test, so only the always-available groups run
-(confusion_matrices, precision_recall_f1, balanced_accuracy_mcc, taxonomic,
-calibration). This keeps the test offline and dependency-free.
+Where a test reaches a gated group it hands the context an inert stand-in for
+the dataset or the classifier, so the groups that compute anything are the
+always-available ones (confusion_matrices, precision_recall_f1,
+balanced_accuracy_mcc, taxonomic, calibration). This keeps the test offline and
+dependency-free.
 """
 
 import dataclasses
+import logging
 import unittest
 from unittest import mock
 
@@ -234,7 +237,7 @@ class ApplicableGroupsTest(unittest.TestCase):
     """Each group is gated on the context inputs it actually reads."""
 
     def _names(self, ctx: MetricsContext) -> list[str]:
-        return [name for name, _func in metrics_registry.applicable_metric_groups(ctx)]
+        return [spec.name for spec in metrics_registry.applicable_metric_groups(ctx)]
 
     def test_region_probe_is_skipped_without_a_classifier(self):
         """The probe is scored through the exported predictor; without one
@@ -270,10 +273,43 @@ class RegionGroupIsolationTest(unittest.TestCase):
         self.conn = duckdb.connect()
         self.ctx = _make_ctx()
         self.ctx.dataset = object()
+        # Whether some other module's dictConfig has disabled this logger
+        # must not decide whether the warning below can be observed.
+        coordinator_logger = logging.getLogger("mermaid_classifier.pyspacer.metrics.coordinator")
+        self.addCleanup(setattr, coordinator_logger, "disabled", coordinator_logger.disabled)
+        coordinator_logger.disabled = False
 
-    def test_run_survives_and_region_metrics_are_absent(self):
+    def _logged_metrics(self, failing_group: str) -> dict[str, float]:
         with (
             mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_mlflow,
+            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
+            _registry_with_failing_group(failing_group),
+        ):
+            MetricsCoordinator(self.ctx, self.conn).compute_and_log_all()
+        return {call.args[0]: call.args[1] for call in mock_mlflow.log_metric.call_args_list}
+
+    def test_run_survives_and_region_rates_are_absent(self):
+        logged = self._logged_metrics("region")
+        self.assertIn("precision_macro", logged)
+        self.assertEqual(
+            [],
+            [name for name in logged if name.startswith("region_val/oor")],
+            msg="a failed group must not publish rates",
+        )
+
+    def test_a_failed_region_group_leaves_its_status_at_zero(self):
+        """The status is logged before the work that can raise, so a group
+        that blew up is distinguishable in MLflow from one that never ran —
+        a warning nobody can see is not an artifact."""
+        self.assertEqual(self._logged_metrics("region")["region_val/scored"], 0.0)
+
+    def test_a_failed_probe_group_leaves_its_own_status_at_zero(self):
+        self.ctx.clf = MockClf(["A1::", "A2::", "B1::"])
+        self.assertEqual(self._logged_metrics("region_probe")["region_probe/scored"], 0.0)
+
+    def test_the_failed_group_is_named_in_a_warning(self):
+        with (
+            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow"),
             mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
             _registry_with_failing_group("region"),
             self.assertLogs(
@@ -282,9 +318,6 @@ class RegionGroupIsolationTest(unittest.TestCase):
         ):
             MetricsCoordinator(self.ctx, self.conn).compute_and_log_all()
 
-        metric_names = [call.args[0] for call in mock_mlflow.log_metric.call_args_list]
-        self.assertIn("precision_macro", metric_names)
-        self.assertEqual([], [name for name in metric_names if name.startswith("region_val/")])
         self.assertTrue(
             any("region" in message for message in logs.output),
             msg=f"the failed group is not named in the warnings: {logs.output}",

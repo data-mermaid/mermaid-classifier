@@ -137,6 +137,12 @@ class ComputeRegionTest(unittest.TestCase):
         self.assertAlmostEqual(self.scalars["region_val/excess"], 2 / 4 - 1 / 4)
         self.assertAlmostEqual(self.scalars["region_val/ratio_to_gt"], 2.0)
 
+    def test_a_population_that_was_scored_says_so_in_a_metric(self):
+        """The coordinator logs a 0 before the group runs; only reaching the
+        end of scoring turns it into a 1, so a group that raised and one that
+        had nothing to score are both readable from MLflow alone."""
+        self.assertEqual(self.scalars["region_val/scored"], 1.0)
+
     def test_scored_population_counts_exclude_the_unrecorded_images(self):
         self.assertEqual(self.scalars["region_val/n_points"], 4)
         self.assertEqual(self.scalars["region_val/n_images"], 2)
@@ -289,6 +295,18 @@ class IndexAlignmentTest(unittest.TestCase):
         attribute every point to the wrong image."""
         ctx = _make_ctx(gt=FIXTURE_GT + [0], est=FIXTURE_EST + [0])
         with self.assertRaisesRegex(ValueError, "val_results"):
+            compute_region(ctx)
+
+    def test_the_image_the_index_ran_past_is_named(self):
+        """A grand total says only that something moved; the image whose
+        points ran past the results is where a reader has to look, and it is
+        the only per-image count there is anything to check against."""
+        images = (
+            ("img-a", (TROPICAL_ATLANTIC, "Tropical Atlantic"), 2),
+            ("img-b", (CENTRAL_INDO_PACIFIC, "Central Indo-Pacific"), 4),
+        )
+        ctx = _make_ctx(images=images, gt=[0, 0, 1], est=[0, 1, 0])
+        with self.assertRaisesRegex(ValueError, "img-b"):
             compute_region(ctx)
 
 

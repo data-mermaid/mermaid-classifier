@@ -20,10 +20,16 @@ cache for precision no downstream head uses.
 Downloads run through a thread pool in batches, each batch checkpointed to a
 shard so an interrupted build restarts where it stopped. The shard records
 which images were missing as well as which points were filled, so a resumed
-build reports the same counts as an uninterrupted one.
+build reports the same counts as an uninterrupted one. It also records a hash
+of the `(image_id, point_id, row, col)` its rows were built for: positions are
+indices into one run's probe rows, so a shard reused across a changed
+selection would land the previous selection's vectors on this one's points --
+the very misalignment the (row, col) match exists to prevent. A shard whose
+hash does not match the batch is discarded and the batch downloaded again.
 """
 
 import dataclasses
+import hashlib
 import io
 import logging
 from collections.abc import Callable, Sequence
@@ -145,6 +151,7 @@ def build_feature_cache(
         raise ValueError(f"batch_size must be at least 1, got {batch_size}")
 
     image_ids = [str(value) for value in probe_rows["image_id"]]
+    point_ids = [str(value) for value in probe_rows["point_id"]]
     rows = np.asarray(probe_rows["row"], dtype=np.int64)
     cols = np.asarray(probe_rows["col"], dtype=np.int64)
 
@@ -160,13 +167,27 @@ def build_feature_cache(
 
     for index, batch in enumerate(batches):
         shard = None if shard_dir is None else shard_dir / f"batch_{index:05d}.npz"
+        key = _shard_points_key(
+            [position for image_id in batch for position in wanted[image_id]],
+            image_ids=image_ids,
+            point_ids=point_ids,
+            rows=rows,
+            cols=cols,
+        )
         if shard is not None and shard.exists():
-            cached = np.load(shard, allow_pickle=False)
-            positions = cached["positions"].astype(np.int64)
-            features[positions] = cached["vectors"]
-            filled[positions] = True
-            missing_images.update(str(value) for value in cached["missing_image_ids"])
-            continue
+            restored = _restore_shard(shard, key)
+            if restored is None:
+                logger.warning(
+                    "shard %s was built for a different set of probe points;"
+                    " discarding it and downloading this batch again",
+                    shard.name,
+                )
+            else:
+                positions, vectors, shard_missing = restored
+                features[positions] = vectors
+                filled[positions] = True
+                missing_images.update(shard_missing)
+                continue
 
         found, batch_missing = _run_batch(
             loader,
@@ -193,6 +214,7 @@ def build_feature_cache(
                 positions=positions,
                 vectors=vectors,
                 missing_image_ids=np.array(sorted(batch_missing), dtype=np.str_),
+                points_key=np.array(key, dtype=np.str_),
             )
         logger.info(
             "feature batch %d/%d: %d points, %d image(s) without a feature file",
@@ -215,7 +237,7 @@ def build_feature_cache(
     return FeatureCache(
         features=features[kept],
         image_ids=tuple(image_ids[position] for position in kept),
-        point_ids=tuple(str(value) for value in probe_rows["point_id"].to_numpy()[kept]),
+        point_ids=tuple(point_ids[position] for position in kept),
         rows=rows[kept],
         cols=cols[kept],
         gt_labels=tuple(str(value) for value in probe_rows["gt_label"].to_numpy()[kept]),
@@ -241,6 +263,46 @@ def write_feature_cache(cache: FeatureCache, path: Path) -> None:
         gt_label=np.array(cache.gt_labels, dtype=np.str_),
         region_id=np.array(cache.region_ids, dtype=np.str_),
         held_out=cache.held_out,
+    )
+
+
+def _shard_points_key(
+    positions: Sequence[int],
+    *,
+    image_ids: Sequence[str],
+    point_ids: Sequence[str],
+    rows: NDArray[np.int64],
+    cols: NDArray[np.int64],
+) -> str:
+    """A hash of the points one shard covers, in the order it stores them.
+
+    Identifies the points rather than their row indices, which belong to one
+    run's probe rows and mean nothing in another's.
+    """
+    digest = hashlib.sha256()
+    for position in positions:
+        digest.update(
+            f"{image_ids[position]}\x1f{point_ids[position]}\x1f"
+            f"{int(rows[position])}\x1f{int(cols[position])}\x1e".encode()
+        )
+    return digest.hexdigest()
+
+
+def _restore_shard(
+    shard: Path, key: str
+) -> tuple[NDArray[np.int64], NDArray[np.float32], set[str]] | None:
+    """One shard's filled positions, vectors and missing images, or None.
+
+    None is a shard whose key is not this batch's, and a shard carrying no key
+    at all: neither says its rows are these points.
+    """
+    cached = np.load(shard, allow_pickle=False)
+    if "points_key" not in cached.files or str(cached["points_key"]) != key:
+        return None
+    return (
+        cached["positions"].astype(np.int64),
+        np.asarray(cached["vectors"], dtype=np.float32),
+        {str(value) for value in cached["missing_image_ids"]},
     )
 
 

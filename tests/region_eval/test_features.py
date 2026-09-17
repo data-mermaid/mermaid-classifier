@@ -14,6 +14,7 @@ metadata carries.
 import io
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -155,6 +156,87 @@ class FeatureCacheTest(unittest.TestCase):
         self.assertEqual(second.n_points_missing_image, first.n_points_missing_image)
         self.assertEqual(second.missing_image_ids, first.missing_image_ids)
         np.testing.assert_array_equal(second.features, first.features)
+
+    def test_a_shard_built_for_other_points_is_rebuilt_rather_than_restored(self):
+        """Positions in a shard index one run's probe rows. Rebuilding into a
+        directory whose shards came from a different selection -- another seed,
+        another target size, a refreshed export -- would otherwise lay the old
+        run's vectors on the new run's rows: every point scored with another
+        image's features while carrying this image's ground truth, and every
+        missing count reading zero.
+        """
+        first_points = {f"i{index}": [(10 * index, 20 * index)] for index in range(1, 5)}
+        second_points = {f"i{index}": [(10 * index, 20 * index)] for index in range(5, 9)}
+        for points_by_image in (first_points, second_points):
+            for image_id, points in points_by_image.items():
+                self._write_feature_file(image_id, points)
+        shards = self.root / "shards"
+
+        build_feature_cache(
+            _probe_rows(first_points),
+            self._loader,
+            feature_dim=DIM,
+            workers=2,
+            batch_size=2,
+            shard_dir=shards,
+        )
+        second = build_feature_cache(
+            _probe_rows(second_points),
+            self._loader,
+            feature_dim=DIM,
+            workers=2,
+            batch_size=2,
+            shard_dir=shards,
+        )
+
+        self.assertEqual(list(second.image_ids), ["i5", "i6", "i7", "i8"])
+        self.assertEqual(second.n_points_missing_row_col, 0)
+        self.assertEqual(second.n_points_missing_image, 0)
+        self._assert_aligned(second)
+
+    def test_a_shard_written_without_a_points_key_is_rebuilt(self):
+        """A shard left by a build that predates the key cannot say which
+        points it holds, so restoring it is the same gamble as restoring a
+        stale one.
+        """
+        probe = _probe_rows({"i1": [(10, 20)], "i2": [(30, 40)]})
+        for image_id, points in (("i1", [(10, 20)]), ("i2", [(30, 40)])):
+            self._write_feature_file(image_id, points)
+        shards = self.root / "shards"
+        build_feature_cache(
+            probe, self._loader, feature_dim=DIM, workers=2, batch_size=1, shard_dir=shards
+        )
+        stored = np.load(shards / "batch_00000.npz", allow_pickle=False)
+        np.savez_compressed(
+            shards / "batch_00000.npz",
+            **{name: stored[name] for name in stored.files if name != "points_key"},
+        )
+        fetched: list[str] = []
+
+        def recording(image_id: str) -> bytes:
+            fetched.append(image_id)
+            return self._loader(image_id)
+
+        cache = build_feature_cache(
+            probe, recording, feature_dim=DIM, workers=2, batch_size=1, shard_dir=shards
+        )
+
+        self.assertEqual(fetched, ["i1"], "the keyless shard is the only batch downloaded again")
+        self.assertEqual(list(cache.image_ids), ["i1", "i2"])
+        self._assert_aligned(cache)
+
+    def test_a_feature_file_that_does_not_parse_raises_rather_than_counting_it_missing(self):
+        """A truncated archive that read as a missing image would shrink the
+        probe silently: the missing-image count absorbs it, and the score is
+        taken on fewer points than it says. Only a fetch is forgiving.
+        """
+        self._write_feature_file("i1", [(10, 20)])
+        whole = _feature_bytes([(30, 40)])
+        (self.root / "i2.npz").write_bytes(whole[: len(whole) // 2])
+        probe = _probe_rows({"i1": [(10, 20)], "i2": [(30, 40)]})
+
+        with self.assertRaises(zipfile.BadZipFile):
+            build_feature_cache(probe, self._loader, feature_dim=DIM, workers=2)
 
     def test_batching_covers_every_image(self):
         images = {f"i{index}": [(10 * index, 20 * index)] for index in range(1, 8)}

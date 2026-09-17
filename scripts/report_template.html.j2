@@ -105,6 +105,7 @@
   .metric-card .value.warn { color: var(--amber); }
   .metric-card .value.bad  { color: var(--red-600); }
   .metric-card .interval { font-size: 0.7rem; color: var(--gray-600); margin-top: 0.25rem; }
+  .metric-card .denominator { font-size: 0.7rem; color: var(--gray-600); margin-top: 0.25rem; }
 
   /* Data tables (from pandas to_html) */
   .dataframe { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.5rem 0 1rem 0; }
@@ -248,11 +249,17 @@
   {%- endif -%}
 {%- endmacro %}
 
-{# One metric card: the value, and the interval it must never be read without #}
-{% macro metric_card(label, value, intervals, primary=False) -%}
+{# One metric card: the value, the population it was read over, and the
+   interval it must never be read without. A rate with an empty denominator
+   reads 0.00%, exactly as a model with no incidents does, so the k and n go
+   on the card rather than in a CSV. #}
+{% macro metric_card(label, value, intervals, counts=None, primary=False) -%}
       <div class="metric-card{% if primary %} metric-card--primary{% endif %}">
         <div class="label">{{ label }}</div>
         <div class="value {{ metric_value_class(label, value, intervals) | trim }}">{{ format_metric_value(label, value, intervals) | trim }}</div>
+        {%- if counts and label in counts %}
+        <div class="denominator">{{ "%d" | format(counts[label][0]) }} of {{ "%d" | format(counts[label][1]) }}</div>
+        {%- endif %}
         {%- if intervals and label in intervals %}
         {%- if intervals[label] %}
         <div class="interval">95% CI {{ format_metric_value(label, intervals[label][0], intervals) | trim }} &ndash; {{ format_metric_value(label, intervals[label][1], intervals) | trim }}</div>
@@ -350,7 +357,7 @@
   <div class="metric-group">
     <div class="metric-cards">
       {% for label, value in metrics.executive %}
-{{ metric_card(label, value, metrics.intervals, primary=loop.first) }}
+{{ metric_card(label, value, metrics.intervals, metrics.counts, primary=loop.first) }}
       {% endfor %}
     </div>
   </div>
@@ -403,7 +410,7 @@
     <h3>Region Mismatch</h3>
     <div class="metric-cards">
       {% for label, value in metrics.region %}
-{{ metric_card(label, value, metrics.intervals) }}
+{{ metric_card(label, value, metrics.intervals, metrics.counts) }}
       {% endfor %}
     </div>
   </div>

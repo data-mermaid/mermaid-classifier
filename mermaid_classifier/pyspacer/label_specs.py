@@ -28,6 +28,10 @@ from mermaid_classifier.pyspacer.utils import logging_config_for_script
 
 logger = logging_config_for_script("train")
 
+# How many unmatched image ids a warning names. Enough to recognise an id
+# format that has drifted, short enough to read in a training log.
+UNMATCHED_ID_SAMPLE_SIZE = 10
+
 
 class LabelFilter(CsvSpec):
     """
@@ -254,9 +258,11 @@ class ImageExclusionFilter(CsvSpec):
         this spec's exclusion list.
 
         Logs the number of annotations and distinct images removed, and
-        how many listed ids matched no row in the table. A list that
-        matches nothing looks like a successful exclusion but excludes
-        nothing, so that case is logged as a warning rather than info.
+        every listed id that matched no row, a sample of them by name.
+        Any unmatched id is a warning: an id format that has drifted from
+        the table's image_id leaves those images in training while the run
+        reads as though they were withheld, and a list that matches nothing
+        at all carries the harder message.
         """
         if self.is_empty():
             return
@@ -279,6 +285,24 @@ class ImageExclusionFilter(CsvSpec):
                 f"  USING ({image_id_column_name})"
             ).fetchall()[0]
 
+            unmatched_count = len(self.excluded_image_ids) - images_removed
+            unmatched_sample: list[str] = []
+            if unmatched_count > 0:
+                # Sampled before the delete: afterwards no listed id
+                # matches a row, whether it did or not.
+                unmatched_sample = [
+                    row[0]
+                    for row in duck_conn.execute(
+                        f"SELECT e.{image_id_column_name}"
+                        f" FROM {excluded_table_name} e"
+                        f" LEFT JOIN {duck_table_name} t"
+                        f"  USING ({image_id_column_name})"
+                        f" WHERE t.{image_id_column_name} IS NULL"
+                        f" ORDER BY e.{image_id_column_name}"
+                        f" LIMIT {UNMATCHED_ID_SAMPLE_SIZE}"
+                    ).fetchall()
+                ]
+
             duck_conn.execute(
                 f"CREATE OR REPLACE TABLE {duck_table_name} AS"
                 f" SELECT t.*"
@@ -288,22 +312,31 @@ class ImageExclusionFilter(CsvSpec):
                 f" WHERE e.{image_id_column_name} IS NULL"
             )
 
-        unmatched_count = len(self.excluded_image_ids) - images_removed
-
         if images_removed == 0:
             logger.warning(
                 "Image exclusion spec listed %s image id(s), but none"
                 " matched an image_id in this dataset — the exclusion"
-                " had no effect.",
+                " had no effect. Unmatched ids include: %s",
                 len(self.excluded_image_ids),
+                ", ".join(unmatched_sample),
+            )
+        elif unmatched_count > 0:
+            logger.warning(
+                "Image exclusion spec removed %s annotation(s) across %s"
+                " image(s), but %s of %s listed id(s) matched no image in"
+                " this dataset and stay in the training data."
+                " Unmatched ids include: %s",
+                annotations_removed,
+                images_removed,
+                unmatched_count,
+                len(self.excluded_image_ids),
+                ", ".join(unmatched_sample),
             )
         else:
             logger.info(
                 "Image exclusion spec removed %s annotation(s) across"
-                " %s image(s); %s of %s listed id(s) matched no image"
-                " in this dataset.",
+                " %s image(s); every one of the %s listed id(s) matched.",
                 annotations_removed,
                 images_removed,
-                unmatched_count,
                 len(self.excluded_image_ids),
             )

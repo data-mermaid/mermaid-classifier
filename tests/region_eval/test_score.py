@@ -48,8 +48,9 @@ import yaml
 from pyspacer._calibrated_model_fixture import make_calibrated_model
 
 from mermaid_classifier.pyspacer.inference import export_artifact
+from mermaid_classifier.region_eval.decisions import RegionBlindBaseline
 from mermaid_classifier.region_eval.features import FeatureCache, write_feature_cache
-from mermaid_classifier.region_eval.metrics import RegionMetricsOptions
+from mermaid_classifier.region_eval.metrics import RateEstimate, RegionMetricsOptions
 from mermaid_classifier.region_eval.probe_set import (
     PROBE_COLUMNS,
     NameSnapshot,
@@ -58,6 +59,7 @@ from mermaid_classifier.region_eval.probe_set import (
     probe_content_hash,
 )
 from mermaid_classifier.region_eval.score import (
+    _ratio_to_baseline_interval,
     load_probe,
     paired_comparison,
     score_model,
@@ -178,6 +180,7 @@ N_PROBE_COUNT_PAIRS = 9
 N_POINTS = 25
 N_IMAGES = 6
 N_HELD_OUT = 17
+N_HELD_OUT_IMAGES = 4
 N_IN_MODEL_CLASSES = 24
 N_GT_OUT_OF_REGION = 3
 N_GT_DISCRIMINATING = 19
@@ -492,6 +495,7 @@ class ScoreReportTest(unittest.TestCase):
                 "triage_ground_truth_counts",
                 "name_resolution",
                 "within_branch_ancestry",
+                "held_out_training_exclusion",
                 "masking_upper_bound",
             },
         )
@@ -527,6 +531,33 @@ class ScoreReportTest(unittest.TestCase):
 
         effects = entries["realized_design_effect"]["magnitude"]
         self.assertEqual(effects["n_measured"] + effects["n_degenerate"], 4)
+
+        held_out = entries["held_out_training_exclusion"]["magnitude"]
+        self.assertEqual(held_out["n_held_out_points"], N_HELD_OUT)
+        self.assertEqual(held_out["n_held_out_images"], N_HELD_OUT_IMAGES)
+        self.assertAlmostEqual(held_out["share_points_held_out"], N_HELD_OUT / N_POINTS)
+        self.assertIn("not verifiable", held_out["training_exclusion"])
+
+    def test_the_held_out_block_says_the_exclusion_cannot_be_verified(self):
+        """`held_out` means only that the image is outside a census region.
+        A model whose training run never consumed the matching exclusion list
+        produces a held-out block that is a training-set measurement, and the
+        block is what the mitigation argument quotes, so the qualifier travels
+        with the rates rather than living only in limitations.yaml.
+        """
+        score = self._score()
+        out_dir = self.root / "out"
+        write_report(score, out_dir)
+        text = (out_dir / "summary.md").read_text()
+
+        held_out = text.index("### Held-out points only")
+        qualifier = text.index("not verifiable from here", held_out)
+        self.assertLess(qualifier, text.index("## Other denominators"))
+        self.assertIn("training-set measurement", text[held_out:])
+
+        manifest = json.loads((out_dir / "manifest.json").read_text())
+        self.assertIn("census region", manifest["held_out"]["definition"])
+        self.assertIn("not verifiable", manifest["held_out"]["training_exclusion"])
 
     def test_frozen_corpus_counts_bucket_events_the_probes_own_counts_call_mistakes(self):
         """Stypopodium is annotated 605 times in the Western Indo-Pacific, which
@@ -726,6 +757,98 @@ class ScoreReportTest(unittest.TestCase):
             paired_comparison([self._score(), reversed_score])
 
 
+class ProbeIntegrityTest(unittest.TestCase):
+    """What binds the parquet, the manifest and the feature cache together.
+
+    A probe dir rebuilt in place after the selection moved holds two
+    selections at once: a fresh parquet beside a cache -- or a shard -- from
+    the previous one. Every integrity counter still reads clean, because the
+    npz's own metadata is written from the new rows, so the only thing that
+    can catch it is a check that the cache's points are the parquet's.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        _model, batch = make_calibrated_model()
+        self.features = np.asarray(batch)[:N_POINTS]
+        self.probe_dir = self.root / "probe"
+        self.rows = _write_probe(self.probe_dir, self.features)
+
+    def _overwrite_cache(self, rows: pd.DataFrame, features: np.ndarray) -> None:
+        """Replace the probe's cache with one built for `rows`."""
+        write_feature_cache(
+            FeatureCache(
+                features=features.astype(np.float32),
+                image_ids=tuple(rows["image_id"]),
+                point_ids=tuple(rows["point_id"]),
+                rows=np.asarray(rows["row"], dtype=np.int64),
+                cols=np.asarray(rows["col"], dtype=np.int64),
+                gt_labels=tuple(rows["gt_label"]),
+                region_ids=tuple(rows["region_id"]),
+                held_out=np.asarray(rows["held_out"], dtype=bool),
+                n_points_requested=len(rows),
+                n_points_missing_row_col=0,
+                n_points_missing_image=0,
+                missing_image_ids=(),
+            ),
+            self.probe_dir / "probe_features.npz",
+        )
+
+    def test_a_cache_built_for_another_selection_is_refused(self):
+        """Twenty-five vectors for twenty-five rows, cached and requested
+        counts equal, nothing missing -- and every vector belongs to another
+        image. Scoring it would price each point against another point's
+        features while reporting this point's ground truth and region.
+        """
+        other = _probe_rows(
+            [
+                (f"o{image_id}", region_id, attribute_id)
+                for image_id, region_id, attribute_id in PROBE_POINTS
+            ]
+        )
+        self._overwrite_cache(other, self.features)
+
+        with self.assertRaisesRegex(ValueError, "does not hold the points"):
+            load_probe(self.probe_dir)
+
+    def test_a_cache_reordered_against_the_parquet_is_refused(self):
+        """The reversed cache carries the same 25 (image, point) pairs and the
+        same 25 vectors, so every count balances and only the order gives it
+        away.
+        """
+        self._overwrite_cache(self.rows.iloc[::-1].reset_index(drop=True), self.features[::-1])
+
+        with self.assertRaisesRegex(ValueError, "does not hold the points"):
+            load_probe(self.probe_dir)
+
+    def test_a_cache_short_by_one_images_points_still_loads(self):
+        """An image whose feature file never existed legitimately shrinks the
+        cache. A check that refused that would refuse every real probe.
+        """
+        kept = self.rows[self.rows["image_id"] != "ta1"].reset_index(drop=True)
+        self._overwrite_cache(kept, self.features[len(self.rows) - len(kept) :])
+
+        probe = load_probe(self.probe_dir)
+
+        self.assertEqual(probe.features.n_points, len(kept))
+        self.assertNotIn("ta1", probe.features.image_ids)
+
+    def test_a_manifest_recording_other_points_is_refused(self):
+        """The manifest's content hash and the parquet disagreeing means the
+        points moved after the probe was frozen, which makes every other file
+        in the directory a description of something else.
+        """
+        manifest_path = self.probe_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["content_hash"] = probe_content_hash(_probe_rows(PROBE_POINTS[:20]))
+        manifest_path.write_text(json.dumps(manifest))
+
+        with self.assertRaisesRegex(ValueError, "content_hash"):
+            load_probe(self.probe_dir)
+
+
 class NameResolutionTest(unittest.TestCase):
     """The names frozen with the probe, rendered into the artifacts.
 
@@ -919,6 +1042,62 @@ class DecisionStatisticsTest(unittest.TestCase):
         )
         self.assertEqual(int(baseline["n"]), self.score.decisions.region_blind.n_discriminating)
 
+    def test_the_ratio_interval_carries_both_of_its_terms(self):
+        """Inverting the permutation interval alone reports how tightly the
+        null is pinned as the ratio's precision. On the real run that is 2.5x
+        too narrow, and the ratio reaches summary.md without its method
+        string, so the caveat has to be in the bounds themselves: each end
+        divides one end of the measured rate's cluster bootstrap interval by
+        the opposite end of the permutation interval.
+        """
+        baseline = self.score.decisions.region_blind
+        measured = self.score.metrics.overall.oor_rate_disc
+        self.assertAlmostEqual(
+            measured.rate,
+            baseline.observed_rate,
+            msg="the ratio's numerator and oor_rate_disc must share a denominator",
+        )
+        self.assertLess(measured.ci_low, measured.ci_high)
+
+        summary = _read_csv(self.out_dir / "summary.csv")
+        ratio = summary[summary["metric"] == "region_blind_ratio"].iloc[0]
+        self.assertAlmostEqual(float(ratio["ci_low"]), measured.ci_low / baseline.baseline_ci_high)
+        self.assertAlmostEqual(float(ratio["ci_high"]), measured.ci_high / baseline.baseline_ci_low)
+
+        self.assertLess(
+            float(ratio["ci_low"]),
+            baseline.observed_rate / baseline.baseline_ci_high,
+            "the lower bound must sit below the null-only inversion",
+        )
+        self.assertGreater(
+            float(ratio["ci_high"]),
+            baseline.observed_rate / baseline.baseline_ci_low,
+            "the upper bound must sit above the null-only inversion",
+        )
+
+        row = self._decisions().loc[("region_blind", "ratio")]
+        self.assertAlmostEqual(float(row["ci_low"]), float(ratio["ci_low"]))
+        self.assertAlmostEqual(float(row["ci_high"]), float(ratio["ci_high"]))
+
+    def test_the_markdown_renders_the_widened_ratio_interval(self):
+        """summary.md carries no method column, so the bounds a reader takes
+        for the ratio's confidence interval are the only place the second
+        source of uncertainty can appear.
+        """
+        baseline = self.score.decisions.region_blind
+        measured = self.score.metrics.overall.oor_rate_disc
+        text = (self.out_dir / "summary.md").read_text()
+
+        low = measured.ci_low / baseline.baseline_ci_high
+        high = measured.ci_high / baseline.baseline_ci_low
+        self.assertIn(f"[{low:.4f}, {high:.4f}]", text)
+        self.assertNotIn(
+            f"[{baseline.observed_rate / baseline.baseline_ci_high:.4f},"
+            f" {baseline.observed_rate / baseline.baseline_ci_low:.4f}]",
+            text,
+            "the null-only inversion must not reach the human summary",
+        )
+
     def test_a_region_blind_model_scores_near_the_permutation_baseline(self):
         """The fixture model reads features that carry nothing about region, so
         shuffling regions between images must not move its out-of-region rate.
@@ -1042,6 +1221,76 @@ class DecisionStatisticsTest(unittest.TestCase):
         self.assertLess(ratio, masking)
         self.assertIn("fixes", text[section:])
         self.assertIn("breaks", text[section:])
+
+
+class RatioIntervalTest(unittest.TestCase):
+    """The degenerate ends of the region-blind ratio's interval.
+
+    A permutation distribution with no spread and a bootstrap with no spread
+    are both reachable on a small or homogeneous probe and neither is
+    reachable from the fixture, so the bounds are read off the helper with the
+    two estimates handed to it directly.
+    """
+
+    def _baseline(self, *, observed: float, low: float, high: float) -> RegionBlindBaseline:
+        return RegionBlindBaseline(
+            n_points=100,
+            n_images=10,
+            n_unrecorded_region_excluded=0,
+            n_region_unknown=0,
+            n_discriminating=100,
+            n_out_of_region=int(observed * 100),
+            observed_rate=observed,
+            baseline_rate=(low + high) / 2.0,
+            baseline_sd=(high - low) / 4.0,
+            baseline_ci_low=low,
+            baseline_ci_high=high,
+            ratio=observed / ((low + high) / 2.0),
+            n_permutations=200,
+        )
+
+    def _measured(self, *, low: float, high: float) -> RateEstimate:
+        return RateEstimate(
+            k=20,
+            n=100,
+            rate=(low + high) / 2.0,
+            ci_low=low,
+            ci_high=high,
+            wilson_low=low,
+            wilson_high=high,
+            design_effect=1.0,
+            upper_bound=None,
+            upper_bound_n_images=10,
+            imprecise=None,
+        )
+
+    def test_both_uncertainties_widen_the_bounds(self):
+        low, high = _ratio_to_baseline_interval(
+            self._baseline(observed=0.20, low=0.25, high=0.35),
+            self._measured(low=0.16, high=0.24),
+        )
+        self.assertAlmostEqual(low, 0.16 / 0.35)
+        self.assertAlmostEqual(high, 0.24 / 0.25)
+
+    def test_a_null_and_a_measurement_with_no_spread_leave_no_bounds(self):
+        """Dividing a point by a point is a zero-width interval on the number
+        the mitigation argument rests on, which reads as certainty nothing
+        measured.
+        """
+        low, high = _ratio_to_baseline_interval(
+            self._baseline(observed=0.20, low=0.25, high=0.25),
+            self._measured(low=0.20, high=0.20),
+        )
+        self.assertTrue(math.isnan(low))
+        self.assertTrue(math.isnan(high))
+
+    def test_a_null_pinned_to_zero_leaves_an_unbounded_end(self):
+        low, high = _ratio_to_baseline_interval(
+            self._baseline(observed=0.20, low=0.0, high=0.35),
+            self._measured(low=0.16, high=0.24),
+        )
+        self.assertAlmostEqual(low, 0.16 / 0.35)
+        self.assertTrue(math.isnan(high))
 
 
 class ModelSpecTest(unittest.TestCase):

@@ -8,6 +8,7 @@ Empty growth form is the empty string '' (never NULL) per the BA+GF convention.
 BA+GF separator is '::' (BAGF_SEP).
 """
 
+import logging
 import unittest
 from io import StringIO
 
@@ -20,6 +21,7 @@ from mermaid_classifier.pyspacer.label_specs import (
     LabelFilter,
     LabelRollupSpec,
 )
+from mermaid_classifier.pyspacer.utils import logging_config_for_script
 
 
 def _make_conn() -> duckdb.DuckDBPyConnection:
@@ -319,17 +321,72 @@ class ImageExclusionFilterInDuckDBTest(unittest.TestCase):
             msg=f"expected unmatched-count info in logs, got: {log_ctx.output}",
         )
 
+    def test_a_partly_unmatched_list_is_loud_and_names_what_it_missed(self):
+        """An id format that has drifted matches a handful and leaves the rest
+        in training, which reads as a held-out population that is not one. The
+        images that did match still go."""
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["img1", "img2"])
+
+        f = ImageExclusionFilter(StringIO("image_id\nimg1\nimg_absent\n"))
+        with self.assertLogs(logger="train", level="WARNING") as log_ctx:
+            f.filter_in_duckdb(conn, "annotations")
+
+        self.assertTrue(
+            any("img_absent" in message for message in log_ctx.output),
+            msg=f"the unmatched id is not named: {log_ctx.output}",
+        )
+        remaining_ids = {
+            row[0] for row in conn.execute("SELECT DISTINCT image_id FROM annotations").fetchall()
+        }
+        self.assertEqual(remaining_ids, {"img2"})
+
+    def test_a_fully_matched_list_stays_quiet(self):
+        """A warning on every healthy run is a warning nobody reads."""
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["img1", "img2"])
+
+        f = ImageExclusionFilter(StringIO("image_id\nimg1\n"))
+        with self.assertLogs(logger="train", level="INFO") as log_ctx:
+            f.filter_in_duckdb(conn, "annotations")
+
+        self.assertEqual(
+            [record.levelno for record in log_ctx.records],
+            [logging.INFO],
+            msg=f"a complete match must not warn: {log_ctx.output}",
+        )
+
     def test_entirely_unmatched_list_is_loud(self):
         """A list that matches nothing at all logs a warning, not just info."""
         conn = _make_conn()
         _seed_image_annotations(conn, ["img1", "img2"])
 
         f = ImageExclusionFilter(StringIO("image_id\nimg_absent_1\nimg_absent_2\n"))
-        with self.assertLogs(logger="train", level="WARNING"):
+        with self.assertLogs(logger="train", level="WARNING") as log_ctx:
             f.filter_in_duckdb(conn, "annotations")
 
+        self.assertTrue(
+            any("img_absent_1" in message for message in log_ctx.output),
+            msg=f"the unmatched ids are not named: {log_ctx.output}",
+        )
         count = conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
         self.assertEqual(count, 2, msg="nothing should have been removed")
+
+
+class ScriptLoggingConfigTest(unittest.TestCase):
+    """This module configures logging when it is imported, and a training run
+    reports its degraded states through loggers built before that import."""
+
+    def test_configuring_a_script_logger_leaves_other_loggers_working(self):
+        """Every warning a metric group or the region evaluation emits goes
+        through a logger created at its own module's import; silencing those
+        leaves a degraded run looking like a clean one."""
+        existing = logging.getLogger("tests.pyspacer.pre_existing_logger")
+
+        logging_config_for_script("train")
+
+        with self.assertLogs(existing, level="WARNING"):
+            existing.warning("a degraded state nobody would otherwise see")
 
     def test_extra_csv_columns_ignored(self):
         conn = _make_conn()

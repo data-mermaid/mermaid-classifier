@@ -193,6 +193,11 @@ class ComputeRegionProbeTest(unittest.TestCase):
         self.assertAlmostEqual(self.scalars["region_probe/gt_oor_rate"], 1 / 4)
         self.assertAlmostEqual(self.scalars["region_probe/ratio_to_gt"], 2.0)
 
+    def test_a_probe_that_was_scored_says_so_in_a_metric(self):
+        """The coordinator logs a 0 before the group runs, so a probe dir it
+        could not read leaves a 0 behind rather than no metric at all."""
+        self.assertEqual(self.scalars["region_probe/scored"], 1.0)
+
     def test_population_counts_cover_the_whole_probe(self):
         self.assertEqual(self.scalars["region_probe/n_points"], 4)
         self.assertEqual(self.scalars["region_probe/n_images"], 2)

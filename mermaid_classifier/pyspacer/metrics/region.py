@@ -47,6 +47,12 @@ from mermaid_classifier.region_eval.metrics import (
 
 VAL_PREFIX = "region_val"
 
+
+def scored_metric_name(prefix: str) -> str:
+    """The status scalar published under a region metric prefix."""
+    return f"{prefix}/scored"
+
+
 # The tables that explain a rate, in the order a reader works through them:
 # which region, which label, which direction, which confusion.
 TABLE_NAMES = ("per_region", "per_label", "per_direction", "confusion")
@@ -63,18 +69,29 @@ def compute_region(ctx: MetricsContext) -> MetricGroupResult:
 
     assert dataset is not None  # guarded above: the map is an attribute of it
     val_results = ctx.val_results
+    n_val_points = len(val_results.gt)
     image_ids: list[str] = []
     image_region_ids: list[str] = []
     region_names: dict[str, str] = {}
     for feature_loc in dataset.labels.val.keys():  # noqa: SIM118 — ImageLabels.keys() is not a plain dict; __iter__ differs
         region_id, region_name = feature_loc_to_region[feature_loc]
         n_points = len(dataset.labels.val[feature_loc])
+        if len(image_region_ids) + n_points > n_val_points:
+            # The running count is checked per image so the drift names the
+            # image it first appeared at, rather than only a wrong total.
+            raise ValueError(
+                f"Per-region index ran past val_results at image"
+                f" {feature_loc.key!r}: {len(image_region_ids) + n_points} points"
+                f" indexed over {n_val_points} results."
+                " dataset.labels.val iteration order may have diverged from"
+                " evaluate_classifier."
+            )
         image_ids.extend([str(feature_loc.key)] * n_points)
         image_region_ids.extend([region_id] * n_points)
         if region_id:
             region_names[region_id] = region_name
 
-    if len(image_region_ids) != len(val_results.gt):
+    if len(image_region_ids) != n_val_points:
         # Defensive: order or counts drifted from evaluate_classifier.
         # Don't poison the run with a silently-wrong breakdown.
         raise ValueError(
@@ -115,11 +132,16 @@ def emit_region_metrics(prefix: str, metrics: RegionMismatchMetrics) -> MetricGr
     The prefix is the caller's: two populations with incomparable denominators
     must not share a metric name, and a shared emitter is how they stay
     identical in shape while staying distinct in name.
+
+    `{prefix}/scored` reaches 1 here and nowhere else: the coordinator logs a
+    0 before the group runs, so rates that never arrive read as a failure
+    rather than as a model with no incidents.
     """
     rates = metrics.overall
     result = MetricGroupResult()
     result.scalars.extend(
         [
+            ScalarMetric(name=scored_metric_name(prefix), value=1.0),
             ScalarMetric(name=f"{prefix}/n_points", value=float(metrics.n_points)),
             ScalarMetric(name=f"{prefix}/n_images", value=float(metrics.n_images)),
             ScalarMetric(name=f"{prefix}/n_regions", value=float(len(metrics.observed_region_ids))),

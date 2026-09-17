@@ -23,8 +23,15 @@ from mermaid_classifier.pyspacer.metrics.cover import compute_cover
 from mermaid_classifier.pyspacer.metrics.per_source import compute_per_source
 from mermaid_classifier.pyspacer.metrics.probability import compute_probability
 from mermaid_classifier.pyspacer.metrics.ranking import compute_ranking
-from mermaid_classifier.pyspacer.metrics.region import compute_region
-from mermaid_classifier.pyspacer.metrics.region_probe import compute_region_probe
+from mermaid_classifier.pyspacer.metrics.region import (
+    VAL_PREFIX,
+    compute_region,
+    scored_metric_name,
+)
+from mermaid_classifier.pyspacer.metrics.region_probe import (
+    PROBE_PREFIX,
+    compute_region_probe,
+)
 from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
 
 MetricGroupFunc = typing.Callable[[MetricsContext], MetricGroupResult]
@@ -37,6 +44,10 @@ class MetricGroupSpec:
     requires_dataset: bool = False
     requires_val_proba: bool = False
     requires_clf: bool = False
+    # A metric logged as 0 before the group runs and raised to 1 by the
+    # group's own result, so a group that fails is distinguishable from one
+    # that was never applicable.
+    status_metric: str | None = None
 
 
 # Order is significant — mirrors the historical coordinator ordering.
@@ -50,14 +61,24 @@ METRIC_GROUPS: list[MetricGroupSpec] = [
     MetricGroupSpec("per_source", compute_per_source, requires_dataset=True),
     MetricGroupSpec("probability", compute_probability, requires_val_proba=True),
     MetricGroupSpec("ranking", compute_ranking, requires_val_proba=True),
-    MetricGroupSpec("region", compute_region, requires_dataset=True),
-    MetricGroupSpec("region_probe", compute_region_probe, requires_clf=True),
+    MetricGroupSpec(
+        "region",
+        compute_region,
+        requires_dataset=True,
+        status_metric=scored_metric_name(VAL_PREFIX),
+    ),
+    MetricGroupSpec(
+        "region_probe",
+        compute_region_probe,
+        requires_clf=True,
+        status_metric=scored_metric_name(PROBE_PREFIX),
+    ),
 ]
 
 
-def applicable_metric_groups(ctx: MetricsContext) -> list[tuple[str, MetricGroupFunc]]:
-    """Ordered (name, func) for groups whose required ctx inputs are present."""
-    groups: list[tuple[str, MetricGroupFunc]] = []
+def applicable_metric_groups(ctx: MetricsContext) -> list[MetricGroupSpec]:
+    """Ordered specs for groups whose required ctx inputs are present."""
+    groups: list[MetricGroupSpec] = []
     for spec in METRIC_GROUPS:
         if spec.requires_dataset and ctx.dataset is None:
             continue
@@ -65,5 +86,5 @@ def applicable_metric_groups(ctx: MetricsContext) -> list[tuple[str, MetricGroup
             continue
         if spec.requires_clf and ctx.clf is None:
             continue
-        groups.append((spec.name, spec.func))
+        groups.append(spec)
     return groups

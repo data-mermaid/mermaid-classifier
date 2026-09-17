@@ -32,6 +32,8 @@ REGION_RUN_METRICS = {
     "region_val/oor_rate": 0.0384,
     "region_val/oor_rate_lo95": 0.0371,
     "region_val/oor_rate_hi95": 0.0398,
+    "region_val/oor_rate_k": 164.0,
+    "region_val/oor_rate_n": 4281.0,
     "region_val/gt_oor_rate": 0.0052,
     "region_val/gt_oor_rate_lo95": 0.0044,
     "region_val/gt_oor_rate_hi95": 0.0061,
@@ -234,6 +236,28 @@ class TestRegionMetricGrouping(unittest.TestCase):
     def test_a_metric_that_is_not_a_rate_has_no_interval_entry(self):
         result = fetch_scalar_metrics(self._make_mock_run(REGION_RUN_METRICS))
         self.assertNotIn("Accuracy", result["intervals"])
+
+    def test_a_rate_carries_the_population_it_was_read_over(self):
+        """A rate of zero over no data reads exactly like a model with no
+        incidents; only k and n separate them."""
+        result = fetch_scalar_metrics(self._make_mock_run(REGION_RUN_METRICS))
+        self.assertEqual(result["counts"]["Out-of-Region Rate"], (164.0, 4281.0))
+
+    def test_an_empty_denominator_is_carried_rather_than_dropped(self):
+        result = fetch_scalar_metrics(
+            self._make_mock_run(
+                {
+                    "region_val/oor_rate_disc": 0.0,
+                    "region_val/oor_rate_disc_k": 0.0,
+                    "region_val/oor_rate_disc_n": 0.0,
+                }
+            )
+        )
+        self.assertEqual(result["counts"]["Validation: Out-of-Region (Discriminating)"], (0.0, 0.0))
+
+    def test_a_rate_whose_counts_were_not_logged_has_no_entry(self):
+        result = fetch_scalar_metrics(self._make_mock_run(REGION_RUN_METRICS))
+        self.assertNotIn("Probe: Out-of-Region", result["counts"])
 
 
 class TestLoadArtifactData(unittest.TestCase):
@@ -492,6 +516,7 @@ class TestRenderRegionReport(unittest.TestCase):
                 "taxonomic": None,
                 "region": [
                     ("Validation: Out-of-Region", 0.0384),
+                    ("Validation: Out-of-Region (Discriminating)", 0.0),
                     ("Probe: Out-of-Region", 0.1402),
                 ],
                 "intervals": {
@@ -499,6 +524,11 @@ class TestRenderRegionReport(unittest.TestCase):
                     "Ground-Truth Floor": (0.0044, 0.0061),
                     "Validation: Out-of-Region": (0.0371, 0.0398),
                     "Probe: Out-of-Region": None,
+                },
+                "counts": {
+                    "Out-of-Region Rate": (164.0, 4281.0),
+                    "Validation: Out-of-Region": (164.0, 4281.0),
+                    "Validation: Out-of-Region (Discriminating)": (0.0, 0.0),
                 },
             },
             "sections": {
@@ -541,6 +571,16 @@ class TestRenderRegionReport(unittest.TestCase):
         html = self._render(self._context())
         self.assertIn("not logged", html)
 
+    def test_the_card_shows_the_population_the_rate_was_read_over(self):
+        html = self._render(self._context())
+        self.assertIn("164 of 4281", html)
+
+    def test_a_rate_with_no_denominator_says_so_on_the_card(self):
+        """0.00% over an empty denominator is what a model with no incidents
+        reads as too; the card has to separate them."""
+        html = self._render(self._context())
+        self.assertIn("0 of 0", html)
+
     def test_both_region_sections_render_their_tables(self):
         html = self._render(self._context())
         self.assertIn('id="region_val"', html)
@@ -558,6 +598,7 @@ class TestRenderRegionReport(unittest.TestCase):
                     "taxonomic": None,
                     "region": None,
                     "intervals": {},
+                    "counts": {},
                 },
                 sections={},
             )

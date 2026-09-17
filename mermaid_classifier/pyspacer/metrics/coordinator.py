@@ -49,12 +49,17 @@ class MetricsCoordinator:
         if self.ctx.clf is not None and self.ctx.dataset is not None:
             self._precompute_probabilities()
 
-        for name, func in applicable_metric_groups(self.ctx):
+        for spec in applicable_metric_groups(self.ctx):
             try:
-                result = func(self.ctx)
+                if spec.status_metric is not None:
+                    # Logged before the work that can raise: a group that
+                    # fails leaves this 0 standing, so absent rates read as a
+                    # failure rather than as a model with no incidents.
+                    mlflow.log_metric(spec.status_metric, 0.0)
+                result = spec.func(self.ctx)
                 self._log_result(result)
             except Exception:
-                logger.warning(f"Metric group '{name}' failed", exc_info=True)
+                logger.warning(f"Metric group '{spec.name}' failed", exc_info=True)
 
     def _precompute_probabilities(self):
         """Pre-compute the full probability matrix for val set.

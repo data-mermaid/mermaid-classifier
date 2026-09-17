@@ -14,7 +14,9 @@ that ships rather than the in-memory estimator it was exported from.
 `settings.region_probe_dir` locates the probe. Unset, the group does nothing:
 a run with no probe to score against is the common case, not a failure. A
 directory that is configured but not readable raises instead, because
-silently scoring no points would read as a model with no incidents.
+silently scoring no points would read as a model with no incidents. The
+coordinator catches that raise, leaving `region_probe/scored` at the 0 it
+logged before the group ran.
 
 The rates carry the `region_probe/` prefix throughout. The validation-split
 group measures the same behaviour over a different population with different

@@ -220,6 +220,17 @@ MEOW_N_REGIONS = 12
 MEOW_N_PAIRS_TESTED = 66
 MEOW_N_PAIRS_INTERSECTING = 0
 
+# `held_out` marks a point whose image region is not a census region of the
+# probe. The portable artifact records its label space and the libraries it
+# was built with, and nothing about which points its training run excluded, so
+# the two cannot be reconciled from a score.
+HELD_OUT_DEFINITION = "the point's image region is not a census region of the probe"
+HELD_OUT_TRAINING_EXCLUSION = (
+    "not verifiable from here: the model artifact carries no training"
+    " exclusion list, so nothing reconciles what the run excluded against the"
+    " probe's census regions"
+)
+
 # Diagnostics that a missing input can leave uncomputable carry one of these
 # rather than a number a reader would take for a measurement.
 STATUS_COMPUTED = "computed"
@@ -430,6 +441,12 @@ def load_probe(
     silently scoring zero points would read as a model with no incidents.
     A build checkpoints into `shards/` beside the cache, so an interrupted
     one restarts where it stopped.
+
+    Two things have to agree before a score means anything: the manifest's
+    recorded content hash against the points on disk, and the cache's points
+    against those same points. Either disagreement is a probe dir holding two
+    selections at once, which scores each point against another point's
+    vector, so both raise.
     """
     rows = pd.read_parquet(probe_dir / PROBE_POINTS_FILE)
     missing = [column for column in PROBE_COLUMNS if column not in rows.columns]
@@ -454,6 +471,9 @@ def load_probe(
     manifest_path = probe_dir / PROBE_MANIFEST_FILE
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
 
+    content_hash = probe_content_hash(rows)
+    _check_recorded_content_hash(manifest, content_hash, manifest_path)
+
     features_path = probe_dir / PROBE_FEATURES_FILE
     if features_path.exists():
         features = read_feature_cache(features_path)
@@ -472,6 +492,7 @@ def load_probe(
         )
         write_feature_cache(cache, features_path)
         features = read_feature_cache(features_path)
+    _check_features_match_rows(features, rows, features_path)
 
     return LoadedProbe(
         rows=rows,
@@ -482,10 +503,57 @@ def load_probe(
         ancestry_by_attribute=ancestry,
         manifest=manifest,
         features=features,
-        content_hash=probe_content_hash(rows),
+        content_hash=content_hash,
         region_snapshot_hash=region_snapshot_hash(region_ids_by_attribute),
         points_fingerprint=points_fingerprint(features),
     )
+
+
+def _check_recorded_content_hash(
+    manifest: Mapping[str, Any], content_hash: str, manifest_path: Path
+) -> None:
+    """Refuse points that have moved since the manifest recorded them.
+
+    A probe frozen before the hash was recorded carries none, and passes.
+    """
+    recorded = manifest.get("content_hash")
+    if recorded is not None and str(recorded) != content_hash:
+        raise ValueError(
+            f"{manifest_path} records content_hash {recorded} but"
+            f" {PROBE_POINTS_FILE} hashes to {content_hash}: the points have"
+            " changed since the probe was frozen, so nothing else in this"
+            " directory describes them"
+        )
+
+
+def _check_features_match_rows(features: ProbeFeatures, rows: pd.DataFrame, path: Path) -> None:
+    """Refuse a feature cache built for points other than these.
+
+    The cache is allowed to be shorter than the parquet -- a point with no
+    matching (row, col) and every point of an image with no feature file are
+    both dropped -- but what it carries has to be these points in their order.
+    A cache left behind by an earlier selection fails here rather than pairing
+    each point with another point's vector.
+    """
+    cached = list(zip(features.image_ids, features.point_ids, strict=True))
+    present = set(cached)
+    probe_points = list(
+        zip(
+            (str(value) for value in rows["image_id"]),
+            (str(value) for value in rows["point_id"]),
+            strict=True,
+        )
+    )
+    expected = [pair for pair in probe_points if pair in present]
+    if expected != cached:
+        wanted = set(probe_points)
+        foreign = sum(1 for pair in cached if pair not in wanted)
+        raise ValueError(
+            f"{path} does not hold the points in {PROBE_POINTS_FILE}: it"
+            f" carries {len(cached)} point(s), {foreign} of which the probe"
+            f" does not contain, against {len(expected)} that line up in"
+            " order. Rebuild the cache."
+        )
 
 
 def predict_with_probabilities(
@@ -946,6 +1014,18 @@ def build_limitations(score: ModelScore) -> dict[str, Any]:
                 "magnitude": _within_branch_magnitude(score),
             },
             {
+                "id": "held_out_training_exclusion",
+                "statement": (
+                    "`held_out` says only that the point's image region is not"
+                    " a census region of the probe, which is what the probe"
+                    " builder can see. Whether the scored model's training run"
+                    " consumed the matching exclusion list is not readable"
+                    " from the artifact, so for a model trained without it the"
+                    " held-out block is a training-set measurement."
+                ),
+                "magnitude": _held_out_magnitude(score),
+            },
+            {
                 "id": "masking_upper_bound",
                 "statement": (
                     "The masking counterfactual assumes every image's recorded"
@@ -1004,6 +1084,10 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
             "n_resamples": score.options.n_resamples,
             "seed": score.options.seed,
             "target_margin": score.options.target_margin,
+        },
+        "held_out": {
+            "definition": HELD_OUT_DEFINITION,
+            "training_exclusion": HELD_OUT_TRAINING_EXCLUSION,
         },
         "scored": {
             "n_points": int(score.points.n_points),
@@ -1078,13 +1162,24 @@ def render_markdown(score: ModelScore) -> str:
 
 
 def _held_out_lines(score: ModelScore) -> list[str]:
-    """The held-out rates, below the all-points headline they qualify."""
+    """The held-out rates, below the all-points headline they qualify.
+
+    The qualifier travels with the rates: `held_out` is a property of the
+    probe, and the assumption that this model's training run excluded the same
+    points is one the score cannot check.
+    """
     held = score.metrics.held_out
     if held is None:
         return ["No probe point is held out.", ""]
     return [
         f"- Out-of-region predictions: {_rate_text(held.oor_rate)}",
         f"- Ground-truth floor: {_rate_text(held.gt_oor_rate)}",
+        "",
+        f"Held out means {HELD_OUT_DEFINITION}. The model artifact carries no"
+        " training exclusion list, so whether this run excluded those points"
+        " is not verifiable from here: trained without that exclusion, these"
+        f" two rates are a training-set measurement. {LIMITATIONS_FILE} counts"
+        " what they are read over.",
         "",
     ]
 
@@ -1132,17 +1227,16 @@ def write_report(score: ModelScore, out_dir: Path) -> dict[str, Path]:
 def _decision_summary_rows(score: ModelScore) -> list[dict[str, object]]:
     """The region-blind baseline and the ratio to it, as summary rows.
 
-    The ratio's interval inverts the baseline's percentile interval, so it
-    describes how tightly the null is pinned rather than the sampling error of
-    the measured rate -- a ratio of 0.8 means one thing against a baseline
-    spread of 0.01 and nothing at all against a spread of 0.3.
+    The ratio's interval carries both of its terms -- the cluster bootstrap of
+    the measured rate and the percentile spread of the null -- so its width is
+    the two combined rather than the null's alone.
     """
     baseline = score.decisions.region_blind
     permutation = (
         f"out-of-region rate under {baseline.n_permutations} permutations of"
         f" image regions between images, seed={score.options.seed}"
     )
-    low, high = _ratio_to_baseline_interval(baseline)
+    low, high = _ratio_to_baseline_interval(baseline, score.metrics.overall.oor_rate_disc)
     return [
         {
             "model": score.name,
@@ -1181,29 +1275,43 @@ def _decision_summary_rows(score: ModelScore) -> list[dict[str, object]]:
             "design_effect": None,
             "imprecise": None,
             "method": (
-                f"measured rate over the mean {permutation}; the interval"
-                f" inverts the permutation interval, so it carries the null's"
-                f" dispersion rather than sampling error"
+                f"measured rate over the mean {permutation}; each end of the"
+                f" interval divides one end of the measured rate's cluster"
+                f" bootstrap interval by the opposite end of the permutation"
+                f" interval, so it carries both terms' uncertainty"
             ),
         },
     ]
 
 
-def _ratio_to_baseline_interval(baseline: RegionBlindBaseline) -> tuple[float, float]:
-    """The measured rate against each end of the permutation interval.
+def _ratio_to_baseline_interval(
+    baseline: RegionBlindBaseline, measured: RateEstimate
+) -> tuple[float, float]:
+    """The ratio's interval, carrying the uncertainty of both its terms.
 
-    A baseline end of zero leaves that bound unbounded, which is NaN rather
-    than an infinity a reader would take for a number.
+    Each end divides one end of the measured rate's cluster bootstrap interval
+    by the opposite end of the permutation interval, so the bounds widen with
+    the sampling error of the numerator as well as the dispersion of the null.
+    Inverting the permutation interval alone reports the null's spread as the
+    ratio's precision, and on a real run the numerator is the larger of the
+    two.
+
+    A baseline end of zero leaves that bound unbounded, and a bound neither
+    term resolved collapses the interval to a point; both read as NaN rather
+    than as a number.
     """
-    low = (
-        baseline.observed_rate / baseline.baseline_ci_high
-        if baseline.baseline_ci_high
-        else math.nan
-    )
-    high = (
-        baseline.observed_rate / baseline.baseline_ci_low if baseline.baseline_ci_low else math.nan
-    )
+    low = _quotient(measured.ci_low, baseline.baseline_ci_high)
+    high = _quotient(measured.ci_high, baseline.baseline_ci_low)
+    if low == high:
+        return math.nan, math.nan
     return low, high
+
+
+def _quotient(numerator: float, denominator: float) -> float:
+    """numerator/denominator, NaN wherever the division says nothing."""
+    if not math.isfinite(numerator) or not math.isfinite(denominator) or denominator == 0.0:
+        return math.nan
+    return numerator / denominator
 
 
 def _decision_row(
@@ -1242,7 +1350,7 @@ def _region_blind_rows(score: ModelScore) -> list[dict[str, object]]:
         f"{baseline.n_permutations} permutations of image regions between images,"
         f" seed={score.options.seed}"
     )
-    low, high = _ratio_to_baseline_interval(baseline)
+    low, high = _ratio_to_baseline_interval(baseline, measured)
     return [
         _decision_row(
             score,
@@ -1293,7 +1401,9 @@ def _region_blind_rows(score: ModelScore) -> list[dict[str, object]]:
             method=(
                 "measured rate over the region-blind baseline; near 1 the model"
                 " reads nothing about region from the image, well below 1 only a"
-                " tail leaks"
+                " tail leaks. The interval divides each end of the measured"
+                " rate's cluster bootstrap interval by the opposite end of the"
+                " permutation interval, carrying both terms' uncertainty"
             ),
         ),
     ]
@@ -1473,7 +1583,7 @@ def _decision_lines(score: ModelScore) -> list[str]:
     decisions = score.decisions
     baseline = decisions.region_blind
     masking = decisions.masking
-    low, high = _ratio_to_baseline_interval(baseline)
+    low, high = _ratio_to_baseline_interval(baseline, score.metrics.overall.oor_rate_disc)
     return [
         f"- Region-blind baseline: {_percent(baseline.baseline_rate)}"
         f" [{_percent(baseline.baseline_ci_low)}, {_percent(baseline.baseline_ci_high)}]"
@@ -1542,6 +1652,21 @@ def _name_resolution(score: ModelScore) -> dict[str, Any]:
 def _n_unresolved(identifiers: set[str], names: Mapping[str, str]) -> int:
     """Ids the name map does not carry a name for."""
     return sum(1 for identifier in identifiers if not names.get(identifier))
+
+
+def _held_out_magnitude(score: ModelScore) -> dict[str, Any]:
+    """How much of the probe is held out, and what pins the exclusion to it."""
+    points = score.points
+    held = points.held_out
+    n_held_out = int(np.count_nonzero(held))
+    images = {image_id for image_id, flag in zip(points.image_ids, held, strict=True) if bool(flag)}
+    return {
+        "definition": HELD_OUT_DEFINITION,
+        "n_held_out_points": n_held_out,
+        "n_held_out_images": len(images),
+        "share_points_held_out": (float(n_held_out / points.n_points) if points.n_points else 0.0),
+        "training_exclusion": HELD_OUT_TRAINING_EXCLUSION,
+    }
 
 
 def _within_branch_magnitude(score: ModelScore) -> dict[str, Any]:

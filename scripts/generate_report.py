@@ -334,7 +334,8 @@ def fetch_scalar_metrics(run: Any) -> dict[str, Any]:
     Each group is a list of (label, value) tuples, or None if no
     metrics in that group are present. `intervals` maps the label of every
     rate present to its 95% bounds, and carries None where the run logged a
-    rate without them.
+    rate without them. `counts` maps the label of every rate whose k and n
+    the run logged to that pair.
     """
     all_metrics = run.data.metrics
 
@@ -352,6 +353,7 @@ def fetch_scalar_metrics(run: Any) -> dict[str, Any]:
         "taxonomic": _build_group(TAXONOMIC_METRICS),
         "region": _build_group(REGION_METRICS),
         "intervals": _build_intervals(all_metrics),
+        "counts": _build_counts(all_metrics),
     }
 
 
@@ -372,6 +374,25 @@ def _build_intervals(
         high = all_metrics.get(f"{key}_hi95")
         intervals[label] = None if low is None or high is None else (low, high)
     return intervals
+
+
+def _build_counts(all_metrics: dict[str, Any]) -> dict[str, tuple[float, float]]:
+    """The incident count and denominator behind each rate, by display label.
+
+    A rate over an empty denominator is logged as zero, which is what a model
+    with no incidents reads as too; the pair beneath the rate is what tells
+    the two apart.
+    """
+    counts: dict[str, tuple[float, float]] = {}
+    for key, label in [*EXECUTIVE_METRICS, *REGION_METRICS]:
+        if key not in all_metrics or not key.startswith(INTERVAL_METRIC_PREFIXES):
+            continue
+        numerator = all_metrics.get(f"{key}_k")
+        denominator = all_metrics.get(f"{key}_n")
+        if numerator is None or denominator is None:
+            continue
+        counts[label] = (numerator, denominator)
+    return counts
 
 
 def download_run_artifacts(run_id: str, dst_dir: Path) -> Path:
