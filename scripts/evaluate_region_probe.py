@@ -1,12 +1,15 @@
 """Score published model artifacts against the frozen region probe, locally.
 
 Loads the probe points, their frozen benthic-attribute region map, the frozen
-corpus-wide annotation counts triage reads and the cached feature matrix from
---probe-dir, runs each --model through the production loader, and writes one
-report directory per model under --out-dir (summary.csv, the
-per-region/label/direction tables, limitations.yaml, manifest.json and a
-Markdown summary). A probe carrying no counts file leaves triage reading the
-probe's own ground truth, a lower bound that limitations.yaml records.
+corpus-wide annotation counts triage reads, the frozen display names and
+taxonomic ancestry, and the cached feature matrix from --probe-dir, runs each
+--model through the production loader, and writes one report directory per
+model under --out-dir (summary.csv, the per-region/label/direction tables,
+decisions.csv, limitations.yaml, manifest.json and a Markdown summary). A probe
+carrying no counts file leaves triage reading the probe's own ground truth, a
+lower bound that limitations.yaml records; one carrying no names renders ids,
+and one carrying no ancestry leaves the within-branch share uncomputed. Both
+are recorded there too.
 
 Two or more models are scored on identical points, so the comparison between
 them is paired and lands in paired_comparison.csv at the top of --out-dir. An
@@ -31,6 +34,7 @@ Outputs (in --out-dir):
     <model>/direction_matrix.csv  the same counts as a matrix
     <model>/confusion.csv         commonest (region, truth, prediction) triples
     <model>/region_list_suspects.csv  pairs the ground truth supports upstream
+    <model>/decisions.csv         the statistics that choose between mitigations
     <model>/limitations.yaml      every caveat with its measured magnitude
     <model>/manifest.json         probe hashes, model paths, drift diagnostic
     <model>/summary.md            the headline rate beside the ground-truth floor

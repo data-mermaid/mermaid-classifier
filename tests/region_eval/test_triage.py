@@ -76,6 +76,12 @@ GROUND_TRUTH_COUNTS = {
     (BA_PACIFIC, TROPICAL_ATLANTIC): 2,
 }
 
+ATTRIBUTE_NAMES = {BA_ATLANTIC: "Agaricia tenuifolia", BA_PACIFIC: "Goniopora"}
+REGION_NAMES = {
+    TROPICAL_ATLANTIC: "Tropical Atlantic",
+    CENTRAL_INDO_PACIFIC: "Central Indo-Pacific",
+}
+
 
 def _points():
     return prepare_scored_points(
@@ -196,8 +202,39 @@ class RegionListSuspectsTest(unittest.TestCase):
         self.assertEqual(len(result.region_list_suspects), 0)
         self.assertEqual(
             list(result.region_list_suspects.columns),
-            ["attribute_id", "region_id", "n_ground_truth", "n_predicted"],
+            [
+                "attribute_id",
+                "attribute_name",
+                "region_id",
+                "region_name",
+                "n_ground_truth",
+                "n_predicted",
+            ],
         )
+
+    def test_suspects_name_the_attribute_and_the_region(self):
+        """This table is a bug report handed to the data team. Two UUIDs name
+        neither the coral to check nor the ocean to add it to.
+        """
+        result = triage_events(
+            _points(),
+            ground_truth_counts=GROUND_TRUTH_COUNTS,
+            attribute_names=ATTRIBUTE_NAMES,
+            region_names=REGION_NAMES,
+        )
+        row = result.region_list_suspects.iloc[0]
+        self.assertEqual(row["attribute_id"], BA_ATLANTIC)
+        self.assertEqual(row["attribute_name"], "Agaricia tenuifolia")
+        self.assertEqual(row["region_id"], CENTRAL_INDO_PACIFIC)
+        self.assertEqual(row["region_name"], "Central Indo-Pacific")
+
+    def test_an_unresolved_name_renders_its_id_rather_than_an_empty_cell(self):
+        """A probe frozen before the names were is the case this covers: the
+        id says "unresolved" where a blank would say "unnamed".
+        """
+        row = _triage().region_list_suspects.iloc[0]
+        self.assertEqual(row["attribute_name"], BA_ATLANTIC)
+        self.assertEqual(row["region_name"], CENTRAL_INDO_PACIFIC)
 
 
 if __name__ == "__main__":

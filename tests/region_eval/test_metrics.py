@@ -78,6 +78,16 @@ REGION_IDS_BY_ATTRIBUTE = {
 
 MODEL_CLASSES = (GLOBAL_LABEL, ATLANTIC_LABEL, PACIFIC_LABEL, NO_REGIONS_LABEL)
 
+REGION_NAMES = {
+    TROPICAL_ATLANTIC: "Tropical Atlantic",
+    CENTRAL_INDO_PACIFIC: "Central Indo-Pacific",
+}
+LABEL_NAMES = {
+    ATLANTIC_LABEL: "Atlantic coral",
+    PACIFIC_LABEL: "Pacific coral",
+    OFF_LIST_LABEL: "Off-list coral",
+}
+
 # (image_id, image_region_id, ground truth label, predicted label)
 FIXTURE_ROWS = (
     ("image-a", CENTRAL_INDO_PACIFIC, GLOBAL_LABEL, PACIFIC_LABEL),
@@ -682,8 +692,16 @@ class PerLabelTableTest(unittest.TestCase):
     def test_label_names_come_from_the_caller(self):
         row = self.table[self.table["label"] == ATLANTIC_LABEL].iloc[0]
         self.assertEqual(row["label_name"], "Atlantic coral")
+
+    def test_an_unresolved_label_renders_its_id_rather_than_an_empty_cell(self):
+        """An empty cell reads as "this label has no name"; the id reads as
+        "unresolved", which is what actually happened. The caller here names
+        only the Atlantic label, so the Pacific one has to fall back."""
         other = self.table[self.table["label"] == PACIFIC_LABEL].iloc[0]
-        self.assertEqual(other["label_name"], "")
+        self.assertEqual(other["label_name"], PACIFIC_LABEL)
+
+    def test_every_label_name_cell_is_populated(self):
+        self.assertEqual([], [name for name in self.table["label_name"] if not str(name).strip()])
 
     def test_wilson_interval_brackets_the_rate(self):
         for _, row in self.table.iterrows():
@@ -738,6 +756,80 @@ class DirectionTest(unittest.TestCase):
         self.assertEqual(
             int(to_atlantic["n_out_of_region"]) + int(to_eastern_pacific["n_out_of_region"]), 8
         )
+
+
+def _directions(result):
+    """The all-points direction rows, keyed by the ordered region pair."""
+    rows = result.per_direction
+    return rows[rows["population"] == ALL_POINTS].set_index(
+        ["image_region_id", "excluded_region_id"]
+    )
+
+
+class NameRenderingTest(unittest.TestCase):
+    """Names for the ids the tables key on.
+
+    An id-only table cannot be read without a join the reader has to do by
+    hand, and a name resolved at scoring time would make the table depend on a
+    later state of the taxonomy than the score it annotates.
+    """
+
+    def setUp(self):
+        self.result = compute_region_metrics(
+            _prepare(),
+            options=OPTIONS,
+            label_names=LABEL_NAMES,
+            region_names=REGION_NAMES,
+        )
+
+    def test_per_region_rows_carry_the_region_name_beside_the_id(self):
+        rows = self.result.per_region.set_index("region_id")
+        self.assertEqual(rows.loc[TROPICAL_ATLANTIC, "region_name"], "Tropical Atlantic")
+        self.assertEqual(rows.loc[CENTRAL_INDO_PACIFIC, "region_name"], "Central Indo-Pacific")
+
+    def test_per_direction_rows_name_both_ends_of_the_direction(self):
+        rows = _directions(self.result)
+        row = rows.loc[(CENTRAL_INDO_PACIFIC, TROPICAL_ATLANTIC)]
+        self.assertEqual(row["image_region_name"], "Central Indo-Pacific")
+        self.assertEqual(row["excluded_region_name"], "Tropical Atlantic")
+
+    def test_direction_matrix_axes_render_region_names(self):
+        matrix = self.result.direction_matrix
+        self.assertEqual(int(matrix.loc["Central Indo-Pacific", "Tropical Atlantic"]), 2)
+        self.assertEqual(int(matrix.loc["Tropical Atlantic", "Central Indo-Pacific"]), 2)
+
+    def test_confusion_rows_name_the_region_and_both_labels(self):
+        rows = self.result.confusion
+        named = {
+            (row["image_region_name"], row["gt_label_name"], row["pred_label_name"])
+            for _, row in rows.iterrows()
+        }
+        self.assertIn(("Central Indo-Pacific", "Pacific coral", "Atlantic coral"), named)
+        self.assertIn(("Tropical Atlantic", "Off-list coral", "Pacific coral"), named)
+
+    def test_an_unnamed_region_renders_its_id_in_every_table(self):
+        """Half a name map is the realistic failure -- a region added upstream
+        after the probe was frozen. The id says "unresolved" where a blank
+        would say "unnamed"."""
+        result = compute_region_metrics(
+            _prepare(),
+            options=OPTIONS,
+            label_names=LABEL_NAMES,
+            region_names={TROPICAL_ATLANTIC: "Tropical Atlantic"},
+        )
+        per_region = result.per_region.set_index("region_id")
+        self.assertEqual(per_region.loc[CENTRAL_INDO_PACIFIC, "region_name"], CENTRAL_INDO_PACIFIC)
+        self.assertIn(CENTRAL_INDO_PACIFIC, result.direction_matrix.columns)
+        row = _directions(result).loc[(CENTRAL_INDO_PACIFIC, TROPICAL_ATLANTIC)]
+        self.assertEqual(row["image_region_name"], CENTRAL_INDO_PACIFIC)
+        self.assertEqual(row["excluded_region_name"], "Tropical Atlantic")
+
+    def test_names_default_to_ids_when_the_caller_supplies_none(self):
+        bare = compute_region_metrics(_prepare(), options=OPTIONS)
+        self.assertEqual(
+            set(bare.per_region["region_name"]), {TROPICAL_ATLANTIC, CENTRAL_INDO_PACIFIC}
+        )
+        self.assertEqual([], [name for name in bare.per_label["label_name"] if not str(name)])
 
 
 class ConfusionTest(unittest.TestCase):

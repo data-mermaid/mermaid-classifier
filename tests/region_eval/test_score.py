@@ -50,7 +50,13 @@ from pyspacer._calibrated_model_fixture import make_calibrated_model
 from mermaid_classifier.pyspacer.inference import export_artifact
 from mermaid_classifier.region_eval.features import FeatureCache, write_feature_cache
 from mermaid_classifier.region_eval.metrics import RegionMetricsOptions
-from mermaid_classifier.region_eval.probe_set import PROBE_COLUMNS, probe_content_hash
+from mermaid_classifier.region_eval.probe_set import (
+    PROBE_COLUMNS,
+    NameSnapshot,
+    ancestry_snapshot_hash,
+    name_snapshot_hash,
+    probe_content_hash,
+)
 from mermaid_classifier.region_eval.score import (
     load_probe,
     paired_comparison,
@@ -104,6 +110,53 @@ PROBE_POINTS = [
     ("cip4", CENTRAL_INDO_PACIFIC, "ba1"),
     ("cip4", CENTRAL_INDO_PACIFIC, "ba0"),
 ]
+
+# The frozen display names. ba4 and gf4 are deliberately absent, as is the
+# Eastern Pacific, so every table has one id that no name resolves.
+BA_NAMES = {
+    "ba0": "Porites astreoides",
+    "ba1": "Acropora cervicornis",
+    "ba2": "Goniopora",
+    "ba3": "Agaricia tenuifolia",
+    "ba9": "Orbicella faveolata",
+}
+GF_NAMES = {
+    "gf0": "Encrusting",
+    "gf1": "Branching",
+    "gf2": "Massive",
+    "gf3": "Foliose",
+    "gf9": "Columnar",
+}
+REGION_DISPLAY_NAMES = {
+    TROPICAL_ATLANTIC: "Tropical Atlantic",
+    CENTRAL_INDO_PACIFIC: "Central Indo-Pacific",
+}
+NAMES = NameSnapshot(
+    benthic_attributes=BA_NAMES, growth_forms=GF_NAMES, regions=REGION_DISPLAY_NAMES
+)
+
+# Ids a report renders: the six attributes and six growth forms the model
+# classes and the probe ground truth span between them, and the three regions
+# the directions run between.
+N_RENDERED_ATTRIBUTES = 6
+N_RENDERED_GROWTH_FORMS = 6
+N_RENDERED_REGIONS = 3
+
+CORAL_ROOT = "root-coral"
+# Every attribute under one root, so every out-of-region prediction shares a
+# branch with its ground truth and the share is exactly 1.
+ONE_BRANCH_ANCESTRY = {
+    attribute: [CORAL_ROOT, attribute] for attribute in ("ba0", "ba1", "ba2", "ba3", "ba4", "ba9")
+}
+# Each attribute its own root, so none shares a branch and the share is 0.
+SEPARATE_BRANCH_ANCESTRY = {
+    attribute: [f"root-{attribute}", attribute]
+    for attribute in ("ba0", "ba1", "ba2", "ba3", "ba4", "ba9")
+}
+
+# Permutations enough for a stable baseline on six images, few enough to keep
+# the suite quick.
+N_PERMUTATIONS = 200
 
 # Corpus-wide confirmed annotations for every (attribute, region) pair a
 # prediction on this probe can be flagged on: an out-of-region prediction of
@@ -162,12 +215,17 @@ def _probe_rows(points=PROBE_POINTS) -> pd.DataFrame:
 
 
 def _write_probe(
-    probe_dir: Path, features: np.ndarray, points=PROBE_POINTS, counts=None
+    probe_dir: Path,
+    features: np.ndarray,
+    points=PROBE_POINTS,
+    counts=None,
+    names: NameSnapshot | None = NAMES,
+    ancestry=ONE_BRANCH_ANCESTRY,
 ) -> pd.DataFrame:
     """Write the probe dir in the layout build_region_probe.py emits.
 
-    `counts` writes the frozen corpus-wide annotation counts; omitting it is a
-    probe built before they were frozen.
+    `counts`, `names` and `ancestry` write the frozen snapshots; passing None
+    for one is a probe built before that snapshot was frozen beside the points.
     """
     probe_dir.mkdir(parents=True, exist_ok=True)
     rows = _probe_rows(points)
@@ -175,6 +233,19 @@ def _write_probe(
     (probe_dir / "ba_regions.json").write_text(json.dumps(FROZEN_REGIONS, sort_keys=True))
     if counts is not None:
         (probe_dir / "ba_region_counts.json").write_text(json.dumps(counts, sort_keys=True))
+    if names is not None:
+        (probe_dir / "names.json").write_text(
+            json.dumps(
+                {
+                    "benthic_attributes": dict(names.benthic_attributes),
+                    "growth_forms": dict(names.growth_forms),
+                    "regions": dict(names.regions),
+                },
+                sort_keys=True,
+            )
+        )
+    if ancestry is not None:
+        (probe_dir / "ba_ancestry.json").write_text(json.dumps(ancestry, sort_keys=True))
     (probe_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -182,6 +253,8 @@ def _write_probe(
                 "content_hash": probe_content_hash(rows),
                 "n_points": len(rows),
                 "n_images": rows["image_id"].nunique(),
+                "names_hash": None if names is None else name_snapshot_hash(names),
+                "ancestry_hash": (None if ancestry is None else ancestry_snapshot_hash(ancestry)),
             }
         )
     )
@@ -261,6 +334,12 @@ class ScoreReportTest(unittest.TestCase):
         _write_probe(probe_dir, self.features, counts=CORPUS_COUNTS)
         return probe_dir
 
+    def _probe(self, suffix: str, **overrides):
+        """A loaded probe dir written with the given snapshots."""
+        probe_dir = self.root / f"probe_{suffix}"
+        _write_probe(probe_dir, self.features, **overrides)
+        return load_probe(probe_dir)
+
     def _score(self, name: str = "v1", *, seed: int = 0, live_map=None, probe=None):
         model_pt, model_json = _export_model(self.root / f"model_{name}", seed=seed)
         return score_model(
@@ -270,6 +349,7 @@ class ScoreReportTest(unittest.TestCase):
             probe=self.probe if probe is None else probe,
             options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
             live_region_map_loader=_live_map() if live_map is None else live_map,
+            n_permutations=N_PERMUTATIONS,
         )
 
     def test_scores_a_real_artifact_and_writes_the_report_files(self):
@@ -289,6 +369,7 @@ class ScoreReportTest(unittest.TestCase):
             "direction_matrix.csv",
             "confusion.csv",
             "region_list_suspects.csv",
+            "decisions.csv",
             "limitations.yaml",
             "manifest.json",
             "summary.md",
@@ -409,6 +490,9 @@ class ScoreReportTest(unittest.TestCase):
                 "ground_truth_out_of_region_floor",
                 "region_polygons_disjoint",
                 "triage_ground_truth_counts",
+                "name_resolution",
+                "within_branch_ancestry",
+                "masking_upper_bound",
             },
         )
         for name, entry in entries.items():
@@ -640,6 +724,324 @@ class ScoreReportTest(unittest.TestCase):
         self.assertNotEqual(self.probe.points_fingerprint, reversed_score.probe.points_fingerprint)
         with self.assertRaisesRegex(ValueError, "different probe points"):
             paired_comparison([self._score(), reversed_score])
+
+
+class NameResolutionTest(unittest.TestCase):
+    """The names frozen with the probe, rendered into the artifacts.
+
+    A table of UUIDs is one a scientist cannot act on without joining it by
+    hand, which is what this covers end to end: the names come off the frozen
+    snapshot, and an id the snapshot does not name renders as the id rather
+    than as a blank a reader would take for "unnamed".
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        _model, batch = make_calibrated_model()
+        self.features = np.asarray(batch)[:N_POINTS]
+        _write_probe(self.root / "probe", self.features, counts=CORPUS_COUNTS)
+        self.probe = load_probe(self.root / "probe")
+        model_pt, model_json = _export_model(self.root / "model")
+        self.score = score_model(
+            "v1",
+            model_pt_path=model_pt,
+            model_json_path=model_json,
+            probe=self.probe,
+            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+            live_region_map_loader=_live_map(),
+            n_permutations=N_PERMUTATIONS,
+        )
+        self.out_dir = self.root / "out"
+        write_report(self.score, self.out_dir)
+
+    def test_per_label_renders_the_frozen_name_for_every_row(self):
+        table = _read_csv(self.out_dir / "per_label.csv").set_index("label")
+        self.assertEqual(table.loc["ba1::gf1", "label_name"], "Acropora cervicornis::Branching")
+        self.assertEqual(
+            [], [name for name in table["label_name"] if not name.strip()], "a name cell is blank"
+        )
+
+    def test_an_unnamed_label_renders_its_id_rather_than_an_empty_cell(self):
+        """ba4 and gf4 are absent from the frozen names, which is the state a
+        probe frozen before an attribute was added leaves behind."""
+        table = _read_csv(self.out_dir / "per_label.csv").set_index("label")
+        self.assertEqual(table.loc["ba4::gf4", "label_name"], "ba4::gf4")
+
+    def test_a_label_without_a_growth_form_renders_the_attribute_name_alone(self):
+        self.assertEqual(
+            self.score.probe.label_display_name("ba1::"),
+            "Acropora cervicornis",
+        )
+
+    def test_region_list_suspects_name_the_attribute_and_the_region(self):
+        suspects = _read_csv(self.out_dir / "region_list_suspects.csv").set_index("attribute_id")
+        self.assertGreater(len(suspects), 0)
+        self.assertEqual(suspects.loc["ba1", "attribute_name"], "Acropora cervicornis")
+        self.assertEqual(
+            set(suspects["region_name"]) - {"Tropical Atlantic", "Central Indo-Pacific"},
+            set(),
+            "every suspect row must name the region it was predicted in",
+        )
+
+    def test_the_direction_tables_render_region_names(self):
+        directions = _read_csv(self.out_dir / "per_direction.csv")
+        self.assertEqual(
+            set(directions["image_region_name"]),
+            {"Tropical Atlantic", "Central Indo-Pacific"},
+        )
+        self.assertIn("Tropical Atlantic", set(directions["excluded_region_name"]))
+
+        matrix = _read_csv(self.out_dir / "direction_matrix.csv")
+        self.assertEqual(
+            set(matrix["image_region_name"]), {"Tropical Atlantic", "Central Indo-Pacific"}
+        )
+        self.assertIn("Central Indo-Pacific", matrix.columns)
+        self.assertIn(
+            EASTERN_PACIFIC,
+            matrix.columns,
+            "an unnamed region keeps its id, which reads as unresolved",
+        )
+
+    def test_limitations_count_the_ids_no_name_resolved(self):
+        """A blank cell hides the gap; the count makes it a measured caveat.
+        The frozen names omit ba4, gf4 and the Eastern Pacific.
+        """
+        magnitude = _limitation(self.out_dir, "name_resolution")
+        self.assertEqual(magnitude["source"], "frozen_probe")
+        self.assertEqual(magnitude["n_benthic_attributes"], N_RENDERED_ATTRIBUTES)
+        self.assertEqual(magnitude["n_benthic_attributes_unresolved"], 1)
+        self.assertEqual(magnitude["n_growth_forms"], N_RENDERED_GROWTH_FORMS)
+        self.assertEqual(magnitude["n_growth_forms_unresolved"], 1)
+        self.assertEqual(magnitude["n_regions"], N_RENDERED_REGIONS)
+        self.assertEqual(magnitude["n_regions_unresolved"], 1)
+
+    def test_manifest_records_the_frozen_name_and_ancestry_hashes(self):
+        """Two scores render the same names only if they read the same
+        snapshot, which the hash is what makes checkable."""
+        manifest = json.loads((self.out_dir / "manifest.json").read_text())
+        self.assertEqual(manifest["probe"]["names_hash"], name_snapshot_hash(NAMES))
+        self.assertEqual(
+            manifest["probe"]["ancestry_hash"], ancestry_snapshot_hash(ONE_BRANCH_ANCESTRY)
+        )
+
+    def test_a_probe_frozen_without_names_renders_ids_and_counts_them_all(self):
+        """A probe built before the names were frozen still scores; what it
+        must not do is emit blank name cells that read as "unnamed".
+        """
+        bare = self._bare_probe()
+        model_pt, model_json = _export_model(self.root / "model_bare")
+        score = score_model(
+            "bare",
+            model_pt_path=model_pt,
+            model_json_path=model_json,
+            probe=bare,
+            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+            live_region_map_loader=_live_map(),
+            n_permutations=N_PERMUTATIONS,
+        )
+        out_dir = self.root / "out_bare"
+        write_report(score, out_dir)
+
+        table = _read_csv(out_dir / "per_label.csv")
+        self.assertEqual(list(table["label"]), list(table["label_name"]))
+
+        magnitude = _limitation(out_dir, "name_resolution")
+        self.assertEqual(magnitude["source"], "none")
+        self.assertEqual(
+            magnitude["n_benthic_attributes_unresolved"], magnitude["n_benthic_attributes"]
+        )
+        self.assertEqual(magnitude["n_growth_forms_unresolved"], magnitude["n_growth_forms"])
+        self.assertEqual(magnitude["n_regions_unresolved"], magnitude["n_regions"])
+        self.assertEqual(magnitude["n_benthic_attributes"], N_RENDERED_ATTRIBUTES)
+
+    def _bare_probe(self):
+        probe_dir = self.root / "probe_bare"
+        _write_probe(probe_dir, self.features, counts=CORPUS_COUNTS, names=None, ancestry=None)
+        return load_probe(probe_dir)
+
+
+class DecisionStatisticsTest(unittest.TestCase):
+    """The statistics that choose between the mitigations.
+
+    A rate says how bad the problem is; these say what to do about it, and a
+    report that omits them leaves the reader to pick between a hard constraint,
+    reweighting and dropping labels with no evidence.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        _model, batch = make_calibrated_model()
+        self.features = np.asarray(batch)[:N_POINTS]
+        _write_probe(self.root / "probe", self.features, counts=CORPUS_COUNTS)
+        self.probe = load_probe(self.root / "probe")
+        self.score = self._score(self.probe)
+        self.out_dir = self.root / "out"
+        write_report(self.score, self.out_dir)
+
+    def _score(self, probe, name: str = "v1"):
+        model_pt, model_json = _export_model(self.root / f"model_{name}")
+        return score_model(
+            name,
+            model_pt_path=model_pt,
+            model_json_path=model_json,
+            probe=probe,
+            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+            live_region_map_loader=_live_map(),
+            n_permutations=N_PERMUTATIONS,
+        )
+
+    def _decisions(self):
+        return _read_csv(self.out_dir / "decisions.csv").set_index(["statistic", "quantity"])
+
+    def test_the_permutation_ratio_reaches_the_summary_with_an_interval(self):
+        """The ratio is the number that picks between a hard constraint and a
+        reweighting, so it belongs in the file a reader opens first -- with the
+        spread of the null beside it, since a ratio of 0.8 means one thing
+        against a baseline spread of 0.01 and nothing against a spread of 0.3.
+        """
+        summary = _read_csv(self.out_dir / "summary.csv")
+        overall = summary[summary["population"] == "all"].set_index("metric")
+        self.assertIn("region_blind_ratio", overall.index)
+        self.assertIn("region_blind_rate", overall.index)
+
+        ratio = overall.loc["region_blind_ratio"]
+        self.assertAlmostEqual(float(ratio["estimate"]), self.score.decisions.region_blind.ratio)
+        self.assertLess(float(ratio["ci_low"]), float(ratio["ci_high"]))
+        self.assertIn("permutation", ratio["method"])
+
+        baseline = overall.loc["region_blind_rate"]
+        self.assertAlmostEqual(
+            float(baseline["estimate"]), self.score.decisions.region_blind.baseline_rate
+        )
+        self.assertEqual(int(baseline["n"]), self.score.decisions.region_blind.n_discriminating)
+
+    def test_a_region_blind_model_scores_near_the_permutation_baseline(self):
+        """The fixture model reads features that carry nothing about region, so
+        shuffling regions between images must not move its out-of-region rate.
+        A scorer that reported the raw rate (0.70 here) as the ratio, or never
+        computed the baseline at all, lands outside this band.
+        """
+        baseline = self.score.decisions.region_blind
+        self.assertGreater(baseline.ratio, 0.8)
+        self.assertLess(baseline.ratio, 1.4)
+        self.assertGreaterEqual(baseline.observed_rate, baseline.baseline_ci_low)
+        self.assertLessEqual(baseline.observed_rate, baseline.baseline_ci_high)
+        self.assertEqual(baseline.n_permutations, N_PERMUTATIONS)
+
+    def test_masking_reports_what_it_fixes_apart_from_what_it_breaks(self):
+        """A delta of zero is one fix against one break as readily as it is no
+        change at all, and a scientist reads those two very differently. On
+        this probe masking fixes three predictions and breaks one.
+        """
+        masking = self.score.decisions.masking
+        self.assertEqual(masking.n_fixed, 3)
+        self.assertEqual(masking.n_broken, 1)
+
+        rows = self._decisions()
+        self.assertEqual(int(rows.loc[("masking", "n_fixed"), "k"]), 3)
+        self.assertEqual(int(rows.loc[("masking", "n_broken"), "k"]), 1)
+        self.assertEqual(float(rows.loc[("masking", "n_fixed"), "value"]), 3.0)
+
+        delta = rows.loc[("masking", "accuracy_delta")]
+        self.assertAlmostEqual(float(delta["value"]), masking.accuracy_delta)
+        self.assertFalse(math.isnan(float(delta["ci_low"])))
+        self.assertFalse(math.isnan(float(delta["ci_high"])))
+
+    def test_confidence_stratification_reaches_the_report_with_its_bins(self):
+        """An AUROC near 0.5 rules a confidence threshold out before anyone
+        tunes a cutoff, so it has to be in the report rather than derivable
+        from it."""
+        rows = self._decisions()
+        self.assertAlmostEqual(
+            float(rows.loc[("confidence", "auroc"), "value"]),
+            self.score.decisions.confidence.auroc,
+        )
+        bins = [key for key in rows.index if key[0] == "confidence" and key[1].startswith("rate_")]
+        self.assertEqual(len(bins), len(self.score.decisions.confidence.bins))
+
+    def test_within_branch_share_reads_the_frozen_ancestry(self):
+        """Every fixture attribute hangs off one root, so every out-of-region
+        prediction is the right branch in the wrong ocean and the share is 1.
+        """
+        share = self.score.decisions.within_branch
+        self.assertIsNotNone(share)
+        self.assertEqual(share.share, 1.0)
+        self.assertEqual(share.n_within_branch, share.n_out_of_region)
+        self.assertGreater(share.n_out_of_region, 0)
+
+    def test_separate_branches_leave_almost_no_within_branch_share(self):
+        """Giving each attribute its own root inverts the statistic: only a
+        prediction of the very attribute in the truth still shares a branch.
+        One of the sixteen events is that case -- ba1 predicted where the truth
+        is ba1, on a Pacific image ba1 does not cover. A test that only ever
+        saw one ancestry could not tell the comparison from a constant.
+        """
+        probe = self.root / "probe_split"
+        _write_probe(probe, self.features, counts=CORPUS_COUNTS, ancestry=SEPARATE_BRANCH_ANCESTRY)
+        score = self._score(load_probe(probe), name="split")
+        share = score.decisions.within_branch
+        self.assertEqual(share.n_within_branch, 1)
+        self.assertEqual(share.n_evaluable, 16)
+        self.assertAlmostEqual(share.share, 1 / 16)
+
+    def test_within_branch_degrades_to_not_computed_without_an_ancestry_snapshot(self):
+        """A probe built before the ancestry was frozen still scores. The
+        statistic that cannot be computed says so; it does not fail the run and
+        it does not read as a share of zero.
+        """
+        probe = self.root / "probe_no_ancestry"
+        _write_probe(probe, self.features, counts=CORPUS_COUNTS, ancestry=None)
+        score = self._score(load_probe(probe), name="no_ancestry")
+        out_dir = self.root / "out_no_ancestry"
+        write_report(score, out_dir)
+
+        self.assertIsNone(score.decisions.within_branch)
+        self.assertEqual(score.decisions.within_branch_status, "not_computed")
+
+        rows = _read_csv(out_dir / "decisions.csv")
+        within = rows[rows["statistic"] == "within_branch"]
+        self.assertEqual(set(within["status"]), {"not_computed"})
+
+        magnitude = _limitation(out_dir, "within_branch_ancestry")
+        self.assertEqual(magnitude["status"], "not_computed")
+        self.assertTrue(str(magnitude["reason"]).strip())
+
+        summary = _read_csv(out_dir / "summary.csv")
+        self.assertEqual(
+            summary[summary["population"] == "all"].set_index("metric").loc["oor_rate", "n"],
+            str(N_POINTS),
+            "the rest of the score is complete without the ancestry",
+        )
+
+    def test_decisions_csv_carries_every_statistic_for_the_model(self):
+        rows = _read_csv(self.out_dir / "decisions.csv")
+        self.assertEqual(set(rows["model"]), {"v1"})
+        self.assertEqual(
+            set(rows["statistic"]),
+            {"region_blind", "masking", "within_branch", "confidence"},
+        )
+        self.assertEqual(
+            [], [method for method in rows["method"] if not method.strip()], "a method is blank"
+        )
+
+    def test_markdown_leads_the_interpretation_with_the_ratio(self):
+        """The ratio is what picks the mitigation, so a reader who stops after
+        the first line of the section must have read it -- not the masking
+        delta, which is only worth pricing once the ratio says masking is the
+        answer.
+        """
+        text = (self.out_dir / "summary.md").read_text()
+        section = text.index("## What to do about it")
+        ratio = text.index("region-blind rate", section)
+        masking = text.index("Masking", section)
+        self.assertLess(section, ratio)
+        self.assertLess(ratio, masking)
+        self.assertIn("fixes", text[section:])
+        self.assertIn("breaks", text[section:])
 
 
 class ModelSpecTest(unittest.TestCase):

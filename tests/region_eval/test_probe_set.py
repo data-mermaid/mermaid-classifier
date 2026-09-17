@@ -35,12 +35,18 @@ import pyarrow.parquet as pq
 from mermaid_classifier.region_eval.metrics import required_n_for_detection
 from mermaid_classifier.region_eval.probe_set import (
     PROBE_COLUMNS,
+    NameSnapshot,
     ProbeSelectionOptions,
+    ancestry_snapshot,
+    ancestry_snapshot_hash,
+    ancestry_snapshot_json,
     build_manifest,
     build_probe_set,
     ground_truth_counts_hash,
     ground_truth_counts_json,
     minimum_detectable_effect_table,
+    name_snapshot_hash,
+    name_snapshot_json,
     probe_content_hash,
     read_annotations,
     region_snapshot,
@@ -69,6 +75,29 @@ REGION_IDS_BY_ATTRIBUTE = {
 }
 
 POINTS_PER_IMAGE = 4
+
+BA_ROOT = "4d4d4d4d-0000-4000-8000-000000000000"
+GF_BRANCHING = "5e5e5e5e-0000-4000-8000-000000000001"
+
+NAMES = NameSnapshot(
+    benthic_attributes={
+        BA_ROOT: "Hard coral",
+        BA_GLOBAL: "Porites",
+        BA_PACIFIC: "Acropora",
+        BA_UNRECORDED: "Sand",
+    },
+    growth_forms={GF_BRANCHING: "Branching"},
+    regions=REGION_NAMES,
+)
+
+# Root-to-leaf paths, root first and ending in the attribute itself, which is
+# the shape `within_branch_share` reads.
+ANCESTRY = {
+    BA_ROOT: [BA_ROOT],
+    BA_GLOBAL: [BA_ROOT, BA_GLOBAL],
+    BA_PACIFIC: [BA_ROOT, BA_PACIFIC],
+    BA_UNRECORDED: [BA_UNRECORDED],
+}
 
 
 def _image_rows(image_id: str, region_id: str, *, eligible: bool) -> list[dict[str, object]]:
@@ -378,14 +407,82 @@ class MinimumDetectableEffectTest(unittest.TestCase):
         self.assertTrue(atlantic[0.20]["resolvable"])
 
 
+class NameSnapshotTest(unittest.TestCase):
+    """The display names frozen beside the region map.
+
+    A name resolved at scoring time makes the artifact depend on a later state
+    of the taxonomy, so the names travel with the probe and the manifest pins
+    which ones they were.
+    """
+
+    def test_hash_ignores_key_insertion_order(self):
+        reordered = NameSnapshot(
+            benthic_attributes=dict(reversed(list(NAMES.benthic_attributes.items()))),
+            growth_forms=dict(NAMES.growth_forms),
+            regions=dict(reversed(list(NAMES.regions.items()))),
+        )
+        self.assertEqual(name_snapshot_hash(NAMES), name_snapshot_hash(reordered))
+
+    def test_hash_changes_when_a_name_changes(self):
+        renamed = NameSnapshot(
+            benthic_attributes={**NAMES.benthic_attributes, BA_PACIFIC: "Acropora sp."},
+            growth_forms=NAMES.growth_forms,
+            regions=NAMES.regions,
+        )
+        self.assertNotEqual(name_snapshot_hash(NAMES), name_snapshot_hash(renamed))
+
+    def test_hash_distinguishes_the_sections(self):
+        """A flat id-to-name map would hash a region renamed to an attribute's
+        name as no change at all."""
+        swapped = NameSnapshot(
+            benthic_attributes=NAMES.regions,
+            growth_forms=NAMES.growth_forms,
+            regions=NAMES.benthic_attributes,
+        )
+        self.assertNotEqual(name_snapshot_hash(NAMES), name_snapshot_hash(swapped))
+
+    def test_the_json_snapshot_round_trips_every_section(self):
+        payload = json.loads(name_snapshot_json(NAMES))
+        self.assertEqual(payload["benthic_attributes"][BA_PACIFIC], "Acropora")
+        self.assertEqual(payload["growth_forms"][GF_BRANCHING], "Branching")
+        self.assertEqual(payload["regions"][TROPICAL_ATLANTIC], "Tropical Atlantic")
+
+
+class AncestrySnapshotTest(unittest.TestCase):
+    def test_the_json_snapshot_keeps_each_path_root_first(self):
+        """Reversing a path would make two attributes share an ancestor only
+        when they share a leaf, which inverts the statistic that reads it."""
+        payload = json.loads(ancestry_snapshot_json(ANCESTRY))
+        self.assertEqual(payload[BA_PACIFIC], [BA_ROOT, BA_PACIFIC])
+        self.assertEqual(payload[BA_UNRECORDED], [BA_UNRECORDED])
+
+    def test_hash_ignores_key_insertion_order(self):
+        self.assertEqual(
+            ancestry_snapshot_hash(ANCESTRY),
+            ancestry_snapshot_hash(dict(reversed(list(ANCESTRY.items())))),
+        )
+
+    def test_hash_changes_when_an_attribute_is_regrafted(self):
+        regrafted = {**ANCESTRY, BA_PACIFIC: [BA_UNRECORDED, BA_PACIFIC]}
+        self.assertNotEqual(ancestry_snapshot_hash(ANCESTRY), ancestry_snapshot_hash(regrafted))
+
+    def test_snapshot_copies_the_paths_it_was_given(self):
+        snapshot = ancestry_snapshot(ANCESTRY)
+        self.assertEqual(snapshot[BA_GLOBAL], [BA_ROOT, BA_GLOBAL])
+
+
 class ManifestTest(unittest.TestCase):
-    def _manifest(self, probe=None) -> dict[str, object]:
+    def _manifest(self, probe=None, **overrides: object) -> dict[str, object]:
+        arguments: dict[str, object] = {
+            "source_uri": "s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet",
+            "source_etag": '"abc123"',
+            "source_row_count": 459_025,
+            "builder_git_sha": "deadbeef",
+        }
+        arguments.update(overrides)
         return build_manifest(
             probe if probe is not None else _build(),
-            source_uri="s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet",
-            source_etag='"abc123"',
-            source_row_count=459_025,
-            builder_git_sha="deadbeef",
+            **arguments,  # pyright: ignore[reportArgumentType]
         )
 
     def test_manifest_is_json_serializable(self):
@@ -410,6 +507,48 @@ class ManifestTest(unittest.TestCase):
         manifest = self._manifest(probe)
         self.assertEqual(manifest["ground_truth_counts_hash"], probe.ground_truth_counts_hash)
         self.assertEqual(manifest["n_ground_truth_pairs"], len(probe.ground_truth_counts))
+
+    def test_manifest_pins_the_frozen_names_and_ancestry(self):
+        """Two scores are comparable only if they rendered the same names off
+        the same taxonomy, so both snapshots are hashed beside the region map's.
+        """
+        manifest = self._manifest(names=NAMES, ancestry=ANCESTRY)
+        self.assertEqual(manifest["names_hash"], name_snapshot_hash(NAMES))
+        self.assertEqual(manifest["ancestry_hash"], ancestry_snapshot_hash(ANCESTRY))
+        self.assertEqual(manifest["n_ancestry_attributes"], len(ANCESTRY))
+        self.assertEqual(
+            manifest["n_names"],
+            {"benthic_attributes": 4, "growth_forms": 1, "regions": 3},
+        )
+
+    def test_manifest_hashes_move_with_a_renamed_attribute(self):
+        renamed = NameSnapshot(
+            benthic_attributes={**NAMES.benthic_attributes, BA_PACIFIC: "Acropora sp."},
+            growth_forms=NAMES.growth_forms,
+            regions=NAMES.regions,
+        )
+        self.assertNotEqual(
+            self._manifest(names=NAMES, ancestry=ANCESTRY)["names_hash"],
+            self._manifest(names=renamed, ancestry=ANCESTRY)["names_hash"],
+        )
+
+    def test_a_probe_frozen_without_names_records_no_hash_for_them(self):
+        """An older probe carries neither snapshot; the manifest says so rather
+        than pinning a hash of nothing."""
+        manifest = self._manifest()
+        self.assertIsNone(manifest["names_hash"])
+        self.assertIsNone(manifest["ancestry_hash"])
+
+    def test_freezing_names_leaves_the_probe_content_hash_alone(self):
+        """The feature cache is keyed on the selected points. Folding names
+        into the content hash would invalidate every cached shard whenever the
+        taxonomy was renamed.
+        """
+        probe = _build()
+        self.assertEqual(
+            self._manifest(probe, names=NAMES, ancestry=ANCESTRY)["content_hash"],
+            probe.content_hash,
+        )
 
     def test_manifest_counts_match_the_realized_strata(self):
         manifest = self._manifest()

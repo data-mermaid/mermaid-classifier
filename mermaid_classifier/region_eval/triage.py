@@ -48,7 +48,14 @@ EVENT_COLUMNS = (
     "bucket",
 )
 BUCKET_COUNT_COLUMNS = ("bucket", "n")
-REGION_LIST_SUSPECT_COLUMNS = ("attribute_id", "region_id", "n_ground_truth", "n_predicted")
+REGION_LIST_SUSPECT_COLUMNS = (
+    "attribute_id",
+    "attribute_name",
+    "region_id",
+    "region_name",
+    "n_ground_truth",
+    "n_predicted",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,6 +95,8 @@ def triage_events(
     *,
     ground_truth_counts: Mapping[tuple[str, str], int],
     threshold: int = DEFAULT_LIST_SUSPECT_THRESHOLD,
+    attribute_names: Mapping[str, str] | None = None,
+    region_names: Mapping[str, str] | None = None,
 ) -> TriageResult:
     """Bucket every region-mismatch event in a scored slice.
 
@@ -95,6 +104,10 @@ def triage_events(
     of confirmed human annotations of that pair corpus-wide. A pair the
     mapping omits counts as zero, which is a `model_error` rather than a
     missing row.
+
+    `attribute_names` and `region_names` are the caller's frozen display names
+    for the suspect table, which is a bug report handed upstream: an id either
+    mapping omits renders as the id, never as a blank.
 
     `points` arrives already filtered of unrecorded image regions, and the
     count of what was dropped travels through to the result.
@@ -130,7 +143,9 @@ def triage_events(
         threshold=threshold,
         events=_frame([dataclasses.asdict(event) for event in events], EVENT_COLUMNS),
         bucket_counts=_bucket_counts(events),
-        region_list_suspects=_region_list_suspects(events),
+        region_list_suspects=_region_list_suspects(
+            events, attribute_names or {}, region_names or {}
+        ),
     )
 
 
@@ -156,7 +171,11 @@ def _bucket_counts(events: Sequence[_Event]) -> pd.DataFrame:
     )
 
 
-def _region_list_suspects(events: Sequence[_Event]) -> pd.DataFrame:
+def _region_list_suspects(
+    events: Sequence[_Event],
+    attribute_names: Mapping[str, str],
+    region_names: Mapping[str, str],
+) -> pd.DataFrame:
     """Attribute-region pairs the ground truth supports but the region list omits."""
     predictions: Counter[tuple[str, str]] = Counter()
     annotations: dict[tuple[str, str], int] = {}
@@ -175,7 +194,9 @@ def _region_list_suspects(events: Sequence[_Event]) -> pd.DataFrame:
         [
             {
                 "attribute_id": attribute_id,
+                "attribute_name": _display(attribute_id, attribute_names),
                 "region_id": region_id,
+                "region_name": _display(region_id, region_names),
                 "n_ground_truth": n_ground_truth,
                 "n_predicted": n_predicted,
             }
@@ -183,6 +204,11 @@ def _region_list_suspects(events: Sequence[_Event]) -> pd.DataFrame:
         ],
         REGION_LIST_SUSPECT_COLUMNS,
     )
+
+
+def _display(identifier: str, names: Mapping[str, str]) -> str:
+    """The display name for an id, or the id where no name resolves."""
+    return names.get(identifier) or identifier
 
 
 def _frame(rows: Sequence[Mapping[str, object]], columns: Sequence[str]) -> pd.DataFrame:

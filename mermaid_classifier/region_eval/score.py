@@ -26,6 +26,20 @@ falls back to the probe's own ground truth, which counts each pair only as
 often as the probe samples it and so reads the model-error headline high;
 `limitations.yaml` records which of the two a score was taken on.
 
+Every table renders the display names frozen with the probe beside the ids it
+keys on, so the artifact that says which labels cause this can be read without
+a join. An id the snapshot does not name renders as the id, which reads as
+unresolved rather than as unnamed, and `limitations.yaml` counts those too.
+
+`decisions` runs alongside the rates, because a rate says how bad the problem
+is and says nothing about which mitigation answers it. The region-blind
+permutation baseline is the load-bearing one -- the ratio to it separates a
+model that reads nothing about region from one leaking only a tail -- and the
+masking counterfactual prices the constraint that ratio would argue for. The
+within-branch share needs the taxonomic ancestry frozen with the probe, and a
+probe carrying none leaves that one statistic uncomputed rather than failing a
+run whose others are complete.
+
 Outputs are written to a local directory. Nothing is uploaded: publishing a
 score is a deliberate step of its own.
 """
@@ -45,6 +59,7 @@ import yaml
 from numpy.typing import NDArray
 
 from mermaid_classifier.common.benthic_attributes import (
+    BAGF_SEP,
     get_benthic_attribute_library,
     split_ba_gf,
 )
@@ -54,6 +69,17 @@ from mermaid_classifier.common.region_rules import (
     paired_cluster_bootstrap_diff,
 )
 from mermaid_classifier.pyspacer.inference import load_predictor
+from mermaid_classifier.region_eval.decisions import (
+    DEFAULT_N_PERMUTATIONS,
+    ConfidenceStratification,
+    MaskingCounterfactual,
+    RegionBlindBaseline,
+    WithinBranchShare,
+    confidence_stratification,
+    masking_counterfactual,
+    region_blind_baseline,
+    within_branch_share,
+)
 from mermaid_classifier.region_eval.features import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_WORKERS,
@@ -76,7 +102,17 @@ from mermaid_classifier.region_eval.metrics import (
     prepare_scored_points,
 )
 from mermaid_classifier.region_eval.probe_set import (
+    PROBE_ANCESTRY_FILE,
     PROBE_COLUMNS,
+    PROBE_COUNTS_FILE,
+    PROBE_FEATURES_FILE,
+    PROBE_MANIFEST_FILE,
+    PROBE_NAMES_FILE,
+    PROBE_POINTS_FILE,
+    PROBE_REGIONS_FILE,
+    NameSnapshot,
+    ancestry_snapshot_hash,
+    name_snapshot_hash,
     probe_content_hash,
     region_snapshot_hash,
 )
@@ -88,17 +124,25 @@ from mermaid_classifier.region_eval.triage import (
 
 logger = logging.getLogger(__name__)
 
-PROBE_POINTS_FILE = "probe_points.parquet"
-PROBE_REGIONS_FILE = "ba_regions.json"
-PROBE_COUNTS_FILE = "ba_region_counts.json"
-PROBE_MANIFEST_FILE = "manifest.json"
-PROBE_FEATURES_FILE = "probe_features.npz"
-
 SUMMARY_FILE = "summary.csv"
 LIMITATIONS_FILE = "limitations.yaml"
 MANIFEST_FILE = "manifest.json"
 MARKDOWN_FILE = "summary.md"
+DECISIONS_FILE = "decisions.csv"
 COMPARISON_FILE = "paired_comparison.csv"
+
+DECISIONS_COLUMNS = (
+    "model",
+    "statistic",
+    "status",
+    "quantity",
+    "value",
+    "ci_low",
+    "ci_high",
+    "k",
+    "n",
+    "method",
+)
 
 SUMMARY_COLUMNS = (
     "model",
@@ -153,6 +197,12 @@ RATE_DENOMINATORS = {
     "image_affected_rate": "images in this population, one trial each",
     "accuracy": "points whose ground-truth label is inside the model's label space",
 }
+REGION_BLIND_DENOMINATOR = (
+    "predictions whose benthic attribute is region-discriminating across the"
+    " regions this probe contains -- the denominator permuting regions between"
+    " images leaves fixed, so it cancels out of the ratio"
+)
+
 MACRO_DENOMINATOR = (
     "regions in this population, each contributing its own rate unweighted,"
     " so the mean does not move with the corpus mix"
@@ -170,8 +220,18 @@ MEOW_N_REGIONS = 12
 MEOW_N_PAIRS_TESTED = 66
 MEOW_N_PAIRS_INTERSECTING = 0
 
-DRIFT_COMPUTED = "computed"
-DRIFT_NOT_COMPUTED = "not_computed"
+# Diagnostics that a missing input can leave uncomputable carry one of these
+# rather than a number a reader would take for a measurement.
+STATUS_COMPUTED = "computed"
+STATUS_NOT_COMPUTED = "not_computed"
+
+DRIFT_COMPUTED = STATUS_COMPUTED
+DRIFT_NOT_COMPUTED = STATUS_NOT_COMPUTED
+
+# Where the display names came from. Only a probe carrying the frozen
+# snapshot can name anything; without it every id renders as itself.
+NAMES_SOURCE_PROBE = "frozen_probe"
+NAMES_SOURCE_NONE = "none"
 
 # Where the (attribute, region) annotation counts triage reads came from. Only
 # the corpus-wide ones carry the count the list-suspect threshold is set for;
@@ -216,19 +276,59 @@ class ProbeFeatures:
 class LoadedProbe:
     """Everything a scoring run reads off disk, plus the hashes that pin it.
 
-    `ground_truth_counts` is None for a probe built before the corpus-wide
-    counts were frozen beside it, which is a fallback for the caller to
-    resolve rather than a reason to refuse the probe.
+    `ground_truth_counts`, `names` and `ancestry_by_attribute` are absent for a
+    probe built before each was frozen beside the points. Each is a fallback
+    for the caller to resolve -- ids for names, an uncomputed statistic for
+    ancestry -- rather than a reason to refuse the probe.
     """
 
     rows: pd.DataFrame
     region_ids_by_attribute: dict[str, frozenset[str]]
     ground_truth_counts: dict[tuple[str, str], int] | None
+    names: NameSnapshot
+    names_present: bool
+    ancestry_by_attribute: dict[str, tuple[str, ...]] | None
     manifest: dict[str, Any]
     features: ProbeFeatures
     content_hash: str
     region_snapshot_hash: str
     points_fingerprint: str
+
+    def label_display_name(self, label: str) -> str:
+        """A BA-GF label as text, falling back to the id it cannot name.
+
+        A label with no growth form reads as the attribute name alone, which
+        is the convention the MERMAID library renders BA-only combos in.
+        """
+        attribute_id, growth_form_id = split_ba_gf(label)
+        attribute = self.names.benthic_attributes.get(attribute_id) or attribute_id
+        if not growth_form_id:
+            return attribute
+        growth_form = self.names.growth_forms.get(growth_form_id) or growth_form_id
+        return f"{attribute}{BAGF_SEP}{growth_form}"
+
+    def label_display_names(self, labels: Sequence[str]) -> dict[str, str]:
+        """Display names for a set of labels, keyed by the label itself."""
+        return {label: self.label_display_name(label) for label in set(labels)}
+
+
+@dataclasses.dataclass(frozen=True)
+class DecisionStatistics:
+    """The four statistics that choose between the mitigations.
+
+    `within_branch` is None where the probe carries no ancestry snapshot to
+    read, and `within_branch_status` says so: a share of zero would read as
+    "none of these is the right taxon", which is a measurement rather than the
+    absence of one.
+    """
+
+    region_blind: RegionBlindBaseline
+    masking: MaskingCounterfactual
+    confidence: ConfidenceStratification
+    within_branch: WithinBranchShare | None
+    within_branch_status: str
+    within_branch_reason: str | None
+    n_permutations: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -244,6 +344,7 @@ class ModelScore:
     points: ScoredPoints
     metrics: RegionMismatchMetrics
     triage: TriageResult
+    decisions: DecisionStatistics
     ground_truth_counts_source: str
     n_ground_truth_pairs: int
     drift: dict[str, Any]
@@ -267,6 +368,25 @@ def read_ground_truth_counts(path: Path) -> dict[tuple[str, str], int]:
         (str(attribute_id), str(region_id)): int(count)
         for attribute_id, by_region in payload.items()
         for region_id, count in by_region.items()
+    }
+
+
+def read_name_snapshot(path: Path) -> NameSnapshot:
+    """The frozen `names.json` as the three lookups the reports render from."""
+    payload = json.loads(path.read_text())
+    return NameSnapshot(
+        benthic_attributes=_name_section(payload, "benthic_attributes"),
+        growth_forms=_name_section(payload, "growth_forms"),
+        regions=_name_section(payload, "regions"),
+    )
+
+
+def read_ancestry_snapshot(path: Path) -> dict[str, tuple[str, ...]]:
+    """The frozen `ba_ancestry.json` as root-to-leaf paths per attribute."""
+    payload = json.loads(path.read_text())
+    return {
+        str(attribute_id): tuple(str(ancestor) for ancestor in path_)
+        for attribute_id, path_ in payload.items()
     }
 
 
@@ -321,6 +441,16 @@ def load_probe(
     counts_path = probe_dir / PROBE_COUNTS_FILE
     ground_truth_counts = read_ground_truth_counts(counts_path) if counts_path.exists() else None
 
+    names_path = probe_dir / PROBE_NAMES_FILE
+    names = (
+        read_name_snapshot(names_path)
+        if names_path.exists()
+        else NameSnapshot(benthic_attributes={}, growth_forms={}, regions={})
+    )
+
+    ancestry_path = probe_dir / PROBE_ANCESTRY_FILE
+    ancestry = read_ancestry_snapshot(ancestry_path) if ancestry_path.exists() else None
+
     manifest_path = probe_dir / PROBE_MANIFEST_FILE
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
 
@@ -347,6 +477,9 @@ def load_probe(
         rows=rows,
         region_ids_by_attribute=region_ids_by_attribute,
         ground_truth_counts=ground_truth_counts,
+        names=names,
+        names_present=names_path.exists(),
+        ancestry_by_attribute=ancestry,
         manifest=manifest,
         features=features,
         content_hash=probe_content_hash(rows),
@@ -355,11 +488,19 @@ def load_probe(
     )
 
 
-def predict_labels(predictor: Any, features: NDArray[np.float32]) -> tuple[str, ...]:
-    """The argmax label of each feature vector, in the model's own class names."""
+def predict_with_probabilities(
+    predictor: Any, features: NDArray[np.float32]
+) -> tuple[tuple[str, ...], NDArray[np.float64]]:
+    """Each feature vector's argmax label and the whole probability matrix.
+
+    One forward pass answers both: the label the inference lane would emit,
+    and the matrix the masking counterfactual re-argmaxes with the
+    out-of-region classes zeroed.
+    """
     classes = list(predictor.classes_)
-    probabilities = np.asarray(predictor.predict_proba(features))
-    return tuple(classes[int(index)] for index in np.argmax(probabilities, axis=1))
+    probabilities = np.asarray(predictor.predict_proba(features), dtype=np.float64)
+    labels = tuple(classes[int(index)] for index in np.argmax(probabilities, axis=1))
+    return labels, probabilities
 
 
 def score_model(
@@ -372,6 +513,7 @@ def score_model(
     live_region_map_loader: LiveRegionMapLoader = default_live_region_map,
     ground_truth_counts: Mapping[tuple[str, str], int] | None = None,
     triage_threshold: int = DEFAULT_LIST_SUSPECT_THRESHOLD,
+    n_permutations: int = DEFAULT_N_PERMUTATIONS,
 ) -> ModelScore:
     """Score one portable artifact on the probe and assemble every output.
 
@@ -381,11 +523,14 @@ def score_model(
     probe without them falls back to its own ground truth --
     `ground_truth_counts_source` says which, because only the first two carry
     the count the list-suspect threshold is set for.
+
+    `n_permutations` sizes the region-blind null. It dominates the cost of the
+    decision statistics, since each permutation re-scores every prediction.
     """
     resolved = RegionMetricsOptions() if options is None else options
     predictor = load_predictor(model_pt_path, model_json_path)
     classes = tuple(str(label) for label in predictor.classes_)
-    predictions = predict_labels(predictor, probe.features.features)
+    predictions, probabilities = predict_with_probabilities(predictor, probe.features.features)
 
     points = prepare_scored_points(
         image_ids=probe.features.image_ids,
@@ -396,9 +541,20 @@ def score_model(
         model_classes=classes,
         held_out=probe.features.held_out.tolist(),
     )
-    metrics = compute_region_metrics(points, options=resolved)
+    metrics = compute_region_metrics(
+        points,
+        options=resolved,
+        label_names=probe.label_display_names([*classes, *probe.features.gt_labels, *predictions]),
+        region_names=probe.names.regions,
+    )
     counts, counts_source = _resolve_ground_truth_counts(points, probe, ground_truth_counts)
-    triage = triage_events(points, ground_truth_counts=counts, threshold=triage_threshold)
+    triage = triage_events(
+        points,
+        ground_truth_counts=counts,
+        threshold=triage_threshold,
+        attribute_names=probe.names.benthic_attributes,
+        region_names=probe.names.regions,
+    )
 
     return ModelScore(
         name=name,
@@ -410,6 +566,14 @@ def score_model(
         points=points,
         metrics=metrics,
         triage=triage,
+        decisions=compute_decisions(
+            probe=probe,
+            predictions=predictions,
+            probabilities=probabilities,
+            classes=classes,
+            options=resolved,
+            n_permutations=n_permutations,
+        ),
         ground_truth_counts_source=counts_source,
         n_ground_truth_pairs=len(counts),
         drift=region_list_drift(
@@ -418,6 +582,76 @@ def score_model(
             classes=classes,
             live_region_map_loader=live_region_map_loader,
         ),
+    )
+
+
+def compute_decisions(
+    *,
+    probe: LoadedProbe,
+    predictions: Sequence[str],
+    probabilities: NDArray[np.float64],
+    classes: Sequence[str],
+    options: RegionMetricsOptions,
+    n_permutations: int = DEFAULT_N_PERMUTATIONS,
+) -> DecisionStatistics:
+    """The four statistics that separate the mitigations from one another.
+
+    All four read the probe's frozen region map, so a curation change upstream
+    cannot move them. The within-branch share also needs the frozen ancestry,
+    and a probe without it leaves that one statistic uncomputed rather than
+    failing a run whose other three are complete.
+    """
+    features = probe.features
+    confidences = probabilities.max(axis=1).tolist()
+
+    ancestry = probe.ancestry_by_attribute
+    within_branch = (
+        None
+        if ancestry is None
+        else within_branch_share(
+            image_region_ids=features.region_ids,
+            gt_labels=features.gt_labels,
+            pred_labels=predictions,
+            region_ids_by_attribute=probe.region_ids_by_attribute,
+            ancestry_by_attribute=ancestry,
+        )
+    )
+
+    return DecisionStatistics(
+        region_blind=region_blind_baseline(
+            image_ids=features.image_ids,
+            image_region_ids=features.region_ids,
+            pred_labels=predictions,
+            region_ids_by_attribute=probe.region_ids_by_attribute,
+            n_permutations=n_permutations,
+            alpha=options.alpha,
+            seed=options.seed,
+        ),
+        masking=masking_counterfactual(
+            image_ids=features.image_ids,
+            image_region_ids=features.region_ids,
+            gt_labels=features.gt_labels,
+            probabilities=probabilities,
+            model_classes=classes,
+            region_ids_by_attribute=probe.region_ids_by_attribute,
+            n_resamples=options.n_resamples,
+            alpha=options.alpha,
+            seed=options.seed,
+        ),
+        confidence=confidence_stratification(
+            image_region_ids=features.region_ids,
+            pred_labels=predictions,
+            pred_confidences=confidences,
+            region_ids_by_attribute=probe.region_ids_by_attribute,
+        ),
+        within_branch=within_branch,
+        within_branch_status=(STATUS_NOT_COMPUTED if within_branch is None else STATUS_COMPUTED),
+        within_branch_reason=(
+            None
+            if within_branch is not None
+            else f"probe carries no {PROBE_ANCESTRY_FILE}; taxonomic ancestry is unavailable"
+        ),
+        n_permutations=n_permutations,
     )
 
 
@@ -535,14 +769,39 @@ def paired_comparison(
 
 
 def summary_table(score: ModelScore) -> pd.DataFrame:
-    """One row per metric, each carrying the denominator it was read over."""
+    """One row per metric, each carrying the denominator it was read over.
+
+    The region-blind baseline and the ratio to it sit here beside the rates
+    rather than in `decisions.csv` alone: the ratio is what picks between a
+    hard constraint and a reweighting, and a reader opens this file first.
+    """
     rows: list[dict[str, object]] = []
     for population, rates in _populations(score):
         rows.extend(_population_summary_rows(score, population, rates))
+    rows.extend(_decision_summary_rows(score))
     table = pd.DataFrame(rows, columns=pd.Index(SUMMARY_COLUMNS))
     # Counts stay integral: a difference row carries no k, and a float column
     # would render every denominator as "25.0".
     return table.astype({"k": "Int64", "n": "Int64"})
+
+
+def decisions_table(score: ModelScore) -> pd.DataFrame:
+    """Every decision statistic in long form, one quantity per row.
+
+    A quantity with no interval carries NaN bounds rather than a bare number
+    dressed as an estimate; `method` says how each was read.
+    """
+    rows = [
+        *_region_blind_rows(score),
+        *_masking_rows(score),
+        *_within_branch_rows(score),
+        *_confidence_rows(score),
+    ]
+    # Counts stay integral: a quantity carrying no k renders as a blank rather
+    # than as "3.0".
+    return pd.DataFrame(rows, columns=pd.Index(DECISIONS_COLUMNS)).astype(
+        {"k": "Int64", "n": "Int64"}
+    )
 
 
 def build_limitations(score: ModelScore) -> dict[str, Any]:
@@ -666,6 +925,37 @@ def build_limitations(score: ModelScore) -> dict[str, Any]:
                 },
             },
             {
+                "id": "name_resolution",
+                "statement": (
+                    "Ids render as the display names frozen with the probe. An"
+                    " id the snapshot does not name renders as the id itself,"
+                    " which reads as unresolved rather than as unnamed."
+                ),
+                "magnitude": _name_resolution(score),
+            },
+            {
+                "id": "within_branch_ancestry",
+                "statement": (
+                    "The share of out-of-region predictions that are the right"
+                    " branch in the wrong ocean is read against the taxonomic"
+                    " ancestry frozen with the probe. A probe carrying none"
+                    " leaves the statistic uncomputed, since a share of zero"
+                    " would read as a measurement rather than the absence of"
+                    " one."
+                ),
+                "magnitude": _within_branch_magnitude(score),
+            },
+            {
+                "id": "masking_upper_bound",
+                "statement": (
+                    "The masking counterfactual assumes every image's recorded"
+                    " region is correct, so it is an upper bound on what a hard"
+                    " constraint would buy: a wrong region turns the same"
+                    " machinery into a source of error this number cannot see."
+                ),
+                "magnitude": _masking_magnitude(score),
+            },
+            {
                 "id": "region_polygons_disjoint",
                 "statement": (
                     "All MEOW region polygons were measured mutually disjoint, so"
@@ -691,6 +981,14 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
             "recorded_content_hash": probe.manifest.get("content_hash"),
             "computed_content_hash": probe.content_hash,
             "region_snapshot_hash": probe.region_snapshot_hash,
+            "names_hash": name_snapshot_hash(probe.names) if probe.names_present else None,
+            "recorded_names_hash": probe.manifest.get("names_hash"),
+            "ancestry_hash": (
+                None
+                if probe.ancestry_by_attribute is None
+                else ancestry_snapshot_hash(probe.ancestry_by_attribute)
+            ),
+            "recorded_ancestry_hash": probe.manifest.get("ancestry_hash"),
             "points_fingerprint": probe.points_fingerprint,
             "n_points_cached": int(probe.features.n_points),
             "n_rows": int(len(probe.rows)),
@@ -719,6 +1017,11 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
             "ground_truth_counts_source": score.ground_truth_counts_source,
             "n_ground_truth_pairs": score.n_ground_truth_pairs,
             "bucket_counts": _bucket_counts(score.triage),
+        },
+        "decisions": {
+            "n_permutations": score.decisions.n_permutations,
+            "within_branch_status": score.decisions.within_branch_status,
+            "within_branch_reason": score.decisions.within_branch_reason,
         },
         "region_list_drift": score.drift,
     }
@@ -760,6 +1063,9 @@ def render_markdown(score: ModelScore) -> str:
         f" macro F1 {_number(overall.f1_macro_disc)},"
         f" over {overall.n_f1_disc_points} points",
         "",
+        "## What to do about it",
+        "",
+        *_decision_lines(score),
         "## Region list drift",
         "",
         _drift_text(score.drift),
@@ -796,13 +1102,16 @@ def write_report(score: ModelScore, out_dir: Path) -> dict[str, Path]:
         ("per_direction.csv", metrics.per_direction),
         ("confusion.csv", metrics.confusion),
         ("region_list_suspects.csv", score.triage.region_list_suspects),
+        (DECISIONS_FILE, decisions_table(score)),
     ):
         path = out_dir / name
         frame.to_csv(path, index=False, na_rep="nan")
         written[name] = path
 
+    # Both axes carry region names; per_direction.csv is the long form of the
+    # same counts and carries each pair's ids beside them.
     matrix_path = out_dir / "direction_matrix.csv"
-    metrics.direction_matrix.to_csv(matrix_path, index=True, index_label="image_region_id")
+    metrics.direction_matrix.to_csv(matrix_path, index=True, index_label="image_region_name")
     written["direction_matrix.csv"] = matrix_path
 
     limitations_path = out_dir / LIMITATIONS_FILE
@@ -818,6 +1127,448 @@ def write_report(score: ModelScore, out_dir: Path) -> dict[str, Path]:
     written[MARKDOWN_FILE] = markdown_path
 
     return written
+
+
+def _decision_summary_rows(score: ModelScore) -> list[dict[str, object]]:
+    """The region-blind baseline and the ratio to it, as summary rows.
+
+    The ratio's interval inverts the baseline's percentile interval, so it
+    describes how tightly the null is pinned rather than the sampling error of
+    the measured rate -- a ratio of 0.8 means one thing against a baseline
+    spread of 0.01 and nothing at all against a spread of 0.3.
+    """
+    baseline = score.decisions.region_blind
+    permutation = (
+        f"out-of-region rate under {baseline.n_permutations} permutations of"
+        f" image regions between images, seed={score.options.seed}"
+    )
+    low, high = _ratio_to_baseline_interval(baseline)
+    return [
+        {
+            "model": score.name,
+            "population": ALL_POINTS,
+            "metric": "region_blind_rate",
+            "kind": "baseline",
+            "denominator": REGION_BLIND_DENOMINATOR,
+            "estimate": baseline.baseline_rate,
+            "k": None,
+            "n": baseline.n_discriminating,
+            "ci_low": baseline.baseline_ci_low,
+            "ci_high": baseline.baseline_ci_high,
+            "wilson_low": None,
+            "wilson_high": None,
+            "design_effect": None,
+            "imprecise": None,
+            "method": (
+                f"mean {permutation}; the interval is the"
+                f" {1.0 - score.options.alpha:.0%} percentile spread of the"
+                f" permutation distribution itself, not a sampling error"
+            ),
+        },
+        {
+            "model": score.name,
+            "population": ALL_POINTS,
+            "metric": "region_blind_ratio",
+            "kind": "ratio",
+            "denominator": REGION_BLIND_DENOMINATOR,
+            "estimate": baseline.ratio,
+            "k": baseline.n_out_of_region,
+            "n": baseline.n_discriminating,
+            "ci_low": low,
+            "ci_high": high,
+            "wilson_low": None,
+            "wilson_high": None,
+            "design_effect": None,
+            "imprecise": None,
+            "method": (
+                f"measured rate over the mean {permutation}; the interval"
+                f" inverts the permutation interval, so it carries the null's"
+                f" dispersion rather than sampling error"
+            ),
+        },
+    ]
+
+
+def _ratio_to_baseline_interval(baseline: RegionBlindBaseline) -> tuple[float, float]:
+    """The measured rate against each end of the permutation interval.
+
+    A baseline end of zero leaves that bound unbounded, which is NaN rather
+    than an infinity a reader would take for a number.
+    """
+    low = (
+        baseline.observed_rate / baseline.baseline_ci_high
+        if baseline.baseline_ci_high
+        else math.nan
+    )
+    high = (
+        baseline.observed_rate / baseline.baseline_ci_low if baseline.baseline_ci_low else math.nan
+    )
+    return low, high
+
+
+def _decision_row(
+    score: ModelScore,
+    statistic: str,
+    quantity: str,
+    *,
+    value: float,
+    method: str,
+    status: str = STATUS_COMPUTED,
+    ci_low: float = math.nan,
+    ci_high: float = math.nan,
+    k: int | None = None,
+    n: int | None = None,
+) -> dict[str, object]:
+    return {
+        "model": score.name,
+        "statistic": statistic,
+        "status": status,
+        "quantity": quantity,
+        "value": value,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "k": k,
+        "n": n,
+        "method": method,
+    }
+
+
+def _region_blind_rows(score: ModelScore) -> list[dict[str, object]]:
+    """The measured rate, the region-blind null, and the ratio between them."""
+    baseline = score.decisions.region_blind
+    measured = score.metrics.overall.oor_rate_disc
+    status = STATUS_COMPUTED if baseline.n_discriminating else STATUS_NOT_COMPUTED
+    permutation = (
+        f"{baseline.n_permutations} permutations of image regions between images,"
+        f" seed={score.options.seed}"
+    )
+    low, high = _ratio_to_baseline_interval(baseline)
+    return [
+        _decision_row(
+            score,
+            "region_blind",
+            "observed_rate",
+            status=status,
+            value=baseline.observed_rate,
+            ci_low=measured.ci_low,
+            ci_high=measured.ci_high,
+            k=baseline.n_out_of_region,
+            n=baseline.n_discriminating,
+            method=(
+                "the measured out-of-region rate over region-discriminating"
+                " predictions; interval is the cluster bootstrap over images"
+                " reported for oor_rate_disc"
+            ),
+        ),
+        _decision_row(
+            score,
+            "region_blind",
+            "baseline_rate",
+            status=status,
+            value=baseline.baseline_rate,
+            ci_low=baseline.baseline_ci_low,
+            ci_high=baseline.baseline_ci_high,
+            n=baseline.n_discriminating,
+            method=f"mean rate under {permutation}; interval is the permutation percentile spread",
+        ),
+        _decision_row(
+            score,
+            "region_blind",
+            "baseline_sd",
+            status=status,
+            value=baseline.baseline_sd,
+            n=baseline.n_permutations,
+            method=f"standard deviation of the {permutation}",
+        ),
+        _decision_row(
+            score,
+            "region_blind",
+            "ratio",
+            status=status,
+            value=baseline.ratio,
+            ci_low=low,
+            ci_high=high,
+            k=baseline.n_out_of_region,
+            n=baseline.n_discriminating,
+            method=(
+                "measured rate over the region-blind baseline; near 1 the model"
+                " reads nothing about region from the image, well below 1 only a"
+                " tail leaks"
+            ),
+        ),
+    ]
+
+
+def _masking_rows(score: ModelScore) -> list[dict[str, object]]:
+    """What a hard region constraint at inference would buy, and cost."""
+    masking = score.decisions.masking
+    bootstrap = (
+        f"cluster bootstrap over images, percentile,"
+        f" {score.options.n_resamples} resamples, alpha={score.options.alpha}"
+    )
+    counted = "counted over the points whose ground truth is inside the model's label space"
+    return [
+        _decision_row(
+            score,
+            "masking",
+            "accuracy_unmasked",
+            value=masking.accuracy_unmasked,
+            n=masking.n_accuracy_points,
+            method="argmax of the model's own probabilities",
+        ),
+        _decision_row(
+            score,
+            "masking",
+            "accuracy_masked",
+            value=masking.accuracy_masked,
+            n=masking.n_accuracy_points,
+            method="argmax after zeroing every class the image's region does not permit",
+        ),
+        _decision_row(
+            score,
+            "masking",
+            "accuracy_delta",
+            value=masking.accuracy_delta,
+            ci_low=masking.accuracy_delta_ci_low,
+            ci_high=masking.accuracy_delta_ci_high,
+            n=masking.n_accuracy_points,
+            method=f"masked minus unmasked accuracy; {bootstrap}",
+        ),
+        _decision_row(
+            score,
+            "masking",
+            "n_fixed",
+            value=float(masking.n_fixed),
+            k=masking.n_fixed,
+            n=masking.n_accuracy_points,
+            method=f"predictions masking turns right, {counted}",
+        ),
+        _decision_row(
+            score,
+            "masking",
+            "n_broken",
+            value=float(masking.n_broken),
+            k=masking.n_broken,
+            n=masking.n_accuracy_points,
+            method=f"predictions masking turns wrong, {counted}",
+        ),
+        _decision_row(
+            score,
+            "masking",
+            "changed_share",
+            value=masking.changed_share,
+            k=masking.n_changed,
+            n=masking.n_points,
+            method="predictions masking moves at all, over every scored point",
+        ),
+        _decision_row(
+            score,
+            "masking",
+            "n_no_permitted_class",
+            value=float(masking.n_no_permitted_class),
+            n=masking.n_points,
+            method="points whose region permits no class at all, left as the model made them",
+        ),
+        *(
+            _decision_row(
+                score,
+                "masking",
+                f"margin_{name}",
+                value=value,
+                n=masking.margin_n,
+                method=(
+                    "p_top minus the best in-region probability over the"
+                    " predictions masking overturns; near zero masking is nearly"
+                    " free"
+                ),
+            )
+            for name, value in (
+                ("median", masking.margin_median),
+                ("p90", masking.margin_p90),
+                ("max", masking.margin_max),
+            )
+        ),
+    ]
+
+
+def _within_branch_rows(score: ModelScore) -> list[dict[str, object]]:
+    """The right-taxon-wrong-ocean share, or the reason there is none."""
+    share = score.decisions.within_branch
+    if share is None:
+        return [
+            _decision_row(
+                score,
+                "within_branch",
+                "share",
+                status=STATUS_NOT_COMPUTED,
+                value=math.nan,
+                method=str(score.decisions.within_branch_reason),
+            )
+        ]
+    return [
+        _decision_row(
+            score,
+            "within_branch",
+            "share",
+            value=share.share,
+            k=share.n_within_branch,
+            n=share.n_evaluable,
+            method=(
+                "out-of-region predictions sharing a root-to-leaf branch with"
+                " the truth, over those the frozen ancestry places"
+            ),
+        ),
+        _decision_row(
+            score,
+            "within_branch",
+            "n_out_of_region",
+            value=float(share.n_out_of_region),
+            n=share.n_points,
+            method="out-of-region predictions the share is read over",
+        ),
+        _decision_row(
+            score,
+            "within_branch",
+            "n_ancestry_unknown",
+            value=float(share.n_ancestry_unknown),
+            n=share.n_out_of_region,
+            method="events whose predicted or true attribute the frozen ancestry does not place",
+        ),
+    ]
+
+
+def _confidence_rows(score: ModelScore) -> list[dict[str, object]]:
+    """Whether a confidence threshold could suppress these predictions at all."""
+    confidence = score.decisions.confidence
+    return [
+        _decision_row(
+            score,
+            "confidence",
+            "auroc",
+            value=confidence.auroc,
+            k=confidence.n_out_of_region,
+            n=confidence.n_discriminating,
+            method=(
+                "probability a drawn out-of-region prediction outranks a drawn"
+                " in-region one; 0.5 is no separation and rules a threshold out"
+            ),
+        ),
+        *(
+            _decision_row(
+                score,
+                "confidence",
+                f"rate_{bin_.lower:.2f}_{bin_.upper:.2f}",
+                value=bin_.rate,
+                k=bin_.n_out_of_region,
+                n=bin_.n,
+                method="out-of-region share of the predictions in this confidence band",
+            )
+            for bin_ in confidence.bins
+        ),
+    ]
+
+
+def _decision_lines(score: ModelScore) -> list[str]:
+    """The interpretation, led by the ratio that picks the mitigation."""
+    decisions = score.decisions
+    baseline = decisions.region_blind
+    masking = decisions.masking
+    low, high = _ratio_to_baseline_interval(baseline)
+    return [
+        f"- Region-blind baseline: {_percent(baseline.baseline_rate)}"
+        f" [{_percent(baseline.baseline_ci_low)}, {_percent(baseline.baseline_ci_high)}]"
+        f" of region-discriminating predictions fall out of region once region is"
+        f" shuffled between images, against {_percent(baseline.observed_rate)}"
+        f" [{_percent(score.metrics.overall.oor_rate_disc.ci_low)},"
+        f" {_percent(score.metrics.overall.oor_rate_disc.ci_high)}] measured"
+        f" — {_number(baseline.ratio)}x [{_number(low)}, {_number(high)}]"
+        f" the region-blind rate.",
+        "- Near 1 the model reads nothing about region from the image, which is"
+        " the case a hard constraint answers; well below 1 region is already"
+        " implicit in the features and only a tail leaks, which is the case for"
+        " reweighting, regional training data, or dropping the labels"
+        " responsible.",
+        f"- Masking out-of-region classes at inference moves accuracy by"
+        f" {_percent(masking.accuracy_delta)} points"
+        f" [{_percent(masking.accuracy_delta_ci_low)},"
+        f" {_percent(masking.accuracy_delta_ci_high)}]: it fixes"
+        f" {masking.n_fixed} prediction(s) and breaks {masking.n_broken},"
+        f" changing {masking.n_changed} of {masking.n_points}.",
+        f"- Confidence separates out-of-region predictions at AUROC"
+        f" {_number(decisions.confidence.auroc)} over"
+        f" {decisions.confidence.n_discriminating} prediction(s).",
+        _within_branch_line(score),
+        "",
+    ]
+
+
+def _within_branch_line(score: ModelScore) -> str:
+    share = score.decisions.within_branch
+    if share is None:
+        return f"- Right taxon, wrong ocean: not computed ({score.decisions.within_branch_reason})."
+    return (
+        f"- Right taxon, wrong ocean: {share.n_within_branch} of"
+        f" {share.n_evaluable} out-of-region prediction(s) share a branch with"
+        f" the truth, which is what masking cleans up rather than reshuffles."
+    )
+
+
+def _name_section(payload: Mapping[str, Any], section: str) -> dict[str, str]:
+    """One section of the frozen name snapshot, as text keyed by id."""
+    entries = payload.get(section) or {}
+    return {str(key): str(value) for key, value in entries.items()}
+
+
+def _name_resolution(score: ModelScore) -> dict[str, Any]:
+    """How much of what the report renders the frozen names could resolve."""
+    names = score.probe.names
+    labels = {*score.classes, *score.points.gt_labels, *score.points.pred_labels}
+    split = [split_ba_gf(label) for label in labels]
+    attributes = {attribute_id for attribute_id, _growth_form in split}
+    growth_forms = {growth_form for _attribute, growth_form in split if growth_form}
+    regions = set(score.metrics.direction_region_ids)
+
+    return {
+        "source": NAMES_SOURCE_PROBE if score.probe.names_present else NAMES_SOURCE_NONE,
+        "n_benthic_attributes": len(attributes),
+        "n_benthic_attributes_unresolved": _n_unresolved(attributes, names.benthic_attributes),
+        "n_growth_forms": len(growth_forms),
+        "n_growth_forms_unresolved": _n_unresolved(growth_forms, names.growth_forms),
+        "n_regions": len(regions),
+        "n_regions_unresolved": _n_unresolved(regions, names.regions),
+    }
+
+
+def _n_unresolved(identifiers: set[str], names: Mapping[str, str]) -> int:
+    """Ids the name map does not carry a name for."""
+    return sum(1 for identifier in identifiers if not names.get(identifier))
+
+
+def _within_branch_magnitude(score: ModelScore) -> dict[str, Any]:
+    share = score.decisions.within_branch
+    return {
+        "status": score.decisions.within_branch_status,
+        "reason": score.decisions.within_branch_reason,
+        "n_out_of_region": None if share is None else int(share.n_out_of_region),
+        "n_evaluable": None if share is None else int(share.n_evaluable),
+        "n_ancestry_unknown": None if share is None else int(share.n_ancestry_unknown),
+        "share": None if share is None else _clean(share.share),
+    }
+
+
+def _masking_magnitude(score: ModelScore) -> dict[str, Any]:
+    masking = score.decisions.masking
+    return {
+        "n_fixed": int(masking.n_fixed),
+        "n_broken": int(masking.n_broken),
+        "n_changed": int(masking.n_changed),
+        "n_no_permitted_class": int(masking.n_no_permitted_class),
+        "n_region_unknown_classes": int(masking.n_region_unknown_classes),
+        "n_accuracy_points": int(masking.n_accuracy_points),
+        "accuracy_delta": _clean(masking.accuracy_delta),
+        "accuracy_delta_ci_low": _clean(masking.accuracy_delta_ci_low),
+        "accuracy_delta_ci_high": _clean(masking.accuracy_delta_ci_high),
+    }
 
 
 def _paired_masks(metric: str, points: ScoredPoints) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:

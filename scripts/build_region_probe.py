@@ -2,9 +2,10 @@
 
 Selects a fixed slice of the MERMAID confirmed-annotation export (every
 Tropical Atlantic image plus seeded proportional samples of the two
-Indo-Pacific regions), freezes the benthic-attribute region map alongside it,
-and downloads each selected point's feature vector into one aligned matrix.
-Scoring a model on the probe afterwards touches neither S3 nor the MERMAID API.
+Indo-Pacific regions), freezes the benthic-attribute region map, display names
+and taxonomic ancestry alongside it, and downloads each selected point's
+feature vector into one aligned matrix. Scoring a model on the probe afterwards
+touches neither S3 nor the MERMAID API.
 
 Everything is written under --out-dir. Nothing is uploaded: publishing a probe
 version is a separate, deliberate step.
@@ -15,6 +16,8 @@ Outputs (in --out-dir):
     probe_points.parquet   one row per probe annotation point, PROBE_COLUMNS
     ba_regions.json        the frozen benthic-attribute -> region-ids snapshot
     ba_region_counts.json  corpus-wide confirmed annotations per (attribute, region)
+    names.json             display names for benthic attributes, growth forms, regions
+    ba_ancestry.json       each benthic attribute's root-to-leaf ancestry path
     manifest.json          provenance, realized counts, minimum detectable effects
     probe_features.npz     features[N,1280] float32 + aligned point metadata
     shards/                per-batch download checkpoints (restartable; deletable after)
@@ -33,7 +36,12 @@ from urllib.parse import urlparse
 
 import boto3
 
-from mermaid_classifier.common.benthic_attributes import get_benthic_attribute_library
+from mermaid_classifier.common.benthic_attributes import (
+    BenthicAttributeLibrary,
+    get_benthic_attribute_library,
+    get_growth_form_library,
+    get_region_library,
+)
 from mermaid_classifier.region_eval.features import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_FEATURE_BUCKET,
@@ -47,10 +55,20 @@ from mermaid_classifier.region_eval.probe_set import (
     DEFAULT_CENSUS_REGION_NAMES,
     DEFAULT_REGION_FLOOR,
     DEFAULT_TARGET_IMAGES,
+    PROBE_ANCESTRY_FILE,
+    PROBE_COUNTS_FILE,
+    PROBE_FEATURES_FILE,
+    PROBE_MANIFEST_FILE,
+    PROBE_NAMES_FILE,
+    PROBE_POINTS_FILE,
+    PROBE_REGIONS_FILE,
+    NameSnapshot,
     ProbeSelectionOptions,
+    ancestry_snapshot_json,
     build_manifest,
     build_probe_set,
     ground_truth_counts_json,
+    name_snapshot_json,
     read_annotations,
     region_snapshot_json,
 )
@@ -80,6 +98,34 @@ def builder_git_sha() -> str:
         check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def frozen_names(library: BenthicAttributeLibrary) -> NameSnapshot:
+    """Display names for everything a region report renders.
+
+    Frozen with the probe for the same reason the region map is: a name
+    resolved at scoring time would make a published artifact depend on a later
+    state of the taxonomy than the score it annotates.
+    """
+    return NameSnapshot(
+        benthic_attributes={
+            attribute_id: str(result["name"]) for attribute_id, result in library.by_id.items()
+        },
+        growth_forms=dict(get_growth_form_library().by_id),
+        regions=dict(get_region_library().by_id),
+    )
+
+
+def frozen_ancestry(library: BenthicAttributeLibrary) -> dict[str, list[str]]:
+    """Each benthic attribute's root-to-leaf path, root first and ending in itself.
+
+    Two attributes share an ancestor exactly when their paths agree at the
+    root, which is the condition `within_branch_share` reads.
+    """
+    return {
+        attribute_id: [*library.get_ancestor_ids(attribute_id), attribute_id]
+        for attribute_id in library.by_id
+    }
 
 
 def fetch_source(uri: str, destination: Path, *, region_name: str) -> str | None:
@@ -131,8 +177,14 @@ def main(argv: list[str] | None = None) -> int:
         annotations = read_annotations(local_source)
     logger.info("source rows: %d", len(annotations))
 
-    region_ids_by_attribute = get_benthic_attribute_library().region_ids_by_id
-    (out_dir / "ba_regions.json").write_text(region_snapshot_json(region_ids_by_attribute))
+    library = get_benthic_attribute_library()
+    region_ids_by_attribute = library.region_ids_by_id
+    (out_dir / PROBE_REGIONS_FILE).write_text(region_snapshot_json(region_ids_by_attribute))
+
+    names = frozen_names(library)
+    ancestry = frozen_ancestry(library)
+    (out_dir / PROBE_NAMES_FILE).write_text(name_snapshot_json(names))
+    (out_dir / PROBE_ANCESTRY_FILE).write_text(ancestry_snapshot_json(ancestry))
 
     options = ProbeSelectionOptions(
         seed=args.seed,
@@ -145,13 +197,11 @@ def main(argv: list[str] | None = None) -> int:
     probe = build_probe_set(
         annotations, region_ids_by_attribute=region_ids_by_attribute, options=options
     )
-    probe.rows.to_parquet(out_dir / "probe_points.parquet", index=False)
+    probe.rows.to_parquet(out_dir / PROBE_POINTS_FILE, index=False)
     # Frozen for the same reason as the region map: scoring reads these counts
     # against a fixed threshold, so a corpus that grows afterwards must not
     # move a published score.
-    (out_dir / "ba_region_counts.json").write_text(
-        ground_truth_counts_json(probe.ground_truth_counts)
-    )
+    (out_dir / PROBE_COUNTS_FILE).write_text(ground_truth_counts_json(probe.ground_truth_counts))
 
     manifest = build_manifest(
         probe,
@@ -159,6 +209,8 @@ def main(argv: list[str] | None = None) -> int:
         source_etag=etag,
         source_row_count=len(annotations),
         builder_git_sha=builder_git_sha(),
+        names=names,
+        ancestry=ancestry,
     )
     for stratum in probe.strata:
         logger.info(
@@ -184,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=args.batch_size,
             shard_dir=out_dir / "shards",
         )
-        write_feature_cache(cache, out_dir / "probe_features.npz")
+        write_feature_cache(cache, out_dir / PROBE_FEATURES_FILE)
         manifest["features"] = {
             "n_points_requested": cache.n_points_requested,
             "n_points_cached": int(cache.features.shape[0]),
@@ -204,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             len(cache.missing_image_ids),
         )
 
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    (out_dir / PROBE_MANIFEST_FILE).write_text(json.dumps(manifest, indent=2))
     logger.info(
         "probe %s: %s images, %s points, content_hash=%s",
         manifest["probe_version"],

@@ -42,6 +42,13 @@ reads them to tell an incomplete region list from a model mistake, and the
 probe holds a few of what the corpus holds hundreds of: counted on the probe
 alone, a broadly-annotated pair would not clear the threshold.
 
+So do the display names and the taxonomic ancestry. A report that resolves a
+name at scoring time depends on a later state of the taxonomy than the score
+it annotates, and `within_branch_share` reads ancestry the same way the region
+predicates read regions. Both are pinned by their own manifest hash and sit
+outside `content_hash`, which covers the selected points alone: a rename must
+not invalidate a cached feature shard.
+
 Selection is pure: nothing here reaches S3 or the network, and
 `read_annotations` takes a path DuckDB can open.
 """
@@ -61,6 +68,16 @@ from mermaid_classifier.common.region_rules import is_region_discriminating
 from mermaid_classifier.region_eval.metrics import required_n_for_detection
 
 PROBE_VERSION = "1"
+
+# The probe directory's layout, named where the probe is defined so the builder
+# that writes a file and the scorer that reads it cannot drift apart.
+PROBE_POINTS_FILE = "probe_points.parquet"
+PROBE_REGIONS_FILE = "ba_regions.json"
+PROBE_COUNTS_FILE = "ba_region_counts.json"
+PROBE_NAMES_FILE = "names.json"
+PROBE_ANCESTRY_FILE = "ba_ancestry.json"
+PROBE_MANIFEST_FILE = "manifest.json"
+PROBE_FEATURES_FILE = "probe_features.npz"
 
 PROBE_COLUMNS = (
     "image_id",
@@ -147,6 +164,20 @@ class StratumCounts:
     n_eligible_images: int
     n_images: int
     n_points: int
+
+
+@dataclasses.dataclass(frozen=True)
+class NameSnapshot:
+    """Display names for everything a region report renders, in three sections.
+
+    Sectioned rather than flattened so a region and a benthic attribute that
+    share a name stay distinguishable, and so a reader of the JSON can tell
+    which lookup failed when a name is missing.
+    """
+
+    benthic_attributes: Mapping[str, str]
+    growth_forms: Mapping[str, str]
+    regions: Mapping[str, str]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -381,6 +412,42 @@ def ground_truth_counts_hash(counts: Mapping[tuple[str, str], int]) -> str:
     return hashlib.sha256(ground_truth_counts_json(counts).encode()).hexdigest()
 
 
+def name_snapshot(names: NameSnapshot) -> dict[str, dict[str, str]]:
+    """The display names as JSON-ready sections."""
+    return {
+        "benthic_attributes": dict(names.benthic_attributes),
+        "growth_forms": dict(names.growth_forms),
+        "regions": dict(names.regions),
+    }
+
+
+def name_snapshot_json(names: NameSnapshot) -> str:
+    """The canonical serialization the name hash is taken over."""
+    return json.dumps(name_snapshot(names), sort_keys=True, separators=(",", ":"))
+
+
+def name_snapshot_hash(names: NameSnapshot) -> str:
+    return hashlib.sha256(name_snapshot_json(names).encode()).hexdigest()
+
+
+def ancestry_snapshot(
+    ancestry_by_attribute: Mapping[str, Sequence[str]],
+) -> dict[str, list[str]]:
+    """The ancestry paths as JSON-ready lists, each kept root-first."""
+    return {attribute_id: list(path) for attribute_id, path in ancestry_by_attribute.items()}
+
+
+def ancestry_snapshot_json(ancestry_by_attribute: Mapping[str, Sequence[str]]) -> str:
+    """The canonical serialization the ancestry hash is taken over."""
+    return json.dumps(
+        ancestry_snapshot(ancestry_by_attribute), sort_keys=True, separators=(",", ":")
+    )
+
+
+def ancestry_snapshot_hash(ancestry_by_attribute: Mapping[str, Sequence[str]]) -> str:
+    return hashlib.sha256(ancestry_snapshot_json(ancestry_by_attribute).encode()).hexdigest()
+
+
 def minimum_detectable_effect_table(
     strata: Sequence[StratumCounts],
     *,
@@ -437,6 +504,8 @@ def build_manifest(
     source_etag: str | None,
     source_row_count: int,
     builder_git_sha: str,
+    names: NameSnapshot | None = None,
+    ancestry: Mapping[str, Sequence[str]] | None = None,
     baseline_rates: Sequence[float] = MDE_BASELINE_RATES,
     effects: Sequence[float] = MDE_EFFECTS,
     design_effects: Sequence[float] = MDE_DESIGN_EFFECTS,
@@ -444,9 +513,14 @@ def build_manifest(
     """Everything needed to say whether two scores were taken on the same probe.
 
     The source ETag and row count pin the export, the content hash pins the
-    points, the region-snapshot hash pins the taxonomy, and the
+    points, the region-snapshot hash pins the taxonomy, the name and ancestry
+    hashes pin what the reports render off it, and the
     minimum-detectable-effect table pins what a difference between two scores
     is allowed to mean.
+
+    A probe frozen without the names or the ancestry records a null hash for
+    them, which is the state a score degrades against rather than a hash of
+    nothing.
     """
     return {
         "probe_version": PROBE_VERSION,
@@ -459,6 +533,13 @@ def build_manifest(
         "region_snapshot_hash": probe.region_snapshot_hash,
         "ground_truth_counts_hash": probe.ground_truth_counts_hash,
         "n_ground_truth_pairs": len(probe.ground_truth_counts),
+        "names_hash": None if names is None else name_snapshot_hash(names),
+        "n_names": {
+            section: len(entries)
+            for section, entries in ({} if names is None else name_snapshot(names)).items()
+        },
+        "ancestry_hash": None if ancestry is None else ancestry_snapshot_hash(ancestry),
+        "n_ancestry_attributes": 0 if ancestry is None else len(ancestry),
         "seed": probe.options.seed,
         "target_images": probe.options.target_images,
         "region_floor": probe.options.region_floor,

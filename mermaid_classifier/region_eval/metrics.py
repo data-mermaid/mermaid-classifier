@@ -44,6 +44,11 @@ estimate is flagged `imprecise` rather than dressed up as a comparison.
 Resolving a difference between two model versions is the stiffer requirement
 and has its own formula in `required_n_for_detection`.
 
+*Which name?* Every table keys on ids and renders the caller's frozen display
+names beside them. An id with no name renders as the id: an empty cell reads
+as "this thing has no name", where the id reads as "unresolved", which is what
+actually happened.
+
 `prepare_scored_points` is the only way in. It drops points whose image region
 is unrecorded and reports how many, which is what keeps the region predicates
 from raising inside a metric group that a caller has wrapped in a broad
@@ -83,6 +88,7 @@ CONFUSION_ROW_LIMIT = 50
 PER_REGION_BASE_COLUMNS = (
     "population",
     "region_id",
+    "region_name",
     "n_images",
     "n_points",
     "n_accuracy_points",
@@ -118,7 +124,9 @@ PER_LABEL_COLUMNS = (
 PER_DIRECTION_COLUMNS = (
     "population",
     "image_region_id",
+    "image_region_name",
     "excluded_region_id",
+    "excluded_region_name",
     "n_out_of_region",
     "n_out_of_region_events",
     "n_points",
@@ -132,7 +140,15 @@ PER_DIRECTION_COLUMNS = (
     "upper_bound_n_images",
     "imprecise",
 )
-CONFUSION_COLUMNS = ("image_region_id", "gt_label", "pred_label", "n")
+CONFUSION_COLUMNS = (
+    "image_region_id",
+    "image_region_name",
+    "gt_label",
+    "gt_label_name",
+    "pred_label",
+    "pred_label_name",
+    "n",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -316,7 +332,11 @@ class ScoredPoints:
 
 @dataclasses.dataclass(frozen=True)
 class RegionMismatchMetrics:
-    """Rates for both populations, plus the tables that explain them."""
+    """Rates for both populations, plus the tables that explain them.
+
+    `direction_region_ids` are the region ids the direction matrix's columns
+    stand for, in the same order, since those columns are labelled by name.
+    """
 
     n_points: int
     n_images: int
@@ -328,6 +348,7 @@ class RegionMismatchMetrics:
     per_region: pd.DataFrame
     per_label: pd.DataFrame
     direction_matrix: pd.DataFrame
+    direction_region_ids: tuple[str, ...]
     per_direction: pd.DataFrame
     confusion: pd.DataFrame
 
@@ -430,16 +451,19 @@ def compute_region_metrics(
     *,
     options: RegionMetricsOptions | None = None,
     label_names: Mapping[str, str] | None = None,
+    region_names: Mapping[str, str] | None = None,
 ) -> RegionMismatchMetrics:
     """Every region-mismatch rate and table for one scored slice.
 
-    `label_names` supplies display names for the per-label table; labels it
-    omits carry an empty name. The tables that inventory incidents (per label,
-    direction matrix, confusion) cover all scored points, because splitting
-    counts that already sit in the tens across two populations reads noise.
+    `label_names` and `region_names` supply the display names the tables
+    render; an id either mapping omits renders as the id itself. The tables
+    that inventory incidents (per label, direction matrix, confusion) cover all
+    scored points, because splitting counts that already sit in the tens across
+    two populations reads noise.
     """
     resolved = RegionMetricsOptions() if options is None else options
     names: Mapping[str, str] = {} if label_names is None else label_names
+    regions: Mapping[str, str] = {} if region_names is None else region_names
 
     overall = _population_rates(points, ALL_POINTS, resolved)
     held_out_points = (
@@ -457,9 +481,9 @@ def compute_region_metrics(
     per_region_rows: list[dict[str, object]] = []
     per_direction_rows: list[dict[str, object]] = []
     for name, population in populations:
-        per_region_rows.extend(_per_region_rows(population, name, resolved))
+        per_region_rows.extend(_per_region_rows(population, name, resolved, regions))
         per_direction_rows.extend(
-            _per_direction_rows(population, name, direction_columns, resolved)
+            _per_direction_rows(population, name, direction_columns, resolved, regions)
         )
 
     return RegionMismatchMetrics(
@@ -472,9 +496,10 @@ def compute_region_metrics(
         held_out=held_out,
         per_region=_frame(per_region_rows, _per_region_columns()),
         per_label=_per_label_table(points, names, resolved),
-        direction_matrix=_direction_matrix(points, direction_columns),
+        direction_matrix=_direction_matrix(points, direction_columns, regions),
+        direction_region_ids=tuple(direction_columns),
         per_direction=_frame(per_direction_rows, PER_DIRECTION_COLUMNS),
-        confusion=_confusion_table(points),
+        confusion=_confusion_table(points, names, regions),
     )
 
 
@@ -1031,7 +1056,10 @@ def _per_region_columns() -> tuple[str, ...]:
 
 
 def _per_region_rows(
-    points: ScoredPoints, population: str, options: RegionMetricsOptions
+    points: ScoredPoints,
+    population: str,
+    options: RegionMetricsOptions,
+    region_names: Mapping[str, str],
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for region, mask in _region_masks(points).items():
@@ -1040,6 +1068,7 @@ def _per_region_rows(
         row: dict[str, object] = {
             "population": population,
             "region_id": region,
+            "region_name": _display(region, region_names),
             "n_images": slice_.n_images,
             "n_points": slice_.n_points,
             "n_accuracy_points": core.accuracy.n,
@@ -1063,12 +1092,18 @@ def _direction_columns(points: ScoredPoints) -> tuple[str, ...]:
     return tuple(sorted(regions))
 
 
-def _direction_matrix(points: ScoredPoints, columns: Sequence[str]) -> pd.DataFrame:
+def _direction_matrix(
+    points: ScoredPoints, columns: Sequence[str], region_names: Mapping[str, str]
+) -> pd.DataFrame:
     """Out-of-region counts by image region and the region the label belongs to.
 
     A label permitted in several regions counts once under each of them, so a
     row sums to at least the number of events it covers;
     `per_direction.n_out_of_region_events` carries the unduplicated count.
+
+    Both axes are labelled by region name, falling back to the region id, which
+    keeps every cell numeric. `per_direction` is the long form of this same
+    table and carries each pair's ids beside its names.
     """
     rows = sorted(points.observed_region_ids)
     counts: Counter[tuple[str, str]] = Counter()
@@ -1081,8 +1116,8 @@ def _direction_matrix(points: ScoredPoints, columns: Sequence[str]) -> pd.DataFr
             counts[(region, target)] += 1
     return pd.DataFrame(
         [[counts[(row, column)] for column in columns] for row in rows],
-        index=pd.Index(rows),
-        columns=pd.Index(columns),
+        index=pd.Index([_display(row, region_names) for row in rows]),
+        columns=pd.Index([_display(column, region_names) for column in columns]),
         dtype=int,
     )
 
@@ -1092,6 +1127,7 @@ def _per_direction_rows(
     population: str,
     columns: Sequence[str],
     options: RegionMetricsOptions,
+    region_names: Mapping[str, str],
 ) -> list[dict[str, object]]:
     """One row per ordered (image region, excluded region) pair.
 
@@ -1122,7 +1158,9 @@ def _per_direction_rows(
                 {
                     "population": population,
                     "image_region_id": region,
+                    "image_region_name": _display(region, region_names),
                     "excluded_region_id": excluded,
+                    "excluded_region_name": _display(excluded, region_names),
                     "n_out_of_region": estimate.k,
                     "n_out_of_region_events": n_events,
                     "n_points": estimate.n,
@@ -1180,7 +1218,7 @@ def _per_label_table(
         rows.append(
             {
                 "label": label,
-                "label_name": label_names.get(label, ""),
+                "label_name": _display(label, label_names),
                 "allowed_region_ids": tuple(sorted(allowed_by_label[label])),
                 "n_predicted": n_predicted,
                 "n_out_of_region": k,
@@ -1196,7 +1234,9 @@ def _per_label_table(
     return _frame(rows, PER_LABEL_COLUMNS)
 
 
-def _confusion_table(points: ScoredPoints) -> pd.DataFrame:
+def _confusion_table(
+    points: ScoredPoints, label_names: Mapping[str, str], region_names: Mapping[str, str]
+) -> pd.DataFrame:
     """The commonest (image region, truth, prediction) triples among incidents."""
     counts: Counter[tuple[str, str, str]] = Counter()
     for region, truth, prediction, out_of_region in zip(
@@ -1212,13 +1252,25 @@ def _confusion_table(points: ScoredPoints) -> pd.DataFrame:
     rows: list[dict[str, object]] = [
         {
             "image_region_id": region,
+            "image_region_name": _display(region, region_names),
             "gt_label": truth,
+            "gt_label_name": _display(truth, label_names),
             "pred_label": prediction,
+            "pred_label_name": _display(prediction, label_names),
             "n": count,
         }
         for (region, truth, prediction), count in ordered[:CONFUSION_ROW_LIMIT]
     ]
     return _frame(rows, CONFUSION_COLUMNS)
+
+
+def _display(identifier: str, names: Mapping[str, str]) -> str:
+    """The display name for an id, or the id where no name resolves.
+
+    An empty cell reads as "this thing has no name"; the id reads as
+    "unresolved", which is the state a partial name snapshot leaves behind.
+    """
+    return names.get(identifier) or identifier
 
 
 def _frame(rows: Sequence[Mapping[str, object]], columns: Sequence[str]) -> pd.DataFrame:

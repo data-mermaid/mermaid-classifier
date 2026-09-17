@@ -165,6 +165,32 @@ class GrowthFormLibrary:
         return self.by_id[gf_id]
 
 
+class RegionLibrary:
+    """
+    MERMAID region IDs and their names, from the /v1/choices/ region set.
+    The benthic attribute response carries region IDs and no names, so a
+    report that renders a region by name resolves it here.
+    This is intended to be a singleton class.
+    """
+
+    def __init__(self):
+        download_response = urllib.request.urlopen("https://api.datamermaid.org/v1/choices/")
+        response_json = json.loads(download_response.read())
+        data = None
+        for item in response_json:
+            if item["name"] == "regions":
+                data = item["data"]
+                break
+        if data is None:
+            raise ValueError("'regions' not found in /v1/choices/ response")
+        self.by_id = {region["id"]: region["name"] for region in data}
+
+    def id_to_name(self, region_id: str) -> str:
+        if region_id == "":
+            return ""
+        return self.by_id[region_id]
+
+
 @functools.cache
 def get_benthic_attribute_library() -> BenthicAttributeLibrary:
     """
@@ -182,6 +208,15 @@ def get_growth_form_library() -> GrowthFormLibrary:
     get_benthic_attribute_library().
     """
     return GrowthFormLibrary()
+
+
+@functools.cache
+def get_region_library() -> RegionLibrary:
+    """
+    Lazily construct (and cache) the region library singleton. See
+    get_benthic_attribute_library().
+    """
+    return RegionLibrary()
 
 
 @dataclasses.dataclass
