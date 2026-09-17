@@ -44,7 +44,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yaml
 from pyspacer._calibrated_model_fixture import make_calibrated_model
 
 from mermaid_classifier.pyspacer.inference import export_artifact
@@ -61,7 +60,6 @@ from mermaid_classifier.region_eval.probe_set import (
 from mermaid_classifier.region_eval.score import (
     _ratio_to_baseline_interval,
     load_probe,
-    paired_comparison,
     score_model,
     write_report,
 )
@@ -137,13 +135,6 @@ NAMES = NameSnapshot(
     benthic_attributes=BA_NAMES, growth_forms=GF_NAMES, regions=REGION_DISPLAY_NAMES
 )
 
-# Ids a report renders: the six attributes and six growth forms the model
-# classes and the probe ground truth span between them, and the three regions
-# the directions run between.
-N_RENDERED_ATTRIBUTES = 6
-N_RENDERED_GROWTH_FORMS = 6
-N_RENDERED_REGIONS = 3
-
 CORAL_ROOT = "root-coral"
 # Every attribute under one root, so every out-of-region prediction shares a
 # branch with its ground truth and the share is exactly 1.
@@ -171,16 +162,10 @@ CORPUS_COUNTS = {
     "ba3": {TROPICAL_ATLANTIC: 605, CENTRAL_INDO_PACIFIC: 605},
     "ba4": {TROPICAL_ATLANTIC: 605},
 }
-N_CORPUS_COUNT_PAIRS = 5
-
-# Distinct (ground-truth attribute, region) pairs the probe itself carries:
-# {ba0, ba1, ba3, ba9} in the Atlantic and {ba0..ba4} in the Pacific.
-N_PROBE_COUNT_PAIRS = 9
 
 N_POINTS = 25
 N_IMAGES = 6
 N_HELD_OUT = 17
-N_HELD_OUT_IMAGES = 4
 N_IN_MODEL_CLASSES = 24
 N_GT_OUT_OF_REGION = 3
 N_GT_DISCRIMINATING = 19
@@ -311,11 +296,6 @@ def _bucket_counts(score) -> dict[str, int]:
     return {str(row["bucket"]): int(row["n"]) for _, row in score.triage.bucket_counts.iterrows()}
 
 
-def _limitation(out_dir: Path, entry_id: str) -> dict:
-    payload = yaml.safe_load((out_dir / "limitations.yaml").read_text())
-    return next(entry for entry in payload["limitations"] if entry["id"] == entry_id)["magnitude"]
-
-
 def _read_csv(path: Path) -> pd.DataFrame:
     """The written CSV as text, so an empty cell stays distinguishable."""
     return pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -373,9 +353,7 @@ class ScoreReportTest(unittest.TestCase):
             "confusion.csv",
             "region_list_suspects.csv",
             "decisions.csv",
-            "limitations.yaml",
             "manifest.json",
-            "summary.md",
         ):
             self.assertTrue((out_dir / name).exists(), f"{name} was not written")
 
@@ -472,93 +450,6 @@ class ScoreReportTest(unittest.TestCase):
             self.assertAlmostEqual(float(row["ci_high"]), estimate.ci_high, msg=population)
         self.assertEqual(int(summary.loc[("all", "accuracy"), "n"]), N_IN_MODEL_CLASSES)
 
-    def test_limitations_carry_a_measured_magnitude_for_every_caveat(self):
-        """A caveat reduced to prose is one a reader can wave away, so each
-        entry is asserted to carry numbers -- and the numbers are the ones
-        counted by hand off the probe table.
-        """
-        score = self._score()
-        out_dir = self.root / "out"
-        write_report(score, out_dir)
-
-        payload = yaml.safe_load((out_dir / "limitations.yaml").read_text())
-        entries = {entry["id"]: entry for entry in payload["limitations"]}
-        self.assertEqual(
-            set(entries),
-            {
-                "per_direction_sample_size",
-                "realized_design_effect",
-                "clusters_are_images_not_sites",
-                "model_class_region_coverage",
-                "ground_truth_out_of_region_floor",
-                "region_polygons_disjoint",
-                "triage_ground_truth_counts",
-                "name_resolution",
-                "within_branch_ancestry",
-                "held_out_training_exclusion",
-                "masking_upper_bound",
-            },
-        )
-        for name, entry in entries.items():
-            self.assertTrue(entry["statement"].strip(), f"{name} has no statement")
-            self.assertIsInstance(entry["magnitude"], dict, f"{name} magnitude is not a mapping")
-            self.assertTrue(entry["magnitude"], f"{name} carries no measured magnitude")
-
-        floor = entries["ground_truth_out_of_region_floor"]["magnitude"]
-        self.assertEqual(floor["k"], N_GT_OUT_OF_REGION)
-        self.assertEqual(floor["n"], N_POINTS)
-
-        clusters = entries["clusters_are_images_not_sites"]["magnitude"]
-        self.assertEqual(clusters["n_images"], N_IMAGES)
-        self.assertEqual(clusters["n_points"], N_POINTS)
-        self.assertEqual(clusters["n_points_with_site_id"], 0)
-
-        coverage = entries["model_class_region_coverage"]["magnitude"]
-        self.assertEqual(coverage["n_model_classes"], 5)
-        self.assertEqual(coverage["n_region_discriminating"], 4)
-        self.assertEqual(coverage["n_never_discriminating"], 1)
-        self.assertEqual(coverage["n_untestable_no_probe_region"], 1)
-        self.assertEqual(coverage["untestable_classes"], ["ba3::gf3"])
-
-        polygons = entries["region_polygons_disjoint"]["magnitude"]
-        self.assertEqual(polygons["n_regions"], 12)
-        self.assertEqual(polygons["n_pairs_tested"], 66)
-        self.assertEqual(polygons["n_pairs_intersecting"], 0)
-
-        directions = entries["per_direction_sample_size"]["magnitude"]
-        self.assertGreater(directions["n_directions"], 0)
-        self.assertEqual(len(directions["directions"]), directions["n_directions"])
-
-        effects = entries["realized_design_effect"]["magnitude"]
-        self.assertEqual(effects["n_measured"] + effects["n_degenerate"], 4)
-
-        held_out = entries["held_out_training_exclusion"]["magnitude"]
-        self.assertEqual(held_out["n_held_out_points"], N_HELD_OUT)
-        self.assertEqual(held_out["n_held_out_images"], N_HELD_OUT_IMAGES)
-        self.assertAlmostEqual(held_out["share_points_held_out"], N_HELD_OUT / N_POINTS)
-        self.assertIn("not verifiable", held_out["training_exclusion"])
-
-    def test_the_held_out_block_says_the_exclusion_cannot_be_verified(self):
-        """`held_out` means only that the image is outside a census region.
-        A model whose training run never consumed the matching exclusion list
-        produces a held-out block that is a training-set measurement, and the
-        block is what the mitigation argument quotes, so the qualifier travels
-        with the rates rather than living only in limitations.yaml.
-        """
-        score = self._score()
-        out_dir = self.root / "out"
-        write_report(score, out_dir)
-        text = (out_dir / "summary.md").read_text()
-
-        held_out = text.index("### Held-out points only")
-        qualifier = text.index("not verifiable from here", held_out)
-        self.assertLess(qualifier, text.index("## Other denominators"))
-        self.assertIn("training-set measurement", text[held_out:])
-
-        manifest = json.loads((out_dir / "manifest.json").read_text())
-        self.assertIn("census region", manifest["held_out"]["definition"])
-        self.assertIn("not verifiable", manifest["held_out"]["training_exclusion"])
-
     def test_frozen_corpus_counts_bucket_events_the_probes_own_counts_call_mistakes(self):
         """Stypopodium is annotated 605 times in the Western Indo-Pacific, which
         marks a broadly distributed genus rather than 605 mistakes. A probe
@@ -586,175 +477,32 @@ class ScoreReportTest(unittest.TestCase):
         self.assertGreater(len(suspects), 0)
         self.assertEqual(set(suspects["n_ground_truth"]), {605})
 
-    def test_limitations_name_the_frozen_counts_as_the_triage_source(self):
-        """A suspect table read off corpus counts is authoritative; one read off
-        the probe is a lower bound. A reader must be able to tell which.
+    def test_region_list_drift_reports_a_hash_comparison(self):
+        """A hash comparison, not a rescore: same map unmoved, changed map
+        moved, and an unreachable loader degrades with its reason rather than
+        raising or leaving `moved` looking like a measurement.
         """
-        score = self._score(probe=load_probe(self._counted_probe()))
-        write_report(score, self.root / "out")
+        unmoved = self._score(live_map=_live_map())
+        self.assertEqual(unmoved.drift["status"], "computed")
+        self.assertIsNone(unmoved.drift["reason"])
+        self.assertFalse(unmoved.drift["moved"])
+        self.assertEqual(unmoved.drift["live_snapshot_hash"], unmoved.drift["frozen_snapshot_hash"])
 
-        magnitude = _limitation(self.root / "out", "triage_ground_truth_counts")
-        self.assertEqual(magnitude["source"], "frozen_corpus")
-        self.assertFalse(magnitude["is_lower_bound"])
-        self.assertEqual(magnitude["n_pairs"], N_CORPUS_COUNT_PAIRS)
-        self.assertEqual(magnitude["threshold"], 5)
-
-    def test_a_probe_without_frozen_counts_falls_back_and_says_so(self):
-        """A probe built before the counts were frozen still scores; what it
-        must not do is present a lower-bound suspect table as the corpus one.
-        """
-        score = self._score()
-        write_report(score, self.root / "out")
-
-        magnitude = _limitation(self.root / "out", "triage_ground_truth_counts")
-        self.assertEqual(magnitude["source"], "probe_lower_bound")
-        self.assertTrue(magnitude["is_lower_bound"])
-        self.assertEqual(magnitude["n_pairs"], N_PROBE_COUNT_PAIRS)
-
-    def test_the_multiple_of_the_floor_reports_how_many_draws_it_was_read_over(self):
-        """The interval is read over the draws whose ground-truth floor was not
-        empty, so it is conditional; without the two counts a reader cannot see
-        on how much, and an infinite bound looks like a defect.
-        """
-        score = self._score()
-        out_dir = self.root / "out"
-        write_report(score, out_dir)
-
-        magnitude = _limitation(out_dir, "ground_truth_out_of_region_floor")
-        self.assertEqual(magnitude["n_ratio_draws"], N_RESAMPLES)
-        self.assertGreaterEqual(magnitude["n_ratio_draws_empty_floor"], 0)
-        self.assertLessEqual(magnitude["n_ratio_draws_empty_floor"], N_RESAMPLES)
-
-        summary = _read_csv(out_dir / "summary.csv").set_index(["population", "metric"])
-        self.assertIn("floor", summary.loc[("all", "ratio_to_gt"), "method"])
-
-    def test_markdown_leads_with_the_headline_rate_beside_the_floor(self):
-        """The all-points headline has to come first: a reader who stops after
-        the first number must have read the rate a model is judged on, beside
-        the floor it is judged against, not the held-out subset. Above the
-        drift diagnostic no rate may appear without its interval.
-        """
-        score = self._score()
-        out_dir = self.root / "out"
-        write_report(score, out_dir)
-        text = (out_dir / "summary.md").read_text()
-
-        headline = text.index("## Headline")
-        out_of_region = text.index("- Out-of-region predictions:")
-        floor = text.index("- Ground-truth floor:")
-        held_out = text.index("Held-out points only")
-        self.assertLess(headline, out_of_region)
-        self.assertLess(out_of_region, floor)
-        self.assertLess(floor, held_out)
-
-        results = text[: text.index("## Region list drift")]
-        for line in results.splitlines():
-            if line.startswith("- ") and "%" in line:
-                self.assertIn("[", line, f"rate rendered without its interval: {line}")
-
-    def test_live_region_map_difference_produces_a_non_zero_drift_diagnostic(self):
-        """A coral gaining a region upstream moves the score; without this
-        diagnostic that movement is indistinguishable from a model change.
-        Giving ba1 the Pacific takes the ground-truth floor from 3 to 2.
-        """
-        score = self._score(
-            live_map=_live_map(ba1=[TROPICAL_ATLANTIC, CENTRAL_INDO_PACIFIC]),
+        moved = self._score(
+            name="v2", live_map=_live_map(ba1=[TROPICAL_ATLANTIC, CENTRAL_INDO_PACIFIC])
         )
-        drift = score.drift
+        self.assertEqual(moved.drift["status"], "computed")
+        self.assertTrue(moved.drift["moved"])
+        self.assertNotEqual(moved.drift["live_snapshot_hash"], moved.drift["frozen_snapshot_hash"])
 
-        self.assertEqual(drift["status"], "computed")
-        self.assertEqual(drift["n_attributes_region_changed"], 1)
-        self.assertEqual(drift["n_probe_attributes_changed"], 1)
-        self.assertEqual(drift["probe_attributes_changed"], ["ba1"])
-        self.assertNotEqual(drift["live_snapshot_hash"], drift["frozen_snapshot_hash"])
-
-        rates = {entry["metric"]: entry for entry in drift["rates"]}
-        self.assertEqual(rates["gt_oor_rate"]["frozen_k"], N_GT_OUT_OF_REGION)
-        self.assertEqual(rates["gt_oor_rate"]["live_k"], N_GT_OUT_OF_REGION - 1)
-        self.assertAlmostEqual(rates["gt_oor_rate"]["delta"], -1 / N_POINTS)
-
-    def test_unreachable_live_region_map_degrades_without_failing_the_run(self):
-        """The frozen-map results are complete whether or not the API answers,
-        so an unreachable library costs the diagnostic, not the run.
-        """
-        score = self._score(live_map=_unreachable_live_map())
-        out_dir = self.root / "out"
-        write_report(score, out_dir)
-
-        self.assertEqual(score.drift["status"], "not_computed")
-        self.assertIn("ConnectionError", score.drift["reason"])
-
-        summary = _read_csv(out_dir / "summary.csv")
+        unreachable = self._score(name="v3", live_map=_unreachable_live_map())
+        self.assertEqual(unreachable.drift["status"], "not_computed")
+        self.assertIn("ConnectionError", unreachable.drift["reason"])
+        self.assertIsNone(unreachable.drift["moved"])
+        self.assertIsNone(unreachable.drift["live_snapshot_hash"])
         self.assertEqual(
-            summary[summary["population"] == "all"].set_index("metric").loc["oor_rate", "n"],
-            str(N_POINTS),
+            unreachable.drift["frozen_snapshot_hash"], unmoved.drift["frozen_snapshot_hash"]
         )
-        manifest = json.loads((out_dir / "manifest.json").read_text())
-        self.assertEqual(manifest["region_list_drift"]["status"], "not_computed")
-        self.assertIn("Not computed", (out_dir / "summary.md").read_text())
-
-    def test_two_models_are_compared_pairwise_on_identical_points(self):
-        """An unpaired two-proportion test here would discard the variation the
-        two models share and most of the power with it. The comparison is
-        asserted to be paired, and to be read over one denominator both models
-        share -- 24 points for accuracy, the label space they have in common.
-        """
-        first = self._score("v1", seed=0)
-        second = self._score("v2", seed=1)
-
-        self.assertEqual(first.probe.points_fingerprint, second.probe.points_fingerprint)
-        self.assertEqual(first.points.image_ids, second.points.image_ids)
-        self.assertEqual(first.points.gt_labels, second.points.gt_labels)
-        self.assertNotEqual(first.points.pred_labels, second.points.pred_labels)
-
-        comparison = paired_comparison([first, second])
-        self.assertEqual(set(comparison["model_a"]), {"v1"})
-        self.assertEqual(set(comparison["model_b"]), {"v2"})
-        self.assertEqual(
-            sorted(comparison["metric"]),
-            ["accuracy", "oor_rate", "oor_rate_disc", "oor_rate_disc_gt"],
-        )
-        self.assertEqual(set(comparison["points_fingerprint"]), {first.probe.points_fingerprint})
-
-        for _, row in comparison.iterrows():
-            self.assertIn("paired", row["method"], row["metric"])
-            self.assertIn("McNemar", row["method"], row["metric"])
-            self.assertFalse(math.isnan(row["ci_low"]), row["metric"])
-            self.assertFalse(math.isnan(row["ci_high"]), row["metric"])
-            self.assertAlmostEqual(row["difference"], row["rate_a"] - row["rate_b"])
-            self.assertLessEqual(
-                row["n_discordant_a_only"] + row["n_discordant_b_only"], row["n_paired"]
-            )
-            self.assertGreaterEqual(row["mcnemar_p"], 0.0)
-            self.assertLessEqual(row["mcnemar_p"], 1.0)
-
-        accuracy = comparison.set_index("metric").loc["accuracy"]
-        self.assertEqual(int(accuracy["n_paired"]), N_IN_MODEL_CLASSES)
-
-    def test_paired_comparison_refuses_models_scored_on_different_points(self):
-        """Pairing two scores taken on different point sets would report a
-        difference the shared-draw interval cannot support, so the mismatch
-        has to stop the comparison rather than quietly widen it.
-
-        The second probe carries the same 25 points in reverse, so the arrays
-        still line up by shape: only the fingerprint check can catch it, and a
-        broadcast error cannot stand in for the guard.
-        """
-        other_dir = self.root / "probe_reversed"
-        _write_probe(other_dir, self.features, points=PROBE_POINTS[::-1])
-        model_pt, model_json = _export_model(self.root / "model_reversed")
-        reversed_score = score_model(
-            "reversed",
-            model_pt_path=model_pt,
-            model_json_path=model_json,
-            probe=load_probe(other_dir),
-            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
-            live_region_map_loader=_live_map(),
-        )
-
-        self.assertNotEqual(self.probe.points_fingerprint, reversed_score.probe.points_fingerprint)
-        with self.assertRaisesRegex(ValueError, "different probe points"):
-            paired_comparison([self._score(), reversed_score])
 
 
 class ProbeIntegrityTest(unittest.TestCase):
@@ -949,19 +697,6 @@ class NameResolutionTest(unittest.TestCase):
             "an unnamed region keeps its id, which reads as unresolved",
         )
 
-    def test_limitations_count_the_ids_no_name_resolved(self):
-        """A blank cell hides the gap; the count makes it a measured caveat.
-        The frozen names omit ba4, gf4 and the Eastern Pacific.
-        """
-        magnitude = _limitation(self.out_dir, "name_resolution")
-        self.assertEqual(magnitude["source"], "frozen_probe")
-        self.assertEqual(magnitude["n_benthic_attributes"], N_RENDERED_ATTRIBUTES)
-        self.assertEqual(magnitude["n_benthic_attributes_unresolved"], 1)
-        self.assertEqual(magnitude["n_growth_forms"], N_RENDERED_GROWTH_FORMS)
-        self.assertEqual(magnitude["n_growth_forms_unresolved"], 1)
-        self.assertEqual(magnitude["n_regions"], N_RENDERED_REGIONS)
-        self.assertEqual(magnitude["n_regions_unresolved"], 1)
-
     def test_manifest_records_the_frozen_name_and_ancestry_hashes(self):
         """Two scores render the same names only if they read the same
         snapshot, which the hash is what makes checkable."""
@@ -971,7 +706,7 @@ class NameResolutionTest(unittest.TestCase):
             manifest["probe"]["ancestry_hash"], ancestry_snapshot_hash(ONE_BRANCH_ANCESTRY)
         )
 
-    def test_a_probe_frozen_without_names_renders_ids_and_counts_them_all(self):
+    def test_a_probe_frozen_without_names_renders_ids(self):
         """A probe built before the names were frozen still scores; what it
         must not do is emit blank name cells that read as "unnamed".
         """
@@ -991,15 +726,6 @@ class NameResolutionTest(unittest.TestCase):
 
         table = _read_csv(out_dir / "per_label.csv")
         self.assertEqual(list(table["label"]), list(table["label_name"]))
-
-        magnitude = _limitation(out_dir, "name_resolution")
-        self.assertEqual(magnitude["source"], "none")
-        self.assertEqual(
-            magnitude["n_benthic_attributes_unresolved"], magnitude["n_benthic_attributes"]
-        )
-        self.assertEqual(magnitude["n_growth_forms_unresolved"], magnitude["n_growth_forms"])
-        self.assertEqual(magnitude["n_regions_unresolved"], magnitude["n_regions"])
-        self.assertEqual(magnitude["n_benthic_attributes"], N_RENDERED_ATTRIBUTES)
 
     def _bare_probe(self):
         probe_dir = self.root / "probe_bare"
@@ -1067,8 +793,7 @@ class DecisionStatisticsTest(unittest.TestCase):
     def test_the_ratio_interval_carries_both_of_its_terms(self):
         """Inverting the permutation interval alone reports how tightly the
         null is pinned as the ratio's precision. On the real run that is 2.5x
-        too narrow, and the ratio reaches summary.md without its method
-        string, so the caveat has to be in the bounds themselves: each end
+        too narrow, so the caveat has to be in the bounds themselves: each end
         divides one end of the measured rate's cluster bootstrap interval by
         the opposite end of the permutation interval.
         """
@@ -1100,25 +825,6 @@ class DecisionStatisticsTest(unittest.TestCase):
         row = self._decisions().loc[("region_blind", "ratio")]
         self.assertAlmostEqual(float(row["ci_low"]), float(ratio["ci_low"]))
         self.assertAlmostEqual(float(row["ci_high"]), float(ratio["ci_high"]))
-
-    def test_the_markdown_renders_the_widened_ratio_interval(self):
-        """summary.md carries no method column, so the bounds a reader takes
-        for the ratio's confidence interval are the only place the second
-        source of uncertainty can appear.
-        """
-        baseline = self.score.decisions.region_blind
-        measured = self.score.metrics.overall.oor_rate_disc
-        text = (self.out_dir / "summary.md").read_text()
-
-        low = measured.ci_low / baseline.baseline_ci_high
-        high = measured.ci_high / baseline.baseline_ci_low
-        self.assertIn(f"[{low:.4f}, {high:.4f}]", text)
-        self.assertNotIn(
-            f"[{baseline.observed_rate / baseline.baseline_ci_high:.4f},"
-            f" {baseline.observed_rate / baseline.baseline_ci_low:.4f}]",
-            text,
-            "the null-only inversion must not reach the human summary",
-        )
 
     def test_a_region_blind_model_scores_near_the_permutation_baseline(self):
         """The fixture model reads features that carry nothing about region, so
@@ -1207,10 +913,6 @@ class DecisionStatisticsTest(unittest.TestCase):
         within = rows[rows["statistic"] == "within_branch"]
         self.assertEqual(set(within["status"]), {"not_computed"})
 
-        magnitude = _limitation(out_dir, "within_branch_ancestry")
-        self.assertEqual(magnitude["status"], "not_computed")
-        self.assertTrue(str(magnitude["reason"]).strip())
-
         summary = _read_csv(out_dir / "summary.csv")
         self.assertEqual(
             summary[summary["population"] == "all"].set_index("metric").loc["oor_rate", "n"],
@@ -1228,21 +930,6 @@ class DecisionStatisticsTest(unittest.TestCase):
         self.assertEqual(
             [], [method for method in rows["method"] if not method.strip()], "a method is blank"
         )
-
-    def test_markdown_leads_the_interpretation_with_the_ratio(self):
-        """The ratio is what picks the mitigation, so a reader who stops after
-        the first line of the section must have read it -- not the masking
-        delta, which is only worth pricing once the ratio says masking is the
-        answer.
-        """
-        text = (self.out_dir / "summary.md").read_text()
-        section = text.index("## What to do about it")
-        ratio = text.index("region-blind rate", section)
-        masking = text.index("Masking", section)
-        self.assertLess(section, ratio)
-        self.assertLess(ratio, masking)
-        self.assertIn("fixes", text[section:])
-        self.assertIn("breaks", text[section:])
 
 
 class RatioIntervalTest(unittest.TestCase):

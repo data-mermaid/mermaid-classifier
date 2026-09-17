@@ -5,16 +5,10 @@ corpus-wide annotation counts triage reads, the frozen display names and
 taxonomic ancestry, and the cached feature matrix from --probe-dir, runs each
 --model through the production loader, and writes one report directory per
 model under --out-dir (summary.csv, the per-region/label/direction tables,
-decisions.csv, limitations.yaml, manifest.json and a Markdown summary). A probe
-carrying no counts file leaves triage reading the probe's own ground truth, a
-lower bound that limitations.yaml records; one carrying no names renders ids,
-and one carrying no ancestry leaves the within-branch share uncomputed. Both
-are recorded there too.
-
-Two or more models are scored on identical points, so the comparison between
-them is paired and lands in paired_comparison.csv at the top of --out-dir. An
-unpaired two-proportion test on these rates would discard the variation the
-models share, and most of the power with it.
+decisions.csv and manifest.json). A probe carrying no counts file leaves
+triage reading the probe's own ground truth, a lower bound that manifest.json
+records; one carrying no names renders ids, and one carrying no ancestry
+leaves the within-branch share uncomputed. Both are recorded there too.
 
 A model path is either a local directory holding model.pt + model.json, or the
 s3:// prefix of a released version. The feature cache is downloaded and
@@ -35,10 +29,7 @@ Outputs (in --out-dir):
     <model>/confusion.csv         commonest (region, truth, prediction) triples
     <model>/region_list_suspects.csv  pairs the ground truth supports upstream
     <model>/decisions.csv         the statistics that choose between mitigations
-    <model>/limitations.yaml      every caveat with its measured magnitude
     <model>/manifest.json         probe hashes, model paths, drift diagnostic
-    <model>/summary.md            the headline rate beside the ground-truth floor
-    paired_comparison.csv         with two or more models
 """
 
 from __future__ import annotations
@@ -61,11 +52,9 @@ from mermaid_classifier.region_eval.features import (
 )
 from mermaid_classifier.region_eval.metrics import RegionMetricsOptions
 from mermaid_classifier.region_eval.score import (
-    COMPARISON_FILE,
     PROBE_FEATURES_FILE,
     ModelScore,
     load_probe,
-    paired_comparison,
     score_model,
     write_report,
 )
@@ -217,11 +206,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             if score.drift.get("status") != "computed":
                 logger.warning("  region list drift not computed: %s", score.drift.get("reason"))
-
-    if len(scores) > 1:
-        comparison = paired_comparison(scores, options=options)
-        comparison.to_csv(out_dir / COMPARISON_FILE, index=False, na_rep="nan")
-        logger.info("wrote %s", out_dir / COMPARISON_FILE)
 
     logger.info("wrote %s", out_dir)
     return 0

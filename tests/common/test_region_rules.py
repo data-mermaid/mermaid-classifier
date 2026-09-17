@@ -16,7 +16,6 @@ file while producing intervals that are far too narrow.
 """
 
 import itertools
-import time
 import unittest
 from collections.abc import Sequence
 
@@ -28,7 +27,6 @@ from mermaid_classifier.common.region_rules import (
     design_effect,
     is_out_of_region,
     is_region_discriminating,
-    mcnemar_paired,
     paired_cluster_bootstrap_diff,
     partition_by_recorded_region,
     permutation_baseline,
@@ -399,52 +397,6 @@ class DesignEffectTest(unittest.TestCase):
         at_one_percent = design_effect((0.1, 0.9), 10, 20, alpha=0.01)
         self.assertAlmostEqual(at_five_percent, 3.97207, places=4)
         self.assertAlmostEqual(at_one_percent, 2.56919, places=4)
-
-
-class McnemarPairedTest(unittest.TestCase):
-    """Exact two-sided binomial p-value on the discordant pairs."""
-
-    def test_all_discordance_on_one_side_is_significant(self):
-        """n=10 discordant, min(b,c)=0, so p = 2 * C(10,0)/2^10 = 2/1024."""
-        p_value = mcnemar_paired(10, 0)
-        self.assertAlmostEqual(p_value, 0.001953125, places=12)
-        self.assertLess(p_value, 0.05)
-
-    def test_eight_against_two(self):
-        """p = 2 * (C(10,0) + C(10,1) + C(10,2)) / 2^10 = 2 * 56/1024 = 0.109375."""
-        self.assertAlmostEqual(mcnemar_paired(8, 2), 0.109375, places=12)
-
-    def test_balanced_discordance_returns_exactly_one(self):
-        for discordant in (1, 7, 40):
-            with self.subTest(b=discordant, c=discordant):
-                self.assertEqual(mcnemar_paired(discordant, discordant), 1.0)
-
-    def test_no_discordant_pairs_returns_one(self):
-        self.assertEqual(mcnemar_paired(0, 0), 1.0)
-
-    def test_result_is_symmetric_in_its_arguments(self):
-        """Using b alone rather than min(b, c) passes only one of these."""
-        self.assertEqual(mcnemar_paired(3, 9), mcnemar_paired(9, 3))
-
-    def test_negative_counts_are_rejected(self):
-        with self.assertRaises(ValueError):
-            mcnemar_paired(-1, 3)
-
-    def test_a_large_discordant_count_stays_fast(self):
-        """Point-level comparisons reach this size; the p-value must still land.
-
-        Summing exact binomial coefficients costs O(n^2) bignum work: 40k
-        discordant pairs took 177s and 100k extrapolates to half an hour, with
-        the job merely appearing hung. The log-space tail is linear and returns
-        in milliseconds.
-        """
-        start = time.perf_counter()
-        p_value = mcnemar_paired(60_000, 40_000)
-        elapsed = time.perf_counter() - start
-        self.assertLess(elapsed, 0.5)
-        # 60k against 40k is far beyond any threshold; only the magnitude matters.
-        self.assertGreaterEqual(p_value, 0.0)
-        self.assertLess(p_value, 1e-10)
 
 
 class PermutationBaselineTest(unittest.TestCase):

@@ -12,24 +12,25 @@ the labels a model was never trained on -- flattering a narrow label space.
 The metrics layer excludes them from accuracy and F1 on its own, given the
 model's class list.
 
-Every model is scored twice: once against the region map frozen with the
-probe, and once against the map the MERMAID API serves now. MERMAID curates
-those region lists, so without the second pass a score that moved because a
-coral gained a region is indistinguishable from a score that moved because
-the model changed. Fetching the live map is the one network call this module
-makes, and an unreachable API degrades the diagnostic to "not computed"
-rather than failing a run that is otherwise complete.
+The score itself is read once, against the region map frozen with the probe.
+`region_list_drift` separately compares that frozen map's hash against a hash
+of the map the MERMAID API serves now, so a coral gaining a region between the
+probe's freeze and this run shows up as a hash mismatch rather than being
+folded silently into the rates. Fetching the live map is the one network call
+this module makes, and an unreachable API degrades the diagnostic to "not
+computed" rather than failing a run that is otherwise complete.
 
 Triage reads the corpus-wide annotation counts frozen with the probe, for the
 same reason the region map is frozen. A probe built before they were frozen
 falls back to the probe's own ground truth, which counts each pair only as
 often as the probe samples it and so reads the model-error headline high;
-`limitations.yaml` records which of the two a score was taken on.
+`manifest.json`'s `ground_truth_counts_source` records which of the two a
+score was taken on.
 
 Every table renders the display names frozen with the probe beside the ids it
 keys on, so the artifact that says which labels cause this can be read without
 a join. An id the snapshot does not name renders as the id, which reads as
-unresolved rather than as unnamed, and `limitations.yaml` counts those too.
+unresolved rather than as unnamed.
 
 `decisions` runs alongside the rates, because a rate says how bad the problem
 is and says nothing about which mitigation answers it. The region-blind
@@ -55,18 +56,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import yaml
 from numpy.typing import NDArray
 
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
     get_benthic_attribute_library,
     split_ba_gf,
-)
-from mermaid_classifier.common.region_rules import (
-    is_region_discriminating,
-    mcnemar_paired,
-    paired_cluster_bootstrap_diff,
 )
 from mermaid_classifier.pyspacer.inference import load_predictor
 from mermaid_classifier.region_eval.decisions import (
@@ -125,11 +120,8 @@ from mermaid_classifier.region_eval.triage import (
 logger = logging.getLogger(__name__)
 
 SUMMARY_FILE = "summary.csv"
-LIMITATIONS_FILE = "limitations.yaml"
 MANIFEST_FILE = "manifest.json"
-MARKDOWN_FILE = "summary.md"
 DECISIONS_FILE = "decisions.csv"
-COMPARISON_FILE = "paired_comparison.csv"
 
 DECISIONS_COLUMNS = (
     "model",
@@ -159,23 +151,6 @@ SUMMARY_COLUMNS = (
     "wilson_high",
     "design_effect",
     "imprecise",
-    "method",
-)
-
-COMPARISON_COLUMNS = (
-    "metric",
-    "model_a",
-    "model_b",
-    "rate_a",
-    "rate_b",
-    "difference",
-    "ci_low",
-    "ci_high",
-    "n_paired",
-    "n_discordant_a_only",
-    "n_discordant_b_only",
-    "mcnemar_p",
-    "points_fingerprint",
     "method",
 )
 
@@ -212,14 +187,6 @@ EXCESS_DENOMINATOR = (
     " on one shared draw of images"
 )
 
-# All 12 MEOW region polygons were measured mutually disjoint: none of the 66
-# pairs intersects, and their areas sum exactly to their union. The upstream
-# first-intersecting-polygon assignment is therefore deterministic except
-# exactly on a shared boundary.
-MEOW_N_REGIONS = 12
-MEOW_N_PAIRS_TESTED = 66
-MEOW_N_PAIRS_INTERSECTING = 0
-
 # `held_out` marks a point whose image region is not a census region of the
 # probe. The portable artifact records its label space and the libraries it
 # was built with, and nothing about which points its training run excluded, so
@@ -236,14 +203,6 @@ HELD_OUT_TRAINING_EXCLUSION = (
 STATUS_COMPUTED = "computed"
 STATUS_NOT_COMPUTED = "not_computed"
 
-DRIFT_COMPUTED = STATUS_COMPUTED
-DRIFT_NOT_COMPUTED = STATUS_NOT_COMPUTED
-
-# Where the display names came from. Only a probe carrying the frozen
-# snapshot can name anything; without it every id renders as itself.
-NAMES_SOURCE_PROBE = "frozen_probe"
-NAMES_SOURCE_NONE = "none"
-
 # Where the (attribute, region) annotation counts triage reads came from. Only
 # the corpus-wide ones carry the count the list-suspect threshold is set for;
 # the probe's own ground truth counts each pair at most as often as the probe
@@ -251,12 +210,6 @@ NAMES_SOURCE_NONE = "none"
 COUNTS_SOURCE_CORPUS = "frozen_corpus"
 COUNTS_SOURCE_PROBE = "probe_lower_bound"
 COUNTS_SOURCE_CALLER = "caller_supplied"
-
-CORE_RATE_METRICS = ("oor_rate", "oor_rate_disc", "oor_rate_disc_gt", "gt_oor_rate")
-
-# Rates a v1-vs-v2 comparison is read on. The ground-truth floor is not one
-# of them: it is a property of the probe, identical for every model.
-PAIRED_METRICS = ("oor_rate", "oor_rate_disc", "oor_rate_disc_gt", "accuracy")
 
 RegionMap = Mapping[str, frozenset[str]]
 LiveRegionMapLoader = Callable[[], RegionMap]
@@ -691,12 +644,7 @@ def score_model(
         ),
         ground_truth_counts_source=counts_source,
         n_ground_truth_pairs=len(counts),
-        drift=region_list_drift(
-            probe=probe,
-            predictions=predictions,
-            classes=classes,
-            live_region_map_loader=live_region_map_loader,
-        ),
+        drift=region_list_drift(probe=probe, live_region_map_loader=live_region_map_loader),
     )
 
 
@@ -771,116 +719,40 @@ def compute_decisions(
 
 
 def region_list_drift(
-    *,
-    probe: LoadedProbe,
-    predictions: Sequence[str],
-    classes: Sequence[str],
-    live_region_map_loader: LiveRegionMapLoader,
+    *, probe: LoadedProbe, live_region_map_loader: LiveRegionMapLoader
 ) -> dict[str, Any]:
-    """How far the live region map has moved from the frozen one, and what that costs.
+    """Whether the region map has moved since the probe's map was frozen.
 
-    Rates are recomputed under both maps as bare k/n. The diagnostic answers
-    "would this score read differently against today's region lists", and a
-    point estimate answers it; the intervals in `summary.csv` all belong to
-    the frozen map the probe is pinned to.
+    A hash comparison rather than a rescore: the probe already carries the
+    frozen map's hash, and hashing the live map the same way answers "has this
+    moved" without a second pass over every point or a set of rates a reader
+    could mistake for the score itself.
 
-    A live map that cannot be fetched leaves the diagnostic not computed,
-    carrying the reason, rather than failing a run whose frozen-map results
-    are complete.
+    A live map that cannot be fetched leaves `moved` unanswerable, carrying
+    the reason, rather than failing a run whose frozen-map results are
+    complete.
     """
-    frozen = probe.region_ids_by_attribute
+    frozen_hash = probe.region_snapshot_hash
     try:
         live = dict(live_region_map_loader())
     except Exception as error:  # noqa: BLE001 - any fetch failure degrades the diagnostic
         logger.warning("live region map unavailable; drift not computed: %s", error)
         return {
-            "status": DRIFT_NOT_COMPUTED,
+            "status": STATUS_NOT_COMPUTED,
             "reason": f"{type(error).__name__}: {error}",
-            "frozen_snapshot_hash": probe.region_snapshot_hash,
+            "frozen_snapshot_hash": frozen_hash,
             "live_snapshot_hash": None,
-            "n_attributes_frozen": len(frozen),
+            "moved": None,
         }
 
-    added = sorted(set(live) - set(frozen))
-    removed = sorted(set(frozen) - set(live))
-    changed = sorted(
-        attribute_id
-        for attribute_id in set(frozen) & set(live)
-        if frozenset(frozen[attribute_id]) != frozenset(live[attribute_id])
-    )
-    touched = {split_ba_gf(label)[0] for label in probe.features.gt_labels}
-    touched |= {split_ba_gf(label)[0] for label in predictions}
-
-    frozen_counts = _core_counts(
-        _prepare(probe, predictions, classes, region_map=frozen),
-    )
-    live_counts = _core_counts(
-        _prepare(probe, predictions, classes, region_map=live),
-    )
-
+    live_hash = region_snapshot_hash({key: frozenset(value) for key, value in live.items()})
     return {
-        "status": DRIFT_COMPUTED,
+        "status": STATUS_COMPUTED,
         "reason": None,
-        "frozen_snapshot_hash": probe.region_snapshot_hash,
-        "live_snapshot_hash": region_snapshot_hash(
-            {key: frozenset(value) for key, value in live.items()}
-        ),
-        "n_attributes_frozen": len(frozen),
-        "n_attributes_live": len(live),
-        "n_attributes_added": len(added),
-        "n_attributes_removed": len(removed),
-        "n_attributes_region_changed": len(changed),
-        "n_probe_attributes_changed": len(set(changed) & touched),
-        "probe_attributes_changed": sorted(set(changed) & touched),
-        "rates": [
-            {
-                "metric": metric,
-                "frozen_k": frozen_counts[metric][0],
-                "frozen_n": frozen_counts[metric][1],
-                "frozen_rate": _ratio(*frozen_counts[metric]),
-                "live_k": live_counts[metric][0],
-                "live_n": live_counts[metric][1],
-                "live_rate": _ratio(*live_counts[metric]),
-                "delta": _ratio(*live_counts[metric]) - _ratio(*frozen_counts[metric]),
-            }
-            for metric in CORE_RATE_METRICS
-        ],
+        "frozen_snapshot_hash": frozen_hash,
+        "live_snapshot_hash": live_hash,
+        "moved": live_hash != frozen_hash,
     }
-
-
-def paired_comparison(
-    scores: Sequence[ModelScore], *, options: RegionMetricsOptions | None = None
-) -> pd.DataFrame:
-    """Compare every pair of models on the points they share.
-
-    Models scored on one probe are scored on identical points, so the
-    difference between them is a paired quantity: one draw of images feeds
-    both rates and the variation they share cancels instead of inflating the
-    interval. An unpaired two-proportion test would throw that shared
-    variation away along with most of the power.
-
-    Each pair is read over the intersection of the two denominators, so
-    `rate_a` and `rate_b` can differ from either model's own reported rate --
-    that is the price of making them comparable.
-    """
-    if len(scores) < 2:
-        return pd.DataFrame(columns=pd.Index(COMPARISON_COLUMNS))
-
-    fingerprints = {score.probe.points_fingerprint for score in scores}
-    if len(fingerprints) > 1:
-        raise ValueError(
-            "models were scored on different probe points, so no comparison"
-            f" between them is paired; fingerprints: {sorted(fingerprints)}"
-        )
-
-    resolved = scores[0].options if options is None else options
-    rows = [
-        _comparison_row(metric, first, second, resolved)
-        for position, first in enumerate(scores)
-        for second in scores[position + 1 :]
-        for metric in PAIRED_METRICS
-    ]
-    return pd.DataFrame(rows, columns=pd.Index(COMPARISON_COLUMNS))
 
 
 def summary_table(score: ModelScore) -> pd.DataFrame:
@@ -917,186 +789,6 @@ def decisions_table(score: ModelScore) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=pd.Index(DECISIONS_COLUMNS)).astype(
         {"k": "Int64", "n": "Int64"}
     )
-
-
-def build_limitations(score: ModelScore) -> dict[str, Any]:
-    """Every caveat on this score, each with the magnitude it was measured at.
-
-    Machine-readable and uniform: a renderer that drops one drops a named
-    entry rather than a sentence, and a caveat whose magnitude is small is
-    visibly small rather than absent.
-    """
-    metrics = score.metrics
-    points = score.points
-    floor = metrics.overall.gt_oor_rate
-    ratio = metrics.overall.ratio_to_gt
-    directions = metrics.per_direction
-    overall_directions = (
-        directions[directions["population"] == ALL_POINTS] if len(directions) else directions
-    )
-    n_direction_points = (
-        [int(value) for value in overall_directions["n_points"]] if len(overall_directions) else []
-    )
-    site_ids = [str(value) for value in score.probe.rows["site_id"]]
-    n_with_site = sum(1 for value in site_ids if value)
-
-    return {
-        "model": score.name,
-        "limitations": [
-            {
-                "id": "per_direction_sample_size",
-                "statement": (
-                    "Opposite directions differ in available points by orders of"
-                    " magnitude, so a direction's rate is readable only against its"
-                    " own denominator and directions are never pooled."
-                ),
-                "magnitude": {
-                    "n_directions": len(n_direction_points),
-                    "min_n_points": min(n_direction_points, default=0),
-                    "max_n_points": max(n_direction_points, default=0),
-                    "directions": [
-                        {
-                            "image_region_id": str(row["image_region_id"]),
-                            "excluded_region_id": str(row["excluded_region_id"]),
-                            "n_points": int(row["n_points"]),
-                            "n_out_of_region": int(row["n_out_of_region"]),
-                        }
-                        for _, row in overall_directions.iterrows()
-                    ],
-                },
-            },
-            {
-                "id": "realized_design_effect",
-                "statement": (
-                    "Points inside one image are correlated, so each interval is"
-                    " wider than the independent-sample interval for the same k of"
-                    " n. The design effect is that widening, squared."
-                ),
-                "magnitude": _design_effects(metrics),
-            },
-            {
-                "id": "clusters_are_images_not_sites",
-                "statement": (
-                    "Resampling draws whole images. Images from one dive site are"
-                    " correlated with each other too, so every interval here is a"
-                    " lower bound on the true width."
-                ),
-                "magnitude": {
-                    "n_images": int(points.n_images),
-                    "n_points": int(points.n_points),
-                    "mean_points_per_image": (
-                        float(points.n_points / points.n_images) if points.n_images else 0.0
-                    ),
-                    "n_points_with_site_id": int(n_with_site),
-                    "share_points_with_site_id": (
-                        float(n_with_site / len(site_ids)) if site_ids else 0.0
-                    ),
-                },
-            },
-            {
-                "id": "model_class_region_coverage",
-                "statement": (
-                    "Only a region-discriminating class can ever be out of region,"
-                    " and a class whose recorded regions this probe contains none of"
-                    " is untestable: every prediction of it counts as out of region"
-                    " and none can be confirmed in its own region."
-                ),
-                "magnitude": _class_coverage(score),
-            },
-            {
-                "id": "ground_truth_out_of_region_floor",
-                "statement": (
-                    "Confirmed human annotations are themselves out of region at"
-                    " this rate -- label noise plus region-polygon error. No model"
-                    " can read below it, so a model rate is read against it."
-                ),
-                "magnitude": {
-                    "k": int(floor.k),
-                    "n": int(floor.n),
-                    "rate": _clean(floor.rate),
-                    "ci_low": _clean(floor.ci_low),
-                    "ci_high": _clean(floor.ci_high),
-                    "n_images": int(points.n_images),
-                    "n_ratio_draws": int(ratio.n_draws),
-                    "n_ratio_draws_empty_floor": int(ratio.n_nonfinite_draws),
-                },
-            },
-            {
-                "id": "triage_ground_truth_counts",
-                "statement": (
-                    "An out-of-region event reads as a suspect region list rather"
-                    " than a model error once experts have annotated that"
-                    " (attribute, region) pair at least `threshold` times"
-                    " corpus-wide. Counted on the probe alone the same pair is"
-                    " counted only as often as the probe samples it, which moves"
-                    " events out of list_suspect and into model_error."
-                ),
-                "magnitude": {
-                    "source": score.ground_truth_counts_source,
-                    "is_lower_bound": score.ground_truth_counts_source == COUNTS_SOURCE_PROBE,
-                    "threshold": int(score.triage.threshold),
-                    "n_pairs": int(score.n_ground_truth_pairs),
-                    "bucket_counts": _bucket_counts(score.triage),
-                },
-            },
-            {
-                "id": "name_resolution",
-                "statement": (
-                    "Ids render as the display names frozen with the probe. An"
-                    " id the snapshot does not name renders as the id itself,"
-                    " which reads as unresolved rather than as unnamed."
-                ),
-                "magnitude": _name_resolution(score),
-            },
-            {
-                "id": "within_branch_ancestry",
-                "statement": (
-                    "The share of out-of-region predictions that are the right"
-                    " branch in the wrong ocean is read against the taxonomic"
-                    " ancestry frozen with the probe. A probe carrying none"
-                    " leaves the statistic uncomputed, since a share of zero"
-                    " would read as a measurement rather than the absence of"
-                    " one."
-                ),
-                "magnitude": _within_branch_magnitude(score),
-            },
-            {
-                "id": "held_out_training_exclusion",
-                "statement": (
-                    "`held_out` says only that the point's image region is not"
-                    " a census region of the probe, which is what the probe"
-                    " builder can see. Whether the scored model's training run"
-                    " consumed the matching exclusion list is not readable"
-                    " from the artifact, so for a model trained without it the"
-                    " held-out block is a training-set measurement."
-                ),
-                "magnitude": _held_out_magnitude(score),
-            },
-            {
-                "id": "masking_upper_bound",
-                "statement": (
-                    "The masking counterfactual assumes every image's recorded"
-                    " region is correct, so it is an upper bound on what a hard"
-                    " constraint would buy: a wrong region turns the same"
-                    " machinery into a source of error this number cannot see."
-                ),
-                "magnitude": _masking_magnitude(score),
-            },
-            {
-                "id": "region_polygons_disjoint",
-                "statement": (
-                    "All MEOW region polygons were measured mutually disjoint, so"
-                    " the upstream first-intersecting-polygon assignment is"
-                    " deterministic except exactly on a shared boundary."
-                ),
-                "magnitude": {
-                    "n_regions": MEOW_N_REGIONS,
-                    "n_pairs_tested": MEOW_N_PAIRS_TESTED,
-                    "n_pairs_intersecting": MEOW_N_PAIRS_INTERSECTING,
-                },
-            },
-        ],
-    }
 
 
 def build_manifest(score: ModelScore) -> dict[str, Any]:
@@ -1158,79 +850,6 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
     }
 
 
-def render_markdown(score: ModelScore) -> str:
-    """The human summary, leading with the headline rate beside its floor."""
-    overall = score.metrics.overall
-    lines = [
-        f"# Region mismatch — {score.name}",
-        "",
-        f"{score.points.n_points} points over {score.points.n_images} images"
-        f" from {len(score.metrics.observed_region_ids)} region(s).",
-        "",
-        "## Headline",
-        "",
-        f"- Out-of-region predictions: {_rate_text(overall.oor_rate)}",
-        f"- Ground-truth floor: {_rate_text(overall.gt_oor_rate)}",
-        f"- Excess over the floor: {_diff_text(overall.excess)}",
-        f"- As a multiple of the floor: {_ratio_text(overall.ratio_to_gt)}",
-        "",
-        f"Denominator: {RATE_DENOMINATORS['oor_rate']}.",
-        "",
-        "### Held-out points only",
-        "",
-        *_held_out_lines(score),
-        "## Other denominators for the same incidents",
-        "",
-        f"- Region-discriminating predictions: {_rate_text(overall.oor_rate_disc)}",
-        f"- Region-discriminating ground truths: {_rate_text(overall.oor_rate_disc_gt)}",
-        f"- Images carrying at least one incident: {_rate_text(overall.image_affected_rate)}",
-        "",
-        "## Model quality on this probe",
-        "",
-        f"- Accuracy: {_rate_text(overall.accuracy)}",
-        f"- Over region-discriminating ground truths, point estimates carrying"
-        f" no interval: macro precision {_number(overall.precision_macro_disc)},"
-        f" macro recall {_number(overall.recall_macro_disc)},"
-        f" macro F1 {_number(overall.f1_macro_disc)},"
-        f" over {overall.n_f1_disc_points} points",
-        "",
-        "## What to do about it",
-        "",
-        *_decision_lines(score),
-        "## Region list drift",
-        "",
-        _drift_text(score.drift),
-        "",
-        "## Limitations",
-        "",
-        f"Every caveat, with the magnitude it was measured at, is in {LIMITATIONS_FILE}.",
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def _held_out_lines(score: ModelScore) -> list[str]:
-    """The held-out rates, below the all-points headline they qualify.
-
-    The qualifier travels with the rates: `held_out` is a property of the
-    probe, and the assumption that this model's training run excluded the same
-    points is one the score cannot check.
-    """
-    held = score.metrics.held_out
-    if held is None:
-        return ["No probe point is held out.", ""]
-    return [
-        f"- Out-of-region predictions: {_rate_text(held.oor_rate)}",
-        f"- Ground-truth floor: {_rate_text(held.gt_oor_rate)}",
-        "",
-        f"Held out means {HELD_OUT_DEFINITION}. The model artifact carries no"
-        " training exclusion list, so whether this run excluded those points"
-        " is not verifiable from here: trained without that exclusion, these"
-        f" two rates are a training-set measurement. {LIMITATIONS_FILE} counts"
-        " what they are read over.",
-        "",
-    ]
-
-
 def write_report(score: ModelScore, out_dir: Path) -> dict[str, Path]:
     """Write every artifact for one model into `out_dir`. Nothing is uploaded."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1256,17 +875,9 @@ def write_report(score: ModelScore, out_dir: Path) -> dict[str, Path]:
     metrics.direction_matrix.to_csv(matrix_path, index=True, index_label="image_region_name")
     written["direction_matrix.csv"] = matrix_path
 
-    limitations_path = out_dir / LIMITATIONS_FILE
-    limitations_path.write_text(yaml.safe_dump(build_limitations(score), sort_keys=False))
-    written[LIMITATIONS_FILE] = limitations_path
-
     manifest_path = out_dir / MANIFEST_FILE
     manifest_path.write_text(json.dumps(build_manifest(score), indent=2))
     written[MANIFEST_FILE] = manifest_path
-
-    markdown_path = out_dir / MARKDOWN_FILE
-    markdown_path.write_text(render_markdown(score))
-    written[MARKDOWN_FILE] = markdown_path
 
     return written
 
@@ -1625,199 +1236,10 @@ def _confidence_rows(score: ModelScore) -> list[dict[str, object]]:
     ]
 
 
-def _decision_lines(score: ModelScore) -> list[str]:
-    """The interpretation, led by the ratio that picks the mitigation."""
-    decisions = score.decisions
-    baseline = decisions.region_blind
-    masking = decisions.masking
-    low, high = _ratio_to_baseline_interval(baseline, score.metrics.overall.oor_rate_disc)
-    return [
-        f"- Region-blind baseline: {_percent(baseline.baseline_rate)}"
-        f" [{_percent(baseline.baseline_ci_low)}, {_percent(baseline.baseline_ci_high)}]"
-        f" of region-discriminating predictions fall out of region once region is"
-        f" shuffled between images, against {_percent(baseline.observed_rate)}"
-        f" [{_percent(score.metrics.overall.oor_rate_disc.ci_low)},"
-        f" {_percent(score.metrics.overall.oor_rate_disc.ci_high)}] measured"
-        f" — {_number(baseline.ratio)}x [{_number(low)}, {_number(high)}]"
-        f" the region-blind rate.",
-        "- Near 1 the model reads nothing about region from the image, which is"
-        " the case a hard constraint answers; well below 1 region is already"
-        " implicit in the features and only a tail leaks, which is the case for"
-        " reweighting, regional training data, or dropping the labels"
-        " responsible.",
-        f"- Masking out-of-region classes at inference moves accuracy by"
-        f" {_percent(masking.accuracy_delta)} points"
-        f" [{_percent(masking.accuracy_delta_ci_low)},"
-        f" {_percent(masking.accuracy_delta_ci_high)}]: it fixes"
-        f" {masking.n_fixed} prediction(s) and breaks {masking.n_broken},"
-        f" changing {masking.n_changed} of {masking.n_points}.",
-        f"- Confidence separates out-of-region predictions at AUROC"
-        f" {_number(decisions.confidence.auroc)} over"
-        f" {decisions.confidence.n_discriminating} prediction(s).",
-        _within_branch_line(score),
-        "",
-    ]
-
-
-def _within_branch_line(score: ModelScore) -> str:
-    share = score.decisions.within_branch
-    if share is None:
-        return f"- Right taxon, wrong ocean: not computed ({score.decisions.within_branch_reason})."
-    return (
-        f"- Right taxon, wrong ocean: {share.n_within_branch} of"
-        f" {share.n_evaluable} out-of-region prediction(s) share a branch with"
-        f" the truth, which is what masking cleans up rather than reshuffles."
-    )
-
-
 def _name_section(payload: Mapping[str, Any], section: str) -> dict[str, str]:
     """One section of the frozen name snapshot, as text keyed by id."""
     entries = payload.get(section) or {}
     return {str(key): str(value) for key, value in entries.items()}
-
-
-def _name_resolution(score: ModelScore) -> dict[str, Any]:
-    """How much of what the report renders the frozen names could resolve."""
-    names = score.probe.names
-    labels = {*score.classes, *score.points.gt_labels, *score.points.pred_labels}
-    split = [split_ba_gf(label) for label in labels]
-    attributes = {attribute_id for attribute_id, _growth_form in split}
-    growth_forms = {growth_form for _attribute, growth_form in split if growth_form}
-    regions = set(score.metrics.direction_region_ids)
-
-    return {
-        "source": NAMES_SOURCE_PROBE if score.probe.names_present else NAMES_SOURCE_NONE,
-        "n_benthic_attributes": len(attributes),
-        "n_benthic_attributes_unresolved": _n_unresolved(attributes, names.benthic_attributes),
-        "n_growth_forms": len(growth_forms),
-        "n_growth_forms_unresolved": _n_unresolved(growth_forms, names.growth_forms),
-        "n_regions": len(regions),
-        "n_regions_unresolved": _n_unresolved(regions, names.regions),
-    }
-
-
-def _n_unresolved(identifiers: set[str], names: Mapping[str, str]) -> int:
-    """Ids the name map does not carry a name for."""
-    return sum(1 for identifier in identifiers if not names.get(identifier))
-
-
-def _held_out_magnitude(score: ModelScore) -> dict[str, Any]:
-    """How much of the probe is held out, and what pins the exclusion to it."""
-    points = score.points
-    held = points.held_out
-    n_held_out = int(np.count_nonzero(held))
-    images = {image_id for image_id, flag in zip(points.image_ids, held, strict=True) if bool(flag)}
-    return {
-        "definition": HELD_OUT_DEFINITION,
-        "n_held_out_points": n_held_out,
-        "n_held_out_images": len(images),
-        "share_points_held_out": (float(n_held_out / points.n_points) if points.n_points else 0.0),
-        "training_exclusion": HELD_OUT_TRAINING_EXCLUSION,
-    }
-
-
-def _within_branch_magnitude(score: ModelScore) -> dict[str, Any]:
-    share = score.decisions.within_branch
-    return {
-        "status": score.decisions.within_branch_status,
-        "reason": score.decisions.within_branch_reason,
-        "n_out_of_region": None if share is None else int(share.n_out_of_region),
-        "n_evaluable": None if share is None else int(share.n_evaluable),
-        "n_ancestry_unknown": None if share is None else int(share.n_ancestry_unknown),
-        "share": None if share is None else _clean(share.share),
-    }
-
-
-def _masking_magnitude(score: ModelScore) -> dict[str, Any]:
-    masking = score.decisions.masking
-    return {
-        "n_fixed": int(masking.n_fixed),
-        "n_broken": int(masking.n_broken),
-        "n_changed": int(masking.n_changed),
-        "n_no_permitted_class": int(masking.n_no_permitted_class),
-        "n_region_unknown_classes": int(masking.n_region_unknown_classes),
-        "n_accuracy_points": int(masking.n_accuracy_points),
-        "accuracy_delta": _clean(masking.accuracy_delta),
-        "accuracy_delta_ci_low": _clean(masking.accuracy_delta_ci_low),
-        "accuracy_delta_ci_high": _clean(masking.accuracy_delta_ci_high),
-    }
-
-
-def _paired_masks(metric: str, points: ScoredPoints) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
-    """The (numerator, denominator) masks one metric is read from.
-
-    Each numerator is a subset of its denominator, which is what lets the
-    bootstrap statistic count it without masking again.
-    """
-    if metric == "oor_rate":
-        return points.pred_out_of_region, ~points.pred_region_unknown
-    if metric == "oor_rate_disc":
-        return points.pred_out_of_region, points.pred_discriminating
-    if metric == "oor_rate_disc_gt":
-        return (
-            points.pred_out_of_region & points.gt_discriminating,
-            points.gt_discriminating,
-        )
-    if metric == "accuracy":
-        return points.correct & points.gt_in_model_classes, points.gt_in_model_classes
-    raise ValueError(f"no paired masks for metric {metric!r}")
-
-
-def _comparison_row(
-    metric: str,
-    first: ModelScore,
-    second: ModelScore,
-    options: RegionMetricsOptions,
-) -> dict[str, object]:
-    numerator_a, denominator_a = _paired_masks(metric, first.points)
-    numerator_b, denominator_b = _paired_masks(metric, second.points)
-    shared = denominator_a & denominator_b
-
-    index = np.flatnonzero(shared)
-    image_ids = tuple(first.points.image_ids[int(position)] for position in index)
-    n_paired = len(index)
-
-    events_a = numerator_a[index]
-    events_b = numerator_b[index]
-    rate_a = float(np.count_nonzero(events_a) / n_paired) if n_paired else math.nan
-    rate_b = float(np.count_nonzero(events_b) / n_paired) if n_paired else math.nan
-
-    a_only = int(np.count_nonzero(events_a & ~events_b))
-    b_only = int(np.count_nonzero(events_b & ~events_a))
-
-    if n_paired:
-        ones = np.ones(n_paired, dtype=bool)
-        ci_low, ci_high = paired_cluster_bootstrap_diff(
-            image_ids,
-            _rate_statistic(events_a, ones, rate_a),
-            _rate_statistic(events_b, ones, rate_b),
-            n_resamples=options.n_resamples,
-            alpha=options.alpha,
-            seed=options.seed,
-        )
-    else:
-        ci_low = ci_high = math.nan
-
-    return {
-        "metric": metric,
-        "model_a": first.name,
-        "model_b": second.name,
-        "rate_a": rate_a,
-        "rate_b": rate_b,
-        "difference": rate_a - rate_b,
-        "ci_low": ci_low,
-        "ci_high": ci_high,
-        "n_paired": n_paired,
-        "n_discordant_a_only": a_only,
-        "n_discordant_b_only": b_only,
-        "mcnemar_p": mcnemar_paired(a_only, b_only),
-        "points_fingerprint": first.probe.points_fingerprint,
-        "method": (
-            f"paired cluster bootstrap over images,"
-            f" {options.n_resamples} resamples, alpha={options.alpha};"
-            f" McNemar exact binomial on the {n_paired} shared points"
-        ),
-    }
 
 
 def _populations(score: ModelScore) -> list[tuple[str, PopulationRates]]:
@@ -1965,60 +1387,6 @@ def _macro_row(
     }
 
 
-def _rate_statistic(
-    numerator: NDArray[np.bool_], denominator: NDArray[np.bool_], fallback: float
-) -> Callable[[NDArray[np.intp]], float]:
-    """numerator/denominator over drawn positions, with `fallback` on an empty draw."""
-
-    def statistic(index: NDArray[np.intp]) -> float:
-        drawn = int(np.count_nonzero(denominator[index]))
-        if drawn == 0:
-            return fallback
-        return float(np.count_nonzero(numerator[index]) / drawn)
-
-    return statistic
-
-
-def _prepare(
-    probe: LoadedProbe,
-    predictions: Sequence[str],
-    classes: Sequence[str],
-    *,
-    region_map: RegionMap,
-) -> ScoredPoints:
-    return prepare_scored_points(
-        image_ids=probe.features.image_ids,
-        image_region_ids=probe.features.region_ids,
-        gt_labels=probe.features.gt_labels,
-        pred_labels=predictions,
-        region_ids_by_attribute=region_map,
-        model_classes=classes,
-        held_out=probe.features.held_out.tolist(),
-    )
-
-
-def _core_counts(points: ScoredPoints) -> dict[str, tuple[int, int]]:
-    """Each core rate as bare (k, n), with no interval."""
-    return {
-        "oor_rate": (
-            int(np.count_nonzero(points.pred_out_of_region)),
-            int(np.count_nonzero(~points.pred_region_unknown)),
-        ),
-        "oor_rate_disc": (
-            int(np.count_nonzero(points.pred_out_of_region)),
-            int(np.count_nonzero(points.pred_discriminating)),
-        ),
-        "oor_rate_disc_gt": (
-            int(np.count_nonzero(points.pred_out_of_region & points.gt_discriminating)),
-            int(np.count_nonzero(points.gt_discriminating)),
-        ),
-        "gt_oor_rate": (
-            int(np.count_nonzero(points.gt_out_of_region)),
-            int(np.count_nonzero(~points.gt_region_unknown)),
-        ),
-    }
-
-
 def _bucket_counts(triage: TriageResult) -> dict[str, int]:
     """Events per triage bucket, including the buckets that caught none."""
     return {str(row["bucket"]): int(row["n"]) for _, row in triage.bucket_counts.iterrows()}
@@ -2058,116 +1426,3 @@ def _probe_ground_truth_counts(points: ScoredPoints) -> dict[tuple[str, str], in
         key = (attribute_id, region_id)
         counts[key] = counts.get(key, 0) + 1
     return counts
-
-
-def _class_coverage(score: ModelScore) -> dict[str, Any]:
-    """How much of the model's label space this probe can say anything about."""
-    observed = frozenset(score.metrics.observed_region_ids)
-    region_map = score.probe.region_ids_by_attribute
-
-    discriminating: list[str] = []
-    never: list[str] = []
-    unknown: list[str] = []
-    untestable: list[str] = []
-    for label in score.classes:
-        allowed = region_map.get(split_ba_gf(label)[0], frozenset())
-        if not allowed:
-            unknown.append(label)
-            continue
-        if is_region_discriminating(allowed, observed):
-            discriminating.append(label)
-        else:
-            never.append(label)
-        if not allowed & observed:
-            untestable.append(label)
-
-    return {
-        "n_model_classes": len(score.classes),
-        "n_region_discriminating": len(discriminating),
-        "n_never_discriminating": len(never),
-        "n_region_unknown": len(unknown),
-        "n_untestable_no_probe_region": len(untestable),
-        "untestable_classes": untestable,
-    }
-
-
-def _design_effects(metrics: RegionMismatchMetrics) -> dict[str, Any]:
-    overall = metrics.overall
-    realized = {
-        metric: _clean(estimate.design_effect)
-        for metric, estimate in (
-            ("oor_rate", overall.oor_rate),
-            ("oor_rate_disc", overall.oor_rate_disc),
-            ("oor_rate_disc_gt", overall.oor_rate_disc_gt),
-            ("gt_oor_rate", overall.gt_oor_rate),
-        )
-    }
-    measured = [value for value in realized.values() if value is not None]
-    return {
-        **realized,
-        "max": max(measured) if measured else None,
-        "n_measured": len(measured),
-        "n_degenerate": len(realized) - len(measured),
-    }
-
-
-def _ratio(k: int, n: int) -> float:
-    return k / n if n else math.nan
-
-
-def _clean(value: float) -> float | None:
-    """A float YAML and JSON can carry, with NaN as an explicit absence."""
-    if isinstance(value, float) and math.isnan(value):
-        return None
-    return float(value)
-
-
-def _number(value: float) -> str:
-    return "n/a" if math.isnan(value) else f"{value:.4f}"
-
-
-def _percent(value: float) -> str:
-    return "n/a" if math.isnan(value) else f"{value * 100:.3f}%"
-
-
-def _rate_text(estimate: RateEstimate) -> str:
-    """A rate, its interval and its counts. Never a rate on its own."""
-    interval = f"[{_percent(estimate.ci_low)}, {_percent(estimate.ci_high)}]"
-    body = f"{_percent(estimate.rate)} {interval} ({estimate.k} of {estimate.n})"
-    if estimate.k == 0 and estimate.upper_bound is not None:
-        return (
-            f"{body}; none seen, 95% upper bound {_percent(estimate.upper_bound)}"
-            f" over {estimate.upper_bound_n_images} images"
-        )
-    return body
-
-
-def _diff_text(estimate: DiffEstimate) -> str:
-    return (
-        f"{_percent(estimate.value)} points"
-        f" [{_percent(estimate.ci_low)}, {_percent(estimate.ci_high)}]"
-    )
-
-
-def _ratio_text(estimate: RatioEstimate) -> str:
-    return f"{_number(estimate.value)}x [{_number(estimate.ci_low)}, {_number(estimate.ci_high)}]"
-
-
-def _drift_text(drift: Mapping[str, Any]) -> str:
-    if drift.get("status") != DRIFT_COMPUTED:
-        return f"Not computed: {drift.get('reason')}"
-    lines = [
-        f"Against the live library: {drift['n_attributes_region_changed']} attribute(s)"
-        f" changed region ({drift['n_probe_attributes_changed']} of them on this probe),"
-        f" {drift['n_attributes_added']} added, {drift['n_attributes_removed']} removed."
-        f" A removed attribute has no live regions, so the rates below read n/a"
-        f" rather than zero.",
-        "",
-    ]
-    lines += [
-        f"- {entry['metric']}: frozen {_percent(entry['frozen_rate'])},"
-        f" live {_percent(entry['live_rate'])},"
-        f" delta {_percent(entry['delta'])}"
-        for entry in drift["rates"]
-    ]
-    return "\n".join(lines)

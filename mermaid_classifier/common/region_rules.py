@@ -234,41 +234,6 @@ def design_effect(bootstrap_ci: tuple[float, float], k: int, n: int, *, alpha: f
     return (bootstrap_half_width / wilson_half_width) ** 2
 
 
-def mcnemar_paired(b: int, c: int) -> float:
-    """Exact two-sided binomial p-value for McNemar's test on b and c.
-
-    b and c are the discordant pair counts: cases one model gets right and the
-    other wrong, in each direction. Concordant pairs carry no information and
-    are excluded. With no discordant pairs the p-value is 1.0.
-    """
-    if b < 0 or c < 0:
-        raise ValueError(f"discordant counts must not be negative, got b={b}, c={c}")
-
-    n_discordant = b + c
-    if n_discordant == 0:
-        return 1.0
-
-    smaller = min(b, c)
-    log_n_factorial = math.lgamma(n_discordant + 1)
-    log_half_power = -n_discordant * math.log(2.0)
-    # The tail accumulates in log space, keeping the cost linear in the
-    # discordant count, which reaches tens of thousands on point-level data.
-    log_tail = -math.inf
-    for i in range(smaller + 1):
-        log_term = (
-            log_n_factorial
-            - math.lgamma(i + 1)
-            - math.lgamma(n_discordant - i + 1)
-            + log_half_power
-        )
-        # Log-sum-exp against the running maximum: no term is exponentiated at
-        # its own magnitude.
-        if log_term > log_tail:
-            log_tail, log_term = log_term, log_tail
-        log_tail += math.log1p(math.exp(log_term - log_tail))
-    return min(1.0, 2.0 * math.exp(log_tail))
-
-
 def permutation_baseline(
     cluster_ids: Sequence[Hashable],
     groups: Sequence[Hashable],
