@@ -96,6 +96,21 @@ class DatasetOptions:
       Other informational columns can also be present and will be ignored.
     - This is applied *after* rollups.
 
+    excluded_images_csv
+
+    Local filepath of a CSV file listing image IDs to withhold from
+    training data entirely, regardless of label. For example, this
+    keeps a frozen evaluation probe's held-out images out of the
+    training data those models see.
+    - If this file isn't specified, then no images are excluded on
+      this basis.
+    - Recognized columns:
+      image_id -- An image ID, matching the annotations table's
+        image_id column.
+      Other informational columns can also be present and will be ignored.
+    - Applied independently of the label rollups and inclusion/exclusion
+      filters above: a listed image is removed regardless of its BA+GF.
+
     ref_val_ratios
 
     Determines the ratios of training annotations that will go into
@@ -128,6 +143,7 @@ class DatasetOptions:
     label_rollup_spec_csv: str | None = None
     included_labels_csv: str | None = None
     excluded_labels_csv: str | None = None
+    excluded_images_csv: str | None = None
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     # Optional per-class subsampling. None means use all annotations.
     # See mermaid_classifier.training.subsample for available strategies

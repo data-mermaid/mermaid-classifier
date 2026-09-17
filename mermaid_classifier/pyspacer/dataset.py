@@ -36,6 +36,7 @@ from mermaid_classifier.pyspacer._pipeline_utils import (
     section_profiling,
 )
 from mermaid_classifier.pyspacer.label_specs import (
+    ImageExclusionFilter,
     LabelFilter,
     LabelRollupSpec,
 )
@@ -102,6 +103,13 @@ class TrainingDataset:
             # all labels.
             # In other words, an empty exclusion set.
             self.label_filter = LabelFilter(StringIO(""), inclusion=False)
+
+        if options.excluded_images_csv:
+            with open(options.excluded_images_csv) as csv_f:
+                self.image_exclusion_filter = ImageExclusionFilter(csv_f)
+        else:
+            # No file specified means no images are excluded on this basis.
+            self.image_exclusion_filter = ImageExclusionFilter(StringIO(""))
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
@@ -187,10 +195,25 @@ class TrainingDataset:
                 f"{img_after_filter:,}",
                 f"{img_after_rollup - img_after_filter:,}",
             )
+
+            # Remove any images excluded wholesale (e.g. a frozen
+            # evaluation probe's held-out set), regardless of label.
+            self.image_exclusion_filter.filter_in_duckdb(
+                duck_conn=self.duck_conn,
+                duck_table_name="annotations",
+            )
+            ann_after_exclusion, img_after_exclusion = _annotations_stats()
             logger.info(
-                "Rollups+filter retained %.1f%% of annotations, %.1f%% of unique images",
-                100.0 * ann_after_filter / max(ann_before, 1),
-                100.0 * img_after_filter / max(img_before, 1),
+                "After image exclusion: %s annotations (-%s), %s unique images (-%s)",
+                f"{ann_after_exclusion:,}",
+                f"{ann_after_filter - ann_after_exclusion:,}",
+                f"{img_after_exclusion:,}",
+                f"{img_after_filter - img_after_exclusion:,}",
+            )
+            logger.info(
+                "Rollups+filter+exclusion retained %.1f%% of annotations, %.1f%% of unique images",
+                100.0 * ann_after_exclusion / max(ann_before, 1),
+                100.0 * img_after_exclusion / max(img_before, 1),
             )
 
         if options.subsample is not None:

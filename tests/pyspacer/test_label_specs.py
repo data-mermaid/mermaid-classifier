@@ -1,6 +1,7 @@
-"""Characterization tests for LabelFilter, LabelRollupSpec, and CNSourceFilter.
+"""Characterization tests for LabelFilter, LabelRollupSpec, CNSourceFilter, and
+ImageExclusionFilter.
 
-All three classes live in mermaid_classifier.pyspacer.label_specs and subclass CsvSpec.
+All four classes live in mermaid_classifier.pyspacer.label_specs and subclass CsvSpec.
 Tests cover both the pure-Python methods and the in-DuckDB pipeline methods.
 
 Empty growth form is the empty string '' (never NULL) per the BA+GF convention.
@@ -13,7 +14,12 @@ from io import StringIO
 import duckdb
 import pandas as pd
 
-from mermaid_classifier.pyspacer.label_specs import CNSourceFilter, LabelFilter, LabelRollupSpec
+from mermaid_classifier.pyspacer.label_specs import (
+    CNSourceFilter,
+    ImageExclusionFilter,
+    LabelFilter,
+    LabelRollupSpec,
+)
 
 
 def _make_conn() -> duckdb.DuckDBPyConnection:
@@ -239,6 +245,129 @@ class CNSourceFilterTest(unittest.TestCase):
     def test_source_id_list_empty_when_no_data(self):
         f = CNSourceFilter(StringIO("id\n"))
         self.assertEqual(f.source_id_list, [])
+
+
+# ---------------------------------------------------------------------------
+# ImageExclusionFilter
+# ---------------------------------------------------------------------------
+
+
+def _seed_image_annotations(
+    conn: duckdb.DuckDBPyConnection,
+    image_ids: list[str],
+    points_per_image: int = 1,
+) -> None:
+    """Seed a minimal annotations table with `points_per_image` rows per image_id."""
+    rows = []
+    for image_id in image_ids:
+        for point in range(points_per_image):
+            rows.append({"image_id": image_id, "point": point})
+    df = pd.DataFrame(rows)  # noqa: F841 — referenced by name in DuckDB SQL
+    conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
+
+
+class ImageExclusionFilterInDuckDBTest(unittest.TestCase):
+    """Tests for ImageExclusionFilter.filter_in_duckdb."""
+
+    def test_listed_images_removed_and_unlisted_survive(self):
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["img1", "img2", "img3"])
+
+        f = ImageExclusionFilter(StringIO("image_id\nimg1\nimg3\n"))
+        with self.assertLogs(logger="train", level="INFO"):
+            f.filter_in_duckdb(conn, "annotations")
+
+        remaining_ids = {
+            row[0] for row in conn.execute("SELECT DISTINCT image_id FROM annotations").fetchall()
+        }
+        self.assertEqual(remaining_ids, {"img2"})
+        count = conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_all_points_of_excluded_image_removed(self):
+        """Every row for an excluded image goes, not just the first match."""
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["img1", "img2"], points_per_image=3)
+
+        f = ImageExclusionFilter(StringIO("image_id\nimg1\n"))
+        f.filter_in_duckdb(conn, "annotations")
+
+        rows = conn.execute("SELECT image_id FROM annotations").fetchall()
+        self.assertEqual(len(rows), 3, msg="img2's 3 points should all survive")
+        self.assertTrue(all(row[0] == "img2" for row in rows))
+        img1_count = conn.execute(
+            "SELECT count(*) FROM annotations WHERE image_id = 'img1'"
+        ).fetchone()[0]
+        self.assertEqual(img1_count, 0, msg="all of img1's points must be gone, not just some")
+
+    def test_unmatched_listed_id_counted_not_raised(self):
+        """A listed id absent from the data is counted, logged, and does not raise."""
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["img1", "img2"])
+
+        f = ImageExclusionFilter(StringIO("image_id\nimg1\nimg_absent\n"))
+        with self.assertLogs(logger="train", level="INFO") as log_ctx:
+            f.filter_in_duckdb(conn, "annotations")
+
+        remaining_ids = {
+            row[0] for row in conn.execute("SELECT DISTINCT image_id FROM annotations").fetchall()
+        }
+        self.assertEqual(remaining_ids, {"img2"})
+        # One of the two listed ids (img_absent) matched nothing.
+        self.assertTrue(
+            any("1" in message and "2" in message for message in log_ctx.output),
+            msg=f"expected unmatched-count info in logs, got: {log_ctx.output}",
+        )
+
+    def test_entirely_unmatched_list_is_loud(self):
+        """A list that matches nothing at all logs a warning, not just info."""
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["img1", "img2"])
+
+        f = ImageExclusionFilter(StringIO("image_id\nimg_absent_1\nimg_absent_2\n"))
+        with self.assertLogs(logger="train", level="WARNING"):
+            f.filter_in_duckdb(conn, "annotations")
+
+        count = conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
+        self.assertEqual(count, 2, msg="nothing should have been removed")
+
+    def test_extra_csv_columns_ignored(self):
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["img1", "img2"])
+
+        f = ImageExclusionFilter(StringIO("image_id,note\nimg1,probe image\n"))
+        f.filter_in_duckdb(conn, "annotations")
+
+        remaining_ids = {
+            row[0] for row in conn.execute("SELECT DISTINCT image_id FROM annotations").fetchall()
+        }
+        self.assertEqual(remaining_ids, {"img2"})
+
+    def test_no_spec_configured_leaves_count_untouched(self):
+        """An empty spec (no CSV configured) is a no-op."""
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["img1", "img2"])
+
+        f = ImageExclusionFilter(StringIO(""))
+        self.assertTrue(f.is_empty())
+        f.filter_in_duckdb(conn, "annotations")
+
+        count = conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
+        self.assertEqual(count, 2)
+
+    def test_numeric_csv_ids_match_string_table_ids(self):
+        """pandas infers int64 for an all-numeric CSV column; ids must still
+        match the annotations table's string image_id values."""
+        conn = _make_conn()
+        _seed_image_annotations(conn, ["123", "456"])
+
+        f = ImageExclusionFilter(StringIO("image_id\n123\n"))
+        f.filter_in_duckdb(conn, "annotations")
+
+        remaining_ids = {
+            row[0] for row in conn.execute("SELECT DISTINCT image_id FROM annotations").fetchall()
+        }
+        self.assertEqual(remaining_ids, {"456"})
 
 
 if __name__ == "__main__":

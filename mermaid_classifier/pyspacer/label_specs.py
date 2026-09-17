@@ -4,11 +4,13 @@ CSV-defined label specifications for the training pipeline.
 - LabelFilter: include/exclude specific BA+GF combos from training data.
 - LabelRollupSpec: roll up fine-grained BA+GF combos to coarser categories.
 - CNSourceFilter: specify which CoralNet sources to include.
+- ImageExclusionFilter: withhold specific images from training data.
 """
 
 import typing
 
 import duckdb
+import pandas as pd
 
 from mermaid_classifier.common.benthic_attributes import (
     BAGF_SEP,
@@ -19,8 +21,12 @@ from mermaid_classifier.common.csv_utils import ColumnSpec, CsvSpec
 from mermaid_classifier.common.duckdb_utils import (
     duckdb_filter_on_column,
     duckdb_replace_column,
+    duckdb_temp_table_name,
     duckdb_transform_column,
 )
+from mermaid_classifier.pyspacer.utils import logging_config_for_script
+
+logger = logging_config_for_script("train")
 
 
 class LabelFilter(CsvSpec):
@@ -210,3 +216,94 @@ class CNSourceFilter(CsvSpec):
 
     def is_empty(self) -> bool:
         return len(self.source_id_list) == 0
+
+
+class ImageExclusionFilter(CsvSpec):
+    """
+    A CSV-defined spec listing image IDs to withhold from training data
+    entirely, regardless of label. Used to keep specific images — such
+    as a frozen evaluation probe's held-out set — out of training.
+    """
+
+    column_specs = [
+        ColumnSpec(name="image_id", allow_blank=False),
+    ]
+
+    def __init__(self, csv_file: typing.TextIO):
+        self.excluded_image_ids: set[str] = set()
+
+        super().__init__(csv_file=csv_file)
+
+    def per_row_init_action(self, row: dict[str, str | None]) -> None:
+        # str() guards against pandas inferring int64 for an all-numeric
+        # image_id column; the annotations table's image_id is always a
+        # string, so the comparison in filter_in_duckdb must be too.
+        self.excluded_image_ids.add(str(row["image_id"]))
+
+    def is_empty(self) -> bool:
+        return len(self.excluded_image_ids) == 0
+
+    def filter_in_duckdb(
+        self,
+        duck_conn: duckdb.DuckDBPyConnection,
+        duck_table_name: str,
+        image_id_column_name: str = "image_id",
+    ) -> None:
+        """
+        Remove rows from the given DuckDB table whose image_id is in
+        this spec's exclusion list.
+
+        Logs the number of annotations and distinct images removed, and
+        how many listed ids matched no row in the table. A list that
+        matches nothing looks like a successful exclusion but excludes
+        nothing, so that case is logged as a warning rather than info.
+        """
+        if self.is_empty():
+            return
+
+        excluded_images_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning  # pyright: ignore[reportUnusedVariable]
+            {image_id_column_name: sorted(self.excluded_image_ids)}
+        )
+
+        with duckdb_temp_table_name(duck_conn, base_name="excluded_images") as excluded_table_name:
+            duck_conn.execute(
+                f"CREATE TABLE {excluded_table_name} AS SELECT * FROM excluded_images_df"
+            )
+
+            # A COUNT(*) query always returns exactly one row, so fetchall()[0]
+            # avoids fetchone()'s `tuple[Any, ...] | None` return type.
+            annotations_removed, images_removed = duck_conn.execute(
+                f"SELECT count(*), count(DISTINCT t.{image_id_column_name})"
+                f" FROM {duck_table_name} t"
+                f" JOIN {excluded_table_name} e"
+                f"  USING ({image_id_column_name})"
+            ).fetchall()[0]
+
+            duck_conn.execute(
+                f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+                f" SELECT t.*"
+                f" FROM {duck_table_name} t"
+                f" LEFT JOIN {excluded_table_name} e"
+                f"  USING ({image_id_column_name})"
+                f" WHERE e.{image_id_column_name} IS NULL"
+            )
+
+        unmatched_count = len(self.excluded_image_ids) - images_removed
+
+        if images_removed == 0:
+            logger.warning(
+                "Image exclusion spec listed %s image id(s), but none"
+                " matched an image_id in this dataset — the exclusion"
+                " had no effect.",
+                len(self.excluded_image_ids),
+            )
+        else:
+            logger.info(
+                "Image exclusion spec removed %s annotation(s) across"
+                " %s image(s); %s of %s listed id(s) matched no image"
+                " in this dataset.",
+                annotations_removed,
+                images_removed,
+                unmatched_count,
+                len(self.excluded_image_ids),
+            )

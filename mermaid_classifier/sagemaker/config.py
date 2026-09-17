@@ -81,6 +81,7 @@ class DatasetConfig(BaseModel):
     label_rollup_spec_csv: str | None = None
     included_labels_csv: str | None = None
     excluded_labels_csv: str | None = None
+    excluded_images_csv: str | None = None
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     subsample: SubsampleConfig | None = None
     weighting: WeightingConfig | None = None
@@ -93,6 +94,9 @@ class DatasetConfig(BaseModel):
 
     def excluded_labels_csv_path(self, base: Path) -> Path | None:
         return None if self.excluded_labels_csv is None else base / self.excluded_labels_csv
+
+    def excluded_images_csv_path(self, base: Path) -> Path | None:
+        return None if self.excluded_images_csv is None else base / self.excluded_images_csv
 
 
 class TrainingConfig(BaseModel):
@@ -208,6 +212,7 @@ class TrainingRunConfig(BaseModel):
             label_rollup_spec_csv=_resolve(d.label_rollup_spec_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             excluded_labels_csv=_resolve(d.excluded_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            excluded_images_csv=_resolve(d.excluded_images_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions
             subsample=subsample,
             weighting=weighting,
