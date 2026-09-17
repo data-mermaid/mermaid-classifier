@@ -65,7 +65,7 @@ import numpy as np
 import pandas as pd
 
 from mermaid_classifier.common.benthic_attributes import combine_ba_gf
-from mermaid_classifier.common.region_rules import is_region_discriminating
+from mermaid_classifier.region_eval.region_rules import is_region_discriminating
 
 PROBE_VERSION = "1"
 
@@ -141,7 +141,6 @@ class ProbeSelectionOptions:
     target_images: int = DEFAULT_TARGET_IMAGES
     region_floor: int = DEFAULT_REGION_FLOOR
     census_region_names: frozenset[str] = DEFAULT_CENSUS_REGION_NAMES
-    alpha: float = 0.05
 
 
 @dataclasses.dataclass(frozen=True)

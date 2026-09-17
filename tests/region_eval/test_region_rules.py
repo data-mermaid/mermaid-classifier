@@ -1,4 +1,4 @@
-"""Unit tests for common/region_rules.py.
+"""Unit tests for region_eval/region_rules.py.
 
 Two families of behaviour are pinned here.
 
@@ -22,7 +22,7 @@ from collections.abc import Sequence
 import numpy as np
 from numpy.typing import NDArray
 
-from mermaid_classifier.common.region_rules import (
+from mermaid_classifier.region_eval.region_rules import (
     cluster_bootstrap_ci,
     design_effect,
     is_out_of_region,

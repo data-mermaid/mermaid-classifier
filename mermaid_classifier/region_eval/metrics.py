@@ -65,7 +65,7 @@ from numpy.typing import NDArray
 from sklearn.metrics import precision_recall_fscore_support
 
 from mermaid_classifier.common.benthic_attributes import split_ba_gf
-from mermaid_classifier.common.region_rules import (
+from mermaid_classifier.region_eval.region_rules import (
     cluster_bootstrap_ci,
     cluster_bootstrap_draws,
     design_effect,
@@ -494,11 +494,11 @@ def compute_region_metrics(
         unmapped_attribute_ids=tuple(sorted(points.unmapped_attribute_ids)),
         overall=overall,
         held_out=held_out,
-        per_region=_frame(per_region_rows, _per_region_columns()),
+        per_region=columns_frame(per_region_rows, _per_region_columns()),
         per_label=_per_label_table(points, names, regions, resolved),
         direction_matrix=_direction_matrix(points, direction_columns, regions),
         direction_region_ids=tuple(direction_columns),
-        per_direction=_frame(per_direction_rows, PER_DIRECTION_COLUMNS),
+        per_direction=columns_frame(per_direction_rows, PER_DIRECTION_COLUMNS),
         confusion=_confusion_table(points, names, regions),
     )
 
@@ -1036,7 +1036,7 @@ def _per_region_rows(
         row: dict[str, object] = {
             "population": population,
             "region_id": region,
-            "region_name": _display(region, region_names),
+            "region_name": display_name(region, region_names),
             "n_images": slice_.n_images,
             "n_points": slice_.n_points,
             "n_accuracy_points": core.accuracy.n,
@@ -1084,8 +1084,8 @@ def _direction_matrix(
             counts[(region, target)] += 1
     return pd.DataFrame(
         [[counts[(row, column)] for column in columns] for row in rows],
-        index=pd.Index([_display(row, region_names) for row in rows]),
-        columns=pd.Index([_display(column, region_names) for column in columns]),
+        index=pd.Index([display_name(row, region_names) for row in rows]),
+        columns=pd.Index([display_name(column, region_names) for column in columns]),
         dtype=int,
     )
 
@@ -1126,9 +1126,9 @@ def _per_direction_rows(
                 {
                     "population": population,
                     "image_region_id": region,
-                    "image_region_name": _display(region, region_names),
+                    "image_region_name": display_name(region, region_names),
                     "excluded_region_id": excluded,
-                    "excluded_region_name": _display(excluded, region_names),
+                    "excluded_region_name": display_name(excluded, region_names),
                     "n_out_of_region": estimate.k,
                     "n_out_of_region_events": n_events,
                     "n_points": estimate.n,
@@ -1190,10 +1190,10 @@ def _per_label_table(
         rows.append(
             {
                 "label": label,
-                "label_name": _display(label, label_names),
+                "label_name": display_name(label, label_names),
                 "allowed_region_ids": allowed_ids,
                 "allowed_region_names": tuple(
-                    _display(region_id, region_names) for region_id in allowed_ids
+                    display_name(region_id, region_names) for region_id in allowed_ids
                 ),
                 "n_predicted": n_predicted,
                 "n_out_of_region": k,
@@ -1206,7 +1206,7 @@ def _per_label_table(
                 "cumulative_share": running / total if total else math.nan,
             }
         )
-    return _frame(rows, PER_LABEL_COLUMNS)
+    return columns_frame(rows, PER_LABEL_COLUMNS)
 
 
 def _confusion_table(
@@ -1227,19 +1227,19 @@ def _confusion_table(
     rows: list[dict[str, object]] = [
         {
             "image_region_id": region,
-            "image_region_name": _display(region, region_names),
+            "image_region_name": display_name(region, region_names),
             "gt_label": truth,
-            "gt_label_name": _display(truth, label_names),
+            "gt_label_name": display_name(truth, label_names),
             "pred_label": prediction,
-            "pred_label_name": _display(prediction, label_names),
+            "pred_label_name": display_name(prediction, label_names),
             "n": count,
         }
         for (region, truth, prediction), count in ordered[:CONFUSION_ROW_LIMIT]
     ]
-    return _frame(rows, CONFUSION_COLUMNS)
+    return columns_frame(rows, CONFUSION_COLUMNS)
 
 
-def _display(identifier: str, names: Mapping[str, str]) -> str:
+def display_name(identifier: str, names: Mapping[str, str]) -> str:
     """The display name for an id, or the id where no name resolves.
 
     An empty cell reads as "this thing has no name"; the id reads as
@@ -1248,7 +1248,7 @@ def _display(identifier: str, names: Mapping[str, str]) -> str:
     return names.get(identifier) or identifier
 
 
-def _frame(rows: Sequence[Mapping[str, object]], columns: Sequence[str]) -> pd.DataFrame:
+def columns_frame(rows: Sequence[Mapping[str, object]], columns: Sequence[str]) -> pd.DataFrame:
     """A DataFrame that keeps its columns even with no rows."""
     if not rows:
         return pd.DataFrame(columns=pd.Index(columns))

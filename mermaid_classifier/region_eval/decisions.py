@@ -47,9 +47,10 @@ from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
+from sklearn.metrics import roc_auc_score
 
 from mermaid_classifier.common.benthic_attributes import split_ba_gf
-from mermaid_classifier.common.region_rules import (
+from mermaid_classifier.region_eval.region_rules import (
     cluster_bootstrap_ci,
     is_out_of_region,
     is_region_discriminating,
@@ -248,10 +249,12 @@ def masking_counterfactual(
     """Re-score every prediction with the out-of-region classes zeroed.
 
     `probabilities` is one row per point over `model_classes` in that column
-    order. Classes incompatible with the image's region are zeroed and what
-    remains is renormalised and re-argmaxed. A class with no recorded regions
-    is never zeroed: unrecorded is not permitted-nowhere, and masking one out
-    would charge the model for a gap in the region lists.
+    order. Classes incompatible with the image's region are zeroed and the
+    remaining row is re-argmaxed; renormalising first would change the scale
+    but not the argmax (when probabilities are non-negative), so it is skipped.
+    A class with no recorded regions is never zeroed: unrecorded is not
+    permitted-nowhere, and masking one out would charge the model for a gap in
+    the region lists.
 
     Where an image's region permits no class at all the prediction is left
     exactly as the model made it and counted in `n_no_permitted_class`, since
@@ -282,42 +285,39 @@ def masking_counterfactual(
     point_probabilities = probability_matrix[scorable]
 
     class_allowed = [_allowed_regions(label, region_ids_by_attribute) for label in model_classes]
-    permitted_by_region = {
-        region: np.array(
-            [not is_out_of_region(allowed_ids, region) for allowed_ids in class_allowed],
-            dtype=bool,
-        )
-        for region in set(regions)
-    }
+    unique_regions, region_of_point = np.unique(np.asarray(regions), return_inverse=True)
+    permitted_by_unique_region = np.array(
+        [
+            [not is_out_of_region(allowed_ids, region) for allowed_ids in class_allowed]
+            for region in unique_regions
+        ],
+        dtype=bool,
+    ).reshape(len(unique_regions), len(model_classes))
+    permitted_matrix = permitted_by_unique_region[region_of_point]
     class_index = {label: index for index, label in enumerate(model_classes)}
 
     n_points = len(scorable)
-    unmasked_correct = np.zeros(n_points, dtype=bool)
-    masked_correct = np.zeros(n_points, dtype=bool)
-    scorable_truth = np.zeros(n_points, dtype=bool)
-    changed = np.zeros(n_points, dtype=bool)
-    margins: list[float] = []
-    n_no_permitted_class = 0
+    point_positions = np.arange(n_points)
+    unmasked_index = np.argmax(point_probabilities, axis=1)
+    any_permitted = permitted_matrix.any(axis=1)
+    masked_probs = np.where(permitted_matrix, point_probabilities, 0.0)
+    masked_index = np.where(any_permitted, np.argmax(masked_probs, axis=1), unmasked_index)
+    n_no_permitted_class = int(np.count_nonzero(~any_permitted))
 
-    for position in range(n_points):
-        row = point_probabilities[position]
-        permitted = permitted_by_region[regions[position]]
-        unmasked_index = int(np.argmax(row))
-        if permitted.any():
-            masked_row = row * permitted
-            masked_index = int(np.argmax(masked_row / masked_row.sum()))
-        else:
-            n_no_permitted_class += 1
-            masked_index = unmasked_index
+    truth_index = np.array([class_index.get(truth, -1) for truth in truths], dtype=np.intp)
+    scorable_truth = truth_index >= 0
+    unmasked_correct = truth_index == unmasked_index
+    masked_correct = truth_index == masked_index
+    changed = masked_index != unmasked_index
 
-        truth_index = class_index.get(truths[position])
-        scorable_truth[position] = truth_index is not None
-        unmasked_correct[position] = truth_index == unmasked_index
-        masked_correct[position] = truth_index == masked_index
-        changed[position] = masked_index != unmasked_index
-
-        if is_out_of_region(class_allowed[unmasked_index], regions[position]) and permitted.any():
-            margins.append(float(row[unmasked_index] - row[permitted].max()))
+    # The margin covers a top-1 pick the region excludes (unpermitted) where the
+    # region still permits something else; a region with no permitted class has
+    # nothing for the pick to be measured against.
+    unmasked_permitted = permitted_matrix[point_positions, unmasked_index]
+    margin_eligible = any_permitted & ~unmasked_permitted
+    best_permitted = masked_probs.max(axis=1)
+    unmasked_confidence = point_probabilities[point_positions, unmasked_index]
+    margin_values = (unmasked_confidence - best_permitted)[margin_eligible]
 
     n_accuracy_points = int(scorable_truth.sum())
     accuracy_unmasked = _ratio(int(unmasked_correct.sum()), n_accuracy_points)
@@ -336,7 +336,6 @@ def masking_counterfactual(
             images, delta, n_resamples=n_resamples, alpha=alpha, seed=seed
         )
 
-    margin_values = np.asarray(margins, dtype=np.float64)
     return MaskingCounterfactual(
         n_points=n_points,
         n_images=len(set(images)),
@@ -353,7 +352,7 @@ def masking_counterfactual(
         changed_share=_ratio(int(changed.sum()), n_points),
         n_fixed=int((masked_correct & ~unmasked_correct).sum()),
         n_broken=int((unmasked_correct & ~masked_correct).sum()),
-        margin_n=len(margins),
+        margin_n=int(margin_values.size),
         margin_median=_quantile(margin_values, 50.0),
         margin_p90=_quantile(margin_values, 90.0),
         margin_max=_quantile(margin_values, 100.0),
@@ -627,30 +626,13 @@ def _shares_ancestor(path_a: Sequence[str], path_b: Sequence[str]) -> bool:
 def _auroc(scores: NDArray[np.float64], positive: NDArray[np.bool_]) -> float:
     """Area under the ROC curve of `scores` separating positives from the rest.
 
-    The Mann-Whitney U form: the positives' share of the ranked pairs they
-    could win. Tied scores take their average rank, which sends an all-tied
+    Ties resolve to their average rank internally, which sends an all-tied
     input to exactly 0.5 rather than to whichever extreme the sort order
-    implied. NaN where either class is empty, which no ranking can answer.
+    implied. NaN where either class is empty, a case `roc_auc_score` raises on
+    rather than answers.
     """
     n_positive = int(positive.sum())
     n_negative = int(positive.size - n_positive)
     if n_positive == 0 or n_negative == 0:
         return math.nan
-    ranks = _average_ranks(scores)
-    rank_sum = float(ranks[positive].sum())
-    return (rank_sum - n_positive * (n_positive + 1) / 2.0) / (n_positive * n_negative)
-
-
-def _average_ranks(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    """One-based ranks, with each run of equal values sharing their mean rank."""
-    order = np.argsort(values, kind="stable")
-    ordered = values[order]
-    ranks = np.empty(values.size, dtype=np.float64)
-    start = 0
-    while start < ordered.size:
-        stop = start
-        while stop + 1 < ordered.size and ordered[stop + 1] == ordered[start]:
-            stop += 1
-        ranks[order[start : stop + 1]] = (start + stop + 2) / 2.0
-        start = stop + 1
-    return ranks
+    return float(roc_auc_score(positive, scores))

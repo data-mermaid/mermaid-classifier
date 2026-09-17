@@ -32,7 +32,7 @@ from enum import StrEnum
 
 import pandas as pd
 
-from mermaid_classifier.region_eval.metrics import ScoredPoints
+from mermaid_classifier.region_eval.metrics import ScoredPoints, columns_frame, display_name
 
 DEFAULT_LIST_SUSPECT_THRESHOLD = 5
 
@@ -141,7 +141,7 @@ def triage_events(
     return TriageResult(
         n_unrecorded_region_excluded=points.n_unrecorded_region_excluded,
         threshold=threshold,
-        events=_frame([dataclasses.asdict(event) for event in events], EVENT_COLUMNS),
+        events=columns_frame([dataclasses.asdict(event) for event in events], EVENT_COLUMNS),
         bucket_counts=_bucket_counts(events),
         region_list_suspects=_region_list_suspects(
             events, attribute_names or {}, region_names or {}
@@ -165,7 +165,7 @@ def _bucket(region_unknown: bool, annotations: int, threshold: int) -> TriageBuc
 def _bucket_counts(events: Sequence[_Event]) -> pd.DataFrame:
     """Every bucket, including the ones that caught nothing."""
     counts: Counter[TriageBucket] = Counter(event.bucket for event in events)
-    return _frame(
+    return columns_frame(
         [{"bucket": bucket, "n": counts[bucket]} for bucket in TriageBucket],
         BUCKET_COUNT_COLUMNS,
     )
@@ -190,13 +190,13 @@ def _region_list_suspects(
         ((annotations[pair], pair[0], pair[1], count) for pair, count in predictions.items()),
         key=lambda entry: (-entry[0], entry[1], entry[2]),
     )
-    return _frame(
+    return columns_frame(
         [
             {
                 "attribute_id": attribute_id,
-                "attribute_name": _display(attribute_id, attribute_names),
+                "attribute_name": display_name(attribute_id, attribute_names),
                 "region_id": region_id,
-                "region_name": _display(region_id, region_names),
+                "region_name": display_name(region_id, region_names),
                 "n_ground_truth": n_ground_truth,
                 "n_predicted": n_predicted,
             }
@@ -204,15 +204,3 @@ def _region_list_suspects(
         ],
         REGION_LIST_SUSPECT_COLUMNS,
     )
-
-
-def _display(identifier: str, names: Mapping[str, str]) -> str:
-    """The display name for an id, or the id where no name resolves."""
-    return names.get(identifier) or identifier
-
-
-def _frame(rows: Sequence[Mapping[str, object]], columns: Sequence[str]) -> pd.DataFrame:
-    """A DataFrame that keeps its columns even with no rows."""
-    if not rows:
-        return pd.DataFrame(columns=pd.Index(columns))
-    return pd.DataFrame(list(rows), columns=pd.Index(columns))
