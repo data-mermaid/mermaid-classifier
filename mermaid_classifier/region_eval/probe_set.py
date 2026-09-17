@@ -58,6 +58,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 import duckdb
 import numpy as np
@@ -65,7 +66,6 @@ import pandas as pd
 
 from mermaid_classifier.common.benthic_attributes import combine_ba_gf
 from mermaid_classifier.common.region_rules import is_region_discriminating
-from mermaid_classifier.region_eval.metrics import required_n_for_detection
 
 PROBE_VERSION = "1"
 
@@ -124,14 +124,6 @@ DEFAULT_CENSUS_REGION_NAMES = frozenset({"Tropical Atlantic"})
 CENSUS = "census"
 SAMPLE = "sample"
 
-MDE_BASELINE_RATES = (0.02, 0.05, 0.10)
-MDE_EFFECTS = (0.01, 0.02, 0.05)
-# 1.0 is the unclustered floor. 5.0 is what ~25 correlated points per image
-# imply at an intra-image correlation near 0.2; the realized value arrives only
-# with a scored run, so the table brackets rather than picks.
-MDE_DESIGN_EFFECTS = (1.0, 5.0)
-
-_OVERALL_REGION_NAME = "all"
 _FIELD_SEPARATOR = "\x1f"
 _RECORD_SEPARATOR = b"\x1e"
 
@@ -196,33 +188,6 @@ class ProbeSet:
     region_snapshot_hash: str
     ground_truth_counts: dict[tuple[str, str], int]
     ground_truth_counts_hash: str
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _Annotation:
-    """One source annotation, in the fields selection and the probe schema use."""
-
-    image_id: str
-    point_id: str
-    row: int
-    col: int
-    benthic_attribute_id: str
-    benthic_attribute_name: str
-    growth_form_id: str
-    growth_form_name: str
-    region_id: str
-    region_name: str
-    site_id: str
-
-
-@dataclasses.dataclass(slots=True)
-class _Image:
-    """One image's region, its eligibility, and every point on it."""
-
-    region_id: str
-    region_name: str
-    eligible: bool
-    points: list[_Annotation]
 
 
 def read_annotations(
@@ -290,25 +255,19 @@ def build_probe_set(
     if selection.region_floor < 0:
         raise ValueError(f"region_floor must not be negative, got {selection.region_floor}")
 
-    records = _annotation_records(annotations)
-    recorded = [record for record in records if record.region_id]
-    images = _image_index(recorded, region_ids_by_attribute)
-    census_region_ids = _census_region_ids(images, selection.census_region_names)
-
-    by_region: dict[str, list[str]] = {}
-    for image_id, image in images.items():
-        by_region.setdefault(image.region_id, []).append(image_id)
+    frame = _normalized_frame(annotations)
+    recorded = frame.loc[frame["region_id"] != ""]
+    image_regions = _image_table(recorded, region_ids_by_attribute)
+    census_region_ids = _census_region_ids(image_regions, selection.census_region_names)
 
     selected: set[str] = set()
     pools: dict[str, list[str]] = {}
-    for region_id in sorted(by_region):
+    for region_id_key, group in image_regions.groupby("region_id"):
+        region_id = str(region_id_key)
         if region_id in census_region_ids:
-            selected.update(by_region[region_id])
+            selected.update(group.index)
         else:
-            pools[region_id] = _hash_order(
-                (image_id for image_id in by_region[region_id] if images[image_id].eligible),
-                selection.seed,
-            )
+            pools[region_id] = _hash_order(group.index[group["eligible"]], selection.seed)
 
     allocation = _allocate(
         {region_id: len(pool) for region_id, pool in pools.items()},
@@ -318,18 +277,19 @@ def build_probe_set(
     for region_id, pool in pools.items():
         selected.update(pool[: allocation[region_id]])
 
-    rows = _probe_rows(images, selected, census_region_ids)
+    rows = _probe_rows(recorded, selected, census_region_ids)
+    image_points = recorded.groupby("image_id").size()
     strata = tuple(
-        _stratum_counts(region_id, by_region[region_id], images, selected, census_region_ids)
-        for region_id in sorted(by_region)
+        _stratum_counts(region_id, image_regions, image_points, selected, census_region_ids)
+        for region_id in sorted(image_regions["region_id"].unique())
     )
 
-    counts = ground_truth_counts(records)
+    counts = ground_truth_counts(frame)
     return ProbeSet(
         rows=rows,
         strata=strata,
         options=selection,
-        n_rows_unrecorded_region_dropped=len(records) - len(recorded),
+        n_rows_unrecorded_region_dropped=len(frame) - len(recorded),
         content_hash=probe_content_hash(rows),
         region_snapshot_hash=region_snapshot_hash(region_ids_by_attribute),
         ground_truth_counts=counts,
@@ -362,35 +322,38 @@ def region_snapshot(
     }
 
 
+def _canonical_json(payload: object) -> str:
+    """The canonical serialization every probe-snapshot hash is taken over."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _snapshot_hash(payload: object) -> str:
+    """The sha256 hex digest of a payload's canonical serialization."""
+    return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
+
+
 def region_snapshot_json(region_ids_by_attribute: Mapping[str, frozenset[str]]) -> str:
-    """The canonical serialization the snapshot hash is taken over."""
-    return json.dumps(
-        region_snapshot(region_ids_by_attribute), sort_keys=True, separators=(",", ":")
-    )
+    return _canonical_json(region_snapshot(region_ids_by_attribute))
 
 
 def region_snapshot_hash(region_ids_by_attribute: Mapping[str, frozenset[str]]) -> str:
-    return hashlib.sha256(region_snapshot_json(region_ids_by_attribute).encode()).hexdigest()
+    return _snapshot_hash(region_snapshot(region_ids_by_attribute))
 
 
-def ground_truth_counts(records: Sequence[_Annotation]) -> dict[tuple[str, str], int]:
+def ground_truth_counts(annotations: pd.DataFrame) -> dict[tuple[str, str], int]:
     """Confirmed annotations of each (benthic attribute, region) pair.
 
-    Read over every record given, which is the whole export rather than the
+    Read over every row given, which is the whole export rather than the
     probe subset: this is the corpus evidence triage weighs an out-of-region
     prediction against, and the probe holds too few of any one pair to carry a
     threshold meant for the corpus.
 
-    A record whose region is unrecorded answers no triage question -- every
+    A row whose region is unrecorded answers no triage question -- every
     lookup arrives with an image's recorded region -- and is not counted.
     """
-    counts: dict[tuple[str, str], int] = {}
-    for record in records:
-        if not record.region_id:
-            continue
-        key = (record.benthic_attribute_id, record.region_id)
-        counts[key] = counts.get(key, 0) + 1
-    return counts
+    recorded = annotations.loc[annotations["region_id"] != ""]
+    grouped = recorded.groupby(["benthic_attribute_id", "region_id"]).size()
+    return {cast(tuple[str, str], key): int(count) for key, count in grouped.items()}
 
 
 def ground_truth_counts_snapshot(
@@ -404,12 +367,11 @@ def ground_truth_counts_snapshot(
 
 
 def ground_truth_counts_json(counts: Mapping[tuple[str, str], int]) -> str:
-    """The canonical serialization the counts hash is taken over."""
-    return json.dumps(ground_truth_counts_snapshot(counts), sort_keys=True, separators=(",", ":"))
+    return _canonical_json(ground_truth_counts_snapshot(counts))
 
 
 def ground_truth_counts_hash(counts: Mapping[tuple[str, str], int]) -> str:
-    return hashlib.sha256(ground_truth_counts_json(counts).encode()).hexdigest()
+    return _snapshot_hash(ground_truth_counts_snapshot(counts))
 
 
 def name_snapshot(names: NameSnapshot) -> dict[str, dict[str, str]]:
@@ -422,12 +384,11 @@ def name_snapshot(names: NameSnapshot) -> dict[str, dict[str, str]]:
 
 
 def name_snapshot_json(names: NameSnapshot) -> str:
-    """The canonical serialization the name hash is taken over."""
-    return json.dumps(name_snapshot(names), sort_keys=True, separators=(",", ":"))
+    return _canonical_json(name_snapshot(names))
 
 
 def name_snapshot_hash(names: NameSnapshot) -> str:
-    return hashlib.sha256(name_snapshot_json(names).encode()).hexdigest()
+    return _snapshot_hash(name_snapshot(names))
 
 
 def ancestry_snapshot(
@@ -438,63 +399,11 @@ def ancestry_snapshot(
 
 
 def ancestry_snapshot_json(ancestry_by_attribute: Mapping[str, Sequence[str]]) -> str:
-    """The canonical serialization the ancestry hash is taken over."""
-    return json.dumps(
-        ancestry_snapshot(ancestry_by_attribute), sort_keys=True, separators=(",", ":")
-    )
+    return _canonical_json(ancestry_snapshot(ancestry_by_attribute))
 
 
 def ancestry_snapshot_hash(ancestry_by_attribute: Mapping[str, Sequence[str]]) -> str:
-    return hashlib.sha256(ancestry_snapshot_json(ancestry_by_attribute).encode()).hexdigest()
-
-
-def minimum_detectable_effect_table(
-    strata: Sequence[StratumCounts],
-    *,
-    alpha: float = 0.05,
-    baseline_rates: Sequence[float] = MDE_BASELINE_RATES,
-    effects: Sequence[float] = MDE_EFFECTS,
-    design_effects: Sequence[float] = MDE_DESIGN_EFFECTS,
-) -> list[dict[str, object]]:
-    """Which v1-vs-v2 differences the realized probe can resolve.
-
-    One row per (population, baseline rate, effect, design effect), so a delta
-    cannot be read off the probe without the sample size that would be needed
-    to believe it. The leading rows cover the probe as a whole.
-
-    The requirement is the two-sample detection one, not a margin of error:
-    two rates each measured to a half-width of `effect` still have overlapping
-    intervals at a true difference of `effect`, and a v1-vs-v2 delta is read
-    precisely to decide whether the difference is real.
-    """
-    populations: list[tuple[str, str, int]] = [
-        ("", _OVERALL_REGION_NAME, sum(stratum.n_points for stratum in strata))
-    ]
-    populations += [
-        (stratum.region_id, stratum.region_name, stratum.n_points) for stratum in strata
-    ]
-
-    table: list[dict[str, object]] = []
-    for region_id, region_name, n_points in populations:
-        for rate in baseline_rates:
-            for effect in effects:
-                for inflation in design_effects:
-                    required = required_n_for_detection(
-                        rate, effect, alpha=alpha, design_effect=inflation
-                    )
-                    table.append(
-                        {
-                            "region_id": region_id,
-                            "region_name": region_name,
-                            "n_points": n_points,
-                            "baseline_rate": rate,
-                            "effect": effect,
-                            "design_effect": inflation,
-                            "required_n": required,
-                            "resolvable": n_points >= required,
-                        }
-                    )
-    return table
+    return _snapshot_hash(ancestry_snapshot(ancestry_by_attribute))
 
 
 def build_manifest(
@@ -506,17 +415,12 @@ def build_manifest(
     builder_git_sha: str,
     names: NameSnapshot | None = None,
     ancestry: Mapping[str, Sequence[str]] | None = None,
-    baseline_rates: Sequence[float] = MDE_BASELINE_RATES,
-    effects: Sequence[float] = MDE_EFFECTS,
-    design_effects: Sequence[float] = MDE_DESIGN_EFFECTS,
 ) -> dict[str, object]:
     """Everything needed to say whether two scores were taken on the same probe.
 
     The source ETag and row count pin the export, the content hash pins the
-    points, the region-snapshot hash pins the taxonomy, the name and ancestry
-    hashes pin what the reports render off it, and the
-    minimum-detectable-effect table pins what a difference between two scores
-    is allowed to mean.
+    points, the region-snapshot hash pins the taxonomy, and the name and
+    ancestry hashes pin what the reports render off it.
 
     A probe frozen without the names or the ancestry records a null hash for
     them, which is the state a score degrades against rather than a hash of
@@ -548,87 +452,82 @@ def build_manifest(
         "n_points": sum(stratum.n_points for stratum in probe.strata),
         "strata": [dataclasses.asdict(stratum) for stratum in probe.strata],
         "builder_git_sha": builder_git_sha,
-        "minimum_detectable_effect": minimum_detectable_effect_table(
-            probe.strata,
-            alpha=probe.options.alpha,
-            baseline_rates=baseline_rates,
-            effects=effects,
-            design_effects=design_effects,
-        ),
     }
 
 
-def _annotation_records(annotations: pd.DataFrame) -> list[_Annotation]:
-    """The source frame as records, independent of the dtypes it arrived with."""
+def _normalized_frame(annotations: pd.DataFrame) -> pd.DataFrame:
+    """The source frame coerced to the dtypes selection and hashing depend on.
+
+    A caller's own frame may carry numeric ids or omit `site_id` entirely; the
+    probe schema and its content hash must be stable regardless.
+    """
     missing = [column for column in SOURCE_COLUMNS if column not in annotations.columns]
     if missing:
         raise ValueError(f"annotations are missing column(s): {', '.join(missing)}")
 
-    values = {column: annotations[column].tolist() for column in SOURCE_COLUMNS}
-    site_ids = (
-        annotations["site_id"].tolist()
+    text_columns = [column for column in SOURCE_COLUMNS if column not in ("row", "col")]
+    site_id = (
+        annotations["site_id"]
         if "site_id" in annotations.columns
-        else [""] * len(annotations)
+        else pd.Series([""] * len(annotations), index=annotations.index)
     )
-    return [
-        _Annotation(
-            image_id=str(values["image_id"][position]),
-            point_id=str(values["point_id"][position]),
-            row=int(values["row"][position]),
-            col=int(values["col"][position]),
-            benthic_attribute_id=str(values["benthic_attribute_id"][position]),
-            benthic_attribute_name=str(values["benthic_attribute_name"][position]),
-            growth_form_id=str(values["growth_form_id"][position]),
-            growth_form_name=str(values["growth_form_name"][position]),
-            region_id=str(values["region_id"][position]),
-            region_name=str(values["region_name"][position]),
-            site_id=str(site_ids[position]),
-        )
-        for position in range(len(annotations))
-    ]
+    normalized = annotations.assign(
+        **{column: annotations[column].astype(str) for column in text_columns},
+        row=annotations["row"].astype(int),
+        col=annotations["col"].astype(int),
+        site_id=site_id.astype(str),
+    )
+    columns: list[str] = [*SOURCE_COLUMNS, "site_id"]
+    return normalized.loc[:, columns]
 
 
-def _image_index(
-    records: Sequence[_Annotation],
+def _image_table(
+    recorded: pd.DataFrame,
     region_ids_by_attribute: Mapping[str, frozenset[str]],
-) -> dict[str, _Image]:
-    """Group annotations by image, deciding each image's eligibility as it goes.
+) -> pd.DataFrame:
+    """One row per image: its region and whether any of its annotations is
+    region-discriminating.
 
     An image is eligible when at least one of its ground-truth annotations
     carries a region-discriminating attribute. Discrimination is judged against
     the regions the corpus actually contains, not a fixed MERMAID region list.
+    Raises when one image's annotations carry more than one region -- a
+    data-integrity break upstream, not something selection should resolve by
+    picking one.
     """
-    observed = frozenset(record.region_id for record in records)
-    discriminating = {
+    region_counts = recorded.groupby("image_id")["region_id"].nunique()
+    conflicted = region_counts.loc[region_counts > 1]
+    if len(conflicted) > 0:
+        image_id = str(conflicted.index[0])
+        regions = sorted(recorded.loc[recorded["image_id"] == image_id, "region_id"].unique())
+        raise ValueError(
+            f"image {image_id!r} carries annotations with disagreeing regions: {regions}"
+        )
+
+    observed = frozenset(recorded["region_id"])
+    discriminating_by_attribute = {
         attribute_id: is_region_discriminating(
             region_ids_by_attribute.get(attribute_id, frozenset()), observed
         )
-        for attribute_id in {record.benthic_attribute_id for record in records}
+        for attribute_id in recorded["benthic_attribute_id"].unique()
     }
-
-    images: dict[str, _Image] = {}
-    for record in records:
-        image = images.get(record.image_id)
-        if image is None:
-            images[record.image_id] = _Image(
-                region_id=record.region_id,
-                region_name=record.region_name,
-                eligible=discriminating[record.benthic_attribute_id],
-                points=[record],
-            )
-            continue
-        if image.region_id != record.region_id:
-            raise ValueError(
-                f"image {record.image_id!r} carries annotations with disagreeing"
-                f" regions: {sorted({image.region_id, record.region_id})}"
-            )
-        image.eligible = image.eligible or discriminating[record.benthic_attribute_id]
-        image.points.append(record)
-    return images
+    tagged = recorded.assign(
+        discriminating=recorded["benthic_attribute_id"].map(
+            lambda attribute_id: discriminating_by_attribute[attribute_id]
+        )
+    )
+    return cast(
+        pd.DataFrame,
+        tagged.groupby("image_id").agg(
+            region_id=("region_id", "first"),
+            region_name=("region_name", "first"),
+            eligible=("discriminating", "any"),
+        ),
+    )
 
 
 def _census_region_ids(
-    images: Mapping[str, _Image], census_region_names: frozenset[str]
+    image_regions: pd.DataFrame, census_region_names: frozenset[str]
 ) -> frozenset[str]:
     """Region ids for the named census regions, raising on a name that matches none.
 
@@ -636,14 +535,14 @@ def _census_region_ids(
     with no Atlantic census in it, which would be an Indo-Pacific-only probe
     wearing the right filename.
     """
-    by_name = {image.region_name: image.region_id for image in images.values()}
-    unmatched = sorted(census_region_names - set(by_name))
+    by_name = image_regions.drop_duplicates("region_name").set_index("region_name")["region_id"]
+    unmatched = sorted(census_region_names - set(by_name.index))
     if unmatched:
         raise ValueError(
             f"census region(s) {unmatched} match no region in the data;"
-            f" available: {sorted(by_name)}"
+            f" available: {sorted(by_name.index)}"
         )
-    return frozenset(by_name[name] for name in census_region_names)
+    return frozenset(str(by_name[name]) for name in census_region_names)
 
 
 def _hash_order(image_ids: Iterable[str], seed: int) -> list[str]:
@@ -683,7 +582,7 @@ def _allocate(pools: Mapping[str, int], *, budget: int, floor: int) -> dict[str,
 
 
 def _probe_rows(
-    images: Mapping[str, _Image],
+    recorded: pd.DataFrame,
     selected: Iterable[str],
     census_region_ids: frozenset[str],
 ) -> pd.DataFrame:
@@ -692,45 +591,39 @@ def _probe_rows(
     Emitted already in the canonical (image, point) order the content hash
     reads, so the written parquet and its hash agree by construction.
     """
-    rows = [
-        {
-            "image_id": point.image_id,
-            "point_id": point.point_id,
-            "row": point.row,
-            "col": point.col,
-            "benthic_attribute_id": point.benthic_attribute_id,
-            "benthic_attribute_name": point.benthic_attribute_name,
-            "growth_form_id": point.growth_form_id,
-            "growth_form_name": point.growth_form_name,
-            "gt_label": combine_ba_gf(point.benthic_attribute_id, point.growth_form_id),
-            "region_id": point.region_id,
-            "region_name": point.region_name,
-            "site_id": point.site_id,
-            "held_out": images[image_id].region_id not in census_region_ids,
-        }
-        for image_id in sorted(selected)
-        for point in sorted(images[image_id].points, key=lambda point: point.point_id)
-    ]
-    return pd.DataFrame(rows, columns=pd.Index(PROBE_COLUMNS))
+    points = recorded.loc[recorded["image_id"].isin(list(selected))].sort_values(
+        ["image_id", "point_id"], kind="stable"
+    )
+    points = points.assign(
+        gt_label=[
+            combine_ba_gf(attribute_id, growth_form_id)
+            for attribute_id, growth_form_id in zip(
+                points["benthic_attribute_id"], points["growth_form_id"], strict=True
+            )
+        ],
+        held_out=~points["region_id"].isin(list(census_region_ids)),
+    )
+    return cast(pd.DataFrame, points.loc[:, list(PROBE_COLUMNS)]).reset_index(drop=True)
 
 
 def _stratum_counts(
     region_id: str,
-    region_image_ids: Sequence[str],
-    images: Mapping[str, _Image],
+    image_regions: pd.DataFrame,
+    image_points: pd.Series,
     selected: frozenset[str] | set[str],
     census_region_ids: frozenset[str],
 ) -> StratumCounts:
-    taken = [image_id for image_id in region_image_ids if image_id in selected]
+    region_images = image_regions.loc[image_regions["region_id"] == region_id]
+    taken = [image_id for image_id in region_images.index if image_id in selected]
     return StratumCounts(
         region_id=region_id,
-        region_name=images[region_image_ids[0]].region_name,
+        region_name=str(region_images["region_name"].iloc[0]),
         policy=CENSUS if region_id in census_region_ids else SAMPLE,
         held_out=region_id not in census_region_ids,
-        n_region_images=len(region_image_ids),
-        n_eligible_images=sum(1 for image_id in region_image_ids if images[image_id].eligible),
+        n_region_images=len(region_images),
+        n_eligible_images=int(region_images["eligible"].sum()),
         n_images=len(taken),
-        n_points=sum(len(images[image_id].points) for image_id in taken),
+        n_points=int(image_points.loc[taken].sum()),
     )
 
 

@@ -41,8 +41,6 @@ unduplicated count.
 Rates are computed over all scored points and again over the held-out subset.
 Where a sample cannot measure its rate to the caller's target margin the
 estimate is flagged `imprecise` rather than dressed up as a comparison.
-Resolving a difference between two model versions is the stiffer requirement
-and has its own formula in `required_n_for_detection`.
 
 *Which name?* Every table keys on ids and renders the caller's frozen display
 names beside them. An id with no name renders as the id: an empty cell reads
@@ -160,9 +158,7 @@ class RegionMetricsOptions:
     cluster resamples, so a full-corpus run trades it against wall clock.
 
     `target_margin` is the half-width each cell's confidence interval is
-    checked against, and `RateEstimate.imprecise` carries the verdict. Whether
-    a difference of that size between two model versions is resolvable is the
-    separate question `required_n_for_detection` answers.
+    checked against, and `RateEstimate.imprecise` carries the verdict.
     """
 
     alpha: float = 0.05
@@ -518,9 +514,9 @@ def required_n_for_margin(
 
     The normal approximation z^2 p(1-p) deff / margin^2, rounded up. This is
     precision, not power: two estimates whose half-widths are each
-    `target_margin` have overlapping intervals at a true difference of that
-    size, so a comparison between model versions asks
-    `required_n_for_detection` instead.
+    `target_margin` still have overlapping intervals at a true difference of
+    that size, so it answers "how tight is this estimate" rather than "could
+    two versions be told apart".
 
     A rate of zero or one carries no usable variance estimate, so p = 0.5
     stands in, which is the value that demands the largest sample.
@@ -530,38 +526,6 @@ def required_n_for_margin(
     z = NormalDist().inv_cdf(1.0 - alpha / 2.0)
     variance = z * z * _variance_factor(rate) * design_effect
     return math.ceil(variance / (target_margin * target_margin))
-
-
-def required_n_for_detection(
-    rate: float,
-    minimum_detectable_effect: float,
-    *,
-    alpha: float,
-    design_effect: float = 1.0,
-    power: float = 0.8,
-    two_sample: bool = True,
-) -> int:
-    """Points needed to resolve a difference of `minimum_detectable_effect`.
-
-    (z_{alpha/2} + z_{power})^2 p(1-p) deff / mde^2, rounded up, and doubled
-    when both sides of the comparison are estimated rather than one rate being
-    read against a fixed reference. The power term is the whole difference
-    from `required_n_for_margin`: at a five-percent rate and a one-point
-    effect the margin asks for 1,825 points where two-sample 80% power asks
-    for 7,457.
-
-    A rate of zero or one carries no usable variance estimate, so p = 0.5
-    stands in, which is the value that demands the largest sample.
-    """
-    if minimum_detectable_effect <= 0.0:
-        raise ValueError(
-            f"minimum_detectable_effect must be positive, got {minimum_detectable_effect}"
-        )
-    z_alpha = NormalDist().inv_cdf(1.0 - alpha / 2.0)
-    z_power = NormalDist().inv_cdf(power)
-    variance = (z_alpha + z_power) ** 2 * _variance_factor(rate) * design_effect
-    required = variance / (minimum_detectable_effect * minimum_detectable_effect)
-    return math.ceil(2.0 * required if two_sample else required)
 
 
 def _variance_factor(rate: float) -> float:

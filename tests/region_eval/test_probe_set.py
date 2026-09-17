@@ -32,9 +32,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from mermaid_classifier.region_eval.metrics import required_n_for_detection
 from mermaid_classifier.region_eval.probe_set import (
-    PROBE_COLUMNS,
     NameSnapshot,
     ProbeSelectionOptions,
     ancestry_snapshot,
@@ -44,7 +42,6 @@ from mermaid_classifier.region_eval.probe_set import (
     build_probe_set,
     ground_truth_counts_hash,
     ground_truth_counts_json,
-    minimum_detectable_effect_table,
     name_snapshot_hash,
     name_snapshot_json,
     probe_content_hash,
@@ -257,10 +254,40 @@ class CompositionTest(unittest.TestCase):
         self.assertNotIn("cip-e000", set(probe.rows["image_id"]))
         self.assertEqual(_stratum(probe, CENTRAL_INDO_PACIFIC).n_eligible_images, 39)
 
+    def test_conflicting_regions_on_one_image_raises(self):
+        """A disagreement is a data-integrity break upstream; selection must
+        not silently resolve it by keeping whichever region came first."""
+        annotations = _annotations()
+        annotations.loc[annotations["point_id"] == "cip-e000-p0", "region_id"] = (
+            WESTERN_INDO_PACIFIC
+        )
+        with self.assertRaises(ValueError):
+            _build(annotations)
+
 
 class ProbeRowSchemaTest(unittest.TestCase):
-    def test_rows_carry_the_declared_columns_in_order(self):
-        self.assertEqual(tuple(_build().rows.columns), PROBE_COLUMNS)
+    def test_rows_carry_the_frozen_probe_schema(self):
+        """The column names and order are a contract consumers (the parquet
+        writer, `score.py`) read by name; a rename or reorder here is a
+        break, whether or not `PROBE_COLUMNS` itself moved with it."""
+        self.assertEqual(
+            tuple(_build().rows.columns),
+            (
+                "image_id",
+                "point_id",
+                "row",
+                "col",
+                "benthic_attribute_id",
+                "benthic_attribute_name",
+                "growth_form_id",
+                "growth_form_name",
+                "gt_label",
+                "region_id",
+                "region_name",
+                "site_id",
+                "held_out",
+            ),
+        )
 
     def test_ground_truth_label_joins_attribute_and_growth_form(self):
         rows = _build().rows
@@ -292,21 +319,6 @@ class RegionSnapshotTest(unittest.TestCase):
         snapshot = region_snapshot(REGION_IDS_BY_ATTRIBUTE)
         self.assertEqual(snapshot[BA_PACIFIC], sorted([CENTRAL_INDO_PACIFIC, WESTERN_INDO_PACIFIC]))
         self.assertEqual(snapshot[BA_UNRECORDED], [])
-
-    def test_hash_ignores_key_insertion_order(self):
-        reversed_map = dict(reversed(list(REGION_IDS_BY_ATTRIBUTE.items())))
-        self.assertEqual(
-            region_snapshot_hash(REGION_IDS_BY_ATTRIBUTE),
-            region_snapshot_hash(reversed_map),
-        )
-
-    def test_hash_changes_when_a_region_is_added_to_an_attribute(self):
-        widened = dict(REGION_IDS_BY_ATTRIBUTE)
-        widened[BA_PACIFIC] = ALL_REGIONS
-        self.assertNotEqual(
-            region_snapshot_hash(REGION_IDS_BY_ATTRIBUTE),
-            region_snapshot_hash(widened),
-        )
 
 
 class GroundTruthCountsTest(unittest.TestCase):
@@ -345,23 +357,6 @@ class GroundTruthCountsTest(unittest.TestCase):
         self.assertEqual(counts[(BA_PACIFIC, CENTRAL_INDO_PACIFIC)], 39)
         self.assertNotIn((BA_PACIFIC, ""), counts)
 
-    def test_hash_ignores_pair_insertion_order(self):
-        counts = {(BA_PACIFIC, CENTRAL_INDO_PACIFIC): 40, (BA_GLOBAL, TROPICAL_ATLANTIC): 15}
-        self.assertEqual(
-            ground_truth_counts_hash(counts),
-            ground_truth_counts_hash(dict(reversed(list(counts.items())))),
-        )
-
-    def test_hash_changes_when_a_pair_count_changes(self):
-        """The counts are frozen for the same reason the region map is: a
-        score must not move because the corpus grew afterwards.
-        """
-        counts = {(BA_PACIFIC, CENTRAL_INDO_PACIFIC): 40}
-        self.assertNotEqual(
-            ground_truth_counts_hash(counts),
-            ground_truth_counts_hash({(BA_PACIFIC, CENTRAL_INDO_PACIFIC): 41}),
-        )
-
     def test_the_json_snapshot_round_trips_to_the_same_counts(self):
         probe = _build()
         payload = json.loads(ground_truth_counts_json(probe.ground_truth_counts))
@@ -373,40 +368,6 @@ class GroundTruthCountsTest(unittest.TestCase):
         self.assertEqual(restored, probe.ground_truth_counts)
 
 
-class MinimumDetectableEffectTest(unittest.TestCase):
-    def test_required_n_matches_the_shared_formula(self):
-        table = minimum_detectable_effect_table(
-            _build().strata,
-            alpha=0.05,
-            baseline_rates=(0.05,),
-            effects=(0.05,),
-            design_effects=(1.0,),
-        )
-        entry = next(row for row in table if row["region_id"] == TROPICAL_ATLANTIC)
-        self.assertEqual(
-            entry["required_n"],
-            required_n_for_detection(0.05, 0.05, alpha=0.05, design_effect=1.0),
-        )
-        self.assertEqual(entry["required_n"], 299)
-
-    def test_resolvable_compares_the_realized_points_against_the_requirement(self):
-        table = minimum_detectable_effect_table(
-            _build().strata,
-            alpha=0.05,
-            baseline_rates=(0.05,),
-            effects=(0.10, 0.20),
-            design_effects=(1.0,),
-        )
-        atlantic = {row["effect"]: row for row in table if row["region_id"] == TROPICAL_ATLANTIC}
-        # 24 Atlantic points: short of the 75 a 10-point effect needs, past the
-        # 19 a 20-point one does.
-        self.assertEqual(atlantic[0.10]["n_points"], 24)
-        self.assertEqual(atlantic[0.10]["required_n"], 75)
-        self.assertFalse(atlantic[0.10]["resolvable"])
-        self.assertEqual(atlantic[0.20]["required_n"], 19)
-        self.assertTrue(atlantic[0.20]["resolvable"])
-
-
 class NameSnapshotTest(unittest.TestCase):
     """The display names frozen beside the region map.
 
@@ -414,22 +375,6 @@ class NameSnapshotTest(unittest.TestCase):
     of the taxonomy, so the names travel with the probe and the manifest pins
     which ones they were.
     """
-
-    def test_hash_ignores_key_insertion_order(self):
-        reordered = NameSnapshot(
-            benthic_attributes=dict(reversed(list(NAMES.benthic_attributes.items()))),
-            growth_forms=dict(NAMES.growth_forms),
-            regions=dict(reversed(list(NAMES.regions.items()))),
-        )
-        self.assertEqual(name_snapshot_hash(NAMES), name_snapshot_hash(reordered))
-
-    def test_hash_changes_when_a_name_changes(self):
-        renamed = NameSnapshot(
-            benthic_attributes={**NAMES.benthic_attributes, BA_PACIFIC: "Acropora sp."},
-            growth_forms=NAMES.growth_forms,
-            regions=NAMES.regions,
-        )
-        self.assertNotEqual(name_snapshot_hash(NAMES), name_snapshot_hash(renamed))
 
     def test_hash_distinguishes_the_sections(self):
         """A flat id-to-name map would hash a region renamed to an attribute's
@@ -456,19 +401,60 @@ class AncestrySnapshotTest(unittest.TestCase):
         self.assertEqual(payload[BA_PACIFIC], [BA_ROOT, BA_PACIFIC])
         self.assertEqual(payload[BA_UNRECORDED], [BA_UNRECORDED])
 
-    def test_hash_ignores_key_insertion_order(self):
-        self.assertEqual(
-            ancestry_snapshot_hash(ANCESTRY),
-            ancestry_snapshot_hash(dict(reversed(list(ANCESTRY.items())))),
-        )
-
-    def test_hash_changes_when_an_attribute_is_regrafted(self):
-        regrafted = {**ANCESTRY, BA_PACIFIC: [BA_UNRECORDED, BA_PACIFIC]}
-        self.assertNotEqual(ancestry_snapshot_hash(ANCESTRY), ancestry_snapshot_hash(regrafted))
-
     def test_snapshot_copies_the_paths_it_was_given(self):
         snapshot = ancestry_snapshot(ANCESTRY)
         self.assertEqual(snapshot[BA_GLOBAL], [BA_ROOT, BA_GLOBAL])
+
+
+# (label, hasher, original payload, an insertion-order variant with the same
+# content, a variant whose content actually differs)
+_REORDERED_NAMES = NameSnapshot(
+    benthic_attributes=dict(reversed(list(NAMES.benthic_attributes.items()))),
+    growth_forms=dict(NAMES.growth_forms),
+    regions=dict(reversed(list(NAMES.regions.items()))),
+)
+_RENAMED_NAMES = NameSnapshot(
+    benthic_attributes={**NAMES.benthic_attributes, BA_PACIFIC: "Acropora sp."},
+    growth_forms=NAMES.growth_forms,
+    regions=NAMES.regions,
+)
+_GROUND_TRUTH_COUNTS = {(BA_PACIFIC, CENTRAL_INDO_PACIFIC): 40, (BA_GLOBAL, TROPICAL_ATLANTIC): 15}
+
+SNAPSHOT_HASH_CASES = (
+    (
+        "region",
+        region_snapshot_hash,
+        REGION_IDS_BY_ATTRIBUTE,
+        dict(reversed(list(REGION_IDS_BY_ATTRIBUTE.items()))),
+        {**REGION_IDS_BY_ATTRIBUTE, BA_PACIFIC: ALL_REGIONS},
+    ),
+    (
+        "ground_truth_counts",
+        ground_truth_counts_hash,
+        _GROUND_TRUTH_COUNTS,
+        dict(reversed(list(_GROUND_TRUTH_COUNTS.items()))),
+        {**_GROUND_TRUTH_COUNTS, (BA_PACIFIC, CENTRAL_INDO_PACIFIC): 41},
+    ),
+    ("names", name_snapshot_hash, NAMES, _REORDERED_NAMES, _RENAMED_NAMES),
+    (
+        "ancestry",
+        ancestry_snapshot_hash,
+        ANCESTRY,
+        dict(reversed(list(ANCESTRY.items()))),
+        {**ANCESTRY, BA_PACIFIC: [BA_UNRECORDED, BA_PACIFIC]},
+    ),
+)
+
+
+class SnapshotHashTest(unittest.TestCase):
+    """The four probe-snapshot hashes share one canonical-JSON encoding, so a
+    `sort_keys` or separator regression there breaks all four identically."""
+
+    def test_hash_ignores_insertion_order_but_not_content(self):
+        for label, hasher, original, reordered, changed in SNAPSHOT_HASH_CASES:
+            with self.subTest(label):
+                self.assertEqual(hasher(original), hasher(reordered))
+                self.assertNotEqual(hasher(original), hasher(changed))
 
 
 class ManifestTest(unittest.TestCase):

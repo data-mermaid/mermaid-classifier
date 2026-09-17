@@ -46,7 +46,6 @@ from mermaid_classifier.region_eval.metrics import (
     RegionMetricsOptions,
     compute_region_metrics,
     prepare_scored_points,
-    required_n_for_detection,
     required_n_for_margin,
 )
 
@@ -990,7 +989,7 @@ class PrecisionFlagTest(unittest.TestCase):
 
 
 class RequiredSampleSizeTest(unittest.TestCase):
-    """A margin of error, and the stiffer requirement of resolving a difference."""
+    """The sample size needed to measure a rate to a target margin of error."""
 
     def test_required_n_at_the_worst_case_rate(self):
         # 3.841458820694124 * 0.25 / 0.01 = 96.0364705
@@ -1004,19 +1003,9 @@ class RequiredSampleSizeTest(unittest.TestCase):
         self.assertEqual(required_n_for_margin(0.0, 0.1, alpha=0.05), 97)
         self.assertEqual(required_n_for_margin(math.nan, 0.1, alpha=0.05), 97)
 
-    def test_detection_carries_a_power_term_the_margin_does_not(self):
-        """At a five-percent rate and a one-point effect: 1,825 points for a
-        margin that size, 3,729 against a fixed reference at 80% power, and
-        7,457 once both sides of the comparison are estimated."""
-        self.assertEqual(required_n_for_margin(0.05, 0.01, alpha=0.05), 1825)
-        self.assertEqual(required_n_for_detection(0.05, 0.01, alpha=0.05, two_sample=False), 3729)
-        self.assertEqual(required_n_for_detection(0.05, 0.01, alpha=0.05), 7457)
-
     def test_a_non_positive_effect_is_refused(self):
         with self.assertRaises(ValueError):
             required_n_for_margin(0.5, 0.0, alpha=0.05)
-        with self.assertRaises(ValueError):
-            required_n_for_detection(0.5, 0.0, alpha=0.05)
 
 
 if __name__ == "__main__":
