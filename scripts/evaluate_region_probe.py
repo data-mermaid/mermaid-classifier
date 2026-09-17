@@ -18,7 +18,7 @@ downloaded and written back when --probe-dir has none. Nothing is uploaded:
 publishing a score is a deliberate step of its own.
 
 Run: AWS_PROFILE=wcs-admin uv run python scripts/evaluate_region_probe.py \
-        --probe-dir region_probe/v1 \
+        --probe-dir s3://dev-datamermaid-sm-sources/region_probe/v1/ \
         --model v1=s3://mermaid-config/classifier/v1 \
         --out-dir region_eval/v1
 

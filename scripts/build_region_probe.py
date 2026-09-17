@@ -11,7 +11,8 @@ Everything is written under --out-dir. Nothing is uploaded unless --publish
 names an s3://bucket/prefix/ to copy the build to; publishing a probe version
 is a separate, deliberate step and --publish carries no default.
 
-Run: AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir region_probe/v1
+Each published version is immutable; a new build requires a new version prefix.
+Run: AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir region_probe/v2 --publish s3://dev-datamermaid-sm-sources/region_probe/v2/
 
 Outputs (in --out-dir):
     probe_points.parquet   one row per probe annotation point, PROBE_COLUMNS

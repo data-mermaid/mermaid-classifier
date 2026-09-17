@@ -38,9 +38,11 @@ uv run python scripts/build_coralnet_manifest.py     # ETL parquets -> raw-image
 uv run python scripts/build_feature_bucket.py        # CoralNet-layout feature-vector bucket
 uv run python scripts/extract_reference_features.py  # stack .fv files into a reference matrix
 
-# Region-mismatch probe (see region_eval below): build once, evaluate per model
-AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir region_probe/v1 --seed 1 --publish s3://bucket/prefix/
-AWS_PROFILE=wcs-admin uv run python scripts/evaluate_region_probe.py --probe-dir s3://bucket/prefix/ --model v1=../models/v1 --out-dir region_probe/reports
+# Region-mismatch probe (see region_eval below). A published version is immutable --
+# --publish refuses a prefix that already holds anything -- so cutting a new probe
+# publishes under a new version (v2 here); evaluation scores against the published v1.
+AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir region_probe/v2 --seed 1 --publish s3://dev-datamermaid-sm-sources/region_probe/v2/
+AWS_PROFILE=wcs-admin uv run python scripts/evaluate_region_probe.py --probe-dir s3://dev-datamermaid-sm-sources/region_probe/v1/ --model v1=../models/v1 --out-dir region_probe/reports
 ```
 
 CI runs two workflows on every PR — `tests.yml` (unittest suite, Linux/3.12) and
