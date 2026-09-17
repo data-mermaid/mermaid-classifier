@@ -104,6 +104,7 @@
   .metric-card .value.good { color: var(--green-600); }
   .metric-card .value.warn { color: var(--amber); }
   .metric-card .value.bad  { color: var(--red-600); }
+  .metric-card .interval { font-size: 0.7rem; color: var(--gray-600); margin-top: 0.25rem; }
 
   /* Data tables (from pandas to_html) */
   .dataframe { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.5rem 0 1rem 0; }
@@ -210,13 +211,16 @@
 {# -- Helper macros -- #}
 
 {# Determine threshold CSS class for a metric value #}
-{% macro metric_value_class(label, value) %}
+{% macro metric_value_class(label, value, intervals=None) %}
   {%- set no_threshold = ['Cross-Branch Error Rate', 'Within-Branch Error Rate'] -%}
   {%- set lower_is_better_labels = [
     'ECE', 'Log Loss',
     'Mean Abs Bias %', 'Mean RMSE %', 'Mean MAE %'
   ] -%}
-  {%- if label in no_threshold -%}
+  {#- A region rate is read against its ground-truth floor, so no fixed bar
+      applies to it; membership of the interval map is what marks one. -#}
+  {%- if intervals and label in intervals -%}
+  {%- elif label in no_threshold -%}
   {%- elif label in lower_is_better_labels -%}
     {%- if value <= 0.05 -%}good{%- elif value <= 0.15 -%}warn{%- else -%}bad{%- endif -%}
   {%- else -%}
@@ -225,19 +229,38 @@
 {% endmacro %}
 
 {# Format metric values: percentages as "82.2%", MCC as 3 dp, others as 4 dp #}
-{% macro format_metric_value(label, value) -%}
+{% macro format_metric_value(label, value, intervals=None) -%}
   {%- set percent_labels = [
     'Accuracy', 'Balanced Accuracy', 'F1 (Macro)', 'Precision (Macro)', 'Recall (Macro)',
     'Top-1', 'Top-3', 'Top-5', 'Top-10',
     'GF Accuracy (GF-relevant)', 'Within-BA GF Accuracy'
   ] -%}
-  {%- if label in percent_labels -%}
+  {%- if intervals and label in intervals -%}
+    {#- Rates run to a few percent against a floor of half of one, so a
+        single decimal place collapses the comparison the pair exists for. -#}
+    {{ "%.2f" | format(value * 100) }}%
+  {%- elif label in percent_labels -%}
     {{ "%.1f" | format(value * 100) }}%
   {%- elif label == 'MCC' -%}
     {{ "%.3f" | format(value) }}
   {%- else -%}
     {{ "%.4f" | format(value) }}
   {%- endif -%}
+{%- endmacro %}
+
+{# One metric card: the value, and the interval it must never be read without #}
+{% macro metric_card(label, value, intervals, primary=False) -%}
+      <div class="metric-card{% if primary %} metric-card--primary{% endif %}">
+        <div class="label">{{ label }}</div>
+        <div class="value {{ metric_value_class(label, value, intervals) | trim }}">{{ format_metric_value(label, value, intervals) | trim }}</div>
+        {%- if intervals and label in intervals %}
+        {%- if intervals[label] %}
+        <div class="interval">95% CI {{ format_metric_value(label, intervals[label][0], intervals) | trim }} &ndash; {{ format_metric_value(label, intervals[label][1], intervals) | trim }}</div>
+        {%- else %}
+        <div class="interval">95% CI not logged</div>
+        {%- endif %}
+        {%- endif %}
+      </div>
 {%- endmacro %}
 
 {# Human-friendly labels for CSV <details> summaries #}
@@ -253,7 +276,11 @@
   'per_category_log_loss_csv': 'Per-Category Log Loss (CSV)',
   'per_category_topk_csv':     'Per-Category Top-K Accuracy (CSV)',
   'hierarchical_topk_csv':     'Hierarchical Top-K Results (CSV)',
-  'metrics_csv':               'Per-Source Validation Metrics (CSV)'
+  'metrics_csv':               'Per-Source Validation Metrics (CSV)',
+  'per_region_csv':            'Out-of-Region Rates by Region (CSV)',
+  'per_label_csv':             'Out-of-Region Rates by Label (CSV)',
+  'per_direction_csv':         'Out-of-Region Rates by Direction (CSV)',
+  'confusion_csv':             'Out-of-Region Confusions (CSV)'
 } %}
 
 {# -- Extract ECE value for calibration caption -- #}
@@ -323,10 +350,7 @@
   <div class="metric-group">
     <div class="metric-cards">
       {% for label, value in metrics.executive %}
-      <div class="metric-card{% if loop.first %} metric-card--primary{% endif %}">
-        <div class="label">{{ label }}</div>
-        <div class="value {{ metric_value_class(label, value) | trim }}">{{ format_metric_value(label, value) | trim }}</div>
-      </div>
+{{ metric_card(label, value, metrics.intervals, primary=loop.first) }}
       {% endfor %}
     </div>
   </div>
@@ -369,6 +393,17 @@
         <div class="label">{{ label }}</div>
         <div class="value {{ metric_value_class(label, value) | trim }}">{{ format_metric_value(label, value) | trim }}</div>
       </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if metrics.region %}
+  <div class="metric-group">
+    <h3>Region Mismatch</h3>
+    <div class="metric-cards">
+      {% for label, value in metrics.region %}
+{{ metric_card(label, value, metrics.intervals) }}
       {% endfor %}
     </div>
   </div>

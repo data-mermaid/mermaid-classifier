@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     spacer_batch_size: int | None = None
     feature_cache_dir: str | None = None
     download_max_workers: int = 50
+    # Cluster resamples behind every region-metric interval on the validation
+    # split. Each rate in each table draws this many, and the split can reach
+    # millions of points, so the default buys a readable interval without
+    # spending minutes on precision nobody asked for. The frozen probe is a
+    # fixed ~62,500 points and keeps the statistics layer's own default.
+    region_val_n_resamples: int = 200
+    # Directory holding the frozen region probe. Unset, the probe metric group
+    # does nothing, which is what a run with no probe to score against wants.
+    region_probe_dir: str | None = None
     mlflow_http_request_max_retries: str | None = None
     mlflow_default_experiment_name: str | None = None
 

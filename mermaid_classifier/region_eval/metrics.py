@@ -111,6 +111,7 @@ PER_LABEL_COLUMNS = (
     "label",
     "label_name",
     "allowed_region_ids",
+    "allowed_region_names",
     "n_predicted",
     "n_out_of_region",
     "rate",
@@ -495,7 +496,7 @@ def compute_region_metrics(
         overall=overall,
         held_out=held_out,
         per_region=_frame(per_region_rows, _per_region_columns()),
-        per_label=_per_label_table(points, names, resolved),
+        per_label=_per_label_table(points, names, regions, resolved),
         direction_matrix=_direction_matrix(points, direction_columns, regions),
         direction_region_ids=tuple(direction_columns),
         per_direction=_frame(per_direction_rows, PER_DIRECTION_COLUMNS),
@@ -1179,7 +1180,10 @@ def _per_direction_rows(
 
 
 def _per_label_table(
-    points: ScoredPoints, label_names: Mapping[str, str], options: RegionMetricsOptions
+    points: ScoredPoints,
+    label_names: Mapping[str, str],
+    region_names: Mapping[str, str],
+    options: RegionMetricsOptions,
 ) -> pd.DataFrame:
     """Region-discriminating classes, heaviest incident count first.
 
@@ -1215,11 +1219,15 @@ def _per_label_table(
         running += k
         wilson_low, wilson_high = wilson_ci(k, n_predicted, options.alpha)
         n_images = len(images_by_label[label])
+        allowed_ids = tuple(sorted(allowed_by_label[label]))
         rows.append(
             {
                 "label": label,
                 "label_name": _display(label, label_names),
-                "allowed_region_ids": tuple(sorted(allowed_by_label[label])),
+                "allowed_region_ids": allowed_ids,
+                "allowed_region_names": tuple(
+                    _display(region_id, region_names) for region_id in allowed_ids
+                ),
                 "n_predicted": n_predicted,
                 "n_out_of_region": k,
                 "rate": k / n_predicted,

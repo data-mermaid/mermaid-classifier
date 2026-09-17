@@ -26,6 +26,7 @@ from mermaid_classifier.pyspacer.metrics import MetricsContext, MetricsCoordinat
 from mermaid_classifier.pyspacer.metrics import registry as metrics_registry
 from pyspacer.metrics_test_helpers import (
     MockBALibrary,
+    MockClf,
     MockGFLibrary,
     format_metric,
     make_val_results,
@@ -226,6 +227,67 @@ class ErrorIsolationTest(unittest.TestCase):
                 f"Broken run ({broken_count}) should log fewer metrics"
                 f" than clean run ({clean_count})"
             ),
+        )
+
+
+class ApplicableGroupsTest(unittest.TestCase):
+    """Each group is gated on the context inputs it actually reads."""
+
+    def _names(self, ctx: MetricsContext) -> list[str]:
+        return [name for name, _func in metrics_registry.applicable_metric_groups(ctx)]
+
+    def test_region_probe_is_skipped_without_a_classifier(self):
+        """The probe is scored through the exported predictor; without one
+        there is nothing to score it with."""
+        self.assertNotIn("region_probe", self._names(_make_ctx()))
+
+    def test_region_probe_applies_once_a_classifier_is_present(self):
+        ctx = _make_ctx()
+        ctx.clf = MockClf(["A1::", "A2::", "B1::"])
+        self.assertIn("region_probe", self._names(ctx))
+
+    def test_region_is_skipped_without_a_dataset(self):
+        """The validation-split group reads the dataset's per-image region
+        map."""
+        self.assertNotIn("region", self._names(_make_ctx()))
+
+    def test_region_applies_once_a_dataset_is_present(self):
+        ctx = _make_ctx()
+        ctx.dataset = object()
+        self.assertIn("region", self._names(ctx))
+
+    def test_a_classifier_alone_does_not_bring_in_the_validation_group(self):
+        ctx = _make_ctx()
+        ctx.clf = MockClf(["A1::", "A2::", "B1::"])
+        self.assertNotIn("region", self._names(ctx))
+
+
+class RegionGroupIsolationTest(unittest.TestCase):
+    """A region group that raises must leave the rest of the run standing,
+    and must not leave its absence unexplained."""
+
+    def setUp(self):
+        self.conn = duckdb.connect()
+        self.ctx = _make_ctx()
+        self.ctx.dataset = object()
+
+    def test_run_survives_and_region_metrics_are_absent(self):
+        with (
+            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_mlflow,
+            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
+            _registry_with_failing_group("region"),
+            self.assertLogs(
+                "mermaid_classifier.pyspacer.metrics.coordinator", level="WARNING"
+            ) as logs,
+        ):
+            MetricsCoordinator(self.ctx, self.conn).compute_and_log_all()
+
+        metric_names = [call.args[0] for call in mock_mlflow.log_metric.call_args_list]
+        self.assertIn("precision_macro", metric_names)
+        self.assertEqual([], [name for name in metric_names if name.startswith("region_val/")])
+        self.assertTrue(
+            any("region" in message for message in logs.output),
+            msg=f"the failed group is not named in the warnings: {logs.output}",
         )
 
 

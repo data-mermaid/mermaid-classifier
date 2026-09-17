@@ -52,7 +52,34 @@ EXECUTIVE_METRICS = [
     ("mcc", "MCC"),
     ("ece", "ECE"),
     ("log_loss", "Log Loss"),
+    # The out-of-region rate and the ground-truth floor it is read against
+    # sit next to each other: label noise and region-polygon error put a
+    # floor under the rate that no model can go below, and the rate alone
+    # says nothing about how far above that floor the model is.
+    ("region_val/oor_rate", "Out-of-Region Rate"),
+    ("region_val/gt_oor_rate", "Ground-Truth Floor"),
 ]
+
+# The validation split is composed by the training config and split by point;
+# the probe is a fixed image set. Same behaviour, different denominators over
+# different populations, so the two prefixes never merge and each rate keeps
+# the floor it is judged against beside it.
+REGION_METRICS = [
+    ("region_val/oor_rate", "Validation: Out-of-Region"),
+    ("region_val/gt_oor_rate", "Validation: Ground-Truth Floor"),
+    ("region_val/oor_rate_disc", "Validation: Out-of-Region (Discriminating)"),
+    ("region_val/image_affected_rate", "Validation: Images Affected"),
+    ("region_probe/oor_rate", "Probe: Out-of-Region"),
+    ("region_probe/gt_oor_rate", "Probe: Ground-Truth Floor"),
+    ("region_probe/oor_rate_disc", "Probe: Out-of-Region (Discriminating)"),
+    ("region_probe/image_affected_rate", "Probe: Images Affected"),
+]
+
+# Metric name prefixes whose values are rates carrying their own interval
+# bounds as `_lo95` / `_hi95` companions. Membership of the interval map is
+# what marks a value as a rate, so a rate can never reach the page as a bare
+# number.
+INTERVAL_METRIC_PREFIXES = ("region_val/", "region_probe/")
 
 TOPK_METRICS = [
     ("top_1_accuracy", "Top-1"),
@@ -151,6 +178,26 @@ EVALUATION_SECTIONS: dict[str, _SectionDef] = {
         "artifacts": [
             ("per_source/accuracy_by_source.png", "png"),
             ("per_source/metrics.csv", "csv"),
+        ],
+    },
+    "region_val": {
+        "title": "Region Mismatch \u2014 Validation Split",
+        "optional": True,
+        "artifacts": [
+            ("region_val/per_region.csv", "csv"),
+            ("region_val/per_label.csv", "csv"),
+            ("region_val/per_direction.csv", "csv"),
+            ("region_val/confusion.csv", "csv"),
+        ],
+    },
+    "region_probe": {
+        "title": "Region Mismatch \u2014 Frozen Probe",
+        "optional": True,
+        "artifacts": [
+            ("region_probe/per_region.csv", "csv"),
+            ("region_probe/per_label.csv", "csv"),
+            ("region_probe/per_direction.csv", "csv"),
+            ("region_probe/confusion.csv", "csv"),
         ],
     },
 }
@@ -285,7 +332,9 @@ def fetch_scalar_metrics(run: Any) -> dict[str, Any]:
     """Organize run.data.metrics into named groups for the template.
 
     Each group is a list of (label, value) tuples, or None if no
-    metrics in that group are present.
+    metrics in that group are present. `intervals` maps the label of every
+    rate present to its 95% bounds, and carries None where the run logged a
+    rate without them.
     """
     all_metrics = run.data.metrics
 
@@ -301,7 +350,28 @@ def fetch_scalar_metrics(run: Any) -> dict[str, Any]:
         "topk": _build_group(TOPK_METRICS),
         "cover": _build_group(COVER_METRICS),
         "taxonomic": _build_group(TAXONOMIC_METRICS),
+        "region": _build_group(REGION_METRICS),
+        "intervals": _build_intervals(all_metrics),
     }
+
+
+def _build_intervals(
+    all_metrics: dict[str, Any],
+) -> dict[str, tuple[float, float] | None]:
+    """The 95% bounds of each rate present in the run, keyed by display label.
+
+    A label reaches this map when its metric is a rate, whether or not the
+    run logged bounds for it: a rate with no interval renders as such rather
+    than as an exact number, and a value of None is what says so.
+    """
+    intervals: dict[str, tuple[float, float] | None] = {}
+    for key, label in [*EXECUTIVE_METRICS, *REGION_METRICS]:
+        if key not in all_metrics or not key.startswith(INTERVAL_METRIC_PREFIXES):
+            continue
+        low = all_metrics.get(f"{key}_lo95")
+        high = all_metrics.get(f"{key}_hi95")
+        intervals[label] = None if low is None or high is None else (low, high)
+    return intervals
 
 
 def download_run_artifacts(run_id: str, dst_dir: Path) -> Path:
@@ -408,6 +478,8 @@ def build_template_context(
             "ranking",
             "taxonomic",
             "per_source",
+            "region_val",
+            "region_probe",
         ],
         "n_classes": n_classes,
         "n_predictions": n_predictions,

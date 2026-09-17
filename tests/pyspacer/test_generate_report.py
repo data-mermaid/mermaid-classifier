@@ -27,6 +27,19 @@ from generate_report import (
     render_report,
 )
 
+REGION_RUN_METRICS = {
+    "accuracy": 0.85,
+    "region_val/oor_rate": 0.0384,
+    "region_val/oor_rate_lo95": 0.0371,
+    "region_val/oor_rate_hi95": 0.0398,
+    "region_val/gt_oor_rate": 0.0052,
+    "region_val/gt_oor_rate_lo95": 0.0044,
+    "region_val/gt_oor_rate_hi95": 0.0061,
+    "region_probe/oor_rate": 0.1402,
+    "region_probe/oor_rate_lo95": 0.1310,
+    "region_probe/oor_rate_hi95": 0.1495,
+}
+
 
 def _make_minimal_png(path: Path):
     """Write a minimal valid 1x1 white PNG to the given path."""
@@ -174,6 +187,55 @@ class TestFetchScalarMetrics(unittest.TestCase):
         self.assertIsNone(result["topk"])
 
 
+class TestRegionMetricGrouping(unittest.TestCase):
+    """A region rate is unreadable without the ground-truth floor beside it,
+    and a rate is unreadable without its interval."""
+
+    def _make_mock_run(self, metrics_dict):
+        run = MagicMock()
+        run.data.metrics = metrics_dict
+        return run
+
+    def test_executive_summary_pairs_the_rate_with_its_floor(self):
+        result = fetch_scalar_metrics(self._make_mock_run(REGION_RUN_METRICS))
+        labels = [label for label, _value in result["executive"]]
+        self.assertIn("Out-of-Region Rate", labels)
+        self.assertIn("Ground-Truth Floor", labels)
+        self.assertEqual(
+            labels.index("Ground-Truth Floor") - labels.index("Out-of-Region Rate"),
+            1,
+            msg=f"the floor must sit next to the rate it explains; got {labels}",
+        )
+
+    def test_region_group_carries_both_populations(self):
+        result = fetch_scalar_metrics(self._make_mock_run(REGION_RUN_METRICS))
+        values = dict(result["region"])
+        self.assertIn("Validation: Out-of-Region", values)
+        self.assertIn("Probe: Out-of-Region", values)
+        self.assertAlmostEqual(values["Validation: Out-of-Region"], 0.0384)
+        self.assertAlmostEqual(values["Probe: Out-of-Region"], 0.1402)
+
+    def test_a_run_with_no_region_metrics_has_no_region_group(self):
+        result = fetch_scalar_metrics(self._make_mock_run({"accuracy": 0.85}))
+        self.assertIsNone(result["region"])
+
+    def test_interval_bounds_are_paired_with_the_rate_they_bound(self):
+        result = fetch_scalar_metrics(self._make_mock_run(REGION_RUN_METRICS))
+        self.assertEqual(result["intervals"]["Out-of-Region Rate"], (0.0371, 0.0398))
+        self.assertEqual(result["intervals"]["Probe: Out-of-Region"], (0.1310, 0.1495))
+
+    def test_a_rate_whose_bounds_were_not_logged_is_still_flagged_as_a_rate(self):
+        """The rate must never render as a bare number; without bounds the
+        report has to say the interval is missing rather than omit it."""
+        result = fetch_scalar_metrics(self._make_mock_run({"region_val/oor_rate": 0.0384}))
+        self.assertIn("Out-of-Region Rate", result["intervals"])
+        self.assertIsNone(result["intervals"]["Out-of-Region Rate"])
+
+    def test_a_metric_that_is_not_a_rate_has_no_interval_entry(self):
+        result = fetch_scalar_metrics(self._make_mock_run(REGION_RUN_METRICS))
+        self.assertNotIn("Accuracy", result["intervals"])
+
+
 class TestLoadArtifactData(unittest.TestCase):
     def test_with_all_required_sections(self):
         """Create a minimal artifact tree with required sections."""
@@ -220,6 +282,30 @@ class TestLoadArtifactData(unittest.TestCase):
             self.assertIn("cover", result["sections"])
             self.assertIsNotNone(result["sections"]["cover"]["per_class_bias_png"])
 
+    def test_region_sections_appear_when_their_tables_exist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_dir = Path(tmpdir)
+            for section in ("region_val", "region_probe"):
+                section_dir = artifact_dir / section
+                section_dir.mkdir()
+                (section_dir / "per_region.csv").write_text("region_id,oor_rate\nta,0.04\n")
+
+            result = load_artifact_data(artifact_dir)
+            self.assertIn("region_val", result["sections"])
+            self.assertIn("region_probe", result["sections"])
+            self.assertIsNotNone(result["sections"]["region_val"]["per_region_csv"])
+
+    def test_region_sections_are_absent_when_the_run_has_no_region_tables(self):
+        """A CoralNet-only run logs neither, and the report must render
+        without them rather than with two empty shells."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_dir = Path(tmpdir)
+            (artifact_dir / "system_specs.yaml").write_text("total_ram_gb: 16\n")
+
+            result = load_artifact_data(artifact_dir)
+            self.assertNotIn("region_val", result["sections"])
+            self.assertNotIn("region_probe", result["sections"])
+
     def test_training_artifacts(self):
         """Training artifacts are loaded when present."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -231,6 +317,20 @@ class TestLoadArtifactData(unittest.TestCase):
             self.assertTrue(result["has_training"])
             self.assertIsNotNone(result["training"]["system_specs_yaml"])
             self.assertEqual(result["training"]["system_specs_yaml"]["total_ram_gb"], 16)
+
+
+class TestRegionSectionOrdering(unittest.TestCase):
+    def test_region_sections_are_ordered_after_the_per_source_breakdown(self):
+        context = build_template_context(
+            {"run_id": "x", "run_name": "y", "experiment_name": "z"},
+            {"executive": None, "topk": None, "cover": None, "taxonomic": None, "region": None},
+            {"sections": {}, "root_eval": {}, "training": {}, "has_training": False},
+        )
+        order = context["section_order"]
+        self.assertIn("region_val", order)
+        self.assertIn("region_probe", order)
+        self.assertGreater(order.index("region_val"), order.index("per_source"))
+        self.assertGreater(order.index("region_probe"), order.index("region_val"))
 
 
 class TestBuildTemplateContext(unittest.TestCase):
@@ -360,6 +460,112 @@ class TestRenderReport(unittest.TestCase):
             self.assertNotIn('id="run-configuration"', html)
             # No per-label detail.
             self.assertNotIn('id="per-label-detail"', html)
+
+
+class TestRenderRegionReport(unittest.TestCase):
+    """What a reader sees: never a rate without the floor it is judged
+    against, and never a rate without its interval."""
+
+    def _context(self, **overrides):
+        context = {
+            "title": "Region Report",
+            "generated_at": "2025-01-01 00:00 UTC",
+            "metadata": {
+                "run_id": "abc123def456",
+                "run_name": "test-run",
+                "experiment_name": "test-experiment",
+                "status": "FINISHED",
+                "start_time": "N/A",
+                "end_time": "N/A",
+                "duration": "N/A",
+                "params": {},
+                "tags": {},
+            },
+            "metrics": {
+                "executive": [
+                    ("Accuracy", 0.85),
+                    ("Out-of-Region Rate", 0.0384),
+                    ("Ground-Truth Floor", 0.0052),
+                ],
+                "topk": None,
+                "cover": None,
+                "taxonomic": None,
+                "region": [
+                    ("Validation: Out-of-Region", 0.0384),
+                    ("Probe: Out-of-Region", 0.1402),
+                ],
+                "intervals": {
+                    "Out-of-Region Rate": (0.0371, 0.0398),
+                    "Ground-Truth Floor": (0.0044, 0.0061),
+                    "Validation: Out-of-Region": (0.0371, 0.0398),
+                    "Probe: Out-of-Region": None,
+                },
+            },
+            "sections": {
+                "region_val": {
+                    "title": "Region Mismatch \u2014 Validation Split",
+                    "per_region_csv": "<table>val rows</table>",
+                },
+                "region_probe": {
+                    "title": "Region Mismatch \u2014 Frozen Probe",
+                    "per_label_csv": "<table>probe rows</table>",
+                },
+            },
+            "root_eval": {"metrics_per_label_csv": None, "metrics_overall_yaml": None},
+            "training": {},
+            "has_training": False,
+            "section_order": ["region_val", "region_probe"],
+        }
+        context.update(overrides)
+        return context
+
+    def _render(self, context) -> str:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            render_report(context, output_path)
+            return output_path.read_text()
+
+    def test_the_floor_is_rendered_beside_the_rate(self):
+        html = self._render(self._context())
+        self.assertIn("Out-of-Region Rate", html)
+        self.assertIn("Ground-Truth Floor", html)
+        self.assertIn("3.84%", html)
+        self.assertIn("0.52%", html)
+
+    def test_a_rate_is_never_rendered_without_its_interval(self):
+        html = self._render(self._context())
+        self.assertIn("3.71%", html)
+        self.assertIn("3.98%", html)
+
+    def test_a_rate_whose_bounds_are_missing_says_so_rather_than_reading_exact(self):
+        html = self._render(self._context())
+        self.assertIn("not logged", html)
+
+    def test_both_region_sections_render_their_tables(self):
+        html = self._render(self._context())
+        self.assertIn('id="region_val"', html)
+        self.assertIn('id="region_probe"', html)
+        self.assertIn("val rows", html)
+        self.assertIn("probe rows", html)
+
+    def test_a_run_without_region_metrics_renders_without_the_region_blocks(self):
+        html = self._render(
+            self._context(
+                metrics={
+                    "executive": [("Accuracy", 0.85)],
+                    "topk": None,
+                    "cover": None,
+                    "taxonomic": None,
+                    "region": None,
+                    "intervals": {},
+                },
+                sections={},
+            )
+        )
+        self.assertNotIn('id="region_val"', html)
+        self.assertNotIn('id="region_probe"', html)
+        self.assertNotIn("Out-of-Region", html)
+        self.assertIn("85.0%", html)
 
 
 if __name__ == "__main__":

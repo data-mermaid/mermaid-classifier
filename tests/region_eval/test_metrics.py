@@ -787,6 +787,13 @@ class NameRenderingTest(unittest.TestCase):
         self.assertEqual(rows.loc[TROPICAL_ATLANTIC, "region_name"], "Tropical Atlantic")
         self.assertEqual(rows.loc[CENTRAL_INDO_PACIFIC, "region_name"], "Central Indo-Pacific")
 
+    def test_per_label_rows_name_the_regions_the_label_is_allowed_in(self):
+        """Ids alone leave the reader a join to do by hand, and every other
+        name column in these tables was populated."""
+        row = self.result.per_label.set_index("label").loc[PACIFIC_LABEL]
+        self.assertEqual(row["allowed_region_ids"], (CENTRAL_INDO_PACIFIC,))
+        self.assertEqual(row["allowed_region_names"], ("Central Indo-Pacific",))
+
     def test_per_direction_rows_name_both_ends_of_the_direction(self):
         rows = _directions(self.result)
         row = rows.loc[(CENTRAL_INDO_PACIFIC, TROPICAL_ATLANTIC)]
@@ -823,6 +830,10 @@ class NameRenderingTest(unittest.TestCase):
         row = _directions(result).loc[(CENTRAL_INDO_PACIFIC, TROPICAL_ATLANTIC)]
         self.assertEqual(row["image_region_name"], CENTRAL_INDO_PACIFIC)
         self.assertEqual(row["excluded_region_name"], "Tropical Atlantic")
+        per_label = result.per_label.set_index("label")
+        self.assertEqual(
+            per_label.loc[PACIFIC_LABEL, "allowed_region_names"], (CENTRAL_INDO_PACIFIC,)
+        )
 
     def test_names_default_to_ids_when_the_caller_supplies_none(self):
         bare = compute_region_metrics(_prepare(), options=OPTIONS)
