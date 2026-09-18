@@ -12,6 +12,11 @@ import pandas as pd
 # MERMAID API uses :: as the BA-GF separator.
 BAGF_SEP = "::"
 
+# A refused connection raises promptly on its own; this bounds the case a
+# firewalled or hung endpoint never would, so an interactive CLI degrades
+# instead of blocking indefinitely.
+_HTTP_TIMEOUT_SECONDS = 30
+
 
 def combine_ba_gf(
     benthic_attribute: str,
@@ -60,7 +65,8 @@ class BenthicAttributeLibrary:
 
     def __init__(self):
         download_response = urllib.request.urlopen(
-            "https://api.datamermaid.org/v1/benthicattributes/?limit=5000"
+            "https://api.datamermaid.org/v1/benthicattributes/?limit=5000",
+            timeout=_HTTP_TIMEOUT_SECONDS,
         )
         response_json = json.loads(download_response.read())
         self.raw_results = response_json["results"]
@@ -139,7 +145,9 @@ class GrowthFormLibrary:
     """
 
     def __init__(self):
-        download_response = urllib.request.urlopen("https://api.datamermaid.org/v1/choices/")
+        download_response = urllib.request.urlopen(
+            "https://api.datamermaid.org/v1/choices/", timeout=_HTTP_TIMEOUT_SECONDS
+        )
         response_json = json.loads(download_response.read())
         data = None
         for item in response_json:
@@ -165,7 +173,9 @@ class RegionLibrary:
     """
 
     def __init__(self):
-        download_response = urllib.request.urlopen("https://api.datamermaid.org/v1/choices/")
+        download_response = urllib.request.urlopen(
+            "https://api.datamermaid.org/v1/choices/", timeout=_HTTP_TIMEOUT_SECONDS
+        )
         response_json = json.loads(download_response.read())
         data = None
         for item in response_json:
@@ -289,12 +299,14 @@ class CoralNetMermaidMapping:
         }
 
     def _download_mapping(self):
-        endpoint_response = urllib.request.urlopen(self._endpoint)
+        endpoint_response = urllib.request.urlopen(self._endpoint, timeout=_HTTP_TIMEOUT_SECONDS)
         response_json = json.loads(endpoint_response.read())
         api_mapping = response_json["results"]
 
         while response_json["next"]:
-            endpoint_response = urllib.request.urlopen(response_json["next"])
+            endpoint_response = urllib.request.urlopen(
+                response_json["next"], timeout=_HTTP_TIMEOUT_SECONDS
+            )
             response_json = json.loads(endpoint_response.read())
             api_mapping.extend(response_json["results"])
 
