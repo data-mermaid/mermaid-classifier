@@ -72,6 +72,7 @@ PROBE_VERSION = "1"
 # The probe directory's layout, named where the probe is defined so the builder
 # that writes a file and the scorer that reads it cannot drift apart.
 PROBE_POINTS_FILE = "probe_points.parquet"
+PROBE_HELD_OUT_IMAGES_FILE = "held_out_images.csv"
 PROBE_REGIONS_FILE = "ba_regions.json"
 PROBE_COUNTS_FILE = "ba_region_counts.json"
 PROBE_NAMES_FILE = "names.json"
@@ -309,6 +310,19 @@ def probe_content_hash(rows: pd.DataFrame) -> str:
         digest.update(_FIELD_SEPARATOR.join(_canonical(value) for value in record).encode())
         digest.update(_RECORD_SEPARATOR)
     return digest.hexdigest()
+
+
+def held_out_images_csv(rows: pd.DataFrame) -> str:
+    """The probe's held-out image ids as an `ImageExclusionFilter` CSV.
+
+    One `image_id` per line, covering every image with at least one
+    held-out row and none with only census rows. A probe holding no
+    held-out rows still yields a header with no data rows, which
+    `ImageExclusionFilter` reads as an empty, no-op exclusion list rather
+    than a missing file.
+    """
+    image_ids = sorted({str(image_id) for image_id in rows.loc[rows["held_out"], "image_id"]})
+    return pd.DataFrame({"image_id": image_ids}).to_csv(index=False)
 
 
 def region_snapshot(

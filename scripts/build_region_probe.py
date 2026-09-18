@@ -16,6 +16,8 @@ Run: AWS_PROFILE=wcs-admin uv run python scripts/build_region_probe.py --out-dir
 
 Outputs (in --out-dir):
     probe_points.parquet   one row per probe annotation point, PROBE_COLUMNS
+    held_out_images.csv    distinct image ids from held-out probe rows, ready
+                            for training's excluded_images_csv option
     ba_regions.json        the frozen benthic-attribute -> region-ids snapshot
     ba_region_counts.json  corpus-wide confirmed annotations per (attribute, region)
     names.json             display names for benthic attributes, growth forms, regions
@@ -57,6 +59,7 @@ from mermaid_classifier.region_eval.probe_set import (
     PROBE_ANCESTRY_FILE,
     PROBE_COUNTS_FILE,
     PROBE_FEATURES_FILE,
+    PROBE_HELD_OUT_IMAGES_FILE,
     PROBE_MANIFEST_FILE,
     PROBE_NAMES_FILE,
     PROBE_POINTS_FILE,
@@ -67,6 +70,7 @@ from mermaid_classifier.region_eval.probe_set import (
     build_manifest,
     build_probe_set,
     ground_truth_counts_json,
+    held_out_images_csv,
     name_snapshot_json,
     read_annotations,
     region_snapshot_json,
@@ -162,6 +166,7 @@ def publish_probe(out_dir: Path, uri: str, *, region_name: str = DEFAULT_REGION)
 
     names = [
         PROBE_POINTS_FILE,
+        PROBE_HELD_OUT_IMAGES_FILE,
         PROBE_REGIONS_FILE,
         PROBE_COUNTS_FILE,
         PROBE_NAMES_FILE,
@@ -248,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         annotations, region_ids_by_attribute=region_ids_by_attribute, options=options
     )
     probe.rows.to_parquet(out_dir / PROBE_POINTS_FILE, index=False)
+    (out_dir / PROBE_HELD_OUT_IMAGES_FILE).write_text(held_out_images_csv(probe.rows))
     # Frozen for the same reason as the region map: scoring reads these counts
     # against a fixed threshold, so a corpus that grows afterwards must not
     # move a published score.

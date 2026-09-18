@@ -6,17 +6,23 @@ runs the real local build end to end -- annotation selection, the frozen
 snapshots, the manifest -- with only the two network-facing seams
 (`fetch_source`, the benthic-attribute/growth-form/region libraries) replaced,
 and checks that omitting --publish leaves `publish_probe` untouched while
-giving it never touches S3 either way.
+giving it never touches S3 either way. `HeldOutImagesCsvTest` round-trips
+`held_out_images_csv`'s output through the real `ImageExclusionFilter` that
+training reads it with, rather than asserting the CSV's text.
 """
 
 import shutil
 import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
+import duckdb
 import pandas as pd
+
+from mermaid_classifier.pyspacer.label_specs import ImageExclusionFilter
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -29,6 +35,7 @@ BA_CORAL = "9b9b9b9b-0000-4000-8000-000000000001"
 
 _ALL_PUBLISHED_FILES = (
     brp.PROBE_POINTS_FILE,
+    brp.PROBE_HELD_OUT_IMAGES_FILE,
     brp.PROBE_REGIONS_FILE,
     brp.PROBE_COUNTS_FILE,
     brp.PROBE_NAMES_FILE,
@@ -209,6 +216,45 @@ class BuildRegionProbeMainTest(unittest.TestCase):
         publish.assert_called_once_with(
             out_dir, "s3://bucket/prefix/v9/", region_name=brp.DEFAULT_REGION
         )
+
+
+class HeldOutImagesCsvTest(unittest.TestCase):
+    """`held_out_images_csv`'s output, fed back through the real
+    `ImageExclusionFilter` that training reads it with."""
+
+    def _filtered_ids(self, csv_text: str, image_ids: list[str]) -> set[str]:
+        """Every id in `image_ids` that survives `csv_text`'s exclusion list."""
+        conn = duckdb.connect()
+        seed = pd.DataFrame({"image_id": image_ids})  # noqa: F841 — referenced by name in DuckDB SQL
+        conn.execute("CREATE TABLE annotations AS SELECT * FROM seed")
+
+        exclusion = ImageExclusionFilter(StringIO(csv_text))
+        exclusion.filter_in_duckdb(conn, "annotations")
+
+        return {row[0] for row in conn.execute("SELECT image_id FROM annotations").fetchall()}
+
+    def test_excludes_exactly_the_held_out_images_and_no_others(self):
+        rows = pd.DataFrame(
+            {
+                "image_id": ["img1", "img1", "img2", "img3", "img3"],
+                "held_out": [True, True, False, True, True],
+            }
+        )
+        csv_text = brp.held_out_images_csv(rows)
+
+        remaining = self._filtered_ids(csv_text, ["img1", "img2", "img3"])
+
+        self.assertEqual(remaining, {"img2"})
+
+    def test_no_held_out_rows_writes_a_header_only_csv_that_excludes_nothing(self):
+        rows = pd.DataFrame({"image_id": ["img1", "img2"], "held_out": [False, False]})
+        csv_text = brp.held_out_images_csv(rows)
+
+        exclusion = ImageExclusionFilter(StringIO(csv_text))
+
+        self.assertTrue(exclusion.is_empty())
+        remaining = self._filtered_ids(csv_text, ["img1", "img2"])
+        self.assertEqual(remaining, {"img1", "img2"})
 
 
 if __name__ == "__main__":
