@@ -332,11 +332,7 @@ class ScoredPoints:
 
 @dataclasses.dataclass(frozen=True)
 class RegionMismatchMetrics:
-    """Rates for both populations, plus the tables that explain them.
-
-    `direction_region_ids` are the region ids the direction matrix's columns
-    stand for, in the same order, since those columns are labelled by name.
-    """
+    """Rates for both populations, plus the tables that explain them."""
 
     n_points: int
     n_images: int
@@ -348,7 +344,6 @@ class RegionMismatchMetrics:
     per_region: pd.DataFrame
     per_label: pd.DataFrame
     direction_matrix: pd.DataFrame
-    direction_region_ids: tuple[str, ...]
     per_direction: pd.DataFrame
     confusion: pd.DataFrame
 
@@ -497,7 +492,6 @@ def compute_region_metrics(
         per_region=columns_frame(per_region_rows, _per_region_columns()),
         per_label=_per_label_table(points, names, regions, resolved),
         direction_matrix=_direction_matrix(points, direction_columns, regions),
-        direction_region_ids=tuple(direction_columns),
         per_direction=columns_frame(per_direction_rows, PER_DIRECTION_COLUMNS),
         confusion=_confusion_table(points, names, regions),
     )

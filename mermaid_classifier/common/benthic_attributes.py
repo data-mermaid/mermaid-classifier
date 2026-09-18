@@ -6,6 +6,7 @@ import json
 import operator
 import urllib.request
 from collections import defaultdict
+from typing import Any
 
 import pandas as pd
 
@@ -102,15 +103,6 @@ class BenthicAttributeLibrary:
             return ba_name
         return BAGF_SEP.join([ba_name, gf_library.by_id[gf_id]])
 
-    def get_region_ids(self, ba_id: str) -> frozenset[str]:
-        """
-        The MERMAID region IDs a benthic attribute is recorded in.
-        An empty set means the regions are unrecorded, not that the attribute
-        belongs nowhere -- 11 of 810 attributes carry no regions. An unknown
-        ba_id raises KeyError so it stays distinguishable from that case.
-        """
-        return self.region_ids_by_id[ba_id]
-
     def get_ancestor_ids(self, ba_id: str) -> list[str]:
         """
         Get ancestor IDs, ordered earliest (closest to root) first.
@@ -138,33 +130,56 @@ class BenthicAttributeLibrary:
         return children_ordered_by_name + children_results
 
 
-class GrowthFormLibrary:
+def _fetch_choices_response() -> list[dict[str, Any]]:
+    """One full download of the /v1/choices/ payload."""
+    download_response = urllib.request.urlopen(
+        "https://api.datamermaid.org/v1/choices/", timeout=_HTTP_TIMEOUT_SECONDS
+    )
+    return json.loads(download_response.read())
+
+
+@functools.cache
+def _cached_choices_response() -> list[dict[str, Any]]:
+    """Fetched once; get_growth_form_library() and get_region_library() each
+    read a different slice of this one response."""
+    return _fetch_choices_response()
+
+
+class ChoiceLibrary:
+    """
+    An id-to-name lookup for one named set in the MERMAID /v1/choices/
+    response (for example "growthforms" or "regions").
+    This is intended to be a singleton class.
+    """
+
+    def __init__(self, choice_set: str, *, _response: list[dict[str, Any]] | None = None):
+        response = _fetch_choices_response() if _response is None else _response
+        data = None
+        for item in response:
+            if item["name"] == choice_set:
+                data = item["data"]
+                break
+        if data is None:
+            raise ValueError(f"'{choice_set}' not found in /v1/choices/ response")
+        self.by_id = {entry["id"]: entry["name"] for entry in data}
+
+    def id_to_name(self, entry_id: str) -> str:
+        if entry_id == "":
+            return ""
+        return self.by_id[entry_id]
+
+
+class GrowthFormLibrary(ChoiceLibrary):
     """
     Information about MERMAID growth forms, primarily an id-to-name lookup.
     This is intended to be a singleton class.
     """
 
-    def __init__(self):
-        download_response = urllib.request.urlopen(
-            "https://api.datamermaid.org/v1/choices/", timeout=_HTTP_TIMEOUT_SECONDS
-        )
-        response_json = json.loads(download_response.read())
-        data = None
-        for item in response_json:
-            if item["name"] == "growthforms":
-                data = item["data"]
-                break
-        if data is None:
-            raise ValueError("'growthforms' not found in /v1/choices/ response")
-        self.by_id = {gf["id"]: gf["name"] for gf in data}
-
-    def id_to_name(self, gf_id: str) -> str:
-        if gf_id == "":
-            return ""
-        return self.by_id[gf_id]
+    def __init__(self, *, _response: list[dict[str, Any]] | None = None):
+        super().__init__("growthforms", _response=_response)
 
 
-class RegionLibrary:
+class RegionLibrary(ChoiceLibrary):
     """
     MERMAID region IDs and their names, from the /v1/choices/ region set.
     The benthic attribute response carries region IDs and no names, so a
@@ -172,24 +187,8 @@ class RegionLibrary:
     This is intended to be a singleton class.
     """
 
-    def __init__(self):
-        download_response = urllib.request.urlopen(
-            "https://api.datamermaid.org/v1/choices/", timeout=_HTTP_TIMEOUT_SECONDS
-        )
-        response_json = json.loads(download_response.read())
-        data = None
-        for item in response_json:
-            if item["name"] == "regions":
-                data = item["data"]
-                break
-        if data is None:
-            raise ValueError("'regions' not found in /v1/choices/ response")
-        self.by_id = {region["id"]: region["name"] for region in data}
-
-    def id_to_name(self, region_id: str) -> str:
-        if region_id == "":
-            return ""
-        return self.by_id[region_id]
+    def __init__(self, *, _response: list[dict[str, Any]] | None = None):
+        super().__init__("regions", _response=_response)
 
 
 @functools.cache
@@ -208,7 +207,7 @@ def get_growth_form_library() -> GrowthFormLibrary:
     Lazily construct (and cache) the GF library singleton. See
     get_benthic_attribute_library().
     """
-    return GrowthFormLibrary()
+    return GrowthFormLibrary(_response=_cached_choices_response())
 
 
 @functools.cache
@@ -217,7 +216,7 @@ def get_region_library() -> RegionLibrary:
     Lazily construct (and cache) the region library singleton. See
     get_benthic_attribute_library().
     """
-    return RegionLibrary()
+    return RegionLibrary(_response=_cached_choices_response())
 
 
 @dataclasses.dataclass

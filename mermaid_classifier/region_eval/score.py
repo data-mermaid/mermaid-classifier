@@ -863,7 +863,7 @@ def region_list_drift(
     frozen_hash = probe.region_snapshot_hash
     try:
         live = dict(live_region_map_loader())
-    except Exception as error:  # noqa: BLE001 - any fetch failure degrades the diagnostic
+    except Exception as error:  # any fetch failure degrades the diagnostic
         logger.warning("live region map unavailable; drift not computed: %s", error)
         return {
             "status": STATUS_NOT_COMPUTED,

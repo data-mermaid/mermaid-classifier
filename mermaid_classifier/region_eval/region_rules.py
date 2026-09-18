@@ -199,20 +199,15 @@ def paired_cluster_bootstrap_diff(
 
     Seeded, and deterministic for a given seed and input.
     """
-    positions = _cluster_positions(cluster_ids)
-    if not positions:
-        raise ValueError("cluster_ids must contain at least one cluster")
-    if n_resamples < 1:
-        raise ValueError(f"n_resamples must be at least 1, got {n_resamples}")
-
-    rng = np.random.default_rng(seed)
-    n_clusters = len(positions)
-    differences = np.empty(n_resamples, dtype=np.float64)
-    for resample in range(n_resamples):
-        drawn = rng.integers(0, n_clusters, size=n_clusters)
-        index = _gather(positions, drawn)
-        differences[resample] = statistic_a(index) - statistic_b(index)
-    return _percentile_interval(differences, alpha)
+    return _percentile_interval(
+        cluster_bootstrap_draws(
+            cluster_ids,
+            lambda index: statistic_a(index) - statistic_b(index),
+            n_resamples=n_resamples,
+            seed=seed,
+        ),
+        alpha,
+    )
 
 
 def design_effect(bootstrap_ci: tuple[float, float], k: int, n: int, *, alpha: float) -> float:
