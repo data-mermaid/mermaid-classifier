@@ -412,10 +412,8 @@ class TrainingDataset:
             site=Sites.MERMAID.value, has_training_sets=False
         )
 
-        # Growth forms arrive as '' from the CoralNet-MERMAID mapping, as
-        # NULL from the MERMAID annotations parquet (already normalized to
-        # '' by the COALESCE above), or -- from older exports -- as the
-        # literal string 'None'. Normalize that legacy string to ''.
+        # growth_form_id at this point is a real UUID, '' (for absent growth form),
+        # or the legacy literal string 'None'. Normalize 'None' to ''.
         def transform_func(gf_id: str | None) -> str | None:
             if gf_id == "None":
                 return ""

@@ -330,12 +330,11 @@ class ReadMermaidDataTest(BaseTrainTest):
 
     def test_null_growth_form_id_rows_all_survive(self):
         """
-        growth_form_id arrives from the MERMAID annotations parquet as a
-        real UUID, as NULL (unset growth form), or -- from older exports --
-        as the literal string 'None'. All three row shapes must reach the
-        annotations table (a JOIN USING that fails to match a NULL
-        growth_form_id would silently drop that row), and both the NULL and
-        'None' shapes must normalize to ''.
+        The MERMAID annotations parquet's growth_form_id arrives in three
+        shapes: a real UUID, NULL, and the legacy string 'None'. A JOIN
+        used to normalize the legacy string does not match NULL to NULL,
+        so a NULL growth_form_id must be coalesced to '' before that join
+        or its row is silently dropped.
         """
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -345,19 +344,16 @@ class ReadMermaidDataTest(BaseTrainTest):
         mermaid_table = pa.table(
             {
                 "image_id": pa.array(
-                    [same_char_uuid("3"), same_char_uuid("4"), same_char_uuid("5")],
+                    [same_char_uuid("1"), same_char_uuid("2"), same_char_uuid("3")],
                     pa.string(),
                 ),
-                "row": pa.array([3000, 500, 700], pa.int32()),
-                "col": pa.array([2200, 1800, 900], pa.int32()),
+                "row": pa.array([100, 200, 300], pa.int32()),
+                "col": pa.array([10, 20, 30], pa.int32()),
                 "benthic_attribute_id": pa.array(
-                    [same_char_uuid("6"), same_char_uuid("7"), same_char_uuid("8")],
+                    [same_char_uuid("4"), same_char_uuid("5"), same_char_uuid("6")],
                     pa.string(),
                 ),
-                # Real UUID, NULL, and the legacy 'None' string, in that order.
-                "growth_form_id": pa.array([same_char_uuid("9"), None, "None"], pa.string()),
-                "region_id": pa.array(["", "", ""], pa.string()),
-                "region_name": pa.array(["", "", ""], pa.string()),
+                "growth_form_id": pa.array([same_char_uuid("7"), None, "None"], pa.string()),
             }
         )
 
@@ -368,22 +364,31 @@ class ReadMermaidDataTest(BaseTrainTest):
             parquet_f.close()
             pq.write_table(mermaid_table, parquet_f.name)
 
-            with override_settings(mermaid_annotations_parquet_pattern=parquet_f.name):
+            with override_settings(
+                mermaid_annotations_parquet_pattern=parquet_f.name,
+            ):
                 dataset.read_mermaid_data()
 
         result_tuples = dataset.duck_conn.execute(
             "SELECT image_id, growth_form_id FROM annotations"
         ).fetchall()
 
-        # All three input rows must survive the read.
-        self.assertEqual(len(result_tuples), 3)
+        self.assertEqual(
+            len(result_tuples),
+            3,
+            msg="All three rows should survive, including the NULL growth_form_id row.",
+        )
 
-        gf_by_image = dict(result_tuples)
-        self.assertEqual(gf_by_image[same_char_uuid("3")], same_char_uuid("9"))
-        # NULL growth_form_id should have become ''.
-        self.assertEqual(gf_by_image[same_char_uuid("4")], "")
-        # Legacy 'None' growth_form_id should have become ''.
-        self.assertEqual(gf_by_image[same_char_uuid("5")], "")
+        results_by_image_id = dict(result_tuples)
+        # Real UUID growth form is preserved unchanged.
+        self.assertEqual(
+            results_by_image_id[same_char_uuid("1")],
+            same_char_uuid("7"),
+        )
+        # NULL growth form normalizes to ''.
+        self.assertEqual(results_by_image_id[same_char_uuid("2")], "")
+        # Legacy 'None' string growth form normalizes to ''.
+        self.assertEqual(results_by_image_id[same_char_uuid("3")], "")
 
 
 class HandleMissingFeatureVectorsTest(BaseTrainTest):
