@@ -55,13 +55,13 @@ from mermaid_classifier.region_eval.features import (
     DEFAULT_WORKERS,
 )
 from mermaid_classifier.region_eval.metrics import RegionMetricsOptions
+from mermaid_classifier.region_eval.report import write_report
 from mermaid_classifier.region_eval.score import (
     PROBE_FEATURES_FILE,
     ModelScore,
     check_feature_coverage,
     load_probe,
     score_model,
-    write_report,
 )
 from mermaid_classifier.region_eval.triage import DEFAULT_LIST_SUSPECT_THRESHOLD
 

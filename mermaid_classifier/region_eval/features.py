@@ -79,6 +79,51 @@ class FeatureCache:
     download_failed_image_ids: tuple[str, ...]
 
 
+@dataclasses.dataclass(frozen=True)
+class ProbeFeatures:
+    """The probe's cached feature matrix and the metadata it lines up with.
+
+    `features[i]` belongs to the point every other array describes at index
+    `i`, which is the alignment `build_feature_cache` establishes by
+    (row, col) rather than by position. `content_hash` is the hash of the
+    probe rows the cache was built from, frozen in the npz at write time; an
+    archive written before that field existed reads back with an empty one.
+    `n_points_requested` is `None` for the same reason on an archive written
+    before it was persisted -- coverage against it reads as unknown rather
+    than assumed complete. `n_points_missing_download_failed` and
+    `download_failed_image_ids` are `None` on the same grounds for an archive
+    written before either was persisted: a download failure is then unknown
+    rather than known absent.
+    """
+
+    features: NDArray[np.float32]
+    image_ids: tuple[str, ...]
+    point_ids: tuple[str, ...]
+    rows: NDArray[np.int64]
+    cols: NDArray[np.int64]
+    gt_labels: tuple[str, ...]
+    region_ids: tuple[str, ...]
+    held_out: NDArray[np.bool_]
+    content_hash: str
+    n_points_requested: int | None
+    n_points_missing_download_failed: int | None
+    download_failed_image_ids: tuple[str, ...] | None
+
+    @property
+    def n_points(self) -> int:
+        return len(self.image_ids)
+
+
+def feature_coverage(features: ProbeFeatures) -> float | None:
+    """`n_points_cached` over `n_points_requested`, or `None` when the
+    request count is absent or zero and so gives no fraction to compute.
+    """
+    requested = features.n_points_requested
+    if not requested:
+        return None
+    return features.n_points / requested
+
+
 def read_feature_file(
     payload: bytes,
 ) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float32]]:
@@ -239,6 +284,61 @@ def write_feature_cache(cache: FeatureCache, rows: pd.DataFrame, path: Path) -> 
             cache.n_points_missing_download_failed, dtype=np.int64
         ),
         download_failed_image_ids=np.array(cache.download_failed_image_ids, dtype=np.str_),
+    )
+
+
+def read_feature_cache(path: Path) -> ProbeFeatures:
+    """Read back the npz `write_feature_cache` wrote, in canonical order.
+
+    Every array comes back permuted to the (image_id, point_id) order
+    `probe_content_hash` sorts by before hashing -- the order `_probe_rows`
+    already writes a correctly-built cache in, so the sort is a no-op there.
+    The cluster bootstrap draws resample indices against cluster
+    first-appearance order, so two caches holding the same rows in different
+    orders would otherwise draw different resamples from the same seed
+    despite sharing a `content_hash`.
+
+    A cache written before `content_hash` existed reads back with an empty
+    one, which cannot equal a real probe's hash and so still fails the check
+    in `load_probe` rather than passing silently. A cache written before
+    `n_points_requested`, `n_points_missing_download_failed` or
+    `download_failed_image_ids` existed reads that field back as `None`
+    instead, since there is no comparable substitute a missing value could
+    take.
+    """
+    archive = np.load(path, allow_pickle=False)
+    image_ids = tuple(str(value) for value in archive["image_id"])
+    point_ids = tuple(str(value) for value in archive["point_id"])
+    order = sorted(
+        range(len(image_ids)), key=lambda position: (image_ids[position], point_ids[position])
+    )
+    index = np.asarray(order, dtype=np.int64)
+
+    gt_labels = tuple(str(value) for value in archive["gt_label"])
+    region_ids = tuple(str(value) for value in archive["region_id"])
+    return ProbeFeatures(
+        features=np.asarray(archive["features"], dtype=np.float32)[index],
+        image_ids=tuple(image_ids[position] for position in order),
+        point_ids=tuple(point_ids[position] for position in order),
+        rows=np.asarray(archive["row"], dtype=np.int64)[index],
+        cols=np.asarray(archive["col"], dtype=np.int64)[index],
+        gt_labels=tuple(gt_labels[position] for position in order),
+        region_ids=tuple(region_ids[position] for position in order),
+        held_out=np.asarray(archive["held_out"], dtype=bool)[index],
+        content_hash=str(archive["content_hash"]) if "content_hash" in archive.files else "",
+        n_points_requested=(
+            int(archive["n_points_requested"]) if "n_points_requested" in archive.files else None
+        ),
+        n_points_missing_download_failed=(
+            int(archive["n_points_missing_download_failed"])
+            if "n_points_missing_download_failed" in archive.files
+            else None
+        ),
+        download_failed_image_ids=(
+            tuple(str(value) for value in archive["download_failed_image_ids"])
+            if "download_failed_image_ids" in archive.files
+            else None
+        ),
     )
 
 

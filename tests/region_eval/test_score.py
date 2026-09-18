@@ -66,16 +66,18 @@ from mermaid_classifier.region_eval.probe_set import (
     name_snapshot_hash,
     probe_content_hash,
 )
-from mermaid_classifier.region_eval.score import (
-    ModelScore,
+from mermaid_classifier.region_eval.report import (
     _ratio_to_baseline_interval,
     build_manifest,
-    check_feature_coverage,
     decisions_table,
-    load_probe,
-    score_model,
     summary_table,
     write_report,
+)
+from mermaid_classifier.region_eval.score import (
+    ModelScore,
+    check_feature_coverage,
+    load_probe,
+    score_model,
 )
 
 # Allow importing scripts/evaluate_region_probe.py (mirrors test_release_artifact).

@@ -80,44 +80,6 @@ from mermaid_classifier.region_eval.region_rules import (
 ALL_POINTS = "all"
 HELD_OUT = "held_out"
 
-# The confusion table is a reading aid; past this many rows the tail is noise.
-CONFUSION_ROW_LIMIT = 50
-
-PER_REGION_BASE_COLUMNS = (
-    "population",
-    "region_id",
-    "region_name",
-    "n_images",
-    "n_points",
-    "n_accuracy_points",
-    "accuracy",
-)
-RATE_PREFIXES = ("oor_rate", "oor_rate_disc", "oor_rate_disc_gt", "gt_oor_rate")
-PER_LABEL_COLUMNS = (
-    "label",
-    "label_name",
-    "allowed_region_ids",
-    "allowed_region_names",
-    "n_predicted",
-    "n_out_of_region",
-    "rate",
-    "wilson_low",
-    "wilson_high",
-    "upper_bound",
-    "upper_bound_n_images",
-    "n_ground_truth",
-    "cumulative_share",
-)
-CONFUSION_COLUMNS = (
-    "image_region_id",
-    "image_region_name",
-    "gt_label",
-    "gt_label_name",
-    "pred_label",
-    "pred_label_name",
-    "n",
-)
-
 
 @dataclasses.dataclass(frozen=True)
 class RegionMetricsOptions:
@@ -171,26 +133,6 @@ class RateEstimate:
     upper_bound: float | None
     upper_bound_n_images: int
     imprecise: bool | None
-
-
-# Every RateEstimate field but the rate itself, in declaration order -- the
-# suffixes _prefixed and _per_region_columns key each per-region column under.
-ESTIMATE_SUFFIXES: tuple[str, ...] = tuple(
-    field.name for field in dataclasses.fields(RateEstimate) if field.name != "rate"
-)
-
-PER_DIRECTION_COLUMNS = (
-    "population",
-    "image_region_id",
-    "image_region_name",
-    "excluded_region_id",
-    "excluded_region_name",
-    "n_out_of_region",
-    "n_out_of_region_events",
-    "n_points",
-    "rate",
-    *(suffix for suffix in ESTIMATE_SUFFIXES if suffix not in ("k", "n")),
-)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -982,6 +924,68 @@ def _conditional_percentile_interval(
         if nonfinite_share > alpha / 2.0
         else float(np.percentile(finite, 100.0 * (1.0 - alpha / 2.0))),
     )
+
+
+# The tables below render these rates into DataFrames a report reads. Row
+# builders call back into the same rate estimator used above (`_estimate`,
+# `_core_rates`) rather than recomputing a rate, so a table's number cannot
+# drift from the population-level estimate it reflects.
+
+CONFUSION_ROW_LIMIT = 50
+
+PER_REGION_BASE_COLUMNS = (
+    "population",
+    "region_id",
+    "region_name",
+    "n_images",
+    "n_points",
+    "n_accuracy_points",
+    "accuracy",
+)
+RATE_PREFIXES = ("oor_rate", "oor_rate_disc", "oor_rate_disc_gt", "gt_oor_rate")
+PER_LABEL_COLUMNS = (
+    "label",
+    "label_name",
+    "allowed_region_ids",
+    "allowed_region_names",
+    "n_predicted",
+    "n_out_of_region",
+    "rate",
+    "wilson_low",
+    "wilson_high",
+    "upper_bound",
+    "upper_bound_n_images",
+    "n_ground_truth",
+    "cumulative_share",
+)
+CONFUSION_COLUMNS = (
+    "image_region_id",
+    "image_region_name",
+    "gt_label",
+    "gt_label_name",
+    "pred_label",
+    "pred_label_name",
+    "n",
+)
+
+# Every RateEstimate field but the rate itself, in declaration order -- the
+# suffixes _prefixed and _per_region_columns key each per-region column under.
+ESTIMATE_SUFFIXES: tuple[str, ...] = tuple(
+    field.name for field in dataclasses.fields(RateEstimate) if field.name != "rate"
+)
+
+PER_DIRECTION_COLUMNS = (
+    "population",
+    "image_region_id",
+    "image_region_name",
+    "excluded_region_id",
+    "excluded_region_name",
+    "n_out_of_region",
+    "n_out_of_region_events",
+    "n_points",
+    "rate",
+    *(suffix for suffix in ESTIMATE_SUFFIXES if suffix not in ("k", "n")),
+)
 
 
 def _prefixed(prefix: str, estimate: RateEstimate) -> dict[str, object]:
