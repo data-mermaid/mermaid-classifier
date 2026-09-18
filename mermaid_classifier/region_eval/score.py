@@ -230,6 +230,9 @@ class ProbeFeatures:
     (row, col) rather than by position. `content_hash` is the hash of the
     probe rows the cache was built from, frozen in the npz at write time; an
     archive written before that field existed reads back with an empty one.
+    `n_points_requested` is `None` for the same reason on an archive written
+    before it was persisted -- coverage against it reads as unknown rather
+    than assumed complete.
     """
 
     features: NDArray[np.float32]
@@ -241,6 +244,7 @@ class ProbeFeatures:
     region_ids: tuple[str, ...]
     held_out: NDArray[np.bool_]
     content_hash: str
+    n_points_requested: int | None
 
     @property
     def n_points(self) -> int:
@@ -255,6 +259,12 @@ class LoadedProbe:
     probe built before each was frozen beside the points. Each is a fallback
     for the caller to resolve -- ids for names, an uncomputed statistic for
     ancestry -- rather than a reason to refuse the probe.
+
+    `download_failed_image_ids` names the images whose feature file failed to
+    download during this load. It is empty both when nothing failed and when
+    the cache was read as already built rather than assembled here -- a
+    download failure is only visible in the run that attempts it, so a probe
+    scored from an existing cache carries no record of what its own build saw.
     """
 
     rows: pd.DataFrame
@@ -267,6 +277,7 @@ class LoadedProbe:
     features: ProbeFeatures
     content_hash: str
     region_snapshot_hash: str
+    download_failed_image_ids: tuple[str, ...]
 
     def label_display_name(self, label: str) -> str:
         """A BA-GF label as text, falling back to the id it cannot name.
@@ -377,7 +388,9 @@ def read_feature_cache(path: Path) -> ProbeFeatures:
 
     A cache written before `content_hash` existed reads back with an empty
     one, which cannot equal a real probe's hash and so still fails the check
-    in `load_probe` rather than passing silently.
+    in `load_probe` rather than passing silently. A cache written before
+    `n_points_requested` existed reads that field back as `None` instead,
+    since there is no comparable substitute a missing count could take.
     """
     archive = np.load(path, allow_pickle=False)
     image_ids = tuple(str(value) for value in archive["image_id"])
@@ -399,6 +412,9 @@ def read_feature_cache(path: Path) -> ProbeFeatures:
         region_ids=tuple(region_ids[position] for position in order),
         held_out=np.asarray(archive["held_out"], dtype=bool)[index],
         content_hash=str(archive["content_hash"]) if "content_hash" in archive.files else "",
+        n_points_requested=(
+            int(archive["n_points_requested"]) if "n_points_requested" in archive.files else None
+        ),
     )
 
 
@@ -540,6 +556,7 @@ def _load_local_probe(
     content_hash = probe_content_hash(rows)
 
     features_path = probe_dir / PROBE_FEATURES_FILE
+    download_failed_image_ids: tuple[str, ...] = ()
     if features_path.exists():
         features = read_feature_cache(features_path)
     elif download_dir is None:
@@ -557,7 +574,9 @@ def _load_local_probe(
         )
         write_feature_cache(cache, rows, features_path)
         features = read_feature_cache(features_path)
+        download_failed_image_ids = cache.download_failed_image_ids
     _check_feature_cache_content_hash(features, content_hash, features_path)
+    _warn_if_coverage_incomplete(features)
 
     return LoadedProbe(
         rows=rows,
@@ -570,7 +589,50 @@ def _load_local_probe(
         features=features,
         content_hash=content_hash,
         region_snapshot_hash=region_snapshot_hash(region_ids_by_attribute),
+        download_failed_image_ids=download_failed_image_ids,
     )
+
+
+def _feature_coverage(features: ProbeFeatures) -> float | None:
+    """`n_points_cached` over `n_points_requested`, or `None` when the
+    request count is absent or zero and so gives no fraction to compute.
+    """
+    requested = features.n_points_requested
+    if not requested:
+        return None
+    return features.n_points / requested
+
+
+def _warn_if_coverage_incomplete(features: ProbeFeatures) -> None:
+    """Log how much of the requested probe arrived, whenever it is short.
+
+    Silence otherwise: a cache the tolerance in `load_probe` already accepts
+    should not read as an error on every run that scores it, only as a number
+    a reader can act on when it drops below what they expect.
+    """
+    coverage = _feature_coverage(features)
+    if coverage is not None and coverage < 1.0:
+        logger.warning(
+            "feature cache covers %d/%d requested point(s) (%.1f%% coverage)",
+            features.n_points,
+            features.n_points_requested,
+            coverage * 100,
+        )
+
+
+def check_feature_coverage(features: ProbeFeatures, min_coverage: float) -> None:
+    """Refuse a cache covering less of the requested probe than `min_coverage`.
+
+    A cache whose request count is unknown -- built before that field was
+    persisted -- cannot be checked against a floor and is accepted rather
+    than refused on a number this call cannot see.
+    """
+    coverage = _feature_coverage(features)
+    if coverage is not None and coverage < min_coverage:
+        raise ValueError(
+            f"feature cache covers {features.n_points}/{features.n_points_requested}"
+            f" requested point(s) ({coverage:.1%}), below the required {min_coverage:.1%}"
+        )
 
 
 def _check_feature_cache_content_hash(
@@ -849,7 +911,11 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
                 else ground_truth_counts_hash(probe.ground_truth_counts)
             ),
             "recorded_ground_truth_counts_hash": probe.manifest.get("ground_truth_counts_hash"),
+            "n_points_requested": probe.features.n_points_requested,
             "n_points_cached": int(probe.features.n_points),
+            "coverage": _feature_coverage(probe.features),
+            "n_points_download_failed": len(probe.download_failed_image_ids),
+            "download_failed_image_ids": list(probe.download_failed_image_ids),
             "n_rows": int(len(probe.rows)),
         },
         "model": {

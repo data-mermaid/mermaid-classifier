@@ -17,6 +17,10 @@ or the s3://bucket/prefix/ a probe was published to. The feature cache is
 downloaded and written back when --probe-dir has none. Nothing is uploaded:
 publishing a score is a deliberate step of its own.
 
+--min-coverage refuses to score a cache covering less than the given fraction
+of its requested points; left unset, no floor applies and every run that
+works today still works.
+
 Run: AWS_PROFILE=wcs-admin uv run python scripts/evaluate_region_probe.py \
         --probe-dir s3://dev-datamermaid-sm-sources/region_probe/v1/ \
         --model v1=s3://mermaid-config/classifier/v1 \
@@ -54,6 +58,7 @@ from mermaid_classifier.region_eval.metrics import RegionMetricsOptions
 from mermaid_classifier.region_eval.score import (
     PROBE_FEATURES_FILE,
     ModelScore,
+    check_feature_coverage,
     load_probe,
     score_model,
     write_report,
@@ -126,6 +131,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         " are flagged imprecise rather than read as comparisons",
     )
     parser.add_argument("--triage-threshold", type=int, default=DEFAULT_LIST_SUSPECT_THRESHOLD)
+    parser.add_argument(
+        "--min-coverage",
+        type=float,
+        default=None,
+        help="refuse to score a probe whose cache covers less than this"
+        " fraction of its requested points (default: no floor, matching"
+        " today's behavior); a cache with no recorded request count is"
+        " never refused, since coverage against it is unknown rather than"
+        " known to fall short",
+    )
     parser.add_argument("--feature-bucket", default=DEFAULT_FEATURE_BUCKET)
     parser.add_argument("--feature-prefix", default=DEFAULT_FEATURE_PREFIX)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
@@ -157,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
         probe.features.n_points,
         probe.content_hash,
     )
+    if args.min_coverage is not None:
+        check_feature_coverage(probe.features, args.min_coverage)
 
     options = RegionMetricsOptions(
         alpha=args.alpha,

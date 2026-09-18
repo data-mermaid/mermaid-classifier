@@ -25,6 +25,8 @@ import numpy as np
 import pandas as pd
 
 from mermaid_classifier.region_eval.features import (
+    DEFAULT_FEATURE_BUCKET,
+    DEFAULT_FEATURE_PREFIX,
     DEFAULT_FEATURE_SUFFIX,
     build_feature_cache,
     read_feature_file,
@@ -173,6 +175,67 @@ class FeatureCacheTest(unittest.TestCase):
             build_feature_cache(
                 _probe_rows({"i1": [(10, 20)]}), self.root, feature_dim=DIM, workers=2
             )
+
+    def test_written_cache_stores_n_points_requested(self):
+        self._write_feature_file("i1", [(10, 20)])
+        rows = _probe_rows({"i1": [(10, 20)], "gone": [(30, 40)]}).assign(
+            benthic_attribute_id="ba1",
+            benthic_attribute_name="BA1",
+            growth_form_id="gf1",
+            growth_form_name="GF1",
+            region_name="Region",
+            site_id="",
+        )
+        with self._no_s3():
+            cache = build_feature_cache(rows, self.root, feature_dim=DIM, workers=2)
+        path = self.root / "probe_features.npz"
+
+        write_feature_cache(cache, rows, path)
+
+        stored = np.load(path, allow_pickle=False)
+        self.assertEqual(int(stored["n_points_requested"]), 2)
+
+    def test_a_failed_download_is_counted_apart_from_a_missing_file(self):
+        """A throttled or credential-expired transfer must not read as the
+        file never having existed: only the image download_features_parallel
+        actually reports failed lands in the download-failure bucket, so the
+        two counts partition the same missing-image total differently.
+        """
+        self._write_feature_file("i1", [(10, 20)])
+        probe = _probe_rows({"i1": [(10, 20)], "gone": [(30, 40)], "throttled": [(50, 60)]})
+        failed_key = (
+            DEFAULT_FEATURE_BUCKET,
+            f"{DEFAULT_FEATURE_PREFIX}throttled{DEFAULT_FEATURE_SUFFIX}",
+        )
+        with mock.patch(
+            "mermaid_classifier.region_eval.features.download_features_parallel",
+            return_value={failed_key},
+        ):
+            cache = build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
+
+        self.assertEqual(cache.n_points_missing_download_failed, 1)
+        self.assertEqual(cache.download_failed_image_ids, ("throttled",))
+        self.assertEqual(cache.n_points_missing_image, 1)
+        self.assertEqual(cache.missing_image_ids, ("gone",))
+
+    def test_a_download_failure_is_logged_apart_from_a_missing_file(self):
+        probe = _probe_rows({"gone": [(30, 40)], "throttled": [(50, 60)]})
+        failed_key = (
+            DEFAULT_FEATURE_BUCKET,
+            f"{DEFAULT_FEATURE_PREFIX}throttled{DEFAULT_FEATURE_SUFFIX}",
+        )
+        with (
+            mock.patch(
+                "mermaid_classifier.region_eval.features.download_features_parallel",
+                return_value={failed_key},
+            ),
+            self.assertLogs("mermaid_classifier.region_eval.features", level="WARNING") as logs,
+        ):
+            build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
+
+        messages = "\n".join(logs.output)
+        self.assertIn("throttled", messages)
+        self.assertIn("download", messages.lower())
 
     def test_written_cache_round_trips_its_arrays(self):
         self._write_feature_file("i1", [(10, 20)])

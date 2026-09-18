@@ -55,8 +55,12 @@ class FeatureCache:
     """Probe features and the metadata they line up with, row for row.
 
     `features[i]` is the vector for the point described by every other array
-    at index `i`. The three missing counts partition what was requested but is
-    not here.
+    at index `i`. The four missing counts partition what was requested but is
+    not here: a row/col this image's file does not carry, an image whose file
+    never existed, and -- kept apart from that last one -- an image whose
+    download `download_features_parallel` reported failing. The distinction
+    is what a run can and cannot rebuild by retrying: an image with no file
+    is unaffected by rerunning, a failed download is not.
     """
 
     features: NDArray[np.float32]
@@ -71,6 +75,8 @@ class FeatureCache:
     n_points_missing_row_col: int
     n_points_missing_image: int
     missing_image_ids: tuple[str, ...]
+    n_points_missing_download_failed: int
+    download_failed_image_ids: tuple[str, ...]
 
 
 def read_feature_file(
@@ -127,7 +133,10 @@ def build_feature_cache(
     s3_keys = {
         (bucket, f"{prefix}{image_id}{suffix}"): str(local_paths[image_id]) for image_id in wanted
     }
-    download_features_parallel(s3_keys, max_workers=workers)
+    failed = download_features_parallel(s3_keys, max_workers=workers)
+    failed_image_ids = {
+        image_id for image_id in wanted if (bucket, f"{prefix}{image_id}{suffix}") in failed
+    }
 
     def load(image_id: str) -> bytes:
         return local_paths[image_id].read_bytes()
@@ -136,30 +145,54 @@ def build_feature_cache(
     features = np.zeros((n_points, feature_dim), dtype=np.float32)
     filled = np.zeros(n_points, dtype=bool)
     missing_images: set[str] = set()
+    download_failed_images: set[str] = set()
     for image_id, positions in wanted.items():
         matched = _image_vectors(
-            load, image_id, positions, rows=rows, cols=cols, feature_dim=feature_dim
+            load,
+            image_id,
+            positions,
+            rows=rows,
+            cols=cols,
+            feature_dim=feature_dim,
+            download_failed=image_id in failed_image_ids,
         )
         if matched is None:
             missing_images.add(image_id)
+            if image_id in failed_image_ids:
+                download_failed_images.add(image_id)
             continue
         for position, vector in matched:
             features[position] = vector
             filled[position] = True
 
     absent_image = np.array([image_id in missing_images for image_id in image_ids], dtype=bool)
-    n_missing_image = int((~filled & absent_image).sum())
+    download_failed_mask = np.array(
+        [image_id in download_failed_images for image_id in image_ids], dtype=bool
+    )
     n_missing_row_col = int((~filled & ~absent_image).sum())
+    n_missing_download_failed = int((~filled & download_failed_mask).sum())
+    n_missing_image = int((~filled & absent_image & ~download_failed_mask).sum())
+    truly_missing_images = missing_images - download_failed_images
     if n_missing_row_col:
         logger.warning(
             "%d probe point(s) had no matching (row, col) in their feature file; dropping them",
             n_missing_row_col,
         )
+    if n_missing_download_failed:
+        logger.warning(
+            "%d probe point(s) across %d image(s) dropped because their feature file"
+            " download failed (not because the file does not exist): %s",
+            n_missing_download_failed,
+            len(download_failed_images),
+            sorted(download_failed_images),
+        )
     logger.info(
-        "cached %d/%d probe point(s); %d image(s) had no feature file",
+        "cached %d/%d probe point(s); %d image(s) had no feature file, %d image(s)'"
+        " download failed",
         int(filled.sum()),
         n_points,
-        len(missing_images),
+        len(truly_missing_images),
+        len(download_failed_images),
     )
 
     kept = np.flatnonzero(filled)
@@ -175,7 +208,9 @@ def build_feature_cache(
         n_points_requested=n_points,
         n_points_missing_row_col=n_missing_row_col,
         n_points_missing_image=n_missing_image,
-        missing_image_ids=tuple(sorted(missing_images)),
+        missing_image_ids=tuple(sorted(truly_missing_images)),
+        n_points_missing_download_failed=n_missing_download_failed,
+        download_failed_image_ids=tuple(sorted(download_failed_images)),
     )
 
 
@@ -199,6 +234,7 @@ def write_feature_cache(cache: FeatureCache, rows: pd.DataFrame, path: Path) -> 
         region_id=np.array(cache.region_ids, dtype=np.str_),
         held_out=cache.held_out,
         content_hash=np.array(probe_content_hash(rows), dtype=np.str_),
+        n_points_requested=np.array(cache.n_points_requested, dtype=np.int64),
     )
 
 
@@ -210,6 +246,7 @@ def _image_vectors(
     rows: NDArray[np.int64],
     cols: NDArray[np.int64],
     feature_dim: int,
+    download_failed: bool,
 ) -> list[tuple[int, NDArray[np.float32]]] | None:
     """One image's probe vectors, or None when it has no feature file.
 
@@ -217,11 +254,21 @@ def _image_vectors(
     that carries a different feature dimension, raises: that is a wrong
     extractor or a corrupt object, and shrinking the probe over it would
     change what the score means.
+
+    `download_failed` is whether `download_features_parallel` already
+    reported this image's transfer failing; it only changes what the warning
+    below says, not whether the point is dropped. The fetch is still tried
+    and still guarded here even when it is `True`, because a caller-supplied
+    downloader -- a test double, or a future one -- may report success while
+    still leaving no local file for a reason this set does not cover.
     """
     try:
         payload = loader(image_id)
     except Exception as error:
-        logger.warning("no feature file for image %s: %s", image_id, error)
+        if download_failed:
+            logger.warning("feature file download failed for image %s: %s", image_id, error)
+        else:
+            logger.warning("no feature file for image %s: %s", image_id, error)
         return None
 
     file_rows, file_cols, features = read_feature_file(payload)

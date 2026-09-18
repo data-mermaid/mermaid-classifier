@@ -67,7 +67,10 @@ from mermaid_classifier.region_eval.probe_set import (
     probe_content_hash,
 )
 from mermaid_classifier.region_eval.score import (
+    ModelScore,
     _ratio_to_baseline_interval,
+    build_manifest,
+    check_feature_coverage,
     decisions_table,
     load_probe,
     score_model,
@@ -303,6 +306,8 @@ def _write_probe(
             n_points_missing_row_col=0,
             n_points_missing_image=0,
             missing_image_ids=(),
+            n_points_missing_download_failed=0,
+            download_failed_image_ids=(),
         ),
         rows,
         probe_dir / "probe_features.npz",
@@ -590,6 +595,8 @@ class ProbeIntegrityTest(unittest.TestCase):
                 n_points_missing_row_col=0,
                 n_points_missing_image=0,
                 missing_image_ids=(),
+                n_points_missing_download_failed=0,
+                download_failed_image_ids=(),
             ),
             rows if hash_rows is None else hash_rows,
             self.probe_dir / "probe_features.npz",
@@ -763,6 +770,306 @@ class ProbeIntegrityTest(unittest.TestCase):
 
         archive = np.load(probe_dir / "probe_features.npz", allow_pickle=False)
         self.assertEqual(str(archive["content_hash"]), probe_content_hash(rows))
+
+    def test_load_probe_build_branch_reports_a_failed_download_apart_from_a_missing_file(self):
+        """A throttled or credential-expired transfer must be visible on the
+        probe this build produces, not folded into the same silence a
+        genuinely absent feature file gets.
+        """
+        points = [
+            ("kept1", TROPICAL_ATLANTIC, "ba1"),
+            ("absent", TROPICAL_ATLANTIC, "ba0"),
+            ("throttled", TROPICAL_ATLANTIC, "ba0"),
+        ]
+        rows = _probe_rows(points)
+        probe_dir = self.root / "probe_download_failure"
+        probe_dir.mkdir()
+        rows.to_parquet(probe_dir / "probe_points.parquet", index=False)
+        (probe_dir / "ba_regions.json").write_text(json.dumps(FROZEN_REGIONS, sort_keys=True))
+
+        download_dir = self.root / "downloads_failure"
+        download_dir.mkdir()
+        kept_rows = rows[rows["image_id"] == "kept1"]
+        (download_dir / f"kept1{DEFAULT_FEATURE_SUFFIX}").write_bytes(
+            _feature_file_bytes(list(zip(kept_rows["row"], kept_rows["col"], strict=True)))
+        )
+
+        with mock.patch(
+            "mermaid_classifier.region_eval.features.download_features_parallel",
+            return_value={("coral-reef-training", "mermaid/throttled_featurevector")},
+        ):
+            probe = load_probe(probe_dir, download_dir=download_dir)
+
+        self.assertEqual(probe.download_failed_image_ids, ("throttled",))
+
+        # This test's feature files are real, FEATURE_DIM-wide npz archives
+        # `build_feature_cache` parses for real, so the model must accept
+        # that width too -- unlike `_export_model`'s 8-feature default,
+        # sized for the other tests' hand-built `FeatureCache`s.
+        model, batch = make_calibrated_model(n_features=FEATURE_DIM, seed=0)
+        model_dir = self.root / "model_download_failure"
+        model_dir.mkdir()
+        model_pt, _manifest, _diff = export_artifact(model, model_dir, batch)
+        model_json = model_dir / "model.json"
+        score = score_model(
+            "v1",
+            model_pt_path=Path(model_pt),
+            model_json_path=model_json,
+            probe=probe,
+            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+            live_region_map_loader=_live_map(),
+            n_permutations=N_PERMUTATIONS,
+        )
+        manifest = build_manifest(score)
+        self.assertEqual(manifest["probe"]["n_points_download_failed"], 1)
+        self.assertEqual(manifest["probe"]["download_failed_image_ids"], ["throttled"])
+
+    def test_a_cache_read_as_is_carries_no_download_failure_record(self):
+        """`ProbeIntegrityTest.setUp` writes a complete cache directly, never
+        through a build in this process, so no download was ever attempted
+        here to report on.
+        """
+        probe = load_probe(self.probe_dir)
+        self.assertEqual(probe.download_failed_image_ids, ())
+
+
+class FeatureCoverageTest(unittest.TestCase):
+    """How much of the requested probe actually made it into the cache.
+
+    A cache short by a few images' points still loads -- that tolerance is
+    `ProbeIntegrityTest`'s, and stays -- but nothing before this told a reader
+    how short, or let a caller refuse a run that fell short by more than it
+    could tolerate. These exercise the coverage `write_feature_cache` and
+    `read_feature_cache` round-trip, and what it surfaces.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        _model, batch = make_calibrated_model()
+        self.features = np.asarray(batch)[:N_POINTS]
+        self.probe_dir = self.root / "probe"
+        self.rows = _write_probe(self.probe_dir, self.features)
+
+    def _shrink_cache(self, n_drop: int) -> pd.DataFrame:
+        """Overwrite the probe's cache with `n_drop` fewer points, hashed
+        against the full row set the way a legitimately short cache is.
+        """
+        kept = self.rows.iloc[: len(self.rows) - n_drop].reset_index(drop=True)
+        write_feature_cache(
+            FeatureCache(
+                features=self.features[: len(kept)].astype(np.float32),
+                image_ids=tuple(kept["image_id"]),
+                point_ids=tuple(kept["point_id"]),
+                rows=np.asarray(kept["row"], dtype=np.int64),
+                cols=np.asarray(kept["col"], dtype=np.int64),
+                gt_labels=tuple(kept["gt_label"]),
+                region_ids=tuple(kept["region_id"]),
+                held_out=np.asarray(kept["held_out"], dtype=bool),
+                n_points_requested=len(self.rows),
+                n_points_missing_row_col=0,
+                n_points_missing_image=n_drop,
+                missing_image_ids=(),
+                n_points_missing_download_failed=0,
+                download_failed_image_ids=(),
+            ),
+            self.rows,
+            self.probe_dir / "probe_features.npz",
+        )
+        return kept
+
+    def _strip_n_points_requested(self) -> None:
+        """Simulate a cache npz written before this field existed."""
+        path = self.probe_dir / "probe_features.npz"
+        archive = dict(np.load(path, allow_pickle=False))
+        del archive["n_points_requested"]
+        np.savez_compressed(path, **archive)
+
+    def _score(self, probe) -> ModelScore:
+        model_pt, model_json = _export_model(self.root / "model")
+        return score_model(
+            "v1",
+            model_pt_path=model_pt,
+            model_json_path=model_json,
+            probe=probe,
+            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+            live_region_map_loader=_live_map(),
+            n_permutations=N_PERMUTATIONS,
+        )
+
+    def test_load_probe_reads_back_n_points_requested(self):
+        probe = load_probe(self.probe_dir)
+        self.assertEqual(probe.features.n_points_requested, len(self.rows))
+
+    def test_a_cache_written_before_the_field_existed_reads_back_as_unknown(self):
+        self._strip_n_points_requested()
+
+        probe = load_probe(self.probe_dir)
+
+        self.assertIsNone(probe.features.n_points_requested)
+
+    def test_coverage_below_one_logs_a_warning_naming_both_counts(self):
+        self._shrink_cache(n_drop=5)
+
+        with self.assertLogs("mermaid_classifier.region_eval.score", level="WARNING") as logs:
+            load_probe(self.probe_dir)
+
+        message = "\n".join(logs.output)
+        self.assertIn(str(len(self.rows) - 5), message)
+        self.assertIn(str(len(self.rows)), message)
+
+    def test_complete_coverage_does_not_warn(self):
+        with self.assertNoLogs("mermaid_classifier.region_eval.score", level="WARNING"):
+            load_probe(self.probe_dir)
+
+    def test_manifest_records_the_requested_cached_and_coverage_counts(self):
+        manifest = build_manifest(self._score(load_probe(self.probe_dir)))
+
+        self.assertEqual(manifest["probe"]["n_points_requested"], len(self.rows))
+        self.assertEqual(manifest["probe"]["n_points_cached"], len(self.rows))
+        self.assertEqual(manifest["probe"]["coverage"], 1.0)
+
+    def test_manifest_reports_a_fractional_coverage_for_a_short_cache(self):
+        self._shrink_cache(n_drop=5)
+        manifest = build_manifest(self._score(load_probe(self.probe_dir)))
+
+        n_kept = len(self.rows) - 5
+        self.assertEqual(manifest["probe"]["n_points_requested"], len(self.rows))
+        self.assertEqual(manifest["probe"]["n_points_cached"], n_kept)
+        self.assertAlmostEqual(manifest["probe"]["coverage"], n_kept / len(self.rows))
+
+    def test_manifest_leaves_coverage_null_when_the_request_count_is_unknown(self):
+        self._strip_n_points_requested()
+        manifest = build_manifest(self._score(load_probe(self.probe_dir)))
+
+        self.assertIsNone(manifest["probe"]["n_points_requested"])
+        self.assertIsNone(manifest["probe"]["coverage"])
+
+
+class CheckFeatureCoverageTest(unittest.TestCase):
+    """`check_feature_coverage`, the function `--min-coverage` refuses through."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        _model, batch = make_calibrated_model()
+        self.features = np.asarray(batch)[:N_POINTS]
+        self.probe_dir = self.root / "probe"
+        self.rows = _write_probe(self.probe_dir, self.features)
+
+    def test_refuses_a_cache_short_of_the_floor(self):
+        probe = load_probe(self.probe_dir)
+
+        with self.assertRaisesRegex(ValueError, "25.*25|coverage"):
+            # A full cache scored against an impossible floor above 1.0
+            # exercises the same refusal path a real shortfall would.
+            check_feature_coverage(probe.features, 1.5)
+
+    def test_accepts_a_cache_at_or_above_the_floor(self):
+        probe = load_probe(self.probe_dir)
+        check_feature_coverage(probe.features, 1.0)  # must not raise
+
+    def test_an_unknown_coverage_is_not_refused(self):
+        """A cache whose request count cannot be read is not proof it fell
+        short; the floor cannot be checked against a number that is not
+        there, so it passes rather than fabricating a refusal.
+        """
+        path = self.probe_dir / "probe_features.npz"
+        archive = dict(np.load(path, allow_pickle=False))
+        del archive["n_points_requested"]
+        np.savez_compressed(path, **archive)
+        probe = load_probe(self.probe_dir)
+
+        check_feature_coverage(probe.features, 1.0)  # must not raise
+
+
+class MinCoverageCliTest(unittest.TestCase):
+    """`scripts/evaluate_region_probe.py --min-coverage`, opt-in end to end."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        _model, batch = make_calibrated_model()
+        self.features = np.asarray(batch)[:N_POINTS]
+        self.probe_dir = self.root / "probe"
+        self.rows = _write_probe(self.probe_dir, self.features)
+        self.model_dir = self.root / "model"
+        _export_model(self.model_dir)
+
+    def test_defaults_to_no_floor(self):
+        args = evaluate_region_probe.parse_args(
+            [
+                "--model",
+                f"v1={self.model_dir}",
+                "--probe-dir",
+                str(self.probe_dir),
+                "--out-dir",
+                str(self.root / "out"),
+            ]
+        )
+        self.assertIsNone(args.min_coverage)
+
+    def _shrink_cache(self, n_drop: int) -> None:
+        kept = self.rows.iloc[: len(self.rows) - n_drop].reset_index(drop=True)
+        write_feature_cache(
+            FeatureCache(
+                features=self.features[: len(kept)].astype(np.float32),
+                image_ids=tuple(kept["image_id"]),
+                point_ids=tuple(kept["point_id"]),
+                rows=np.asarray(kept["row"], dtype=np.int64),
+                cols=np.asarray(kept["col"], dtype=np.int64),
+                gt_labels=tuple(kept["gt_label"]),
+                region_ids=tuple(kept["region_id"]),
+                held_out=np.asarray(kept["held_out"], dtype=bool),
+                n_points_requested=len(self.rows),
+                n_points_missing_row_col=0,
+                n_points_missing_image=n_drop,
+                missing_image_ids=(),
+                n_points_missing_download_failed=0,
+                download_failed_image_ids=(),
+            ),
+            self.rows,
+            self.probe_dir / "probe_features.npz",
+        )
+
+    def test_a_run_below_the_requested_floor_is_refused_naming_both_counts(self):
+        self._shrink_cache(n_drop=5)
+
+        with self.assertRaisesRegex(ValueError, str(len(self.rows) - 5)):
+            evaluate_region_probe.main(
+                [
+                    "--model",
+                    f"v1={self.model_dir}",
+                    "--probe-dir",
+                    str(self.probe_dir),
+                    "--out-dir",
+                    str(self.root / "out"),
+                    "--min-coverage",
+                    "0.9",
+                    "--n-resamples",
+                    str(N_RESAMPLES),
+                ]
+            )
+
+    def test_the_same_short_run_is_not_refused_without_the_flag(self):
+        self._shrink_cache(n_drop=5)
+
+        exit_code = evaluate_region_probe.main(
+            [
+                "--model",
+                f"v1={self.model_dir}",
+                "--probe-dir",
+                str(self.probe_dir),
+                "--out-dir",
+                str(self.root / "out"),
+                "--n-resamples",
+                str(N_RESAMPLES),
+            ]
+        )
+        self.assertEqual(exit_code, 0)
 
 
 class _StubS3Client:
