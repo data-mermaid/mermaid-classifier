@@ -235,6 +235,10 @@ def write_feature_cache(cache: FeatureCache, rows: pd.DataFrame, path: Path) -> 
         held_out=cache.held_out,
         content_hash=np.array(probe_content_hash(rows), dtype=np.str_),
         n_points_requested=np.array(cache.n_points_requested, dtype=np.int64),
+        n_points_missing_download_failed=np.array(
+            cache.n_points_missing_download_failed, dtype=np.int64
+        ),
+        download_failed_image_ids=np.array(cache.download_failed_image_ids, dtype=np.str_),
     )
 
 

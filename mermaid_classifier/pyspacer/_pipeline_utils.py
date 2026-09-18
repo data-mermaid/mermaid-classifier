@@ -4,11 +4,12 @@ Pipeline utility helpers shared across the training pipeline modules.
 - section_profiling: context manager that records timing and memory usage
   for a named section of code.
 
-The parallel S3 feature-vector downloader lives in
-``mermaid_classifier.common.s3_utils`` instead: it has no need for the
-training-only logging setup below, and a lightweight consumer (region-eval)
-must be able to reach it without pulling that setup in as an import-time side
-effect.
+Importing this module attaches a console handler and a `train.log` file
+handler to the logger named "train", as a side effect of the module-scope
+`logging_config_for_script` call below. The parallel S3 feature-vector
+downloader, in ``mermaid_classifier.common.s3_utils``, carries no such side
+effect, which is what lets a lightweight consumer such as region-eval reach
+it on its own.
 """
 
 import time

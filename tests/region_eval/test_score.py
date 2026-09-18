@@ -774,12 +774,15 @@ class ProbeIntegrityTest(unittest.TestCase):
     def test_load_probe_build_branch_reports_a_failed_download_apart_from_a_missing_file(self):
         """A throttled or credential-expired transfer must be visible on the
         probe this build produces, not folded into the same silence a
-        genuinely absent feature file gets.
+        genuinely absent feature file gets. `throttled` carries two points on
+        one image, so a count that reports images rather than points would
+        under-report this by one.
         """
         points = [
             ("kept1", TROPICAL_ATLANTIC, "ba1"),
             ("absent", TROPICAL_ATLANTIC, "ba0"),
             ("throttled", TROPICAL_ATLANTIC, "ba0"),
+            ("throttled", TROPICAL_ATLANTIC, "ba1"),
         ]
         rows = _probe_rows(points)
         probe_dir = self.root / "probe_download_failure"
@@ -801,6 +804,7 @@ class ProbeIntegrityTest(unittest.TestCase):
             probe = load_probe(probe_dir, download_dir=download_dir)
 
         self.assertEqual(probe.download_failed_image_ids, ("throttled",))
+        self.assertEqual(probe.features.n_points_missing_download_failed, 2)
 
         # This test's feature files are real, FEATURE_DIM-wide npz archives
         # `build_feature_cache` parses for real, so the model must accept
@@ -821,16 +825,47 @@ class ProbeIntegrityTest(unittest.TestCase):
             n_permutations=N_PERMUTATIONS,
         )
         manifest = build_manifest(score)
-        self.assertEqual(manifest["probe"]["n_points_download_failed"], 1)
+        self.assertEqual(manifest["probe"]["n_points_download_failed"], 2)
         self.assertEqual(manifest["probe"]["download_failed_image_ids"], ["throttled"])
 
     def test_a_cache_read_as_is_carries_no_download_failure_record(self):
         """`ProbeIntegrityTest.setUp` writes a complete cache directly, never
         through a build in this process, so no download was ever attempted
-        here to report on.
+        here to report on -- the cache itself says so, since `_write_probe`
+        persists a zero count and an empty image list into it.
         """
         probe = load_probe(self.probe_dir)
         self.assertEqual(probe.download_failed_image_ids, ())
+        self.assertEqual(probe.features.n_points_missing_download_failed, 0)
+
+    def test_a_cache_predating_the_download_failure_record_reads_back_as_unknown(self):
+        """An npz written before this record existed cannot say whether a
+        download failed; it reads back as unknown rather than as the zero
+        the manifest would otherwise assert as fact.
+        """
+        path = self.probe_dir / "probe_features.npz"
+        archive = dict(np.load(path, allow_pickle=False))
+        del archive["n_points_missing_download_failed"]
+        del archive["download_failed_image_ids"]
+        np.savez_compressed(path, **archive)
+
+        probe = load_probe(self.probe_dir)
+        self.assertIsNone(probe.download_failed_image_ids)
+        self.assertIsNone(probe.features.n_points_missing_download_failed)
+
+        model_pt, model_json = _export_model(self.root / "model_predating_download_record")
+        score = score_model(
+            "v1",
+            model_pt_path=model_pt,
+            model_json_path=model_json,
+            probe=probe,
+            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+            live_region_map_loader=_live_map(),
+            n_permutations=N_PERMUTATIONS,
+        )
+        manifest = build_manifest(score)
+        self.assertIsNone(manifest["probe"]["n_points_download_failed"])
+        self.assertIsNone(manifest["probe"]["download_failed_image_ids"])
 
 
 class FeatureCoverageTest(unittest.TestCase):
@@ -967,6 +1002,16 @@ class CheckFeatureCoverageTest(unittest.TestCase):
             # exercises the same refusal path a real shortfall would.
             check_feature_coverage(probe.features, 1.5)
 
+    def test_the_refusal_names_the_remedy(self):
+        """A local probe dir's short cache is written to disk and refused
+        identically on every later run; the operator needs to know that
+        deleting it is what unblocks a retried download.
+        """
+        probe = load_probe(self.probe_dir)
+
+        with self.assertRaisesRegex(ValueError, r"delete.*probe_features\.npz"):
+            check_feature_coverage(probe.features, 1.5)
+
     def test_accepts_a_cache_at_or_above_the_floor(self):
         probe = load_probe(self.probe_dir)
         check_feature_coverage(probe.features, 1.0)  # must not raise
@@ -983,6 +1028,22 @@ class CheckFeatureCoverageTest(unittest.TestCase):
         probe = load_probe(self.probe_dir)
 
         check_feature_coverage(probe.features, 1.0)  # must not raise
+
+    def test_an_unknown_coverage_logs_that_the_floor_could_not_be_applied(self):
+        """A silent accept here leaves the operator who set --min-coverage
+        believing it was honored; a WARNING is the only signal that it was
+        not applied at all.
+        """
+        path = self.probe_dir / "probe_features.npz"
+        archive = dict(np.load(path, allow_pickle=False))
+        del archive["n_points_requested"]
+        np.savez_compressed(path, **archive)
+        probe = load_probe(self.probe_dir)
+
+        with self.assertLogs("mermaid_classifier.region_eval.score", level="WARNING") as logs:
+            check_feature_coverage(probe.features, 0.99)
+
+        self.assertIn("99.0", "\n".join(logs.output))
 
 
 class MinCoverageCliTest(unittest.TestCase):
@@ -1146,6 +1207,7 @@ class S3ProbeLoadingTest(unittest.TestCase):
                 f"region_probe/v1/{name}"
                 for name in (
                     "probe_points.parquet",
+                    "held_out_images.csv",
                     "ba_regions.json",
                     "ba_region_counts.json",
                     "names.json",

@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import TypeGuard
 from urllib.parse import urlparse
 
-from spacer.aws import get_s3_resource
-
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +54,10 @@ def download_features_parallel(
     Returns:
         Set of (bucket, key) tuples that failed to download.
     """
+    # Deferred: only the nested _download below needs it, so a caller of
+    # parse_s3_uri/is_s3_uri alone stays free of spacer's import cost.
+    from spacer.aws import get_s3_resource
+
     total = len(s3_keys)
     if total == 0:
         return set()

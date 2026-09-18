@@ -690,7 +690,11 @@ class TrainingDataset:
             )
 
         if failed_keys:
-            logger.warning(f"{len(failed_keys)} feature vector download(s) failed.")
+            # The downloader's per-key warning lands on a different logger
+            # than train.log; naming the keys here reaches a post-mortem.
+            logger.warning(
+                f"{len(failed_keys)} feature vector download(s) failed: {sorted(failed_keys)}"
+            )
 
         with self.section_profiling("Building PySpacer labels"):
             # Build ImageLabels with filesystem DataLocations.

@@ -104,6 +104,7 @@ from mermaid_classifier.region_eval.probe_set import (
     PROBE_COLUMNS,
     PROBE_COUNTS_FILE,
     PROBE_FEATURES_FILE,
+    PROBE_HELD_OUT_IMAGES_FILE,
     PROBE_MANIFEST_FILE,
     PROBE_NAMES_FILE,
     PROBE_POINTS_FILE,
@@ -232,7 +233,10 @@ class ProbeFeatures:
     archive written before that field existed reads back with an empty one.
     `n_points_requested` is `None` for the same reason on an archive written
     before it was persisted -- coverage against it reads as unknown rather
-    than assumed complete.
+    than assumed complete. `n_points_missing_download_failed` and
+    `download_failed_image_ids` are `None` on the same grounds for an archive
+    written before either was persisted: a download failure is then unknown
+    rather than known absent.
     """
 
     features: NDArray[np.float32]
@@ -245,6 +249,8 @@ class ProbeFeatures:
     held_out: NDArray[np.bool_]
     content_hash: str
     n_points_requested: int | None
+    n_points_missing_download_failed: int | None
+    download_failed_image_ids: tuple[str, ...] | None
 
     @property
     def n_points(self) -> int:
@@ -261,10 +267,11 @@ class LoadedProbe:
     ancestry -- rather than a reason to refuse the probe.
 
     `download_failed_image_ids` names the images whose feature file failed to
-    download during this load. It is empty both when nothing failed and when
-    the cache was read as already built rather than assembled here -- a
-    download failure is only visible in the run that attempts it, so a probe
-    scored from an existing cache carries no record of what its own build saw.
+    download, read from the feature cache itself -- the one this call just
+    built, or one already on disk from an earlier run. It is `None` for a
+    cache written before that record was persisted, since a download failure
+    is then unknown rather than known absent, and empty when the cache does
+    carry the record and nothing failed.
     """
 
     rows: pd.DataFrame
@@ -277,7 +284,7 @@ class LoadedProbe:
     features: ProbeFeatures
     content_hash: str
     region_snapshot_hash: str
-    download_failed_image_ids: tuple[str, ...]
+    download_failed_image_ids: tuple[str, ...] | None
 
     def label_display_name(self, label: str) -> str:
         """A BA-GF label as text, falling back to the id it cannot name.
@@ -389,8 +396,10 @@ def read_feature_cache(path: Path) -> ProbeFeatures:
     A cache written before `content_hash` existed reads back with an empty
     one, which cannot equal a real probe's hash and so still fails the check
     in `load_probe` rather than passing silently. A cache written before
-    `n_points_requested` existed reads that field back as `None` instead,
-    since there is no comparable substitute a missing count could take.
+    `n_points_requested`, `n_points_missing_download_failed` or
+    `download_failed_image_ids` existed reads that field back as `None`
+    instead, since there is no comparable substitute a missing value could
+    take.
     """
     archive = np.load(path, allow_pickle=False)
     image_ids = tuple(str(value) for value in archive["image_id"])
@@ -415,6 +424,16 @@ def read_feature_cache(path: Path) -> ProbeFeatures:
         n_points_requested=(
             int(archive["n_points_requested"]) if "n_points_requested" in archive.files else None
         ),
+        n_points_missing_download_failed=(
+            int(archive["n_points_missing_download_failed"])
+            if "n_points_missing_download_failed" in archive.files
+            else None
+        ),
+        download_failed_image_ids=(
+            tuple(str(value) for value in archive["download_failed_image_ids"])
+            if "download_failed_image_ids" in archive.files
+            else None
+        ),
     )
 
 
@@ -424,6 +443,7 @@ def read_feature_cache(path: Path) -> ProbeFeatures:
 # optional, exactly as the local path already treats a missing one.
 _PROBE_FILE_NAMES = (
     PROBE_POINTS_FILE,
+    PROBE_HELD_OUT_IMAGES_FILE,
     PROBE_REGIONS_FILE,
     PROBE_COUNTS_FILE,
     PROBE_NAMES_FILE,
@@ -556,7 +576,6 @@ def _load_local_probe(
     content_hash = probe_content_hash(rows)
 
     features_path = probe_dir / PROBE_FEATURES_FILE
-    download_failed_image_ids: tuple[str, ...] = ()
     if features_path.exists():
         features = read_feature_cache(features_path)
     elif download_dir is None:
@@ -574,7 +593,6 @@ def _load_local_probe(
         )
         write_feature_cache(cache, rows, features_path)
         features = read_feature_cache(features_path)
-        download_failed_image_ids = cache.download_failed_image_ids
     _check_feature_cache_content_hash(features, content_hash, features_path)
     _warn_if_coverage_incomplete(features)
 
@@ -589,7 +607,7 @@ def _load_local_probe(
         features=features,
         content_hash=content_hash,
         region_snapshot_hash=region_snapshot_hash(region_ids_by_attribute),
-        download_failed_image_ids=download_failed_image_ids,
+        download_failed_image_ids=features.download_failed_image_ids,
     )
 
 
@@ -625,13 +643,26 @@ def check_feature_coverage(features: ProbeFeatures, min_coverage: float) -> None
 
     A cache whose request count is unknown -- built before that field was
     persisted -- cannot be checked against a floor and is accepted rather
-    than refused on a number this call cannot see.
+    than refused on a number this call cannot see; a WARNING says so, since an
+    operator who set a floor and gets no refusal has no other way to learn it
+    was never applied.
     """
     coverage = _feature_coverage(features)
-    if coverage is not None and coverage < min_coverage:
+    if coverage is None:
+        logger.warning(
+            "--min-coverage %.1f%% cannot be checked: this cache's request count"
+            " is unknown (built before n_points_requested was persisted); the"
+            " floor was not applied",
+            min_coverage * 100,
+        )
+        return
+    if coverage < min_coverage:
         raise ValueError(
             f"feature cache covers {features.n_points}/{features.n_points_requested}"
-            f" requested point(s) ({coverage:.1%}), below the required {min_coverage:.1%}"
+            f" requested point(s) ({coverage:.1%}), below the required {min_coverage:.1%};"
+            f" for a local probe dir, delete {PROBE_FEATURES_FILE} there and rerun to retry"
+            f" the download (a probe read from s3:// already rebuilds into a scratch"
+            f" directory on every run)"
         )
 
 
@@ -914,8 +945,12 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
             "n_points_requested": probe.features.n_points_requested,
             "n_points_cached": int(probe.features.n_points),
             "coverage": _feature_coverage(probe.features),
-            "n_points_download_failed": len(probe.download_failed_image_ids),
-            "download_failed_image_ids": list(probe.download_failed_image_ids),
+            "n_points_download_failed": probe.features.n_points_missing_download_failed,
+            "download_failed_image_ids": (
+                None
+                if probe.download_failed_image_ids is None
+                else list(probe.download_failed_image_ids)
+            ),
             "n_rows": int(len(probe.rows)),
         },
         "model": {

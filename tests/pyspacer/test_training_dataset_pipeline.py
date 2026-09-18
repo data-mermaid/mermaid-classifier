@@ -319,6 +319,37 @@ class PrepAnnotationsTest(unittest.TestCase):
         self.assertGreater(len(self.dataset._feature_path_to_s3_location), 0)
 
 
+class PrepAnnotationsDownloadFailureTest(unittest.TestCase):
+    """The aggregate warning prep_annotations_for_pyspacer logs on a download
+    failure -- the downloader's own per-key warning lands on a logger this
+    module does not attach to train.log, so this is what a post-mortem from
+    train.log alone can still read.
+    """
+
+    def setUp(self):
+        self.override = override_settings(aws_anonymous="True", download_max_workers=1)
+        self.override.__enter__()
+        self.dataset = _make_dataset(self)
+        _seed_annotations(self.dataset)
+
+    def tearDown(self):
+        self.override.__exit__(None, None, None)
+
+    def test_the_aggregate_warning_names_the_failed_keys(self):
+        failed = {("my-bucket", "ba_a/img_0.fv")}
+        with (
+            mock.patch(
+                "mermaid_classifier.pyspacer.dataset.download_features_parallel",
+                return_value=failed,
+            ),
+            self.assertLogs("train", level="WARNING") as logs,
+        ):
+            self.dataset.prep_annotations_for_pyspacer()
+
+        message = "\n".join(logs.output)
+        self.assertIn("ba_a/img_0.fv", message)
+
+
 # ---------------------------------------------------------------------------
 # 5. add_training_set_names
 # ---------------------------------------------------------------------------
