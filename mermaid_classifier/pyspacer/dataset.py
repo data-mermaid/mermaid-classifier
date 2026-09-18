@@ -31,10 +31,8 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
-from mermaid_classifier.pyspacer._pipeline_utils import (
-    download_features_parallel,
-    section_profiling,
-)
+from mermaid_classifier.common.s3_utils import download_features_parallel
+from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
 from mermaid_classifier.pyspacer.label_specs import (
     ImageExclusionFilter,
     LabelFilter,

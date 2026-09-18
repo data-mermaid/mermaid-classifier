@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from mermaid_classifier.pyspacer._pipeline_utils import download_features_parallel
+from mermaid_classifier.common.s3_utils import download_features_parallel
 from mermaid_classifier.region_eval.probe_set import probe_content_hash
 
 logger = logging.getLogger(__name__)
