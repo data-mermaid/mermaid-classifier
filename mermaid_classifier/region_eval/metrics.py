@@ -93,18 +93,6 @@ PER_REGION_BASE_COLUMNS = (
     "accuracy",
 )
 RATE_PREFIXES = ("oor_rate", "oor_rate_disc", "oor_rate_disc_gt", "gt_oor_rate")
-ESTIMATE_SUFFIXES = (
-    "k",
-    "n",
-    "ci_low",
-    "ci_high",
-    "wilson_low",
-    "wilson_high",
-    "design_effect",
-    "upper_bound",
-    "upper_bound_n_images",
-    "imprecise",
-)
 PER_LABEL_COLUMNS = (
     "label",
     "label_name",
@@ -119,25 +107,6 @@ PER_LABEL_COLUMNS = (
     "upper_bound_n_images",
     "n_ground_truth",
     "cumulative_share",
-)
-PER_DIRECTION_COLUMNS = (
-    "population",
-    "image_region_id",
-    "image_region_name",
-    "excluded_region_id",
-    "excluded_region_name",
-    "n_out_of_region",
-    "n_out_of_region_events",
-    "n_points",
-    "rate",
-    "ci_low",
-    "ci_high",
-    "wilson_low",
-    "wilson_high",
-    "design_effect",
-    "upper_bound",
-    "upper_bound_n_images",
-    "imprecise",
 )
 CONFUSION_COLUMNS = (
     "image_region_id",
@@ -202,6 +171,26 @@ class RateEstimate:
     upper_bound: float | None
     upper_bound_n_images: int
     imprecise: bool | None
+
+
+# Every RateEstimate field but the rate itself, in declaration order -- the
+# suffixes _prefixed and _per_region_columns key each per-region column under.
+ESTIMATE_SUFFIXES: tuple[str, ...] = tuple(
+    field.name for field in dataclasses.fields(RateEstimate) if field.name != "rate"
+)
+
+PER_DIRECTION_COLUMNS = (
+    "population",
+    "image_region_id",
+    "image_region_name",
+    "excluded_region_id",
+    "excluded_region_name",
+    "n_out_of_region",
+    "n_out_of_region_events",
+    "n_points",
+    "rate",
+    *(suffix for suffix in ESTIMATE_SUFFIXES if suffix not in ("k", "n")),
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1038,10 +1027,9 @@ def _per_region_rows(
             "n_accuracy_points": core.accuracy.n,
             "accuracy": core.accuracy.rate,
         }
-        row.update(_prefixed("oor_rate", core.oor_rate))
-        row.update(_prefixed("oor_rate_disc", core.oor_rate_disc))
-        row.update(_prefixed("oor_rate_disc_gt", core.oor_rate_disc_gt))
-        row.update(_prefixed("gt_oor_rate", core.gt_oor_rate))
+        for prefix in RATE_PREFIXES:
+            estimate: RateEstimate = getattr(core, prefix)
+            row.update(_prefixed(prefix, estimate))
         rows.append(row)
     return rows
 
@@ -1086,6 +1074,25 @@ def _direction_matrix(
     )
 
 
+def _direction_rate_fields(estimate: RateEstimate) -> dict[str, object]:
+    """A rate's fields under `PER_DIRECTION_COLUMNS`' own names.
+
+    `n_out_of_region`/`n_points` are this table's names for `k`/`n`; every
+    other field keeps `RateEstimate`'s own name.
+    """
+    fields: dict[str, object] = {
+        "n_out_of_region": estimate.k,
+        "n_points": estimate.n,
+        "rate": estimate.rate,
+    }
+    fields.update(
+        (suffix, getattr(estimate, suffix))
+        for suffix in ESTIMATE_SUFFIXES
+        if suffix not in ("k", "n")
+    )
+    return fields
+
+
 def _per_direction_rows(
     points: ScoredPoints,
     population: str,
@@ -1125,18 +1132,8 @@ def _per_direction_rows(
                     "image_region_name": display_name(region, region_names),
                     "excluded_region_id": excluded,
                     "excluded_region_name": display_name(excluded, region_names),
-                    "n_out_of_region": estimate.k,
                     "n_out_of_region_events": n_events,
-                    "n_points": estimate.n,
-                    "rate": estimate.rate,
-                    "ci_low": estimate.ci_low,
-                    "ci_high": estimate.ci_high,
-                    "wilson_low": estimate.wilson_low,
-                    "wilson_high": estimate.wilson_high,
-                    "design_effect": estimate.design_effect,
-                    "upper_bound": estimate.upper_bound,
-                    "upper_bound_n_images": estimate.upper_bound_n_images,
-                    "imprecise": estimate.imprecise,
+                    **_direction_rate_fields(estimate),
                 }
             )
     return rows

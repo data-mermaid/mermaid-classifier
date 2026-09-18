@@ -36,18 +36,6 @@ from mermaid_classifier.region_eval.metrics import ScoredPoints, columns_frame, 
 
 DEFAULT_LIST_SUSPECT_THRESHOLD = 5
 
-EVENT_COLUMNS = (
-    "point_position",
-    "image_id",
-    "image_region_id",
-    "gt_label",
-    "pred_label",
-    "pred_attribute_id",
-    "allowed_region_ids",
-    "ground_truth_count",
-    "bucket",
-)
-BUCKET_COUNT_COLUMNS = ("bucket", "n")
 REGION_LIST_SUSPECT_COLUMNS = (
     "attribute_id",
     "attribute_name",
@@ -73,6 +61,11 @@ class _Event:
     bucket: "TriageBucket"
 
 
+# _Event's own field names, in declaration order -- the columns the events
+# table renders even when no event was raised.
+EVENT_COLUMNS: tuple[str, ...] = tuple(field.name for field in dataclasses.fields(_Event))
+
+
 class TriageBucket(StrEnum):
     """What one event is evidence of. Ordered most to least actionable upstream."""
 
@@ -86,7 +79,7 @@ class TriageResult:
     n_unrecorded_region_excluded: int
     threshold: int
     events: pd.DataFrame
-    bucket_counts: pd.DataFrame
+    bucket_counts: dict[str, int]
     region_list_suspects: pd.DataFrame
 
 
@@ -162,13 +155,10 @@ def _bucket(region_unknown: bool, annotations: int, threshold: int) -> TriageBuc
     return TriageBucket.MODEL_ERROR
 
 
-def _bucket_counts(events: Sequence[_Event]) -> pd.DataFrame:
+def _bucket_counts(events: Sequence[_Event]) -> dict[str, int]:
     """Every bucket, including the ones that caught nothing."""
     counts: Counter[TriageBucket] = Counter(event.bucket for event in events)
-    return columns_frame(
-        [{"bucket": bucket, "n": counts[bucket]} for bucket in TriageBucket],
-        BUCKET_COUNT_COLUMNS,
-    )
+    return {str(bucket): counts[bucket] for bucket in TriageBucket}
 
 
 def _region_list_suspects(

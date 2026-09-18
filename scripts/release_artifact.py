@@ -18,11 +18,11 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import boto3
 from botocore.exceptions import ClientError
 
+from mermaid_classifier.common.s3_utils import parse_s3_uri
 from mermaid_classifier.pyspacer.annotation import resolve_classifier_artifact
 from mermaid_classifier.pyspacer.inference import (
     SCHEMA_VERSION,
@@ -47,14 +47,6 @@ def validate_version(version: str) -> None:
     """Raise ValueError unless version matches ^v\\d+$ (e.g. v3)."""
     if not _VERSION_RE.fullmatch(version):
         raise ValueError(f"version must match ^v\\d+$ (e.g. v3); got {version!r}")
-
-
-def parse_s3_uri(uri: str) -> tuple[str, str]:
-    """Split an s3://bucket/key URI into (bucket, key)."""
-    parsed = urlparse(uri)
-    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
-        raise ValueError(f"not an s3://bucket/key URI: {uri!r}")
-    return parsed.netloc, parsed.path.lstrip("/")
 
 
 def validate_artifact(model_pt: Path, model_json: Path) -> dict[str, Any]:

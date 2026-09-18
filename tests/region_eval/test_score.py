@@ -341,10 +341,6 @@ def _unreachable_live_map():
     return load
 
 
-def _bucket_counts(score) -> dict[str, int]:
-    return {str(row["bucket"]): int(row["n"]) for _, row in score.triage.bucket_counts.iterrows()}
-
-
 def _read_csv(path: Path) -> pd.DataFrame:
     """The written CSV as text, so an empty cell stays distinguishable."""
     return pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -514,8 +510,8 @@ class ScoreReportTest(unittest.TestCase):
         self.assertGreater(events, 0, "the fixture model must produce out-of-region events")
         self.assertEqual(len(corpus.triage.events), events)
 
-        before = _bucket_counts(probe_only)
-        after = _bucket_counts(corpus)
+        before = probe_only.triage.bucket_counts
+        after = corpus.triage.bucket_counts
         self.assertEqual(before["unknown_list"], 0)
         self.assertEqual(before["list_suspect"], 0)
         self.assertEqual(before["model_error"], events)

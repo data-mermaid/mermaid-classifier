@@ -59,6 +59,7 @@ from mermaid_classifier.region_eval.probe_set import (
     PROBE_ANCESTRY_FILE,
     PROBE_COUNTS_FILE,
     PROBE_FEATURES_FILE,
+    PROBE_FILE_NAMES,
     PROBE_HELD_OUT_IMAGES_FILE,
     PROBE_MANIFEST_FILE,
     PROBE_NAMES_FILE,
@@ -164,15 +165,7 @@ def publish_probe(out_dir: Path, uri: str, *, region_name: str = DEFAULT_REGION)
             " version is immutable. Publish to a new version prefix instead."
         )
 
-    names = [
-        PROBE_POINTS_FILE,
-        PROBE_HELD_OUT_IMAGES_FILE,
-        PROBE_REGIONS_FILE,
-        PROBE_COUNTS_FILE,
-        PROBE_NAMES_FILE,
-        PROBE_ANCESTRY_FILE,
-        PROBE_MANIFEST_FILE,
-    ]
+    names = [name for name in PROBE_FILE_NAMES if name != PROBE_FEATURES_FILE]
     if (out_dir / PROBE_FEATURES_FILE).exists():
         names.append(PROBE_FEATURES_FILE)
 

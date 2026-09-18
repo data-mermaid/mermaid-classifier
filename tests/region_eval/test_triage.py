@@ -153,10 +153,10 @@ class BucketAssignmentTest(unittest.TestCase):
         self.assertEqual(len(result.events[result.events["image_id"] == "image-c"]), 0)
 
     def test_bucket_counts_list_every_bucket(self):
-        counts = _triage().bucket_counts.set_index("bucket")
-        self.assertEqual(int(counts.loc[TriageBucket.LIST_SUSPECT, "n"]), 2)
-        self.assertEqual(int(counts.loc[TriageBucket.UNKNOWN_LIST, "n"]), 2)
-        self.assertEqual(int(counts.loc[TriageBucket.MODEL_ERROR, "n"]), 2)
+        counts = _triage().bucket_counts
+        self.assertEqual(counts[TriageBucket.LIST_SUSPECT], 2)
+        self.assertEqual(counts[TriageBucket.UNKNOWN_LIST], 2)
+        self.assertEqual(counts[TriageBucket.MODEL_ERROR], 2)
 
 
 class ThresholdTest(unittest.TestCase):

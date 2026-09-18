@@ -104,11 +104,12 @@ from mermaid_classifier.region_eval.probe_set import (
     PROBE_COLUMNS,
     PROBE_COUNTS_FILE,
     PROBE_FEATURES_FILE,
-    PROBE_HELD_OUT_IMAGES_FILE,
+    PROBE_FILE_NAMES,
     PROBE_MANIFEST_FILE,
     PROBE_NAMES_FILE,
     PROBE_POINTS_FILE,
     PROBE_REGIONS_FILE,
+    REQUIRED_PROBE_FILE_NAMES,
     NameSnapshot,
     ancestry_snapshot_hash,
     ground_truth_counts_hash,
@@ -437,22 +438,6 @@ def read_feature_cache(path: Path) -> ProbeFeatures:
     )
 
 
-# Every file scripts/build_region_probe.py may write under --out-dir, in the
-# order an s3:// probe dir is downloaded. probe_points.parquet and
-# ba_regions.json are load_probe's hard requirements; every other name here is
-# optional, exactly as the local path already treats a missing one.
-_PROBE_FILE_NAMES = (
-    PROBE_POINTS_FILE,
-    PROBE_HELD_OUT_IMAGES_FILE,
-    PROBE_REGIONS_FILE,
-    PROBE_COUNTS_FILE,
-    PROBE_NAMES_FILE,
-    PROBE_ANCESTRY_FILE,
-    PROBE_MANIFEST_FILE,
-    PROBE_FEATURES_FILE,
-)
-_REQUIRED_PROBE_FILE_NAMES = frozenset({PROBE_POINTS_FILE, PROBE_REGIONS_FILE})
-
 _NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
 
 
@@ -466,12 +451,12 @@ def _download_probe_dir(uri: str, destination: Path, *, region_name: str) -> Non
     bucket, prefix = parse_s3_uri(uri)
     prefix = prefix.rstrip("/") + "/"
     client = boto3.client("s3", region_name=region_name)
-    for name in _PROBE_FILE_NAMES:
+    for name in PROBE_FILE_NAMES:
         try:
             client.download_file(bucket, f"{prefix}{name}", str(destination / name))
         except ClientError as error:
             code = error.response.get("Error", {}).get("Code")
-            if name in _REQUIRED_PROBE_FILE_NAMES or code not in _NOT_FOUND_CODES:
+            if name in REQUIRED_PROBE_FILE_NAMES or code not in _NOT_FOUND_CODES:
                 raise
 
 
@@ -980,7 +965,7 @@ def build_manifest(score: ModelScore) -> dict[str, Any]:
             "threshold": score.triage.threshold,
             "ground_truth_counts_source": score.ground_truth_counts_source,
             "n_ground_truth_pairs": score.n_ground_truth_pairs,
-            "bucket_counts": _bucket_counts(score.triage),
+            "bucket_counts": dict(score.triage.bucket_counts),
         },
         "decisions": {
             "n_permutations": score.decisions.n_permutations,
@@ -1037,49 +1022,40 @@ def _decision_summary_rows(score: ModelScore) -> list[dict[str, object]]:
     )
     low, high = _ratio_to_baseline_interval(baseline, score.metrics.overall.oor_rate_disc)
     return [
-        {
-            "model": score.name,
-            "population": ALL_POINTS,
-            "metric": "region_blind_rate",
-            "kind": "baseline",
-            "denominator": REGION_BLIND_DENOMINATOR,
-            "estimate": baseline.baseline_rate,
-            "k": None,
-            "n": baseline.n_discriminating,
-            "ci_low": baseline.baseline_ci_low,
-            "ci_high": baseline.baseline_ci_high,
-            "wilson_low": None,
-            "wilson_high": None,
-            "design_effect": None,
-            "imprecise": None,
-            "method": (
+        _summary_row(
+            score.name,
+            ALL_POINTS,
+            "region_blind_rate",
+            "baseline",
+            REGION_BLIND_DENOMINATOR,
+            estimate=baseline.baseline_rate,
+            n=baseline.n_discriminating,
+            ci_low=baseline.baseline_ci_low,
+            ci_high=baseline.baseline_ci_high,
+            method=(
                 f"mean {permutation}; the interval is the"
                 f" {1.0 - score.options.alpha:.0%} percentile spread of the"
                 f" permutation distribution itself, not a sampling error"
             ),
-        },
-        {
-            "model": score.name,
-            "population": ALL_POINTS,
-            "metric": "region_blind_ratio",
-            "kind": "ratio",
-            "denominator": REGION_BLIND_DENOMINATOR,
-            "estimate": baseline.ratio,
-            "k": baseline.n_out_of_region,
-            "n": baseline.n_discriminating,
-            "ci_low": low,
-            "ci_high": high,
-            "wilson_low": None,
-            "wilson_high": None,
-            "design_effect": None,
-            "imprecise": None,
-            "method": (
+        ),
+        _summary_row(
+            score.name,
+            ALL_POINTS,
+            "region_blind_ratio",
+            "ratio",
+            REGION_BLIND_DENOMINATOR,
+            estimate=baseline.ratio,
+            k=baseline.n_out_of_region,
+            n=baseline.n_discriminating,
+            ci_low=low,
+            ci_high=high,
+            method=(
                 f"measured rate over the mean {permutation}; each end of the"
                 f" interval divides one end of the measured rate's cluster"
                 f" bootstrap interval by the opposite end of the permutation"
                 f" interval, so it carries both terms' uncertainty"
             ),
-        },
+        ),
     ]
 
 
@@ -1425,48 +1401,80 @@ def _population_summary_rows(
     return rows
 
 
-def _rate_row(
-    model: str, population: str, metric: str, estimate: RateEstimate, method: str
+def _summary_row(
+    model: str,
+    population: str,
+    metric: str,
+    kind: str,
+    denominator: str,
+    *,
+    estimate: float,
+    method: str,
+    k: int | None = None,
+    n: int | None = None,
+    ci_low: float = math.nan,
+    ci_high: float = math.nan,
+    wilson_low: float | None = None,
+    wilson_high: float | None = None,
+    design_effect: float | None = None,
+    imprecise: bool | None = None,
 ) -> dict[str, object]:
+    """One `SUMMARY_COLUMNS` row; a field a caller omits reports as absent."""
     return {
         "model": model,
         "population": population,
         "metric": metric,
-        "kind": "rate",
-        "denominator": RATE_DENOMINATORS[metric],
-        "estimate": estimate.rate,
-        "k": estimate.k,
-        "n": estimate.n,
-        "ci_low": estimate.ci_low,
-        "ci_high": estimate.ci_high,
-        "wilson_low": estimate.wilson_low,
-        "wilson_high": estimate.wilson_high,
-        "design_effect": estimate.design_effect,
-        "imprecise": estimate.imprecise,
+        "kind": kind,
+        "denominator": denominator,
+        "estimate": estimate,
+        "k": k,
+        "n": n,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "wilson_low": wilson_low,
+        "wilson_high": wilson_high,
+        "design_effect": design_effect,
+        "imprecise": imprecise,
         "method": method,
     }
+
+
+def _rate_row(
+    model: str, population: str, metric: str, estimate: RateEstimate, method: str
+) -> dict[str, object]:
+    return _summary_row(
+        model,
+        population,
+        metric,
+        "rate",
+        RATE_DENOMINATORS[metric],
+        estimate=estimate.rate,
+        k=estimate.k,
+        n=estimate.n,
+        ci_low=estimate.ci_low,
+        ci_high=estimate.ci_high,
+        wilson_low=estimate.wilson_low,
+        wilson_high=estimate.wilson_high,
+        design_effect=estimate.design_effect,
+        imprecise=estimate.imprecise,
+        method=method,
+    )
 
 
 def _diff_row(
     model: str, population: str, estimate: DiffEstimate, method: str
 ) -> dict[str, object]:
-    return {
-        "model": model,
-        "population": population,
-        "metric": "excess",
-        "kind": "difference",
-        "denominator": EXCESS_DENOMINATOR,
-        "estimate": estimate.value,
-        "k": None,
-        "n": None,
-        "ci_low": estimate.ci_low,
-        "ci_high": estimate.ci_high,
-        "wilson_low": None,
-        "wilson_high": None,
-        "design_effect": None,
-        "imprecise": None,
-        "method": method,
-    }
+    return _summary_row(
+        model,
+        population,
+        "excess",
+        "difference",
+        EXCESS_DENOMINATOR,
+        estimate=estimate.value,
+        ci_low=estimate.ci_low,
+        ci_high=estimate.ci_high,
+        method=method,
+    )
 
 
 def _ratio_method(rates: PopulationRates, paired: str) -> str:
@@ -1486,50 +1494,34 @@ def _ratio_method(rates: PopulationRates, paired: str) -> str:
 def _ratio_row(
     model: str, population: str, estimate: RatioEstimate, method: str
 ) -> dict[str, object]:
-    return {
-        "model": model,
-        "population": population,
-        "metric": "ratio_to_gt",
-        "kind": "ratio",
-        "denominator": EXCESS_DENOMINATOR,
-        "estimate": estimate.value,
-        "k": None,
-        "n": None,
-        "ci_low": estimate.ci_low,
-        "ci_high": estimate.ci_high,
-        "wilson_low": None,
-        "wilson_high": None,
-        "design_effect": None,
-        "imprecise": None,
-        "method": method,
-    }
+    return _summary_row(
+        model,
+        population,
+        "ratio_to_gt",
+        "ratio",
+        EXCESS_DENOMINATOR,
+        estimate=estimate.value,
+        ci_low=estimate.ci_low,
+        ci_high=estimate.ci_high,
+        method=method,
+    )
 
 
 def _macro_row(
     model: str, population: str, metric: str, estimate: MacroEstimate, method: str
 ) -> dict[str, object]:
-    return {
-        "model": model,
-        "population": population,
-        "metric": metric,
-        "kind": "macro",
-        "denominator": MACRO_DENOMINATOR,
-        "estimate": estimate.value,
-        "k": None,
-        "n": estimate.n_regions,
-        "ci_low": estimate.ci_low,
-        "ci_high": estimate.ci_high,
-        "wilson_low": None,
-        "wilson_high": None,
-        "design_effect": None,
-        "imprecise": None,
-        "method": f"{method}, unweighted mean of per-region rates",
-    }
-
-
-def _bucket_counts(triage: TriageResult) -> dict[str, int]:
-    """Events per triage bucket, including the buckets that caught none."""
-    return {str(row["bucket"]): int(row["n"]) for _, row in triage.bucket_counts.iterrows()}
+    return _summary_row(
+        model,
+        population,
+        metric,
+        "macro",
+        MACRO_DENOMINATOR,
+        estimate=estimate.value,
+        n=estimate.n_regions,
+        ci_low=estimate.ci_low,
+        ci_high=estimate.ci_high,
+        method=f"{method}, unweighted mean of per-region rates",
+    )
 
 
 def _resolve_ground_truth_counts(

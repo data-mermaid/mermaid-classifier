@@ -80,6 +80,21 @@ PROBE_ANCESTRY_FILE = "ba_ancestry.json"
 PROBE_MANIFEST_FILE = "manifest.json"
 PROBE_FEATURES_FILE = "probe_features.npz"
 
+# Every file a probe directory may hold, in download/publish order.
+# PROBE_POINTS_FILE and PROBE_REGIONS_FILE are load_probe's hard
+# requirements; every other name here is optional.
+PROBE_FILE_NAMES = (
+    PROBE_POINTS_FILE,
+    PROBE_HELD_OUT_IMAGES_FILE,
+    PROBE_REGIONS_FILE,
+    PROBE_COUNTS_FILE,
+    PROBE_NAMES_FILE,
+    PROBE_ANCESTRY_FILE,
+    PROBE_MANIFEST_FILE,
+    PROBE_FEATURES_FILE,
+)
+REQUIRED_PROBE_FILE_NAMES = frozenset({PROBE_POINTS_FILE, PROBE_REGIONS_FILE})
+
 PROBE_COLUMNS = (
     "image_id",
     "point_id",

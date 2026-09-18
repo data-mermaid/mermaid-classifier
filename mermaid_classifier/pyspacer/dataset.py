@@ -7,11 +7,14 @@ validates feature vector availability, and produces pyspacer-ready
 train/ref/val splits.
 """
 
+import functools
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from contextlib import contextmanager
 from io import StringIO
+from typing import TextIO
 
 import duckdb
 import pandas as pd
@@ -25,6 +28,7 @@ from mermaid_classifier.common.benthic_attributes import (
     get_benthic_attribute_library,
     get_growth_form_library,
 )
+from mermaid_classifier.common.csv_utils import CsvSpec
 from mermaid_classifier.common.duckdb_utils import (
     duckdb_add_column,
     duckdb_grouped_rows,
@@ -51,6 +55,18 @@ from mermaid_classifier.training.subsample import (
 )
 
 logger = logging_config_for_script("train")
+
+
+def _load_csv_spec[T: CsvSpec](path: str | None, factory: Callable[[TextIO], T]) -> T:
+    """A `CsvSpec` read from `path`, or the same type built from an empty CSV.
+
+    An unset path is the caller's "accept everything" default, not a file to
+    complain about missing.
+    """
+    if path:
+        with open(path) as csv_f:
+            return factory(csv_f)
+    return factory(StringIO(""))
 
 
 class TrainingDataset:
@@ -80,34 +96,21 @@ class TrainingDataset:
         # CoralNet data is defined by a manifest parquet (None disables it).
         self.coralnet_source_ids: list[str] = []
 
-        if options.label_rollup_spec_csv:
-            with open(options.label_rollup_spec_csv) as csv_f:
-                self.rollup_spec = LabelRollupSpec(csv_f)
-        else:
-            # Empty rollup-targets set, meaning nothing gets rolled up.
-            self.rollup_spec = LabelRollupSpec(StringIO(""))
+        self.rollup_spec = _load_csv_spec(options.label_rollup_spec_csv, LabelRollupSpec)
 
         if options.included_labels_csv and options.excluded_labels_csv:
             raise ValueError("Specify one of included labels or excluded labels, but not both.")
 
-        if options.included_labels_csv:
-            with open(options.included_labels_csv) as csv_f:
-                self.label_filter = LabelFilter(csv_f, inclusion=True)
-        elif options.excluded_labels_csv:
-            with open(options.excluded_labels_csv) as csv_f:
-                self.label_filter = LabelFilter(csv_f, inclusion=False)
-        else:
-            # No inclusion or exclusion set specified means we accept
-            # all labels.
-            # In other words, an empty exclusion set.
-            self.label_filter = LabelFilter(StringIO(""), inclusion=False)
+        # An empty exclusion set when neither is given, so every label
+        # is accepted.
+        self.label_filter = _load_csv_spec(
+            options.included_labels_csv or options.excluded_labels_csv,
+            functools.partial(LabelFilter, inclusion=bool(options.included_labels_csv)),
+        )
 
-        if options.excluded_images_csv:
-            with open(options.excluded_images_csv) as csv_f:
-                self.image_exclusion_filter = ImageExclusionFilter(csv_f)
-        else:
-            # No file specified means no images are excluded on this basis.
-            self.image_exclusion_filter = ImageExclusionFilter(StringIO(""))
+        self.image_exclusion_filter = _load_csv_spec(
+            options.excluded_images_csv, ImageExclusionFilter
+        )
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
