@@ -685,7 +685,9 @@ def _imprecise(
     if options.target_margin is None:
         return None
     if math.isfinite(effect) and effect > 0.0:
-        inflation = effect
+        # A measured effect below 1 would read as more precise than
+        # independent sampling, a state clustering cannot produce.
+        inflation = max(effect, 1.0)
     elif n_images > 0:
         inflation = n / n_images
     else:

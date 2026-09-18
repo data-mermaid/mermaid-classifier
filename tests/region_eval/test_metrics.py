@@ -44,6 +44,7 @@ from mermaid_classifier.region_eval.metrics import (
     ALL_POINTS,
     HELD_OUT,
     RegionMetricsOptions,
+    _imprecise,
     compute_region_metrics,
     prepare_scored_points,
     required_n_for_margin,
@@ -984,6 +985,16 @@ class PrecisionFlagTest(unittest.TestCase):
         self.assertEqual(required_n_for_margin(0.4, 0.1, alpha=0.05), 93)
         self.assertGreater(estimate.design_effect, 1.0)
         self.assertTrue(estimate.imprecise)
+
+    def test_a_design_effect_below_one_is_floored_to_one_before_it_inflates_the_requirement(self):
+        """Unfloored, a measured effect of 0.5 would halve the unclustered
+        requirement of 97 (rate 0.5, margin 0.1) to 49; floored at 1.0 it
+        stays 97, so 60 points fail the floored requirement though they
+        would have passed the unfloored one."""
+        options = RegionMetricsOptions(alpha=0.05, target_margin=0.1)
+        self.assertEqual(required_n_for_margin(0.5, 0.1, alpha=0.05, design_effect=0.5), 49)
+        self.assertEqual(required_n_for_margin(0.5, 0.1, alpha=0.05), 97)
+        self.assertTrue(_imprecise(rate=0.5, n=60, n_images=60, effect=0.5, options=options))
 
 
 class RequiredSampleSizeTest(unittest.TestCase):
