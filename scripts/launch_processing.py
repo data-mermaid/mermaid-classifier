@@ -111,9 +111,9 @@ def build_processing_request(
         "Environment": {
             **job.env,
             # Launcher-owned: sits after job.env so a YAML env block cannot
-            # redirect these. CONTAINER_ENTRYPOINT_SCRIPT is consumed by the
-            # container entrypoint shim to dispatch to the named script
-            # (falls back to its default if unset).
+            # redirect these. The features image (features-entrypoint.sh) execs
+            # build_feature_bucket.py directly and ignores this var; only the
+            # training image's shim dispatches on it.
             "AWS_DEFAULT_REGION": REGION,
             "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
         },
