@@ -46,7 +46,7 @@ This project uses [`uv`](https://docs.astral.sh/uv/). From a clone of the repo:
 | - | - |
 | Serving-only (load/run a trained classifier) | `uv sync --extra inference` |
 | Full training pipeline (superset of inference) | `uv sync --extra training` |
-| Exactly what CI installs (fails if `uv.lock` is stale) | `uv sync --frozen --extra training` |
+| Exactly what CI installs (fails if `uv.lock` is stale) | `uv sync --frozen --extra training --extra sagemaker` |
 
 The `inference` extra is intentionally minimal (just `pyspacer` + a pinned
 `scikit-learn`) so serving images stay light. `training` is a superset adding
@@ -107,11 +107,30 @@ MLflow artifact store + read/write on `s3://mermaid-config/classifier/*`) and
 
 ## For developers
 
-Set up this project as an [editable install](https://pip.pypa.io/en/stable/topics/local-project-installs/): first git-clone this repo, then use `pip install -e <path to repo>`.
+Git-clone this repo, then resolve the environment with `uv` (the workspace
+package manager; see CLAUDE.md):
+
+```bash
+uv sync --extra training --extra sagemaker
+```
+
+`--extra sagemaker` is what CI installs. Without it
+`tests/sagemaker_launcher/test_launch_training.py` skips itself in
+`setUpModule`, which unittest counts as a single skip however many tests it
+hides — so a short run is hard to tell from a full one by reading the summary.
 
 ### Unit tests
 
-These can be run by, for example, changing the working directory to `tests` and then running `python -m unittest`.
+The suite is `unittest`, and it must run from the `tests` directory, which is
+what puts the test packages and `tests/support/` on `sys.path`:
+
+```bash
+cd tests && uv run python -m unittest          # whole suite
+cd tests && uv run python -m unittest -v region_eval.test_metrics   # one module
+```
+
+Run from the repo root it reports `Ran 0 tests` and exits 0. Naming a bare
+package (`region_eval`) runs nothing either — name a module.
 
 ### Linting, formatting & type checking
 

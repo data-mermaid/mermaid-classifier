@@ -21,10 +21,9 @@ from unittest import mock
 import pandas as pd
 
 # Make scripts/ importable.
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_DIR = REPO_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+from support.paths import add_scripts_to_path
+
+add_scripts_to_path()
 
 import build_feature_bucket as bfb  # noqa: E402
 
@@ -521,9 +520,11 @@ class ResolveDeviceTest(unittest.TestCase):
         with self._mock_torch(mps=False, cuda=False), self.assertRaises(RuntimeError):
             bfb.resolve_device("mps")
 
-    def test_explicit_cpu_always_works(self):
-        with self._mock_torch(mps=False, cuda=False):
-            self.assertEqual(bfb.resolve_device("cpu"), "cpu")
+    def test_an_available_explicit_device_is_returned_unchanged(self):
+        """The auto branches all name a device of their own, so only this one
+        proves --device cuda runs on cuda rather than being downgraded."""
+        with self._mock_torch(mps=False, cuda=True):
+            self.assertEqual(bfb.resolve_device("cuda"), "cuda")
 
 
 # ---- bonus sanity: parse_weights_location ---------------------------

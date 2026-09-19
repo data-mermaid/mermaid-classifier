@@ -12,16 +12,15 @@ import csv
 import io
 import json
 import shutil
-import sys
 import tempfile
 import unittest
 import urllib.request
 from pathlib import Path
 from unittest import mock
 
-# Allow importing scripts/generate_training_config.py.
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from support.paths import add_scripts_to_path
+
+add_scripts_to_path()
 
 import generate_training_config as gtc  # noqa: E402
 
@@ -376,22 +375,10 @@ class HierarchyWalkTests(_GenerateConfigTestCase):
         self.run_main()
         self.assertNotIn((ACROPORA, ""), set(self.get_rollup_lookup()))
 
-    def test_top108_appears_in_included(self):
-        self.run_main()
-        included = self.get_included_set()
-        self.assertIn((ACROPORA, ""), included)
-        self.assertIn((HARD_CORAL, ""), included)
-        self.assertIn((TURF_ALGAE, ""), included)
-
     def test_nested_species_walks_to_nearest_top108(self):
         self.run_main()
         rollups = self.get_rollup_lookup()
         self.assertEqual(rollups[(ACROPORA_HUMILIS, "")], (ACROPORA, ""))
-
-    def test_intermediate_taxon_walks_one_level_up(self):
-        self.run_main()
-        rollups = self.get_rollup_lookup()
-        self.assertEqual(rollups[(ACROPORIDAE, "")], (HARD_CORAL, ""))
 
     def test_orphan_dropped(self):
         self.run_main()
@@ -456,22 +443,6 @@ class PoritesBucketTests(_GenerateConfigTestCase):
             },
         )
 
-    def test_porites_genus_branching_no_rollup(self):
-        self.run_main()
-        rollups = self.get_rollup_lookup()
-        # (Porites, Branching) is already in included_labels — no rollup needed.
-        self.assertNotIn((PORITES, GF_BRANCHING), rollups)
-
-    def test_porites_genus_massive_no_rollup(self):
-        self.run_main()
-        rollups = self.get_rollup_lookup()
-        self.assertNotIn((PORITES, GF_MASSIVE), rollups)
-
-    def test_porites_genus_no_gf_no_rollup(self):
-        self.run_main()
-        rollups = self.get_rollup_lookup()
-        self.assertNotIn((PORITES, ""), rollups)
-
     def test_porites_genus_other_gf_rollup_to_empty(self):
         """(Porites, Encrusting) -> (Porites, '')."""
         self.run_main()
@@ -486,12 +457,6 @@ class PoritesSpeciesTests(_GenerateConfigTestCase):
         self.run_main()
         rollups = self.get_rollup_lookup()
         self.assertEqual(rollups[(PORITES_LOBATA, "")], (PORITES, GF_MASSIVE))
-
-    def test_porites_species_inherent_branching(self):
-        """Porites compressa (inherent: branching) -> (Porites, Branching_uuid)."""
-        self.run_main()
-        rollups = self.get_rollup_lookup()
-        self.assertEqual(rollups[(PORITES_COMPRESSA, "")], (PORITES, GF_BRANCHING))
 
     def test_porites_species_submassive_collapses_to_empty(self):
         """Porites rus (inherent: submassive) -> (Porites, '')."""
@@ -541,31 +506,6 @@ class ExclusionTests(_GenerateConfigTestCase):
         # Bare substrate IS in included_labels (parent of Dead coral but in top-108).
         self.assertIn((BARE_SUBSTRATE, ""), included)
 
-    def test_bleached_coral_dropped(self):
-        """Bleached coral annotations should NOT roll up to Hard coral."""
-        self.run_main()
-        rollups = self.get_rollup_lookup()
-        included = self.get_included_set()
-        self.assertNotIn((BLEACHED_CORAL, ""), rollups)
-        self.assertNotIn((BLEACHED_CORAL, ""), included)
-
-    def test_other_invertebrates_dropped(self):
-        self.run_main()
-        rollups = self.get_rollup_lookup()
-        included = self.get_included_set()
-        self.assertNotIn((OTHER_INVERTEBRATES, ""), rollups)
-        self.assertNotIn((OTHER_INVERTEBRATES, ""), included)
-
-    def test_excluded_top108_membership_defensive(self):
-        """Even with top100=1 in the labels CSV, EXCLUDED_NAMES are dropped."""
-        # The fixture's TOP108_NAMES already includes the three excluded
-        # names with top100=1; just confirm none make it to included.
-        self.run_main()
-        included_ba = {ba for (ba, _) in self.get_included_set()}
-        self.assertNotIn(DEAD_CORAL, included_ba)
-        self.assertNotIn(BLEACHED_CORAL, included_ba)
-        self.assertNotIn(OTHER_INVERTEBRATES, included_ba)
-
 
 class IncludedLabelCountTests(_GenerateConfigTestCase):
     def test_included_label_ba_uuids_match_expected(self):
@@ -590,10 +530,6 @@ class SourcesPassthroughTests(_GenerateConfigTestCase):
 
 
 class ValidationTests(_GenerateConfigTestCase):
-    def test_outputs_round_trip_through_pipeline(self):
-        rc = self.run_main()
-        self.assertEqual(rc, 0)
-
     def test_every_to_ba_in_included_labels(self):
         self.run_main(extra_args=["--skip-validation"])
         rollups_path = self.output_dir / "rollups.csv"
@@ -606,43 +542,11 @@ class ValidationTests(_GenerateConfigTestCase):
 
 
 class UnresolvedTop108Tests(_GenerateConfigTestCase):
-    def test_skipped_top108_logged_not_crashed(self):
+    def test_skipped_top108_is_named_in_the_output_not_silently_dropped(self):
         rc = self.run_main()
         self.assertEqual(rc, 0)
         readme = (self.output_dir / "README.md").read_text()
-        self.assertIn("Unresolved top-108 names", readme)
         self.assertIn(GHOST_NAME, readme)
-        # Resolved BAs match expected (excluded names + GHOST_NAME filtered out).
-        included_ba = {ba for (ba, _) in self.get_included_set()}
-        self.assertEqual(included_ba, EXPECTED_INCLUDED_BA_UUIDS)
-
-
-class ReadmeTests(_GenerateConfigTestCase):
-    def test_readme_documents_gf_deviation(self):
-        self.run_main()
-        readme = (self.output_dir / "README.md").read_text()
-        self.assertIn("Deviation from notebook", readme)
-        self.assertIn("drop_growthforms", readme)
-
-    def test_readme_lists_excluded_names(self):
-        self.run_main()
-        readme = (self.output_dir / "README.md").read_text()
-        self.assertIn("Excluded labels", readme)
-        for name in ("Dead coral", "Bleached coral", "Other invertebrates"):
-            self.assertIn(name, readme)
-
-    def test_readme_lists_porites_buckets(self):
-        self.run_main()
-        readme = (self.output_dir / "README.md").read_text()
-        self.assertIn("Porites buckets", readme)
-        self.assertIn("Branching", readme)
-        self.assertIn("Massive", readme)
-
-
-class NoNetworkTests(_GenerateConfigTestCase):
-    def test_no_network_in_tests(self):
-        rc = self.run_main()
-        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":

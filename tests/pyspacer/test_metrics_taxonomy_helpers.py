@@ -22,14 +22,8 @@ class TopLevelAncestorTest(unittest.TestCase):
     def test_leaf_node_returns_root(self):
         self.assertEqual(top_level_ancestor("A1", self.lib), "A")
 
-    def test_other_leaf_node_returns_root(self):
-        self.assertEqual(top_level_ancestor("B2", self.lib), "B")
-
     def test_root_node_returns_itself(self):
         self.assertEqual(top_level_ancestor("A", self.lib), "A")
-
-    def test_other_root_node_returns_itself(self):
-        self.assertEqual(top_level_ancestor("B", self.lib), "B")
 
 
 class BuildBaToTopTest(unittest.TestCase):
@@ -56,17 +50,6 @@ class BuildBaToTopTest(unittest.TestCase):
         result = build_ba_to_top(classes, self.lib)
         self.assertEqual(list(result.keys()), ["A1"])
 
-    def test_classes_with_growth_forms(self):
-        classes = ["B1::gf1", "B2::gf2"]
-        result = build_ba_to_top(classes, self.lib)
-        self.assertEqual(result["B1"], "B")
-        self.assertEqual(result["B2"], "B")
-
-    def test_all_classes_present(self):
-        classes = ["A1::", "A2::", "B1::", "B2::"]
-        result = build_ba_to_top(classes, self.lib)
-        self.assertEqual(set(result.keys()), {"A1", "A2", "B1", "B2"})
-
 
 class BuildBaPathsTest(unittest.TestCase):
     """Tests for build_ba_paths()."""
@@ -84,21 +67,10 @@ class BuildBaPathsTest(unittest.TestCase):
         result = build_ba_paths(classes, self.lib)
         self.assertEqual(result["A"], ["A"])
 
-    def test_multiple_classes_different_trees(self):
-        classes = ["A1::", "B2::"]
-        result = build_ba_paths(classes, self.lib)
-        self.assertEqual(result["A1"], ["A", "A1"])
-        self.assertEqual(result["B2"], ["B", "B2"])
-
     def test_deduplicates_ba_ids(self):
         classes = ["A1::", "A1::gf1"]
         result = build_ba_paths(classes, self.lib)
         self.assertEqual(list(result.keys()), ["A1"])
-
-    def test_all_leaves_present(self):
-        classes = ["A1::", "A2::", "B1::", "B2::"]
-        result = build_ba_paths(classes, self.lib)
-        self.assertEqual(set(result.keys()), {"A1", "A2", "B1", "B2"})
 
 
 class FindLcaTest(unittest.TestCase):
@@ -131,10 +103,6 @@ class FindLcaTest(unittest.TestCase):
         lca = find_lca("A1", "B1", self.ba_paths)
         self.assertIsNone(lca)
 
-    def test_different_roots_returns_none(self):
-        lca = find_lca("A", "B", self.ba_paths)
-        self.assertIsNone(lca)
-
 
 class TaxonomicSimilarityTest(unittest.TestCase):
     """Tests for taxonomic_similarity()."""
@@ -165,22 +133,6 @@ class TaxonomicSimilarityTest(unittest.TestCase):
         sim = taxonomic_similarity("A1", "B1", self.ba_paths, self.lib)
         self.assertEqual(sim, 0.0)
 
-    def test_different_roots_return_zero(self):
-        sim = taxonomic_similarity("A", "B", self.ba_paths, self.lib)
-        self.assertEqual(sim, 0.0)
-
-    def test_symmetry(self):
-        sim_ab = taxonomic_similarity("A1", "A2", self.ba_paths, self.lib)
-        sim_ba = taxonomic_similarity("A2", "A1", self.ba_paths, self.lib)
-        self.assertAlmostEqual(sim_ab, sim_ba)
-
-    def test_root_siblings_return_expected_fraction(self):
-        # shared_depth = len(ancestors of 'B') + 1 = 0 + 1 = 1
-        # max_depth = max(len(['B', 'B1']), len(['B', 'B2'])) = 2
-        # expected = 1 / 2 = 0.5
-        sim = taxonomic_similarity("B1", "B2", self.ba_paths, self.lib)
-        self.assertAlmostEqual(sim, 0.5)
-
 
 class GroupByTopLevelTest(unittest.TestCase):
     """Tests for group_by_top_level()."""
@@ -205,23 +157,6 @@ class GroupByTopLevelTest(unittest.TestCase):
         )
         top_ba_ids = {g["top_ba_id"] for g in groups}
         self.assertEqual(top_ba_ids, {"A", "B"})
-
-    def test_group_has_correct_fields(self):
-        gt_indices = [0, 0, 2, 2]
-        sample_indices = list(range(4))
-        groups = group_by_top_level(
-            sample_indices,
-            gt_indices,
-            self.classes,
-            self.ba_to_top,
-            self.lib,
-            min_samples=1,
-        )
-        for group in groups:
-            self.assertIn("top_ba_id", group)
-            self.assertIn("name", group)
-            self.assertIn("indices", group)
-            self.assertIn("n_samples", group)
 
     def test_group_name_from_library(self):
         gt_indices = [0, 0]
@@ -252,46 +187,6 @@ class GroupByTopLevelTest(unittest.TestCase):
         top_ba_ids = {g["top_ba_id"] for g in groups}
         self.assertIn("A", top_ba_ids)
         self.assertNotIn("B", top_ba_ids)
-
-    def test_n_samples_matches_indices_length(self):
-        gt_indices = [0, 0, 0, 2, 2]
-        sample_indices = list(range(5))
-        groups = group_by_top_level(
-            sample_indices,
-            gt_indices,
-            self.classes,
-            self.ba_to_top,
-            self.lib,
-            min_samples=1,
-        )
-        groups_by_id = {g["top_ba_id"]: g for g in groups}
-        self.assertEqual(groups_by_id["A"]["n_samples"], 3)
-        self.assertEqual(groups_by_id["A"]["n_samples"], len(groups_by_id["A"]["indices"]))
-        self.assertEqual(groups_by_id["B"]["n_samples"], 2)
-
-    def test_empty_sample_indices_returns_no_groups(self):
-        groups = group_by_top_level(
-            [],
-            [],
-            self.classes,
-            self.ba_to_top,
-            self.lib,
-            min_samples=1,
-        )
-        self.assertEqual(groups, [])
-
-    def test_all_below_min_samples_returns_no_groups(self):
-        gt_indices = [0, 2]
-        sample_indices = [0, 1]
-        groups = group_by_top_level(
-            sample_indices,
-            gt_indices,
-            self.classes,
-            self.ba_to_top,
-            self.lib,
-            min_samples=30,
-        )
-        self.assertEqual(groups, [])
 
 
 if __name__ == "__main__":

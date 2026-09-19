@@ -10,9 +10,6 @@ from mermaid_classifier.training.sample_weighting import (
     SampleWeightingOptions,
     compute_class_weights,
 )
-from mermaid_classifier.training.sample_weighting.effective_number import (
-    BETA,
-)
 
 
 class EffectiveNumberTest(unittest.TestCase):
@@ -20,18 +17,20 @@ class EffectiveNumberTest(unittest.TestCase):
         return compute_class_weights(counts, SampleWeightingOptions(**kw))
 
     def test_matches_cui_formula(self):
+        # w = (1 - beta) / (1 - beta**n) at beta = 0.9999, evaluated once by
+        # hand so a change to the formula cannot move both sides together.
         counts = {
             combine_ba_gf("A1", "g1"): 100,
             combine_ba_gf("A2", "g1"): 10,
         }
         w = self._run(counts)
 
-        def expected(n):
-            en = (1.0 - BETA**n) / (1.0 - BETA)
-            return 1.0 / en
-
-        self.assertTrue(math.isclose(w[combine_ba_gf("A1", "g1")], expected(100), rel_tol=1e-9))
-        self.assertTrue(math.isclose(w[combine_ba_gf("A2", "g1")], expected(10), rel_tol=1e-9))
+        self.assertTrue(
+            math.isclose(w[combine_ba_gf("A1", "g1")], 0.010049583329027612, rel_tol=1e-9)
+        )
+        self.assertTrue(
+            math.isclose(w[combine_ba_gf("A2", "g1")], 0.10004500825041404, rel_tol=1e-9)
+        )
 
     def test_rare_class_outweighs_common(self):
         counts = {

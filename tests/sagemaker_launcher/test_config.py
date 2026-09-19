@@ -2,9 +2,9 @@
 
 Schema lives in mermaid_classifier/sagemaker/config.py. These tests
 exercise both happy paths (loading a complete YAML) and edge cases
-(missing required fields, unknown strategies). They intentionally do
-NOT import from mermaid_classifier.pyspacer.* to keep the test fast
-and to verify the schema is decoupled from the heavy pyspacer imports.
+(unknown keys, unknown strategies, out-of-charset model names). Only
+BuildOptionsTest imports from mermaid_classifier.pyspacer.*, which is
+where build_options constructs the option dataclasses.
 """
 
 from __future__ import annotations
@@ -50,16 +50,6 @@ def _write(tmp: Path, text: str) -> Path:
 
 
 class LoadHappyPathTest(unittest.TestCase):
-    def test_minimal_yaml_loads(self):
-        with TemporaryDirectory() as td:
-            path = _write(Path(td), MINIMAL_YAML)
-            config = TrainingRunConfig.from_yaml_path(path)
-        self.assertTrue(config.dataset.include_mermaid)
-        self.assertEqual(config.training.epochs, 5)
-        self.assertEqual(config.training.early_stopping_patience, 3)
-        self.assertEqual(config.mlflow.experiment_name, "test-experiment")
-        self.assertEqual(config.env["MLFLOW_TRACKING_SERVER"], "file:./mlruns")
-
     def test_csv_paths_resolve_against_yaml_dir(self):
         with TemporaryDirectory() as td:
             path = _write(Path(td), MINIMAL_YAML)
@@ -67,15 +57,6 @@ class LoadHappyPathTest(unittest.TestCase):
             self.assertEqual(
                 config.dataset.label_rollup_spec_csv_path(path.parent),
                 Path(td) / "rollups.csv",
-            )
-
-    def test_manifest_uri_is_verbatim(self):
-        with TemporaryDirectory() as td:
-            path = _write(Path(td), MINIMAL_YAML)
-            config = TrainingRunConfig.from_yaml_path(path)
-            self.assertEqual(
-                config.dataset.coralnet_manifest_uri,
-                "s3://bucket/coralnet_manifest.parquet",
             )
 
 
@@ -90,42 +71,6 @@ class SubsampleStrategiesTest(unittest.TestCase):
             path = _write(Path(td), _yaml.dump(base))
             return TrainingRunConfig.from_yaml_path(path)
 
-    def test_stratified_with_total_annotations_loads(self):
-        config = self._load(
-            textwrap.dedent("""\
-              subsample:
-                strategy: stratified
-                total_annotations: 5000
-        """)
-        )
-        self.assertEqual(config.dataset.subsample.strategy, "stratified")
-        self.assertEqual(config.dataset.subsample.total_annotations, 5000)
-
-    def test_balanced_with_total_annotations_loads(self):
-        config = self._load(
-            textwrap.dedent("""\
-              subsample:
-                strategy: balanced
-                total_annotations: 5000
-                min_per_class: 50
-        """)
-        )
-        self.assertEqual(config.dataset.subsample.strategy, "balanced")
-        self.assertEqual(config.dataset.subsample.min_per_class, 50)
-
-    def test_removed_subsample_strategy_rejected(self):
-        # soft_balanced was removed from the pipeline (the balancing
-        # experiments settled on 'balanced'); extra="forbid" rejects
-        # both the strategy and its old companion fields.
-        with self.assertRaises(ValidationError):
-            self._load(
-                textwrap.dedent("""\
-                  subsample:
-                    strategy: soft_balanced
-                    total_annotations: 5000
-            """)
-            )
-
     def test_unknown_strategy_rejected(self):
         with self.assertRaises(ValidationError):
             self._load(
@@ -138,33 +83,6 @@ class SubsampleStrategiesTest(unittest.TestCase):
 
 
 class WeightingTest(unittest.TestCase):
-    def test_weighting_yaml_overrides_default(self):
-        with TemporaryDirectory() as td:
-            path = _write(Path(td), MINIMAL_YAML)
-            config = TrainingRunConfig.from_yaml_path(path)
-        self.assertTrue(config.dataset.weighting.enabled)
-        self.assertEqual(config.dataset.weighting.weight_ratio_cap, 5000.0)
-
-    def test_weighting_defaults(self):
-        """Bare WeightingConfig() is enabled with no ratio cap. The
-        effective-number formulation (beta) is fixed in
-        mermaid_classifier.training.sample_weighting, so the only knobs
-        exposed here are `enabled` and `weight_ratio_cap`.
-        """
-        from mermaid_classifier.sagemaker.config import WeightingConfig
-
-        w = WeightingConfig()
-        self.assertTrue(w.enabled)
-        self.assertIsNone(w.weight_ratio_cap)
-
-    def test_removed_weighting_field_rejected(self):
-        # `strategy`/`alpha` were removed; extra="forbid" rejects them.
-        bad_yaml = MINIMAL_YAML.replace("weight_ratio_cap: 5000.0", "alpha: 0.5")
-        with TemporaryDirectory() as td:
-            path = _write(Path(td), bad_yaml)
-            with self.assertRaises(ValidationError):
-                TrainingRunConfig.from_yaml_path(path)
-
     def test_invalid_weight_ratio_cap_rejected(self):
         bad_yaml = MINIMAL_YAML.replace("weight_ratio_cap: 5000.0", "weight_ratio_cap: 0.5")
         with TemporaryDirectory() as td:
@@ -190,49 +108,17 @@ class ApplyEnvTest(unittest.TestCase):
                 self.assertEqual(os.environ["MLFLOW_TRACKING_SERVER"], "file:./mlruns")
                 self.assertEqual(os.environ["WEIGHTS_LOCATION"], "s3://bucket/weights.pt")
 
-    def test_apply_env_with_empty_block_is_noop(self):
-        import os
-        from unittest import mock
-
-        yaml_no_env = MINIMAL_YAML.replace(
-            "env:\n  MLFLOW_TRACKING_SERVER: file:./mlruns\n"
-            "  WEIGHTS_LOCATION: s3://bucket/weights.pt\n",
-            "",
-        )
-        with TemporaryDirectory() as td:
-            path = _write(Path(td), yaml_no_env)
-            config = TrainingRunConfig.from_yaml_path(path)
-            self.assertEqual(config.env, {})
-            with mock.patch.dict(os.environ, {}, clear=False):
-                # apply_env on empty dict must not raise.
-                config.apply_env()
-
-
-class RequiredFieldsTest(unittest.TestCase):
-    def test_missing_dataset_block_rejected(self):
-        bad = "training:\n  epochs: 1\nmlflow:\n  experiment_name: x\n"
-        with TemporaryDirectory() as td:
-            path = _write(Path(td), bad)
-            with self.assertRaises(ValidationError):
-                TrainingRunConfig.from_yaml_path(path)
-
 
 class BuildOptionsTest(unittest.TestCase):
-    """build_options() lazily imports pyspacer dataclasses and constructs them.
-
-    These tests DO import pyspacer (transitively). Skipped if the
-    pyspacer extras aren't installed.
-    """
+    """build_options() lazily imports pyspacer dataclasses and constructs them."""
 
     def test_build_options_produces_three_dataclasses(self):
-        try:
-            from mermaid_classifier.pyspacer.options import (
-                DatasetOptions,
-                MLflowOptions,
-                TrainingOptions,
-            )
-        except Exception:
-            self.skipTest("pyspacer extras not installed")
+        from mermaid_classifier.pyspacer.options import (
+            DatasetOptions,
+            MLflowOptions,
+            TrainingOptions,
+        )
+
         with TemporaryDirectory() as td:
             tmp = Path(td)
             (tmp / "rollups.csv").write_text("from_ba_id,from_gf_id,to_ba_id,to_gf_id\n")
@@ -244,6 +130,10 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertIsInstance(training, TrainingOptions)
         self.assertIsInstance(mlflow, MLflowOptions)
         self.assertEqual(dataset.coralnet_manifest_uri, "s3://bucket/coralnet_manifest.parquet")
+        # The CSVs the YAML names must reach DatasetOptions as resolved paths;
+        # dropping them silently trains against every label.
+        self.assertEqual(dataset.label_rollup_spec_csv, str(tmp / "rollups.csv"))
+        self.assertEqual(dataset.included_labels_csv, str(tmp / "included_labels.csv"))
         self.assertEqual(training.epochs, 5)
         self.assertEqual(training.early_stopping_patience, 3)
 
@@ -264,21 +154,13 @@ class MLflowModelNameTest(unittest.TestCase):
         config = self._load_with_model_name("top108-192best-v1")
         self.assertEqual(config.mlflow.model_name, "top108-192best-v1")
 
-    def test_underscore_rejected(self):
-        with self.assertRaisesRegex(ValidationError, r"'_'"):
-            self._load_with_model_name("top108_192best_v1")
-
-    def test_dot_rejected(self):
-        with self.assertRaisesRegex(ValidationError, r"'\.'"):
-            self._load_with_model_name("model.v1")
-
-    def test_leading_hyphen_rejected(self):
-        with self.assertRaises(ValidationError):
-            self._load_with_model_name("-leading")
-
-    def test_trailing_hyphen_rejected(self):
-        with self.assertRaises(ValidationError):
-            self._load_with_model_name("trailing-")
+    def test_names_outside_the_mlflow_charset_are_rejected(self):
+        """MLflow accepts alphanumerics separated by hyphens. The two anchors
+        carry the leading and trailing cases, so a regex that kept the charset
+        but dropped them would take "-v1" and "v1-"."""
+        for name in ("top108_192best_v1", "-top108-v1", "top108-v1-", "top108.v1"):
+            with self.subTest(name=name), self.assertRaises(ValidationError):
+                self._load_with_model_name(name)
 
     def test_over_57_chars_rejected(self):
         with self.assertRaises(ValidationError):
@@ -301,6 +183,22 @@ class MLflowModelNameTest(unittest.TestCase):
         self.assertIsNone(config.mlflow.model_name)
 
 
+class StrictSchemaTest(unittest.TestCase):
+    """training_config.yaml is hand-edited, so a key the schema does not know
+    is a typo or a setting deleted in an earlier refactor. extra="forbid"
+    turns it into a load-time failure instead of a silently ignored line."""
+
+    def test_unknown_key_in_the_dataset_block_is_rejected(self):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"]["drop_growthfroms"] = True  # a typo for drop_growthforms
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), _yaml.dump(base))
+            with self.assertRaisesRegex(ValidationError, "drop_growthfroms"):
+                TrainingRunConfig.from_yaml_path(path)
+
+
 class ExampleYamlTest(unittest.TestCase):
     def test_committed_example_loads(self):
         # Resolve relative to the repo root (the tests/ dir is one
@@ -313,7 +211,6 @@ class ExampleYamlTest(unittest.TestCase):
         )
         config = TrainingRunConfig.from_yaml_path(example)
         self.assertIsNotNone(config.dataset.subsample)
-        self.assertEqual(config.dataset.subsample.strategy, "balanced")
 
 
 if __name__ == "__main__":

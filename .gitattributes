@@ -1,0 +1,13 @@
+# Text is stored and checked out with LF. With no .gitattributes and no
+# core.autocrlf set, the bytes a contributor commits are the bytes stored, so
+# an editor that writes CRLF mixes endings into the tree without anything
+# reporting it -- ruff-format and basedpyright are both indifferent.
+* text=auto eol=lf
+
+# rollups.csv and included_labels.csv under sagemaker/configs/ are generator
+# output: scripts/generate_training_config.py opens them with newline="" and
+# writes through csv.writer, whose excel dialect terminates rows with CRLF.
+# Normalising them would be undone by the next run, so git leaves their bytes
+# as committed. configs/example/ holds header-only stubs written by hand.
+sagemaker/configs/**/rollups.csv         -text
+sagemaker/configs/**/included_labels.csv -text

@@ -84,6 +84,11 @@ def build_estimator_kwargs(
         "MLFLOW_TRACKING_SERVER": mlflow_uri,
         "AWS_DEFAULT_REGION": REGION,
         **job.env,
+        # Consumed by the container entrypoint shim
+        # (docker/jobs/training-entrypoint.sh) to dispatch to the named script,
+        # which falls back to its historic default if unset. Sits after
+        # job.env so a YAML env block cannot redirect the entrypoint.
+        "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
     }
     kwargs = {
         "image_uri": expand_image_uri(job.image),
@@ -187,11 +192,6 @@ def main(argv: list[str] | None = None) -> None:
     if cfg.training:
         for name, ch in cfg.training.channels.items():
             inputs[name] = TrainingInput(s3_data=ch.s3_uri, input_mode=ch.input_mode)
-
-    # CONTAINER_ENTRYPOINT_SCRIPT is consumed by the container entrypoint
-    # shim (docker/jobs/training-entrypoint.sh) to dispatch to the named
-    # script. Falls back to the historic default if unset.
-    estimator.environment["CONTAINER_ENTRYPOINT_SCRIPT"] = cfg.job.entrypoint
 
     log.info("Submitting TrainingJob...")
     estimator.fit(inputs=inputs, wait=True, logs="All", job_name=run_id)

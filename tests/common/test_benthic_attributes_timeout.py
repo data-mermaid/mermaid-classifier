@@ -13,9 +13,11 @@ Each test bounds its own wait externally, in a background thread joined with
 a 5 s timeout: a missing socket timeout then surfaces as this external
 bound's own failure well before that ceiling, rather than as a hang that
 blocks the test runner for as long as it is allowed to run. Every call site
-`_HTTP_TIMEOUT_SECONDS` guards is exercised: the three library constructors,
-the mapping endpoint's first request, and the mapping endpoint's pagination
-follow-up.
+`_HTTP_TIMEOUT_SECONDS` guards is exercised: the BenthicAttributeLibrary and
+GrowthFormLibrary constructors, the mapping endpoint's first request, and the
+mapping endpoint's pagination follow-up. RegionLibrary needs no case of its
+own -- it and GrowthFormLibrary reach the network through the one
+ChoiceLibrary fetch the growth-form test already bounds.
 """
 
 import concurrent.futures
@@ -32,7 +34,6 @@ from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary,
     CoralNetMermaidMapping,
     GrowthFormLibrary,
-    RegionLibrary,
 )
 
 # Real elapsed time stays well under this on a correctly-guarded call (bounded
@@ -183,15 +184,6 @@ class BenthicAttributesTimeoutTest(unittest.TestCase):
             mock.patch("urllib.request.urlopen", _redirect_to(self.server.url)),
         ):
             elapsed = self._run_bounded(GrowthFormLibrary)
-
-        self.assertLess(elapsed, _ELAPSED_MARGIN_SECONDS)
-
-    def test_region_library_bounds_its_wait(self):
-        with (
-            mock.patch("mermaid_classifier.common.benthic_attributes._HTTP_TIMEOUT_SECONDS", 0.2),
-            mock.patch("urllib.request.urlopen", _redirect_to(self.server.url)),
-        ):
-            elapsed = self._run_bounded(RegionLibrary)
 
         self.assertLess(elapsed, _ELAPSED_MARGIN_SECONDS)
 

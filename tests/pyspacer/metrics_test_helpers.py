@@ -5,6 +5,9 @@ from collections import defaultdict
 import numpy as np
 from spacer.data_classes import ValResults
 
+from mermaid_classifier.common.benthic_attributes import BAGF_SEP, split_ba_gf
+from mermaid_classifier.pyspacer.metrics import MetricsContext
+
 
 class MockBALibrary:
     """Mock with a simple 2-level taxonomy tree.
@@ -39,7 +42,16 @@ class MockBALibrary:
         return self.by_id[ba_id]["name"]
 
     def bagf_id_to_name(self, bagf_id, gf_library):
-        return f"name_{bagf_id}"
+        """Resolve as BenthicAttributeLibrary does, including the KeyError.
+
+        An id outside the tree raises, which is what MetricsContext.validate
+        turns into a MetricsContextError.
+        """
+        ba_id, gf_id = split_ba_gf(bagf_id)
+        ba_name = self.by_id[ba_id]["name"]
+        if gf_id == "":
+            return ba_name
+        return BAGF_SEP.join([ba_name, gf_library.by_id[gf_id]])
 
     def get_descendants(self, ba_id):
         if ba_id not in self.by_parent:
@@ -55,7 +67,7 @@ class MockGFLibrary:
     """Mock of GrowthFormLibrary for testing."""
 
     def __init__(self):
-        self.by_id = {"gf1": "Branching", "gf2": "Massive", "gf3": "Encrusting"}
+        self.by_id = {"gf1": "Branching", "gf2": "Massive"}
 
     def id_to_name(self, gf_id):
         if gf_id == "":
@@ -79,3 +91,20 @@ def make_val_results(gt_indices, est_indices, classes, scores=None):
 
 def format_metric(value):
     return round(float(value), 3)
+
+
+def make_ctx(gt_indices, est_indices, classes, *, scores=None, **overrides):
+    """A MetricsContext over the mock taxonomy.
+
+    `classes` must be BA+GF ids MockBALibrary knows, since validate() resolves
+    every one of them. Anything in `overrides` goes straight to MetricsContext,
+    so a caller adds `dataset=`, `clf=`, `val_proba=` or its own `gf_library=`
+    without needing a second builder.
+    """
+    overrides.setdefault("ba_library", MockBALibrary())
+    overrides.setdefault("gf_library", MockGFLibrary())
+    overrides.setdefault("format_func", format_metric)
+    return MetricsContext(
+        val_results=make_val_results(gt_indices, est_indices, classes, scores),
+        **overrides,
+    )

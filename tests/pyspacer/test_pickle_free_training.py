@@ -3,16 +3,15 @@
 If any module under ``mermaid_classifier/`` or ``scripts/`` re-imports
 pyspacer's classifier store/load/train glue, the pickle round-trip has crept
 back in. This covers the whole codebase: the train/eval/store path and the
-CLI scripts. (The last pickle consumer, ``scripts/evaluate_model.py``, was
-removed in #61.)
+CLI scripts.
 """
 
 import ast
 import unittest
-from pathlib import Path
+
+from support.paths import REPO_ROOT
 
 # Repo root — two levels up from tests/pyspacer/.
-REPO_ROOT = Path(__file__).resolve().parents[2]
 SCANNED_DIRS = (REPO_ROOT / "mermaid_classifier", REPO_ROOT / "scripts")
 
 # Pickle-glue symbols that must never reach the train/eval/store path,

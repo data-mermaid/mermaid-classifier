@@ -6,8 +6,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-
-from pyspacer._calibrated_model_fixture import make_calibrated_model
+from support.calibrated_model import make_calibrated_model
 
 
 class ArtifactPredictorModelTest(unittest.TestCase):

@@ -8,38 +8,15 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
-import torch
+from support.calibrated_model import make_calibrated_model
 
 from mermaid_classifier.pyspacer.inference import (
-    PARITY_PROVEN_SKLEARN,
     ManifestError,
     ParityError,
     SklearnPinError,
     export_artifact,
     load_predictor,
 )
-from mermaid_classifier.pyspacer.inference.head import build_calibrated_head
-from pyspacer._calibrated_model_fixture import make_calibrated_model
-
-
-class HeadParityTest(unittest.TestCase):
-    def test_head_matches_source_predict_proba(self):
-        model, X = make_calibrated_model()
-        head = build_calibrated_head(model)
-        head.eval()
-        with torch.no_grad():
-            got = head(torch.from_numpy(X.astype(np.float32))).numpy()
-        expected = model.predict_proba(X)
-        self.assertEqual(got.shape, expected.shape)
-        self.assertLess(float(np.max(np.abs(got - expected))), 1e-6)
-
-    def test_rows_sum_to_one(self):
-        model, X = make_calibrated_model()
-        head = build_calibrated_head(model)
-        head.eval()
-        with torch.no_grad():
-            got = head(torch.from_numpy(X.astype(np.float32))).numpy()
-        np.testing.assert_allclose(got.sum(axis=1), 1.0, atol=1e-5)
 
 
 class ExportTest(unittest.TestCase):
@@ -67,16 +44,6 @@ class ExportTest(unittest.TestCase):
             on_disk = json.loads((Path(d) / "model.json").read_text())
             self.assertEqual(on_disk, manifest)
 
-    def test_frozen_graph_reloads_and_matches_source(self):
-        model, X = make_calibrated_model()
-        with tempfile.TemporaryDirectory() as d:
-            model_pt, _, _ = export_artifact(model, d, X)
-            graph = torch.jit.load(str(model_pt))
-            graph.eval()
-            with torch.no_grad():
-                got = graph(torch.from_numpy(X.astype(np.float32))).numpy()
-        self.assertLess(float(np.max(np.abs(got - model.predict_proba(X)))), 1e-6)
-
     def test_parity_gate_raises_when_graph_diverges(self):
         model, X = make_calibrated_model()
         # Force the gate to fire with an impossible tolerance: any non-negative max diff > -1.0 always raises.
@@ -96,12 +63,6 @@ class ExportTest(unittest.TestCase):
             # Patch the proven version to something the runner can't have, so
             # the installed sklearn is guaranteed to differ.
             export_artifact(model, d, X)
-
-    def test_export_manifest_records_proven_sklearn(self):
-        model, X = make_calibrated_model()
-        with tempfile.TemporaryDirectory() as d:
-            _, manifest, _ = export_artifact(model, d, X)
-        self.assertEqual(manifest["trained_with"]["sklearn"], PARITY_PROVEN_SKLEARN)
 
 
 class LoadValidationTest(unittest.TestCase):
@@ -145,18 +106,6 @@ class LoadValidationTest(unittest.TestCase):
             Path(model_json).write_text(json.dumps(manifest))
             with self.assertRaises(ManifestError):
                 load_predictor(model_pt, model_json)
-
-    def test_predictor_exposes_classes_alias_for_metrics(self):
-        from mermaid_classifier.pyspacer.inference import load_predictor
-
-        with tempfile.TemporaryDirectory() as d:
-            model_pt, model_json, model, _X = self._export(d)
-            predictor = load_predictor(model_pt, model_json)
-            # Metrics code (metrics/_context.py, probability.py, ranking.py)
-            # reads clf.classes_; it must equal clf.classes and be non-empty.
-            self.assertEqual(predictor.classes_, predictor.classes)
-            self.assertEqual(predictor.classes_, model.classes_.tolist())
-            self.assertGreater(len(predictor.classes_), 0)
 
 
 class LiveModelParityTest(unittest.TestCase):

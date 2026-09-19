@@ -12,7 +12,6 @@ training reads it with, rather than asserting the CSV's text.
 """
 
 import shutil
-import sys
 import tempfile
 import unittest
 from io import StringIO
@@ -21,11 +20,11 @@ from unittest import mock
 
 import duckdb
 import pandas as pd
+from support.paths import add_scripts_to_path
 
 from mermaid_classifier.pyspacer.label_specs import ImageExclusionFilter
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+add_scripts_to_path()
 
 import build_region_probe as brp  # noqa: E402
 

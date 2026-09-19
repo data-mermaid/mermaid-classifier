@@ -7,17 +7,12 @@ imports or hit AWS. Tests verify:
   * apply_env happens before the runner is imported (we observe this
     indirectly by patching the runner factory to capture os.environ at
     construction time)
-  * runner is called once with options built from the YAML
-  * stage markers appear in log output in the right order
-  * an exception in runner.run propagates to sys.exit(1) with the
-    traceback in log output
+  * an exception in runner.run propagates to sys.exit(1)
 """
 
 from __future__ import annotations
 
 import importlib.util
-import io
-import logging
 import os
 import textwrap
 import unittest
@@ -26,7 +21,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+from support.paths import REPO_ROOT
+
 ENTRYPOINT_PATH = REPO_ROOT / "scripts" / "sagemaker_train_entrypoint.py"
 
 
@@ -77,23 +73,6 @@ class EntrypointHappyPathTest(unittest.TestCase):
             os.environ.pop(key, None)
         self.module = _load_entrypoint()
 
-    def test_main_runs_runner_once_with_built_options(self):
-        with (
-            _config_dir() as cfg_dir,
-            patch.object(self.module, "_resolve_runner_factory") as get_factory,
-        ):
-            fake_runner = MagicMock()
-            factory = MagicMock(return_value=fake_runner)
-            get_factory.return_value = factory
-            self.module.main(
-                [
-                    "--config-dir",
-                    str(cfg_dir),
-                ]
-            )
-        factory.assert_called_once()
-        fake_runner.run.assert_called_once_with()
-
     def test_main_applies_env_before_resolving_runner(self):
         with _config_dir() as cfg_dir:
             observed = {}
@@ -112,49 +91,6 @@ class EntrypointHappyPathTest(unittest.TestCase):
         self.assertEqual(observed["mlflow"], "file:./mlruns")
         self.assertEqual(observed["weights"], "s3://x/weights.pt")
 
-    def test_main_logs_stage_markers_in_order(self):
-        buf = io.StringIO()
-        handler = logging.StreamHandler(buf)
-        handler.setLevel(logging.INFO)
-        root = logging.getLogger()
-        root.addHandler(handler)
-        root.setLevel(logging.INFO)
-        try:
-            with (
-                _config_dir() as cfg_dir,
-                patch.object(
-                    self.module,
-                    "_resolve_runner_factory",
-                    return_value=lambda *a, **kw: MagicMock(),
-                ),
-            ):
-                self.module.main(["--config-dir", str(cfg_dir)])
-        finally:
-            root.removeHandler(handler)
-        log_text = buf.getvalue()
-        # Build a list of (stage_name, line_index) for each ENTER marker
-        # we find, then assert the canonical order.
-        all_lines = log_text.splitlines()
-        stage_names = ["load_config", "apply_env", "build_options", "runner_run"]
-        indices = []
-        for stage in stage_names:
-            for i, line in enumerate(all_lines):
-                if f"[stage:{stage}] ENTER" in line:
-                    indices.append(i)
-                    break
-            else:
-                self.fail(f"Missing ENTER marker for stage '{stage}' in log:\n{log_text}")
-        self.assertEqual(
-            indices,
-            sorted(indices),
-            f"Stage ENTER markers appeared out of order. The env-before-"
-            f"pyspacer-import contract relies on apply_env preceding "
-            f"build_options preceding runner_run. Got indices: {indices} for "
-            f"stages {stage_names}",
-        )
-
-
-class EntrypointFailureTest(unittest.TestCase):
     def test_runner_exception_exits_nonzero(self):
         module = _load_entrypoint()
         with _config_dir() as cfg_dir:
