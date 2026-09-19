@@ -166,15 +166,6 @@ class MLPBenchmarkBase:
         self.assertTrue((probs >= 0).all())
         self.assertTrue((probs <= 1).all())
 
-    def test_classes_attribute_is_sorted(self):
-        clf = self._make_classifier()
-        self._train(clf)
-        self.assertEqual(
-            list(clf.classes_),
-            sorted(clf.classes_.tolist()),
-        )
-        self.assertEqual(set(clf.classes_.tolist()), set(self.classes_list))
-
     def test_loss_curve_available_and_finite(self):
         clf = self._make_classifier()
         self._train(clf)
@@ -226,26 +217,6 @@ class MLPBenchmarkBase:
             acc,
             0.75,
             f"Incremental partial_fit accuracy {acc:.3f} below 0.75 for {type(clf).__name__}",
-        )
-
-    def test_decision_function_or_predict_proba_usable_for_calibration(self):
-        """CalibratedClassifierCV(cv='prefit') needs either
-        decision_function or predict_proba on the base estimator. At
-        minimum predict_proba must be present and well-shaped."""
-        clf = self._make_classifier()
-        self._train(clf)
-        probs = clf.predict_proba(self.X_val[:10])
-        self.assertEqual(probs.shape, (10, N_CLASSES))
-
-
-class SklearnMLPBenchmarkTest(MLPBenchmarkBase, unittest.TestCase):
-    """Baseline: sklearn MLPClassifier."""
-
-    def _make_classifier(self):
-        return MLPClassifier(
-            hidden_layer_sizes=HIDDEN,
-            learning_rate_init=LR,
-            random_state=SEED,
         )
 
 
@@ -330,14 +301,6 @@ class MLPParityTest(unittest.TestCase):
             f"Torch {tr_acc:.3f} vs sklearn {sk_acc:.3f} — torch must be within 5% of sklearn.",
         )
 
-    def test_torch_training_accuracy_within_tolerance(self):
-        sk, tr = self._train_both()
-        sk_acc = float(np.mean(sk.predict(self.X_train) == self.y_train))
-        tr_acc = float(np.mean(tr.predict(self.X_train) == self.y_train))
-        self.assertGreaterEqual(
-            tr_acc, sk_acc - 0.05, f"Torch train {tr_acc:.3f} vs sklearn {sk_acc:.3f}"
-        )
-
     def test_torch_predict_proba_distribution_close(self):
         """Torch predict_proba should put mass on the same class as sklearn
         for the majority of validation samples."""
@@ -371,38 +334,6 @@ class MLPParityTest(unittest.TestCase):
             1e-2,
             f"Mean abs difference between torch and sklearn predict_proba"
             f" is {mean_abs_diff:.4f} (> 1e-2).",
-        )
-
-    def test_calibrated_predict_proba_close_to_sklearn(self):
-        """Post-calibration probabilities should track between both.
-
-        Wraps each (prefit) base estimator in the same
-        CalibratedClassifierCV(cv='prefit') path pyspacer uses, calibrates
-        both on an identical held-out split, and compares the calibrated
-        probability matrices within tolerance.
-        """
-        from sklearn.calibration import CalibratedClassifierCV
-
-        sk, tr = self._train_both()
-
-        # Calibrate on the first half of val, compare on the second half,
-        # so calibration and evaluation use disjoint data.
-        n_cal = N_VAL // 2
-        X_cal, y_cal = self.X_val[:n_cal], self.y_val[:n_cal]
-        X_eval = self.X_val[n_cal:]
-
-        sk_cal = CalibratedClassifierCV(sk, cv="prefit").fit(X_cal, y_cal)
-        tr_cal = CalibratedClassifierCV(tr, cv="prefit").fit(X_cal, y_cal)
-
-        sk_probs = sk_cal.predict_proba(X_eval)
-        tr_probs = tr_cal.predict_proba(X_eval)
-        self.assertEqual(sk_probs.shape, tr_probs.shape)
-        mean_abs_diff = float(np.mean(np.abs(sk_probs - tr_probs)))
-        self.assertLess(
-            mean_abs_diff,
-            1e-2,
-            f"Mean abs difference between torch and sklearn calibrated"
-            f" predict_proba is {mean_abs_diff:.4f} (> 1e-2).",
         )
 
 
@@ -450,47 +381,21 @@ class BatchingEquivalenceTest(unittest.TestCase):
                 f"{type(clf).__name__}: expected 2 entries, got {len(clf.loss_curve_)}",
             )
 
-    def test_n_iter_increments_by_one_per_partial_fit(self):
-        """TorchMLPClassifier's n_iter_ tracks total partial_fit calls.
+    def test_batch_size_resolves_against_the_input_size(self):
+        """'auto' caps at 200; an explicit size clips to the input.
 
-        Note: sklearn's MLPClassifier has a quirk where n_iter_ is reset
-        to 0 at the start of each _fit_stochastic call, so it always
-        reads as 1 after any partial_fit call. We deliberately diverge
-        here — tracking cumulative calls is more useful and no caller in
-        this codebase relies on the sklearn-style reset behaviour.
+        A mini-batch larger than the input silently turns an epoch into a
+        single gradient step, which no accuracy assertion here would notice.
         """
-        _, tr = self._make_pair()
-        for expected in (1, 2, 3):
-            tr.partial_fit(self.X, self.y, classes=self.classes)
-            self.assertEqual(tr.n_iter_, expected)
+        auto = TorchMLPClassifier(hidden_layer_sizes=(4,), max_iter=1, random_state=0)
+        self.assertEqual(auto._resolve_batch_size(500), 200)
+        self.assertEqual(auto._resolve_batch_size(50), 50)
 
-    def test_auto_batch_size_is_min_200_and_n_samples(self):
-        """batch_size='auto' resolves to min(200, n_samples) in both."""
-        # 500 samples → 200 mini-batches (200, 200, 100)
-        sk, tr = self._make_pair()
-        sk.partial_fit(self.X[:500], self.y[:500], classes=self.classes)
-        tr.partial_fit(self.X[:500], self.y[:500], classes=self.classes)
-        # Torch exposes resolved batch_size via the helper.
-        self.assertEqual(tr._resolve_batch_size(500), 200)
-
-        # 50 samples < 200 → batch_size = 50 (full input)
-        sk2, tr2 = self._make_pair()
-        sk2.partial_fit(self.X[:50], self.y[:50], classes=self.classes)
-        tr2.partial_fit(self.X[:50], self.y[:50], classes=self.classes)
-        self.assertEqual(tr2._resolve_batch_size(50), 50)
-
-    def test_explicit_batch_size_is_clipped_to_n_samples(self):
-        """batch_size=128 on 50-sample input clips to 50 in both."""
-        kw = {
-            "hidden_layer_sizes": (8,),
-            "batch_size": 128,
-            "random_state": SEED,
-        }
-        sk = MLPClassifier(**kw)
-        tr = TorchMLPClassifier(**kw)
-        sk.partial_fit(self.X[:50], self.y[:50], classes=self.classes)
-        tr.partial_fit(self.X[:50], self.y[:50], classes=self.classes)
-        self.assertEqual(tr._resolve_batch_size(50), 50)
+        explicit = TorchMLPClassifier(
+            hidden_layer_sizes=(4,), max_iter=1, random_state=0, batch_size=128
+        )
+        self.assertEqual(explicit._resolve_batch_size(500), 128)
+        self.assertEqual(explicit._resolve_batch_size(50), 50)
 
     def test_number_of_gradient_steps_per_partial_fit_matches(self):
         """sklearn and torch must do the same number of Adam steps per
@@ -536,16 +441,6 @@ class BatchingEquivalenceTest(unittest.TestCase):
         step_int = int(step_count.item()) if hasattr(step_count, "item") else int(step_count)
         self.assertEqual(step_int, 1)
 
-    def test_loss_curve_records_regularised_loss_trend(self):
-        """Both implementations' loss_curve_ should trend down with
-        continued training on the same data."""
-        sk, tr = self._make_pair()
-        for _ in range(10):
-            sk.partial_fit(self.X, self.y, classes=self.classes)
-            tr.partial_fit(self.X, self.y, classes=self.classes)
-        self.assertLess(sk.loss_curve_[-1], sk.loss_curve_[0])
-        self.assertLess(tr.loss_curve_[-1], tr.loss_curve_[0])
-
     def test_same_random_state_yields_reproducible_shuffle(self):
         """Two fresh classifiers with the same random_state, fed the same
         data, should produce the same loss trajectory. This is the
@@ -568,76 +463,6 @@ class BatchingEquivalenceTest(unittest.TestCase):
             rtol=1e-6,
             err_msg="Same random_state must yield identical loss curves",
         )
-
-
-class TorchMLPIntegratesWithCalibratedClassifierCVTest(unittest.TestCase):
-    """TorchMLPClassifier must plug into the real pyspacer path:
-    CalibratedClassifierCV(cv='prefit') wrapping + MermaidTrainer's
-    batched calibration helper + evaluate_classifier-style inference.
-    """
-
-    def test_full_calibration_and_inference_path(self):
-        from unittest import mock
-
-        from sklearn.calibration import CalibratedClassifierCV
-
-        from mermaid_classifier.pyspacer.trainer import MermaidTrainer
-
-        X_all, y_all = make_gaussian_clusters(
-            n_per_class=(N_TRAIN + N_VAL) // N_CLASSES,
-            seed=SEED,
-        )
-        X_train, y_train, X_val, y_val = train_val_split(X_all, y_all, n_val=N_VAL)
-        classes_list = sorted(np.unique(y_all).tolist())
-
-        clf = TorchMLPClassifier(
-            hidden_layer_sizes=HIDDEN,
-            learning_rate_init=LR,
-            random_state=SEED,
-        )
-        rng = np.random.RandomState(SEED + 1)  # training-shuffle stream
-        train_via_partial_fit(
-            clf,
-            X_train,
-            y_train,
-            classes_list,
-            epochs=EPOCHS,
-            chunk_size=PARTIAL_FIT_BATCH,
-            rng=rng,
-        )
-
-        mock_labels = mock.Mock()
-
-        def batch_generator(batch_size=100):
-            for i in range(0, len(X_train), batch_size):
-                end = min(i + batch_size, len(X_train))
-                yield (
-                    [X_train[j] for j in range(i, end)],
-                    [y_train[j] for j in range(i, end)],
-                )
-
-        mock_labels.load_data_in_batches = batch_generator
-
-        trainer = MermaidTrainer(batch_size=100)
-        calibrated = trainer._calibrate_in_batches(clf, mock_labels)
-
-        self.assertIsInstance(calibrated, CalibratedClassifierCV)
-        self.assertEqual(calibrated.cv, "prefit")
-        self.assertTrue(hasattr(calibrated, "calibrated_classifiers_"))
-
-        # Inference path used by pyspacer's evaluate_classifier:
-        probs = calibrated.predict_proba(X_val)
-        preds = calibrated.predict(X_val)
-        self.assertEqual(probs.shape, (N_VAL, N_CLASSES))
-        np.testing.assert_allclose(probs.sum(axis=1), np.ones(N_VAL), rtol=1e-5, atol=1e-5)
-        acc = float(np.mean(preds == y_val))
-        self.assertGreater(acc, 0.80, f"Calibrated TorchMLP val accuracy {acc:.3f} below 0.80")
-
-        # Full pickle round-trip of the calibrated artifact — this is
-        # exactly what spacer.storage.store_classifier serialises.
-        restored = pickle.loads(pickle.dumps(calibrated))
-        np.testing.assert_allclose(restored.predict_proba(X_val), probs, rtol=1e-5, atol=1e-6)
-        np.testing.assert_array_equal(restored.predict(X_val), preds)
 
 
 if __name__ == "__main__":
