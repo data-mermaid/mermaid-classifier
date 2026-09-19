@@ -14,15 +14,18 @@ class SuiteLayoutTest(unittest.TestCase):
         A directory without __init__.py contributes nothing to a full run,
         while `python -m unittest <pkg>.<module>` still executes it -- so a new
         test package passes when its author names it, passes in CI, and never
-        runs there.
+        runs there. An intermediate directory -- one holding only subpackages,
+        no test_*.py of its own -- needs __init__.py just as much: discovery
+        cannot descend past it to reach the tests beneath, so every ancestor
+        from a test file up to the tests root is checked, not just the leaf.
         """
         missing = sorted(
-            str(d.relative_to(TESTS_ROOT))
-            for d in TESTS_ROOT.rglob("*")
-            if d.is_dir()
-            and d.name != "__pycache__"
-            and any(d.glob("test_*.py"))
-            and not (d / "__init__.py").is_file()
+            {
+                str(p.relative_to(TESTS_ROOT))
+                for f in TESTS_ROOT.rglob("test_*.py")
+                for p in (f.parent, *f.parent.parents)
+                if p != TESTS_ROOT and TESTS_ROOT in p.parents and not (p / "__init__.py").is_file()
+            }
         )
 
         self.assertEqual(
