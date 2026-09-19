@@ -310,6 +310,9 @@ class MLflowTrainingRunner(TrainingRunner):
                 "excluded_labels_csv": os.path.basename(
                     self.dataset_options.excluded_labels_csv or ""
                 ),
+                "excluded_images_csv": os.path.basename(
+                    self.dataset_options.excluded_images_csv or ""
+                ),
                 "included_labels_csv": os.path.basename(
                     self.dataset_options.included_labels_csv or ""
                 ),
