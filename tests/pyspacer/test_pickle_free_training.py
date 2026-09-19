@@ -4,6 +4,12 @@ If any module under ``mermaid_classifier/`` or ``scripts/`` re-imports
 pyspacer's classifier store/load/train glue, or its classify entry point, the
 pickle round-trip has crept back in. This covers the whole codebase: the
 train/eval/store path and the CLI scripts.
+
+Import-shaped re-entries are checked against the full ``FORBIDDEN`` set, since
+an imported name or module can only come from pyspacer. Attribute access has
+no such receiver check, so it is checked against the narrower
+``ATTRIBUTE_FORBIDDEN`` — the two names common enough elsewhere in the repo to
+false-positive are excluded there.
 """
 
 import ast
@@ -14,8 +20,9 @@ from support.paths import REPO_ROOT
 # Repo root — two levels up from tests/pyspacer/.
 SCANNED_DIRS = (REPO_ROOT / "mermaid_classifier", REPO_ROOT / "scripts")
 
-# Pickle-glue symbols reachable by name or by attribute access
-# (``import spacer.storage as s; s.load_classifier``). classify_image and
+# Pickle-glue symbols forbidden as imported names (``from spacer.tasks import
+# classify_image``) or attribute access on a module alias (``import
+# spacer.storage as s; s.load_classifier``). classify_image and
 # ClassifyImageMsg route through the same pickle-backed classifier loader.
 FORBIDDEN = {
     "load_classifier",
@@ -26,6 +33,11 @@ FORBIDDEN = {
     "ClassifyImageMsg",
 }
 
+# The attribute-access check is name-only, with no receiver check, so it can
+# only afford pyspacer-unique names -- classify_image and ClassifyImageMsg are
+# common enough method/class names elsewhere in the repo to false-positive.
+ATTRIBUTE_FORBIDDEN = FORBIDDEN - {"classify_image", "ClassifyImageMsg"}
+
 # Whole modules whose only purpose on this path is the pickle glue. Importing
 # them at all is a re-entry signal, even before any use.
 FORBIDDEN_MODULES = {"spacer.storage", "spacer.tasks"}
@@ -35,10 +47,13 @@ def _glue_references(source: str) -> set[str]:
     """Return every pickle-glue symbol/module this source reaches.
 
     Catches three re-entry shapes:
-      1. ``from spacer.storage import load_classifier`` (imported name)
-      2. ``import spacer.storage`` / ``import spacer.tasks`` (glue module)
+      1. ``from spacer.storage import load_classifier`` (imported name,
+         checked against ``FORBIDDEN``)
+      2. ``import spacer.storage`` / ``import spacer.tasks`` (glue module,
+         checked against ``FORBIDDEN`` and ``FORBIDDEN_MODULES``)
       3. ``import spacer.storage as s; s.load_classifier(...)`` (attribute
-         access on a module alias) — the gap the name-only guard missed.
+         access on a module alias, checked against the narrower
+         ``ATTRIBUTE_FORBIDDEN`` since the receiver isn't verified)
     """
     offenders: set[str] = set()
     for node in ast.walk(ast.parse(source)):
@@ -50,7 +65,7 @@ def _glue_references(source: str) -> set[str]:
             for alias in node.names:
                 if alias.name in FORBIDDEN or alias.name in FORBIDDEN_MODULES:
                     offenders.add(alias.name)
-        elif isinstance(node, ast.Attribute) and node.attr in FORBIDDEN:
+        elif isinstance(node, ast.Attribute) and node.attr in ATTRIBUTE_FORBIDDEN:
             # e.g. ``storage.load_classifier`` or
             # ``spacer.storage.store_classifier``.
             offenders.add(node.attr)
