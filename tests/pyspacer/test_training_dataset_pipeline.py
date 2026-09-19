@@ -14,20 +14,18 @@ pipeline steps forward from a seeded synthetic ``annotations`` table:
 
 Sub-steps characterized
 -----------------------
-- rollup_in_duckdb: row count + BA/GF values change as expected
-- filter_in_duckdb: excluded rows removed
 - _apply_subsample: row count drops to per-class cap; audit df populated
 - prep_annotations_for_pyspacer: returns TrainingTaskLabels with .train/.ref/.val;
   total points across splits equals input count; split respects ref_val_ratios
 - add_training_set_names: annotations table gains training_set column with
   values in {train, ref, val}; no NULLs
+- set_train_summary_stats: the summary dict, and the BA/BA+GF counts carrying
+  names from a stubbed library lookup
 
 Sub-steps NOT characterized (with reason)
 ------------------------------------------
-- set_train_summary_stats: requires ``get_benthic_attribute_library()`` and
-  ``get_growth_form_library()``, which hit the MERMAID API. Mocking them
-  would involve patching the entire library lookup layer; that work is out
-  of scope for this characterization pass.
+- roll_up_in_duckdb and filter_in_duckdb: tested on the specs that own them,
+  in test_label_specs.py (LabelRollupSpecInDuckDBTest, LabelFilterInDuckDBTest).
 - The full TrainingDataset.__init__ end-to-end: reads CoralNet CSVs and a
   MERMAID Parquet from S3 via DuckDB, which is impractical to run offline.
 """
@@ -93,22 +91,8 @@ def _seed_annotations(dataset: NoInitDataset) -> None:
     dataset.duck_conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
 
 
-_ROLLUP_CSV = "from_ba_id,from_gf_id,to_ba_id,to_gf_id\nba_a,,ba_top,\n"
-_FILTER_CSV = "ba_id,gf_id\nba_top,\nba_b,\n"
-
-
 # ---------------------------------------------------------------------------
-# 1. Rollup step
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 2. Filter step
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 3. Subsample step
+# 1. Subsample step
 # ---------------------------------------------------------------------------
 
 
@@ -148,7 +132,7 @@ class SubsampleStepTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. prep_annotations_for_pyspacer + split
+# 2. prep_annotations_for_pyspacer + split
 # ---------------------------------------------------------------------------
 
 
@@ -225,7 +209,7 @@ class PrepAnnotationsDownloadFailureTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. add_training_set_names
+# 3. add_training_set_names
 # ---------------------------------------------------------------------------
 
 
@@ -263,7 +247,7 @@ class AddTrainingSetNamesTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. set_train_summary_stats / describe_train_summary_stats
+# 4. set_train_summary_stats / describe_train_summary_stats
 # ---------------------------------------------------------------------------
 
 

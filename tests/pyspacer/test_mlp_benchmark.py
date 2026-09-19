@@ -2,10 +2,9 @@
 Benchmark suite comparing the sklearn MLPClassifier baseline against the
 in-package TorchMLPClassifier replacement.
 
-The same tests run against both implementations via the
-`_make_classifier` hook. Parity tests then assert that the PyTorch
-classifier reaches accuracy and probability outputs comparable to sklearn
-on identical data.
+The learn-at-all checks run against TorchMLPClassifier; MLPParityTest then
+asserts that it reaches accuracy and probability outputs comparable to
+sklearn on identical data.
 
 All data is synthetic and small so the full suite runs in seconds.
 """
@@ -13,7 +12,6 @@ All data is synthetic and small so the full suite runs in seconds.
 from __future__ import annotations
 
 import pickle
-import time
 import unittest
 
 import numpy as np
@@ -92,11 +90,8 @@ def train_via_partial_fit(
             clf.partial_fit(X_shuf[start:end], y_shuf[start:end], classes=classes)
 
 
-class MLPBenchmarkBase:
-    """Shared test suite executed against both sklearn and torch MLPs.
-
-    Subclasses implement `_make_classifier()` returning an untrained
-    sklearn-compatible MLP classifier instance.
+class TorchMLPBenchmarkTest(unittest.TestCase):
+    """TorchMLPClassifier learns the synthetic task through every entry point.
 
     The accuracy thresholds in these tests (0.85 / 0.80 / 0.75) are
     deliberately-loose sanity floors that answer "can this implementation
@@ -106,9 +101,12 @@ class MLPBenchmarkBase:
     comparison lives in `MLPParityTest`.
     """
 
-    # Subclasses override.
-    def _make_classifier(self):  # pragma: no cover - abstract
-        raise NotImplementedError
+    def _make_classifier(self):
+        return TorchMLPClassifier(
+            hidden_layer_sizes=HIDDEN,
+            learning_rate_init=LR,
+            random_state=SEED,
+        )
 
     @classmethod
     def setUpClass(cls):  # type: ignore[override]
@@ -121,7 +119,6 @@ class MLPBenchmarkBase:
 
     def _train(self, clf):
         rng = np.random.RandomState(SEED + 1)  # training-shuffle stream
-        t0 = time.time()
         train_via_partial_fit(
             clf,
             self.X_train,
@@ -131,7 +128,6 @@ class MLPBenchmarkBase:
             chunk_size=PARTIAL_FIT_BATCH,
             rng=rng,
         )
-        return time.time() - t0
 
     # --- Tests -----------------------------------------------------------
 
@@ -217,17 +213,6 @@ class MLPBenchmarkBase:
             acc,
             0.75,
             f"Incremental partial_fit accuracy {acc:.3f} below 0.75 for {type(clf).__name__}",
-        )
-
-
-class TorchMLPBenchmarkTest(MLPBenchmarkBase, unittest.TestCase):
-    """Replacement: TorchMLPClassifier."""
-
-    def _make_classifier(self):
-        return TorchMLPClassifier(
-            hidden_layer_sizes=HIDDEN,
-            learning_rate_init=LR,
-            random_state=SEED,
         )
 
     def test_old_pickle_without_class_weight_tensor_can_resume(self):

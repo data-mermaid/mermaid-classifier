@@ -1,11 +1,10 @@
 """TrainingRunner._compute_class_weights wiring test.
 
 Exercises the orchestration path that connects DatasetOptions.weighting
-through to compute_class_weights and the per-class log structure. We
-bypass the real BenthicAttributeLibrary/GrowthFormLibrary by
-monkeypatching the module globals in runner.py with fakes — those real
-classes hit the MERMAID API on construction, which is unsuitable for
-unit tests.
+through to compute_class_weights and the per-class log structure.
+
+_compute_class_weights reads one field, labels.train.label_count_per_class,
+and reaches no taxonomy library, so no BA/GF double is needed here.
 """
 
 from __future__ import annotations
@@ -13,16 +12,12 @@ from __future__ import annotations
 import types
 import unittest
 from collections import Counter
-from unittest import mock
 
 from mermaid_classifier.common.benthic_attributes import combine_ba_gf
+from mermaid_classifier.pyspacer.options import DatasetOptions
+from mermaid_classifier.pyspacer.runner import TrainingRunner
 from mermaid_classifier.training.sample_weighting import (
     SampleWeightingOptions,
-)
-
-from .fakes import (
-    FakeGFLibrary,
-    small_tree,
 )
 
 
@@ -40,41 +35,7 @@ class TrainerPipelineTest(unittest.TestCase):
     """Contract: DatasetOptions.weighting -> _compute_class_weights ->
     weight dict + summary log structure."""
 
-    @classmethod
-    def setUpClass(cls):
-        # Import runner.py with the MERMAID API singletons patched out.
-        # This avoids any network call at import time.
-        with (
-            mock.patch(
-                "mermaid_classifier.common.benthic_attributes.BenthicAttributeLibrary",
-                return_value=small_tree(),
-            ),
-            mock.patch(
-                "mermaid_classifier.common.benthic_attributes.GrowthFormLibrary",
-                return_value=FakeGFLibrary({"g1": "GF1", "g2": "GF2"}),
-            ),
-        ):
-            from mermaid_classifier.pyspacer import runner as runner_mod
-        cls.runner_mod = runner_mod
-
-    def setUp(self):
-        # Replace the cached taxonomy-library accessors with ones that
-        # return our fakes, for the duration of each test. runner.py calls
-        # get_benthic_attribute_library() / get_growth_form_library()
-        # (the real ones hit the MERMAID API on construction).
-        fake_ba = small_tree()
-        fake_gf = FakeGFLibrary({"g1": "GF1", "g2": "GF2"})
-        self._patches = [
-            mock.patch.object(self.runner_mod, "get_benthic_attribute_library", lambda: fake_ba),
-            mock.patch.object(self.runner_mod, "get_growth_form_library", lambda: fake_gf),
-        ]
-        for p in self._patches:
-            p.start()
-        self.addCleanup(lambda: [p.stop() for p in self._patches])
-
     def _make_runner(self, weighting):
-        DatasetOptions = self.runner_mod.DatasetOptions
-        TrainingRunner = self.runner_mod.TrainingRunner
         return TrainingRunner(
             dataset_options=DatasetOptions(
                 include_mermaid=False,

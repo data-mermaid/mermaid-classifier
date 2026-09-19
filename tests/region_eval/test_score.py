@@ -181,11 +181,9 @@ CORPUS_COUNTS = {
 }
 
 N_POINTS = 25
-N_IMAGES = 6
 N_HELD_OUT = 17
 N_IN_MODEL_CLASSES = 24
 N_GT_OUT_OF_REGION = 3
-N_GT_DISCRIMINATING = 19
 
 # Small enough to keep six-image resampling quick, large enough that the
 # percentile interval is not degenerate.
