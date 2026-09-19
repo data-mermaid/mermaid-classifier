@@ -611,3 +611,47 @@ class ConfidenceStratificationTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             _stratify(rows)
+
+
+class SourceRowAlignmentTest(unittest.TestCase):
+    """Both statistics take a column indexed over the rows the points were
+    prepared from, and read it through `source_positions`. A column of any
+    other length still indexes, so it would pair confidences and probabilities
+    with the wrong points and move the result rather than raise."""
+
+    def test_a_probability_matrix_shorter_than_its_source_rows_is_refused(self):
+        probabilities = np.array([row[3] for row in MASKING_ROWS], dtype=np.float64)
+        points = prepare_scored_points(
+            image_ids=[row[0] for row in MASKING_ROWS],
+            image_region_ids=[row[1] for row in MASKING_ROWS],
+            gt_labels=[row[2] for row in MASKING_ROWS],
+            pred_labels=[MASKING_CLASSES[int(i)] for i in probabilities.argmax(axis=1)],
+            region_ids_by_attribute=REGION_IDS_BY_ATTRIBUTE,
+            model_classes=MASKING_CLASSES,
+        )
+
+        with self.assertRaisesRegex(ValueError, r"probabilities must hold one row per source"):
+            masking_counterfactual(
+                points,
+                probabilities=probabilities[:-1],
+                model_classes=MASKING_CLASSES,
+                region_ids_by_attribute=REGION_IDS_BY_ATTRIBUTE,
+            )
+
+    def test_a_confidence_column_shorter_than_its_source_rows_is_refused(self):
+        predictions = [row[1] for row in CONFIDENCE_ROWS]
+        points = prepare_scored_points(
+            image_ids=["image-a"] * len(CONFIDENCE_ROWS),
+            image_region_ids=[row[0] for row in CONFIDENCE_ROWS],
+            gt_labels=predictions,
+            pred_labels=predictions,
+            region_ids_by_attribute=REGION_IDS_BY_ATTRIBUTE,
+            model_classes=(),
+        )
+
+        with self.assertRaisesRegex(ValueError, r"pred_confidences must hold one row per source"):
+            confidence_stratification(
+                points,
+                pred_confidences=[row[2] for row in CONFIDENCE_ROWS[:-1]],
+                bin_edges=QUARTILE_EDGES,
+            )

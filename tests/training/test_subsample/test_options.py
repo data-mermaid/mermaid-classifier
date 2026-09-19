@@ -34,5 +34,23 @@ class OptionsValidationTest(unittest.TestCase):
             )
 
 
+class LogDictTest(unittest.TestCase):
+    """to_log_dict is what TrainingRunner hands mlflow.log_params, so these
+    keys are the names a run is read back by."""
+
+    def test_every_option_reaches_the_logged_params(self):
+        options = SubsampleOptions(strategy="balanced", total_annotations=1000, min_per_class=10)
+
+        self.assertEqual(
+            options.to_log_dict(),
+            {
+                "subsample/enabled": True,
+                "subsample/strategy": "balanced",
+                "subsample/total_annotations": 1000,
+                "subsample/min_per_class": 10,
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

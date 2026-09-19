@@ -42,6 +42,19 @@ class TorchClassifierWeightTest(unittest.TestCase):
         self.assertEqual(list(clf.classes_), ["a", "b", "c"])
         np.testing.assert_allclose(clf._class_weight_tensor.numpy(), [1.0, 5.0, 25.0])
 
+    def test_negative_class_weight_rejected(self):
+        """A negative loss weight rewards the class it is meant to damp, and
+        torch would train on it without complaint."""
+        X, y = _make_imbalanced_dataset(seed=2)
+        clf = TorchMLPClassifier(
+            hidden_layer_sizes=(8,),
+            max_iter=2,
+            random_state=0,
+            class_weight={"a": 1.0, "b": -5.0, "c": 25.0},
+        )
+        with self.assertRaisesRegex(ValueError, "negative"):
+            clf.fit(X, y)
+
     def test_class_weight_tensor_reaches_the_loss(self):
         # The tensor being built correctly says nothing about it being passed
         # to cross_entropy; identical seeds and data must still diverge.

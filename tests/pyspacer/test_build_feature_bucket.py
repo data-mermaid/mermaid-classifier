@@ -521,6 +521,12 @@ class ResolveDeviceTest(unittest.TestCase):
         with self._mock_torch(mps=False, cuda=False), self.assertRaises(RuntimeError):
             bfb.resolve_device("mps")
 
+    def test_an_available_explicit_device_is_returned_unchanged(self):
+        """The auto branches all name a device of their own, so only this one
+        proves --device cuda runs on cuda rather than being downgraded."""
+        with self._mock_torch(mps=False, cuda=True):
+            self.assertEqual(bfb.resolve_device("cuda"), "cuda")
+
 
 # ---- bonus sanity: parse_weights_location ---------------------------
 

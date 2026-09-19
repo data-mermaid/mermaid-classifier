@@ -2,9 +2,9 @@
 
 Schema lives in mermaid_classifier/sagemaker/config.py. These tests
 exercise both happy paths (loading a complete YAML) and edge cases
-(missing required fields, unknown strategies). They intentionally do
-NOT import from mermaid_classifier.pyspacer.* to keep the test fast
-and to verify the schema is decoupled from the heavy pyspacer imports.
+(unknown keys, unknown strategies, out-of-charset model names). Only
+BuildOptionsTest imports from mermaid_classifier.pyspacer.*, which is
+where build_options constructs the option dataclasses.
 """
 
 from __future__ import annotations
@@ -130,6 +130,10 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertIsInstance(training, TrainingOptions)
         self.assertIsInstance(mlflow, MLflowOptions)
         self.assertEqual(dataset.coralnet_manifest_uri, "s3://bucket/coralnet_manifest.parquet")
+        # The CSVs the YAML names must reach DatasetOptions as resolved paths;
+        # dropping them silently trains against every label.
+        self.assertEqual(dataset.label_rollup_spec_csv, str(tmp / "rollups.csv"))
+        self.assertEqual(dataset.included_labels_csv, str(tmp / "included_labels.csv"))
         self.assertEqual(training.epochs, 5)
         self.assertEqual(training.early_stopping_patience, 3)
 
@@ -150,9 +154,13 @@ class MLflowModelNameTest(unittest.TestCase):
         config = self._load_with_model_name("top108-192best-v1")
         self.assertEqual(config.mlflow.model_name, "top108-192best-v1")
 
-    def test_underscore_rejected(self):
-        with self.assertRaisesRegex(ValidationError, r"'_'"):
-            self._load_with_model_name("top108_192best_v1")
+    def test_names_outside_the_mlflow_charset_are_rejected(self):
+        """MLflow accepts alphanumerics separated by hyphens. The two anchors
+        carry the leading and trailing cases, so a regex that kept the charset
+        but dropped them would take "-v1" and "v1-"."""
+        for name in ("top108_192best_v1", "-top108-v1", "top108-v1-", "top108.v1"):
+            with self.subTest(name=name), self.assertRaises(ValidationError):
+                self._load_with_model_name(name)
 
     def test_over_57_chars_rejected(self):
         with self.assertRaises(ValidationError):
@@ -173,6 +181,22 @@ class MLflowModelNameTest(unittest.TestCase):
             path = _write(Path(td), _yaml.dump(base))
             config = TrainingRunConfig.from_yaml_path(path)
         self.assertIsNone(config.mlflow.model_name)
+
+
+class StrictSchemaTest(unittest.TestCase):
+    """training_config.yaml is hand-edited, so a key the schema does not know
+    is a typo or a setting deleted in an earlier refactor. extra="forbid"
+    turns it into a load-time failure instead of a silently ignored line."""
+
+    def test_unknown_key_in_the_dataset_block_is_rejected(self):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"]["drop_growthfroms"] = True  # a typo for drop_growthforms
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), _yaml.dump(base))
+            with self.assertRaisesRegex(ValidationError, "drop_growthfroms"):
+                TrainingRunConfig.from_yaml_path(path)
 
 
 class ExampleYamlTest(unittest.TestCase):
