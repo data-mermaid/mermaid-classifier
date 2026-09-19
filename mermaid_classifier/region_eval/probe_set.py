@@ -228,6 +228,20 @@ def read_annotations(
         if missing:
             raise ValueError(f"{parquet_path} is missing column(s): {', '.join(missing)}")
 
+        # Unlike a growth form, an id has no meaningful empty value: coalescing
+        # a NULL image_id or benthic_attribute_id to '' would carry the
+        # corruption forward into probe selection and the content hash
+        # instead of stopping it here.
+        for column in ("image_id", "benthic_attribute_id"):
+            # A COUNT(*) query always returns exactly one row, so fetchall()[0]
+            # avoids fetchone()'s `tuple[Any, ...] | None` return type.
+            null_count = connection.execute(
+                f"SELECT COUNT(*) FROM read_parquet(?) WHERE {column} IS NULL",
+                [str(parquet_path)],
+            ).fetchall()[0][0]
+            if null_count:
+                raise ValueError(f"{parquet_path} has {null_count} row(s) with a NULL {column}")
+
         projections = [
             "image_id",
             "CAST(point_id AS VARCHAR) AS point_id",

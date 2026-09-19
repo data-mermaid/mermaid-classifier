@@ -596,6 +596,18 @@ class ReadAnnotationsTest(unittest.TestCase):
         self.assertEqual(list(frame["region_id"]), [CENTRAL_INDO_PACIFIC, ""])
         self.assertEqual(list(frame["region_name"]), ["Central Indo-Pacific", ""])
 
+    def test_a_null_image_id_raises(self):
+        columns = self._base_columns()
+        columns["image_id"] = pa.array(["i1", None], pa.string())
+        with self.assertRaisesRegex(ValueError, "image_id"):
+            read_annotations(self._write(columns))
+
+    def test_a_null_benthic_attribute_id_raises(self):
+        columns = self._base_columns()
+        columns["benthic_attribute_id"] = pa.array([BA_GLOBAL, None], pa.string())
+        with self.assertRaisesRegex(ValueError, "benthic_attribute_id"):
+            read_annotations(self._write(columns))
+
     def test_the_selection_runs_over_a_parquet_read_from_disk(self):
         annotations = _annotations()
         path = Path(self.tmp.name) / "corpus.parquet"
