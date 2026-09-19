@@ -122,18 +122,34 @@ there, not a coordinator change. HTML reports render from MLflow runs via
 ### Region-mismatch evaluation (`mermaid_classifier/region_eval/`)
 
 Measures how often the classifier applies a benthic-attribute label from a
-region that label does not occur in, and prices the candidate fixes —
-a region-blind permutation baseline, a masking counterfactual, within-branch
-share, and confidence stratification (`decisions.py`). Scoring runs against a
-**frozen** probe (`probe_set.py`): the sampled points, the region map, display
-names, taxonomic ancestry, and corpus-wide annotation counts are all pinned
-and hashed, so upstream taxonomy curation cannot move a published score.
-`score.py` separately reports a drift diagnostic when the live region map has
-moved since the probe was frozen. The pure modules (`metrics.py`, `triage.py`,
-`decisions.py`, `region_rules.py`) take the region map as caller-supplied
-frozen data and never import the live benthic-attribute library. Reached only
-through the two CLI scripts named in the Commands block above; nothing under
+region that label does not occur in, and prices the candidate fixes — a
+region-blind permutation baseline, a masking counterfactual, within-branch
+share, and confidence stratification, all in `decisions.py`. Scoring runs
+against a **frozen** probe (`probe_set.py`): the sampled points, the region
+map, display names, taxonomic ancestry, and corpus-wide annotation counts are
+all pinned and hashed, so upstream taxonomy curation cannot move a published
+score. `features.py` holds the feature cache both ways —
+`write_feature_cache`/`FeatureCache`, `read_feature_cache`/`ProbeFeatures` —
+plus `feature_coverage`. `score.py` loads a probe and scores a model against
+it, reporting a drift diagnostic when the live region map has moved since the
+probe was frozen; `report.py` renders the nine report artifacts from the
+resulting `ModelScore`, depending on `score` in one direction only. The pure
+modules — `metrics.py`, `triage.py`, `decisions.py`, `region_rules.py` — take
+the region map as caller-supplied frozen data and never import the live
+benthic-attribute library; `decisions.py`'s four mitigation functions and
+`triage_events` all take the `ScoredPoints` that the otherwise-pure
+`metrics.py` prepares. Reached only through the two CLI scripts named in the
+Commands block above: `evaluate_region_probe.py`'s `--min-coverage` refuses to
+score a feature cache below a given coverage fraction (no floor by default),
+and `build_region_probe.py` writes `held_out_images.csv`, the exclusion list
+the training pipeline's `ImageExclusionFilter` consumes. Nothing under
 `pyspacer/` imports it.
+
+`metrics.py` deliberately holds both the rate statistics and the tables that
+present them: the per-region and per-direction builders call the estimators
+rather than format precomputed values, so splitting the two would need the
+estimators exported as private cross-module imports plus a deferred import to
+break the resulting cycle — more machinery than the separation buys.
 
 ### SageMaker launcher and CoralNet ingest
 
