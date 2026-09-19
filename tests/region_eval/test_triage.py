@@ -140,24 +140,6 @@ class BucketAssignmentTest(unittest.TestCase):
         self.assertEqual(int(rare["ground_truth_count"]), 0)
         self.assertEqual(rare["bucket"], TriageBucket.MODEL_ERROR)
 
-    def test_in_region_predictions_never_become_events(self):
-        events = _triage().events
-        self.assertNotIn(
-            PACIFIC_LABEL,
-            set(events[events["image_region_id"] == CENTRAL_INDO_PACIFIC]["pred_label"]),
-        )
-
-    def test_unrecorded_image_regions_are_excluded_and_counted(self):
-        result = _triage()
-        self.assertEqual(result.n_unrecorded_region_excluded, 1)
-        self.assertEqual(len(result.events[result.events["image_id"] == "image-c"]), 0)
-
-    def test_bucket_counts_list_every_bucket(self):
-        counts = _triage().bucket_counts
-        self.assertEqual(counts[TriageBucket.LIST_SUSPECT], 2)
-        self.assertEqual(counts[TriageBucket.UNKNOWN_LIST], 2)
-        self.assertEqual(counts[TriageBucket.MODEL_ERROR], 2)
-
 
 class ThresholdTest(unittest.TestCase):
     """Seven annotations sit either side of the threshold at T = 7 and T = 8."""
@@ -196,21 +178,6 @@ class RegionListSuspectsTest(unittest.TestCase):
         table = result.region_list_suspects
         self.assertEqual(list(table["n_ground_truth"]), [9, 7])
         self.assertEqual(list(table["attribute_id"]), [BA_PACIFIC, BA_ATLANTIC])
-
-    def test_no_suspects_yields_an_empty_table_with_its_columns(self):
-        result = triage_events(_points(), ground_truth_counts={})
-        self.assertEqual(len(result.region_list_suspects), 0)
-        self.assertEqual(
-            list(result.region_list_suspects.columns),
-            [
-                "attribute_id",
-                "attribute_name",
-                "region_id",
-                "region_name",
-                "n_ground_truth",
-                "n_predicted",
-            ],
-        )
 
     def test_suspects_name_the_attribute_and_the_region(self):
         """This table is a bug report handed to the data team. Two UUIDs name

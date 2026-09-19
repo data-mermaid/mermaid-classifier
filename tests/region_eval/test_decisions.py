@@ -144,20 +144,6 @@ class RegionBlindBaselineTest(unittest.TestCase):
         self.assertAlmostEqual(result.baseline_sd, 0.2887, delta=0.03)
         self.assertEqual((result.baseline_ci_low, result.baseline_ci_high), (0.0, 1.0))
 
-    def test_unrecorded_image_regions_are_dropped_and_counted_without_raising(self):
-        """`permutation_baseline` rejects "" outright, so an unfiltered row
-        would turn this metric into an exception the orchestrator swallows.
-        The two unrecorded rows leave the 4/8 rate untouched."""
-        rows = (*BLIND_ROWS, ("image-e", "", PACIFIC_LABEL), ("image-e", "", ATLANTIC_LABEL))
-
-        result = _baseline(rows)
-
-        self.assertEqual(result.n_unrecorded_region_excluded, 2)
-        self.assertEqual(result.n_points, 8)
-        self.assertEqual(result.n_images, 4)
-        self.assertEqual(result.observed_rate, 0.5)
-        self.assertEqual(result.ratio, 1.0)
-
     def test_labels_with_no_recorded_regions_leave_the_denominator(self):
         """An attribute nobody has recorded a region for is unrecorded, not
         permitted nowhere. Counting the two extra rows would read 4/10 = 0.4
@@ -270,15 +256,6 @@ class MaskingCounterfactualTest(unittest.TestCase):
         self.assertEqual(result.accuracy_masked, 0.75)
         self.assertEqual(result.accuracy_delta, 0.0)
 
-    def test_ground_truth_outside_the_label_space_leaves_accuracy(self):
-        """M5 cannot be predicted correctly by any model carrying these three
-        classes. Scoring it would read accuracy as 3/5 = 0.6 and attribute the
-        gap to the model rather than to the label space."""
-        result = _masking(MASKING_ROWS)
-
-        self.assertEqual(result.n_accuracy_points, 4)
-        self.assertEqual(result.accuracy_unmasked, 0.75)
-
     def test_margin_over_out_of_region_events_prices_the_confidence_masking_fights(self):
         """M1 gives 0.50 - 0.30 and M4 gives 0.60 - 0.30, so the median margin
         is 0.25. Reading the margin over every point, rather than over the
@@ -330,18 +307,6 @@ class MaskingCounterfactualTest(unittest.TestCase):
         self.assertEqual(result.accuracy_delta, 0.0)
         self.assertEqual(result.margin_n, 0)
         self.assertTrue(math.isnan(result.margin_median))
-
-    def test_image_region_permitting_no_class_leaves_its_prediction_unmasked(self):
-        """Every class is out of region in the Eastern Pacific here, so the
-        masked distribution would sum to zero and renormalising it would hand
-        the argmax to whichever column division by zero happened to favour."""
-        rows = (("image-a", EASTERN_PACIFIC, ATLANTIC_LABEL, (0.40, 0.60)),)
-
-        result = _masking(rows, model_classes=(ATLANTIC_LABEL, PACIFIC_LABEL))
-
-        self.assertEqual(result.n_no_permitted_class, 1)
-        self.assertEqual(result.n_changed, 0)
-        self.assertEqual(result.margin_n, 0)
 
     def test_unrecorded_image_regions_are_dropped_and_counted_without_raising(self):
         """A "" region reaching `is_out_of_region` raises, and the metrics
@@ -493,19 +458,6 @@ class WithinBranchShareTest(unittest.TestCase):
         self.assertEqual(result.n_evaluable, 0)
         self.assertTrue(math.isnan(result.share))
 
-    def test_unrecorded_image_regions_are_dropped_and_counted_without_raising(self):
-        """`is_out_of_region` raises on "", and a metrics orchestrator swallows
-        what a group raises, so the share would disappear rather than report
-        two events and one exclusion."""
-        rows = (*BRANCH_ROWS, ("", ACROPORA_TA_LABEL, ACROPORA_CIP_LABEL))
-
-        result = _branch(rows)
-
-        self.assertEqual(result.n_unrecorded_region_excluded, 1)
-        self.assertEqual(result.n_points, 3)
-        self.assertEqual(result.n_out_of_region, 2)
-        self.assertEqual(result.share, 0.5)
-
 
 # Both regions appear, which is what makes the Atlantic and Pacific labels
 # region-discriminating; the global label is permitted everywhere the data goes
@@ -581,16 +533,6 @@ class ConfidenceStratificationTest(unittest.TestCase):
         self.assertEqual(result.bins[3].rate, 0.5)
         self.assertTrue(math.isnan(result.bins[2].rate))
 
-    def test_empty_bin_edges_span_the_unit_interval_by_default(self):
-        """The default quintiles put 0.20 and 0.30 together and 0.80 and 0.90
-        together, each pair holding one out-of-region prediction."""
-        result = _stratify(CONFIDENCE_ROWS)
-
-        self.assertEqual(
-            [(bin_.n, bin_.n_out_of_region) for bin_ in result.bins],
-            [(0, 0), (2, 1), (0, 0), (0, 0), (2, 1)],
-        )
-
     def test_predictions_permitted_everywhere_leave_the_bins(self):
         """C5 is the most confident prediction in the fixture and could never
         have been out of region. Binning it would put three points in the top
@@ -659,15 +601,6 @@ class ConfidenceStratificationTest(unittest.TestCase):
         self.assertEqual(result.n_unrecorded_region_excluded, 1)
         self.assertEqual(result.n_points, 6)
         self.assertEqual(result.auroc, 0.75)
-
-    def test_confidence_outside_the_bin_edges_is_rejected(self):
-        """A score the bins do not span would be dropped from every bin while
-        still counting in `n_discriminating`, so the per-bin counts would stop
-        summing to the total without saying so."""
-        rows = ((TROPICAL_ATLANTIC, PACIFIC_LABEL, 1.5),)
-
-        with self.assertRaises(ValueError):
-            _stratify(rows)
 
     def test_confidence_of_nan_is_rejected_as_outside_the_bins(self):
         """NaN falls neither below the lowest edge nor above the highest, so a

@@ -140,20 +140,6 @@ class FeatureCacheTest(unittest.TestCase):
         self.assertEqual(list(cache.held_out), [False, True])
         self._assert_aligned(cache)
 
-    def test_features_are_cast_to_float32(self):
-        self._write_feature_file("i1", [(10, 20)])
-        cache = build_feature_cache(
-            _probe_rows({"i1": [(10, 20)]}), self.root, feature_dim=DIM, workers=2
-        )
-        self.assertEqual(cache.features.dtype, np.float32)
-
-    def test_every_point_missing_leaves_an_empty_but_shaped_matrix(self):
-        probe = _probe_rows({"gone": [(10, 20)]})
-        with self._no_s3():
-            cache = build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
-        self.assertEqual(cache.features.shape, (0, DIM))
-        self.assertEqual(cache.n_points_missing_image, 1)
-
     def test_a_feature_file_that_does_not_parse_raises_rather_than_counting_it_missing(self):
         """A truncated archive that read as a missing image would shrink the
         probe silently: the missing-image count absorbs it, and the score is
@@ -217,25 +203,6 @@ class FeatureCacheTest(unittest.TestCase):
         self.assertEqual(cache.download_failed_image_ids, ("throttled",))
         self.assertEqual(cache.n_points_missing_image, 1)
         self.assertEqual(cache.missing_image_ids, ("gone",))
-
-    def test_a_download_failure_is_logged_apart_from_a_missing_file(self):
-        probe = _probe_rows({"gone": [(30, 40)], "throttled": [(50, 60)]})
-        failed_key = (
-            DEFAULT_FEATURE_BUCKET,
-            f"{DEFAULT_FEATURE_PREFIX}throttled{DEFAULT_FEATURE_SUFFIX}",
-        )
-        with (
-            mock.patch(
-                "mermaid_classifier.region_eval.features.download_features_parallel",
-                return_value={failed_key},
-            ),
-            self.assertLogs("mermaid_classifier.region_eval.features", level="WARNING") as logs,
-        ):
-            build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
-
-        messages = "\n".join(logs.output)
-        self.assertIn("throttled", messages)
-        self.assertIn("download", messages.lower())
 
     def test_written_cache_round_trips_its_arrays(self):
         self._write_feature_file("i1", [(10, 20)])

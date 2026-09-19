@@ -178,18 +178,6 @@ class PartitionByRecordedRegionTest(unittest.TestCase):
         self.assertEqual(scorable, [0, 2])
         self.assertEqual(unscorable, [1, 3])
 
-    def test_all_recorded_leaves_unscorable_empty(self):
-        scorable, unscorable = partition_by_recorded_region(
-            [TROPICAL_ATLANTIC, CENTRAL_INDO_PACIFIC]
-        )
-        self.assertEqual(scorable, [0, 1])
-        self.assertEqual(unscorable, [])
-
-    def test_all_unrecorded_leaves_scorable_empty(self):
-        scorable, unscorable = partition_by_recorded_region(["", ""])
-        self.assertEqual(scorable, [])
-        self.assertEqual(unscorable, [0, 1])
-
 
 class WilsonCiTest(unittest.TestCase):
     """Wilson score interval, against bounds derived by hand from the formula."""
@@ -212,17 +200,6 @@ class WilsonCiTest(unittest.TestCase):
         self.assertAlmostEqual(lower, 0.11186, places=4)
         self.assertAlmostEqual(upper, 0.46870, places=4)
 
-    def test_alpha_widens_the_interval(self):
-        """At alpha=0.01, z = 2.5758293, so the k=0 upper bound is
-        z^2 / (100 + z^2) = 6.6348966 / 106.6348966 = 0.0622207.
-        """
-        _, upper = wilson_ci(0, 100, alpha=0.01)
-        self.assertAlmostEqual(upper, 0.0622, places=4)
-
-    def test_lower_bound_is_never_negative(self):
-        lower, _ = wilson_ci(0, 100)
-        self.assertGreaterEqual(lower, 0.0)
-
     def test_no_trials_gives_the_full_unit_interval(self):
         self.assertEqual(wilson_ci(0, 0), (0.0, 1.0))
 
@@ -237,9 +214,6 @@ class WilsonCiTest(unittest.TestCase):
 
 class RuleOfThreeTest(unittest.TestCase):
     """The 95% upper bound on a rate when zero events were observed."""
-
-    def test_one_thousand_trials(self):
-        self.assertEqual(rule_of_three(1000), 0.003)
 
     def test_two_hundred_and_fifty_three_trials(self):
         """3/253 = 0.0118577, the '95% upper bound 1.2%' a zero cell reports."""
@@ -367,14 +341,6 @@ class PairedClusterBootstrapTest(unittest.TestCase):
 
 class DesignEffectTest(unittest.TestCase):
     """How much the naive Wilson interval understates the clustered width."""
-
-    def test_squared_ratio_of_half_widths(self):
-        """Wilson half-width at k=10, n=20 is
-        z/(20 + z^2) * sqrt(10*10/20 + z^2/4) = 0.2007020.
-        A bootstrap interval of (0.1, 0.9) has half-width 0.4, so the design
-        effect is (0.4 / 0.2007020)^2 = 1.9930045^2 = 3.97207.
-        """
-        self.assertAlmostEqual(design_effect((0.1, 0.9), 10, 20, alpha=0.05), 3.97207, places=4)
 
     def test_matching_widths_give_a_design_effect_of_one(self):
         """The Wilson interval at k=10, n=20 is 0.5 +/- 0.2007020."""

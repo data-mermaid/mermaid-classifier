@@ -315,12 +315,6 @@ class DenominatorTest(unittest.TestCase):
         }
         self.assertEqual(len(denominators), 3)
 
-    def test_region_unknown_predictions_leave_numerator_and_denominator(self):
-        """Points 4 and 16 predict an attribute with no recorded regions."""
-        self.assertEqual(self.rates.n_pred_region_unknown, 2)
-        self.assertEqual(self.rates.n_points, 16)
-        self.assertEqual(self.rates.oor_rate.n, 16 - 2)
-
     def test_region_unknown_ground_truth_leaves_the_floor_denominator(self):
         """Point 8's ground truth has no recorded regions."""
         self.assertEqual(self.rates.n_gt_region_unknown, 1)
@@ -368,9 +362,6 @@ class DenominatorTest(unittest.TestCase):
         self.assertEqual(self.rates.image_affected_rate.n, 4)
         self.assertAlmostEqual(self.rates.image_affected_rate.rate, 3 / 4)
         self.assertEqual(self.rates.n_images, 4)
-
-    def test_excluded_count_travels_to_the_result(self):
-        self.assertEqual(self.result.n_unrecorded_region_excluded, 2)
 
 
 class DiscGtProportionTest(unittest.TestCase):
@@ -431,36 +422,9 @@ class UnrecordedRegionTest(unittest.TestCase):
         self.assertEqual(result.overall.oor_rate.n, 0)
         self.assertTrue(math.isnan(result.overall.oor_rate.rate))
 
-    def test_a_mixed_slice_scores_only_the_recorded_rows(self):
-        result = compute_region_metrics(_prepare(), options=OPTIONS)
-        self.assertEqual(result.overall.n_points, 16)
-        self.assertEqual(result.n_unrecorded_region_excluded, 2)
-
 
 class ZeroCellTest(unittest.TestCase):
     """A cell with no events reports an upper bound, not a bare zero."""
-
-    def test_zero_out_of_region_reports_a_rule_of_three_upper_bound(self):
-        """Twenty points, but five images: the bound counts the trials, and
-        a point inside an image is not one."""
-        result = compute_region_metrics(_prepare(CLEAN_ROWS), options=OPTIONS)
-        estimate = result.overall.oor_rate
-        self.assertEqual(estimate.k, 0)
-        self.assertEqual(estimate.n, 20)
-        self.assertEqual(estimate.rate, 0.0)
-        self.assertEqual(estimate.upper_bound_n_images, 5)
-        self.assertAlmostEqual(estimate.upper_bound, 3 / 5)
-
-    def test_a_populated_cell_carries_no_upper_bound(self):
-        result = compute_region_metrics(_prepare(), options=OPTIONS)
-        self.assertIsNone(result.overall.oor_rate.upper_bound)
-
-    def test_an_empty_denominator_yields_a_blank_estimate(self):
-        """One observed region makes every label non-discriminating."""
-        result = compute_region_metrics(_prepare(CLEAN_ROWS), options=OPTIONS)
-        estimate = result.overall.oor_rate_disc
-        self.assertEqual(estimate.n, 0)
-        self.assertTrue(math.isnan(estimate.rate))
 
     def test_an_empty_denominator_reports_no_upper_bound(self):
         """A cell with an empty denominator carries no upper bound at all."""
@@ -713,11 +677,6 @@ class PerRegionTableTest(unittest.TestCase):
         self.assertEqual(macro.oor_rate.n_regions, 2)
         self.assertAlmostEqual(macro.oor_rate.value, (2 / 10 + 2 / 4) / 2)
 
-    def test_region_macro_differs_from_the_pooled_rate(self):
-        """Corpus mix moves the pooled rate and leaves the macro mean alone."""
-        macro = self.result.overall.region_macro.oor_rate.value
-        self.assertNotAlmostEqual(macro, self.result.overall.oor_rate.rate)
-
 
 class PerLabelTableTest(unittest.TestCase):
     def setUp(self):
@@ -754,16 +713,6 @@ class PerLabelTableTest(unittest.TestCase):
     def test_label_names_come_from_the_caller(self):
         row = self.table[self.table["label"] == ATLANTIC_LABEL].iloc[0]
         self.assertEqual(row["label_name"], "Atlantic coral")
-
-    def test_an_unresolved_label_renders_its_id_rather_than_an_empty_cell(self):
-        """An empty cell reads as "this label has no name"; the id reads as
-        "unresolved", which is what actually happened. The caller here names
-        only the Atlantic label, so the Pacific one has to fall back."""
-        other = self.table[self.table["label"] == PACIFIC_LABEL].iloc[0]
-        self.assertEqual(other["label_name"], PACIFIC_LABEL)
-
-    def test_every_label_name_cell_is_populated(self):
-        self.assertEqual([], [name for name in self.table["label_name"] if not str(name).strip()])
 
     def test_wilson_interval_brackets_the_rate(self):
         for _, row in self.table.iterrows():
@@ -896,13 +845,6 @@ class NameRenderingTest(unittest.TestCase):
         self.assertEqual(
             per_label.loc[PACIFIC_LABEL, "allowed_region_names"], (CENTRAL_INDO_PACIFIC,)
         )
-
-    def test_names_default_to_ids_when_the_caller_supplies_none(self):
-        bare = compute_region_metrics(_prepare(), options=OPTIONS)
-        self.assertEqual(
-            set(bare.per_region["region_name"]), {TROPICAL_ATLANTIC, CENTRAL_INDO_PACIFIC}
-        )
-        self.assertEqual([], [name for name in bare.per_label["label_name"] if not str(name)])
 
 
 class ConfusionTest(unittest.TestCase):

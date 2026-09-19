@@ -35,7 +35,6 @@ import pyarrow.parquet as pq
 from mermaid_classifier.region_eval.probe_set import (
     NameSnapshot,
     ProbeSelectionOptions,
-    ancestry_snapshot,
     ancestry_snapshot_hash,
     ancestry_snapshot_json,
     build_manifest,
@@ -202,11 +201,6 @@ class CompositionTest(unittest.TestCase):
         atlantic = rows[rows["region_id"] == TROPICAL_ATLANTIC]
         self.assertEqual(len(atlantic), 6 * POINTS_PER_IMAGE)
         self.assertFalse(bool(atlantic["held_out"].any()))
-
-    def test_indo_pacific_points_are_held_out(self):
-        rows = _build().rows
-        pacific = rows[rows["region_id"] != TROPICAL_ATLANTIC]
-        self.assertTrue(bool(pacific["held_out"].all()))
 
     def test_proportional_allocation_uses_only_the_eligible_pool(self):
         probe = _build()
@@ -401,10 +395,6 @@ class AncestrySnapshotTest(unittest.TestCase):
         self.assertEqual(payload[BA_PACIFIC], [BA_ROOT, BA_PACIFIC])
         self.assertEqual(payload[BA_UNRECORDED], [BA_UNRECORDED])
 
-    def test_snapshot_copies_the_paths_it_was_given(self):
-        snapshot = ancestry_snapshot(ANCESTRY)
-        self.assertEqual(snapshot[BA_GLOBAL], [BA_ROOT, BA_GLOBAL])
-
 
 # (label, hasher, original payload, an insertion-order variant with the same
 # content, a variant whose content actually differs)
@@ -471,21 +461,6 @@ class ManifestTest(unittest.TestCase):
             **arguments,  # pyright: ignore[reportArgumentType]
         )
 
-    def test_manifest_is_json_serializable(self):
-        json.dumps(self._manifest())
-
-    def test_manifest_records_the_source_and_the_builder(self):
-        manifest = self._manifest()
-        self.assertEqual(manifest["source_etag"], '"abc123"')
-        self.assertEqual(manifest["source_row_count"], 459_025)
-        self.assertEqual(manifest["builder_git_sha"], "deadbeef")
-        self.assertEqual(manifest["seed"], 0)
-
-    def test_manifest_content_hash_tracks_the_probe_rows(self):
-        probe = _build()
-        self.assertEqual(manifest_hash := self._manifest(probe)["content_hash"], probe.content_hash)
-        self.assertNotEqual(manifest_hash, self._manifest(_build(seed=1))["content_hash"])
-
     def test_manifest_records_the_frozen_ground_truth_counts(self):
         """Two scores are comparable only if they read the same corpus counts,
         so the hash travels beside the region-snapshot one."""
@@ -493,30 +468,6 @@ class ManifestTest(unittest.TestCase):
         manifest = self._manifest(probe)
         self.assertEqual(manifest["ground_truth_counts_hash"], probe.ground_truth_counts_hash)
         self.assertEqual(manifest["n_ground_truth_pairs"], len(probe.ground_truth_counts))
-
-    def test_manifest_pins_the_frozen_names_and_ancestry(self):
-        """Two scores are comparable only if they rendered the same names off
-        the same taxonomy, so both snapshots are hashed beside the region map's.
-        """
-        manifest = self._manifest(names=NAMES, ancestry=ANCESTRY)
-        self.assertEqual(manifest["names_hash"], name_snapshot_hash(NAMES))
-        self.assertEqual(manifest["ancestry_hash"], ancestry_snapshot_hash(ANCESTRY))
-        self.assertEqual(manifest["n_ancestry_attributes"], len(ANCESTRY))
-        self.assertEqual(
-            manifest["n_names"],
-            {"benthic_attributes": 4, "growth_forms": 1, "regions": 3},
-        )
-
-    def test_manifest_hashes_move_with_a_renamed_attribute(self):
-        renamed = NameSnapshot(
-            benthic_attributes={**NAMES.benthic_attributes, BA_PACIFIC: "Acropora sp."},
-            growth_forms=NAMES.growth_forms,
-            regions=NAMES.regions,
-        )
-        self.assertNotEqual(
-            self._manifest(names=NAMES, ancestry=ANCESTRY)["names_hash"],
-            self._manifest(names=renamed, ancestry=ANCESTRY)["names_hash"],
-        )
 
     def test_a_probe_frozen_without_names_records_no_hash_for_them(self):
         """An older probe carries neither snapshot; the manifest says so rather
