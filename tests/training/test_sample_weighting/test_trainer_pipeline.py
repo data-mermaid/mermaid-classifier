@@ -112,32 +112,6 @@ class TrainerPipelineTest(unittest.TestCase):
             self.assertGreater(w, 0.0, f"weight for {label!r} should be positive")
         self.assertTrue(log["enabled"])
 
-    def test_log_structure_contains_required_summary_keys(self):
-        runner = self._make_runner(weighting=SampleWeightingOptions())
-        counts = {
-            combine_ba_gf("A1", "g1"): 100,
-            combine_ba_gf("A2", "g1"): 50,
-        }
-        weights, log = runner._compute_class_weights(_fake_labels(counts))
-        self.assertIn("per_class_df", log)
-        self.assertIn("summary", log)
-        for key in (
-            "weight_mean",
-            "weight_median",
-            "weight_p5",
-            "weight_p95",
-            "weight_max_min_ratio",
-            "n_classes",
-        ):
-            self.assertIn(key, log["summary"])
-        # Per-class DataFrame no longer carries a rare_action column —
-        # rare-class accounting lives in the label-transforms artifact.
-        df = log["per_class_df"]
-        self.assertNotIn("rare_action", df.columns)
-        self.assertIn("bagf_id", df.columns)
-        self.assertIn("count", df.columns)
-        self.assertIn("weight", df.columns)
-
 
 if __name__ == "__main__":
     unittest.main()

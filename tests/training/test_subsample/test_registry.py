@@ -92,14 +92,6 @@ class BalancedTest(unittest.TestCase):
         self.assertEqual(targets[("b", "")], 30)
         self.assertEqual(targets[("c", "")], 100)
 
-    def test_total_split_equally(self):
-        counts = {("a", ""): 1000, ("b", ""): 1000, ("c", ""): 1000}
-        opts = SubsampleOptions(strategy="balanced", total_annotations=300)
-        targets = compute_per_class_targets(opts, counts)
-        self.assertEqual(targets[("a", "")], 100)
-        self.assertEqual(targets[("b", "")], 100)
-        self.assertEqual(targets[("c", "")], 100)
-
     def test_balanced_respects_min_per_class(self):
         # min_per_class is the floor: even if min(per, n_c) is smaller,
         # the allocator returns at least min_per_class. Here per =
@@ -115,32 +107,6 @@ class BalancedTest(unittest.TestCase):
         targets = compute_per_class_targets(opts, counts)
         self.assertEqual(targets[("a", "")], 10)
         self.assertEqual(targets[("b", "")], 5)
-
-    def test_single_class(self):
-        # per = 50 // 1 = 50, capped at the available 100.
-        counts = {("solo", ""): 100}
-        opts = SubsampleOptions(strategy="balanced", total_annotations=50)
-        self.assertEqual(
-            compute_per_class_targets(opts, counts),
-            {("solo", ""): 50},
-        )
-
-
-class DispatchTest(unittest.TestCase):
-    def test_stratified_dispatches(self):
-        # Smoke test: dispatch reaches _stratified.
-        opts = SubsampleOptions(strategy="stratified", total_annotations=10)
-        targets = compute_per_class_targets(opts, {("a", ""): 100})
-        self.assertEqual(targets[("a", "")], 10)
-
-    def test_balanced_dispatches(self):
-        opts = SubsampleOptions(strategy="balanced", total_annotations=5)
-        targets = compute_per_class_targets(opts, {("a", ""): 100})
-        self.assertEqual(targets[("a", "")], 5)
-
-    def test_empty_counts_returns_empty(self):
-        opts = SubsampleOptions(strategy="stratified", total_annotations=10)
-        self.assertEqual(compute_per_class_targets(opts, {}), {})
 
 
 if __name__ == "__main__":

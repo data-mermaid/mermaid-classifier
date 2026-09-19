@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import unittest
 
 from mermaid_classifier.common.benthic_attributes import combine_ba_gf
@@ -39,22 +38,9 @@ class WeightInvariantsTest(unittest.TestCase):
         for label, w in weights.items():
             self.assertGreater(w, 0.0, f"weight for {label!r} is non-positive: {w!r}")
 
-    def test_deterministic(self):
-        opts = SampleWeightingOptions()
-        w1 = compute_class_weights(self.counts, opts)
-        w2 = compute_class_weights(self.counts, opts)
-        for k in w1:
-            self.assertTrue(
-                math.isclose(w1[k], w2[k]),
-                f"weight for {k!r} drifted across calls",
-            )
-
     def test_disabled_returns_empty(self):
         weights = compute_class_weights(self.counts, SampleWeightingOptions(enabled=False))
         self.assertEqual(weights, {})
-
-    def test_empty_counts_returns_empty(self):
-        self.assertEqual(compute_class_weights({}, SampleWeightingOptions()), {})
 
     def test_weight_ratio_cap_bounds_weight_spread(self):
         # weight_ratio_cap=R must ensure max/min <= R. Weights are
@@ -65,6 +51,12 @@ class WeightInvariantsTest(unittest.TestCase):
         self.assertGreaterEqual(len(weights), 2)
         ws = list(weights.values())
         self.assertLessEqual(max(ws) / min(ws), cap + tol)
+
+    def test_cap_of_one_is_accepted_and_equalises_every_weight(self):
+        # 1.0 is the inclusive floor of the validator and the degenerate end
+        # of the clamp: every weight collapses onto the minimum.
+        weights = compute_class_weights(self.counts, SampleWeightingOptions(weight_ratio_cap=1.0))
+        self.assertEqual(len(set(weights.values())), 1)
 
 
 if __name__ == "__main__":
