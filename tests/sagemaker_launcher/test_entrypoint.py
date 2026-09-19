@@ -7,8 +7,7 @@ imports or hit AWS. Tests verify:
   * apply_env happens before the runner is imported (we observe this
     indirectly by patching the runner factory to capture os.environ at
     construction time)
-  * an exception in runner.run propagates to sys.exit(1) with the
-    traceback in log output
+  * an exception in runner.run propagates to sys.exit(1)
 """
 
 from __future__ import annotations

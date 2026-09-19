@@ -13,9 +13,11 @@ Each test bounds its own wait externally, in a background thread joined with
 a 5 s timeout: a missing socket timeout then surfaces as this external
 bound's own failure well before that ceiling, rather than as a hang that
 blocks the test runner for as long as it is allowed to run. Every call site
-`_HTTP_TIMEOUT_SECONDS` guards is exercised: the three library constructors,
-the mapping endpoint's first request, and the mapping endpoint's pagination
-follow-up.
+`_HTTP_TIMEOUT_SECONDS` guards is exercised: the BenthicAttributeLibrary and
+GrowthFormLibrary constructors, the mapping endpoint's first request, and the
+mapping endpoint's pagination follow-up. RegionLibrary needs no case of its
+own -- it and GrowthFormLibrary reach the network through the one
+ChoiceLibrary fetch the growth-form test already bounds.
 """
 
 import concurrent.futures

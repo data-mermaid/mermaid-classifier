@@ -1,6 +1,6 @@
 """Unit tests for region_eval/metrics.py.
 
-One 16-point fixture carries every case the rates have to separate. Expected
+One 18-point fixture carries every case the rates have to separate. Expected
 values are counted by hand off this table and written as k/n literals, so a
 rate that drifts fails against a number no code in the package produced:
 

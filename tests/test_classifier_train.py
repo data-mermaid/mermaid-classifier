@@ -4,10 +4,10 @@ classifier_train.py is a script, not a module; we import it by path. The tests
 mock the local AWS SSO step and the MLflowTrainingRunner factory so they neither
 hit AWS nor run real training, and verify that the local driver:
 
-  * loads a committed config dir, applies its env, builds the three option
-    dataclasses, and calls the runner exactly once with them;
-  * applies the config's env block before constructing the runner;
-  * defaults to the committed coralnet_top108_best config dir.
+  * loads a committed config dir and calls the runner once with options built
+    from it, identified by the manifest URI rather than a default that could
+    match by accident;
+  * defaults to a config dir that exists inside the repo.
 
 build_options() itself does no network I/O (it only constructs dataclasses from
 the YAML + sibling CSVs), so running it against the committed `example` config

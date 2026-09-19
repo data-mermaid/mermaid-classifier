@@ -179,8 +179,8 @@ class ReadMermaidDataTest(BaseTrainTest):
     def test_gfs_present_and_empty(self):
         """
         Test the following regarding no-GF annotations:
-        1. CoralNet annotations with no GF don't get dropped during the
-        empty-value normalization step. (This was a problem before.)
+        1. CoralNet annotations with no GF survive the empty-value
+        normalization step rather than being dropped by it.
         2. MERMAID annotations with no GF end up with a GF of '', empty string.
 
         And test alongside with-GF annotations.
@@ -469,9 +469,10 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
 
 class LazyLibraryTest(BaseTrainTest):
     """
-    The BA and GF libraries hit the MERMAID API in their __init__. Importing
-    the training modules (dataset/runner) must not trigger those network calls
-    (it used to, via module-level singletons), so unit tests can run offline.
+    The BA and GF libraries hit the MERMAID API in their __init__, so the
+    training modules (dataset/runner) reach them through cached accessors
+    rather than module-level singletons. Importing one must trigger no network
+    call, which is what lets the unit suite run offline.
     """
 
     def test_importing_training_modules_does_not_call_the_mermaid_api(self):

@@ -1,8 +1,8 @@
 """Characterization unit tests for common/csv_utils.py (CsvSpec / ColumnSpec).
 
 Uses a minimal concrete subclass defined in this module. All tests assert
-exact observed behavior — these are characterization tests intended to guard
-refactoring in issues #73 and #74.
+exact observed behavior, pinning which parsed value lands under which key so
+a rewrite of the header handling has to reproduce it.
 """
 
 import unittest

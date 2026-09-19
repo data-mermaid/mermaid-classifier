@@ -1,9 +1,11 @@
 """Unit tests for region_eval/score.py.
 
-Every test scores a real exported artifact -- a TorchScript head built from
-the shared calibrated-model fixture and loaded through the production
-`load_predictor` -- against a 25-point probe written to a temp dir in the
-layout `build_region_probe.py` emits. Nothing here reaches S3, the MERMAID
+Most tests score a real exported artifact -- a TorchScript head built from
+the shared calibrated-model fixture and reached through the production loader
+-- against a 25-point probe written to a temp dir in the layout
+`build_region_probe.py` emits. RatioIntervalTest and ModelSpecTest score
+nothing: they cover the report's interval arithmetic and the CLI's model-spec
+parser, both of which live here because their callers do. Nothing here reaches S3, the MERMAID
 API or the network: the feature cache is a local npz and the live region map
 arrives as an injected callable.
 

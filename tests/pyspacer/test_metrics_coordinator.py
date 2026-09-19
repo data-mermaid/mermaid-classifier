@@ -6,8 +6,8 @@ These tests characterize:
 1. Happy path: compute_and_log_all() completes, records ≥1 mlflow.log_metric call,
    and a known metric name (precision_macro) appears.
 2. Per-group error isolation: if one metric group raises, the coordinator catches it
-   and still logs metrics from other groups — this is the key invariant that
-   issue #73's registry refactor must preserve.
+   and still logs metrics from other groups — the invariant that lets
+   registry.py add a metric group as a one-line edit.
 3. Invalid context: if ctx.validate() fails, compute_and_log_all() returns early
    without raising and logs no metrics.
 
@@ -32,8 +32,9 @@ from pyspacer.metrics_test_helpers import (
 def _registry_with_failing_group(name: str):
     """Patch the metric registry so the named group's func raises when called.
 
-    Injects the failure at the registry seam (where the coordinator now looks
-    metric groups up) rather than patching an import in the coordinator module.
+    The failure goes in at the registry seam, which is where the coordinator
+    looks metric groups up, so the patch survives a change to how the
+    coordinator imports them.
     """
 
     def _raise(_ctx):

@@ -1,8 +1,8 @@
 """Characterization unit tests for common/duckdb_utils.py.
 
 Each TestCase covers one public function. All tests use in-memory DuckDB
-connections and assert exact observed behavior — these are characterization
-tests intended to guard refactoring in issues #73 and #74.
+connections and assert exact observed behavior, pinning the SQL each helper
+generates and the state it leaves behind so a rewrite has to reproduce both.
 """
 
 import unittest
