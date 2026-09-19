@@ -79,7 +79,6 @@ from mermaid_classifier.region_eval.report import (
     write_report,
 )
 from mermaid_classifier.region_eval.score import (
-    ModelScore,
     check_feature_coverage,
     load_probe,
     score_model,
@@ -350,13 +349,72 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False)
 
 
-class ScoreReportTest(unittest.TestCase):
+class ProbeTestCase(unittest.TestCase):
+    """A temp dir and the feature batch every probe fixture in this module
+    starts from. `_score` is here rather than on each subclass because the
+    three copies had disagreed on argument order, so `self._score(probe)`
+    meant different things depending on which class it was written in."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         _model, batch = make_calibrated_model()
         self.features = np.asarray(batch)[:N_POINTS]
+
+    def _score(self, probe=None, *, name="v1", seed=0, live_map=None):
+        """Score a freshly exported model against `probe`, or `self.probe`."""
+        model_pt, model_json = _export_model(self.root / f"model_{name}", seed=seed)
+        return score_model(
+            name,
+            model_pt_path=model_pt,
+            model_json_path=model_json,
+            probe=self.probe if probe is None else probe,
+            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
+            live_region_map_loader=_live_map() if live_map is None else live_map,
+            n_permutations=N_PERMUTATIONS,
+        )
+
+
+class WrittenProbeTestCase(ProbeTestCase):
+    """Adds a probe written to `self.probe_dir`, with its rows in `self.rows`."""
+
+    def setUp(self):
+        super().setUp()
+        self.probe_dir = self.root / "probe"
+        self.rows = _write_probe(self.probe_dir, self.features)
+
+    def _shrink_cache(self, n_drop: int) -> pd.DataFrame:
+        """Overwrite the probe's cache with `n_drop` fewer points, hashed
+        against the full row set the way a legitimately short cache is.
+        """
+        kept = self.rows.iloc[: len(self.rows) - n_drop].reset_index(drop=True)
+        write_feature_cache(
+            FeatureCache(
+                features=self.features[: len(kept)].astype(np.float32),
+                image_ids=tuple(kept["image_id"]),
+                point_ids=tuple(kept["point_id"]),
+                rows=np.asarray(kept["row"], dtype=np.int64),
+                cols=np.asarray(kept["col"], dtype=np.int64),
+                gt_labels=tuple(kept["gt_label"]),
+                region_ids=tuple(kept["region_id"]),
+                held_out=np.asarray(kept["held_out"], dtype=bool),
+                n_points_requested=len(self.rows),
+                n_points_missing_row_col=0,
+                n_points_missing_image=n_drop,
+                missing_image_ids=(),
+                n_points_missing_download_failed=0,
+                download_failed_image_ids=(),
+            ),
+            self.rows,
+            self.probe_dir / "probe_features.npz",
+        )
+        return kept
+
+
+class ScoreReportTest(ProbeTestCase):
+    def setUp(self):
+        super().setUp()
         self.rows = _write_probe(self.root / "probe", self.features)
         self.probe = load_probe(self.root / "probe")
 
@@ -371,18 +429,6 @@ class ScoreReportTest(unittest.TestCase):
         probe_dir = self.root / f"probe_{suffix}"
         _write_probe(probe_dir, self.features, **overrides)
         return load_probe(probe_dir)
-
-    def _score(self, name: str = "v1", *, seed: int = 0, live_map=None, probe=None):
-        model_pt, model_json = _export_model(self.root / f"model_{name}", seed=seed)
-        return score_model(
-            name,
-            model_pt_path=model_pt,
-            model_json_path=model_json,
-            probe=self.probe if probe is None else probe,
-            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
-            live_region_map_loader=_live_map() if live_map is None else live_map,
-            n_permutations=N_PERMUTATIONS,
-        )
 
     def test_scores_a_real_artifact_and_writes_the_report_files(self):
         """A missing output file, or a summary row without its denominator
@@ -530,7 +576,7 @@ class ScoreReportTest(unittest.TestCase):
         )
 
 
-class ProbeIntegrityTest(unittest.TestCase):
+class ProbeIntegrityTest(WrittenProbeTestCase):
     """What binds the parquet and the feature cache together.
 
     A probe dir rebuilt in place after the selection moved holds two
@@ -538,15 +584,6 @@ class ProbeIntegrityTest(unittest.TestCase):
     Nothing about the cache's shape says it is stale -- only the hash it
     carries of the rows it was built from does.
     """
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        _model, batch = make_calibrated_model()
-        self.features = np.asarray(batch)[:N_POINTS]
-        self.probe_dir = self.root / "probe"
-        self.rows = _write_probe(self.probe_dir, self.features)
 
     def _overwrite_cache(
         self, rows: pd.DataFrame, features: np.ndarray, *, hash_rows: pd.DataFrame | None = None
@@ -810,7 +847,7 @@ class ProbeIntegrityTest(unittest.TestCase):
         self.assertIsNone(manifest["probe"]["download_failed_image_ids"])
 
 
-class FeatureCoverageTest(unittest.TestCase):
+class FeatureCoverageTest(WrittenProbeTestCase):
     """How much of the requested probe actually made it into the cache.
 
     A cache short by a few images' points still loads -- that tolerance is
@@ -820,60 +857,12 @@ class FeatureCoverageTest(unittest.TestCase):
     `read_feature_cache` round-trip, and what it surfaces.
     """
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        _model, batch = make_calibrated_model()
-        self.features = np.asarray(batch)[:N_POINTS]
-        self.probe_dir = self.root / "probe"
-        self.rows = _write_probe(self.probe_dir, self.features)
-
-    def _shrink_cache(self, n_drop: int) -> pd.DataFrame:
-        """Overwrite the probe's cache with `n_drop` fewer points, hashed
-        against the full row set the way a legitimately short cache is.
-        """
-        kept = self.rows.iloc[: len(self.rows) - n_drop].reset_index(drop=True)
-        write_feature_cache(
-            FeatureCache(
-                features=self.features[: len(kept)].astype(np.float32),
-                image_ids=tuple(kept["image_id"]),
-                point_ids=tuple(kept["point_id"]),
-                rows=np.asarray(kept["row"], dtype=np.int64),
-                cols=np.asarray(kept["col"], dtype=np.int64),
-                gt_labels=tuple(kept["gt_label"]),
-                region_ids=tuple(kept["region_id"]),
-                held_out=np.asarray(kept["held_out"], dtype=bool),
-                n_points_requested=len(self.rows),
-                n_points_missing_row_col=0,
-                n_points_missing_image=n_drop,
-                missing_image_ids=(),
-                n_points_missing_download_failed=0,
-                download_failed_image_ids=(),
-            ),
-            self.rows,
-            self.probe_dir / "probe_features.npz",
-        )
-        return kept
-
     def _strip_n_points_requested(self) -> None:
         """Simulate a cache npz written before this field existed."""
         path = self.probe_dir / "probe_features.npz"
         archive = dict(np.load(path, allow_pickle=False))
         del archive["n_points_requested"]
         np.savez_compressed(path, **archive)
-
-    def _score(self, probe) -> ModelScore:
-        model_pt, model_json = _export_model(self.root / "model")
-        return score_model(
-            "v1",
-            model_pt_path=model_pt,
-            model_json_path=model_json,
-            probe=probe,
-            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
-            live_region_map_loader=_live_map(),
-            n_permutations=N_PERMUTATIONS,
-        )
 
     def test_load_probe_reads_back_n_points_requested(self):
         probe = load_probe(self.probe_dir)
@@ -917,17 +906,8 @@ class FeatureCoverageTest(unittest.TestCase):
         self.assertIsNone(manifest["probe"]["coverage"])
 
 
-class CheckFeatureCoverageTest(unittest.TestCase):
+class CheckFeatureCoverageTest(WrittenProbeTestCase):
     """`check_feature_coverage`, the function `--min-coverage` refuses through."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        _model, batch = make_calibrated_model()
-        self.features = np.asarray(batch)[:N_POINTS]
-        self.probe_dir = self.root / "probe"
-        self.rows = _write_probe(self.probe_dir, self.features)
 
     def test_refuses_a_cache_short_of_the_floor(self):
         probe = load_probe(self.probe_dir)
@@ -981,17 +961,11 @@ class CheckFeatureCoverageTest(unittest.TestCase):
         self.assertIn("99.0", "\n".join(logs.output))
 
 
-class MinCoverageCliTest(unittest.TestCase):
+class MinCoverageCliTest(WrittenProbeTestCase):
     """`scripts/evaluate_region_probe.py --min-coverage`, opt-in end to end."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        _model, batch = make_calibrated_model()
-        self.features = np.asarray(batch)[:N_POINTS]
-        self.probe_dir = self.root / "probe"
-        self.rows = _write_probe(self.probe_dir, self.features)
+        super().setUp()
         self.model_dir = self.root / "model"
         _export_model(self.model_dir)
         # main() takes score_model's default loader, which reads the live
@@ -1002,29 +976,6 @@ class MinCoverageCliTest(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-
-    def _shrink_cache(self, n_drop: int) -> None:
-        kept = self.rows.iloc[: len(self.rows) - n_drop].reset_index(drop=True)
-        write_feature_cache(
-            FeatureCache(
-                features=self.features[: len(kept)].astype(np.float32),
-                image_ids=tuple(kept["image_id"]),
-                point_ids=tuple(kept["point_id"]),
-                rows=np.asarray(kept["row"], dtype=np.int64),
-                cols=np.asarray(kept["col"], dtype=np.int64),
-                gt_labels=tuple(kept["gt_label"]),
-                region_ids=tuple(kept["region_id"]),
-                held_out=np.asarray(kept["held_out"], dtype=bool),
-                n_points_requested=len(self.rows),
-                n_points_missing_row_col=0,
-                n_points_missing_image=n_drop,
-                missing_image_ids=(),
-                n_points_missing_download_failed=0,
-                download_failed_image_ids=(),
-            ),
-            self.rows,
-            self.probe_dir / "probe_features.npz",
-        )
 
     def test_a_run_below_the_requested_floor_is_refused_naming_both_counts(self):
         self._shrink_cache(n_drop=5)
@@ -1100,7 +1051,7 @@ def _s3_objects(
     }
 
 
-class S3ProbeLoadingTest(unittest.TestCase):
+class S3ProbeLoadingTest(ProbeTestCase):
     """`load_probe` given an s3://bucket/prefix/ URI instead of a local dir.
 
     The stub never touches the network; it serves the same bytes a local
@@ -1109,11 +1060,7 @@ class S3ProbeLoadingTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        _model, batch = make_calibrated_model()
-        self.features = np.asarray(batch)[:N_POINTS]
+        super().setUp()
         self.probe_dir = self.root / "probe"
         _write_probe(self.probe_dir, self.features, counts=CORPUS_COUNTS)
 
@@ -1194,7 +1141,7 @@ class S3ProbeLoadingTest(unittest.TestCase):
             load_probe("s3://bucket/region_probe/v3/")
 
 
-class NameResolutionTest(unittest.TestCase):
+class NameResolutionTest(ProbeTestCase):
     """The names frozen with the probe, rendered into the artifacts.
 
     A table of UUIDs is one a scientist cannot act on without joining it by
@@ -1204,11 +1151,7 @@ class NameResolutionTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        _model, batch = make_calibrated_model()
-        self.features = np.asarray(batch)[:N_POINTS]
+        super().setUp()
         _write_probe(self.root / "probe", self.features, counts=CORPUS_COUNTS)
         self.probe = load_probe(self.root / "probe")
         model_pt, model_json = _export_model(self.root / "model")
@@ -1325,7 +1268,7 @@ class NameResolutionTest(unittest.TestCase):
         return load_probe(probe_dir)
 
 
-class DecisionStatisticsTest(unittest.TestCase):
+class DecisionStatisticsTest(ProbeTestCase):
     """The statistics that choose between the mitigations.
 
     A rate says how bad the problem is; these say what to do about it, and a
@@ -1334,28 +1277,12 @@ class DecisionStatisticsTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        _model, batch = make_calibrated_model()
-        self.features = np.asarray(batch)[:N_POINTS]
+        super().setUp()
         _write_probe(self.root / "probe", self.features, counts=CORPUS_COUNTS)
         self.probe = load_probe(self.root / "probe")
         self.score = self._score(self.probe)
         self.out_dir = self.root / "out"
         write_report(self.score, self.out_dir)
-
-    def _score(self, probe, name: str = "v1"):
-        model_pt, model_json = _export_model(self.root / f"model_{name}")
-        return score_model(
-            name,
-            model_pt_path=model_pt,
-            model_json_path=model_json,
-            probe=probe,
-            options=RegionMetricsOptions(n_resamples=N_RESAMPLES),
-            live_region_map_loader=_live_map(),
-            n_permutations=N_PERMUTATIONS,
-        )
 
     def _decisions(self):
         return _read_csv(self.out_dir / "decisions.csv").set_index(["statistic", "quantity"])
