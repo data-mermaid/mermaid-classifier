@@ -119,6 +119,11 @@ uv sync --extra training --extra sagemaker
 `setUpModule`, which unittest counts as a single skip however many tests it
 hides — so a short run is hard to tell from a full one by reading the summary.
 
+If you're working from a branch or stash created before this repo added
+`.gitattributes`, git renormalizes line endings on your next `git add` or
+checkout, which shows up as a large, unrelated diff. Run
+`git add --renormalize .` once to apply the normalization and clear the diff.
+
 ### Unit tests
 
 The suite is `unittest`, and it must run from the `tests` directory, which is
