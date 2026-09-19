@@ -143,14 +143,6 @@ def main(argv: list[str] | None = None) -> None:
             dataset_options, training_options, mlflow_options = config.build_options(
                 config_dir=config_dir
             )
-            # build_options imports mermaid_classifier.pyspacer.runner
-            # (and .dataset), whose module-level logging_config_for_script()
-            # call runs logging.config.dictConfig with
-            # disable_existing_loggers=True (the default), which marks any
-            # logger created before that dictConfig call as disabled.
-            # Re-enable this logger so stage markers after this point are
-            # still emitted.
-            logging.getLogger("sagemaker_train_entrypoint").disabled = False
             log.info("dataset_options: %s", dataset_options)
             log.info("training_options: %s", training_options)
             log.info("mlflow_options: %s", mlflow_options)

@@ -2,7 +2,7 @@
 
 ## Architecture
 
-`MetricsCoordinator` orchestrates all metric computation using a dispatcher pattern. It validates the `MetricsContext`, builds taxonomy caches, then conditionally calls specialized metric functions (calibration, classification, cover, probability, ranking, taxonomic). Each metric group returns a `MetricGroupResult` that can contain heterogeneous result types (scalars, figures, DataFrames, dicts).
+`MetricsCoordinator` orchestrates all metric computation using a dispatcher pattern. It validates the `MetricsContext`, builds taxonomy caches, then conditionally calls specialized metric functions (calibration, classification, cover, per_source, probability, ranking, taxonomic). Each metric group returns a `MetricGroupResult` that can contain heterogeneous result types (scalars, figures, DataFrames, dicts).
 
 ## Design Decisions
 
@@ -13,6 +13,8 @@
 **Hierarchical confusion matrix reordering**: `classification.py` reorders confusion matrix rows and columns by clustering normalized prediction profiles using cosine distance. This reveals block-diagonal structure where related classes cluster together, making the matrix more interpretable.
 
 **LCA-based error attribution**: `taxonomic.py` maps each misclassification to its lowest common ancestor in the BA hierarchy, grouping confusions by how deep in the taxonomy the prediction diverges from ground truth. This distinguishes "close" errors (e.g., two coral species) from "far" errors (e.g., coral vs. algae).
+
+**A metric group must not rely on raising**: `MetricsCoordinator` wraps every group in `except Exception: logger.warning(...)`, so an exception inside a group is swallowed and its metrics simply vanish behind a log line.
 
 ## Invariants
 

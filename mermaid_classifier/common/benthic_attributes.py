@@ -6,11 +6,17 @@ import json
 import operator
 import urllib.request
 from collections import defaultdict
+from typing import Any
 
 import pandas as pd
 
 # MERMAID API uses :: as the BA-GF separator.
 BAGF_SEP = "::"
+
+# A refused connection raises promptly on its own; this bounds the case a
+# firewalled or hung endpoint never would, so an interactive CLI degrades
+# instead of blocking indefinitely.
+_HTTP_TIMEOUT_SECONDS = 30
 
 
 def combine_ba_gf(
@@ -60,7 +66,8 @@ class BenthicAttributeLibrary:
 
     def __init__(self):
         download_response = urllib.request.urlopen(
-            "https://api.datamermaid.org/v1/benthicattributes/?limit=5000"
+            "https://api.datamermaid.org/v1/benthicattributes/?limit=5000",
+            timeout=_HTTP_TIMEOUT_SECONDS,
         )
         response_json = json.loads(download_response.read())
         self.raw_results = response_json["results"]
@@ -68,11 +75,14 @@ class BenthicAttributeLibrary:
         self.by_id = {}
         self.by_name = {}
         self.by_parent = defaultdict(list)
+        # Regions arrive with this one response, so the lookup is built eagerly.
+        self.region_ids_by_id: dict[str, frozenset[str]] = {}
 
         for result in self.raw_results:
             self.by_id[result["id"]] = result
             self.by_name[result["name"]] = result
             self.by_parent[result["parent"]].append(result)
+            self.region_ids_by_id[result["id"]] = frozenset(result["regions"] or ())
 
     def id_to_name(self, ba_id: str) -> str:
         if ba_id == "":
@@ -120,28 +130,65 @@ class BenthicAttributeLibrary:
         return children_ordered_by_name + children_results
 
 
-class GrowthFormLibrary:
+def _fetch_choices_response() -> list[dict[str, Any]]:
+    """One full download of the /v1/choices/ payload."""
+    download_response = urllib.request.urlopen(
+        "https://api.datamermaid.org/v1/choices/", timeout=_HTTP_TIMEOUT_SECONDS
+    )
+    return json.loads(download_response.read())
+
+
+@functools.cache
+def _cached_choices_response() -> list[dict[str, Any]]:
+    """Fetched once; get_growth_form_library() and get_region_library() each
+    read a different slice of this one response."""
+    return _fetch_choices_response()
+
+
+class ChoiceLibrary:
+    """
+    An id-to-name lookup for one named set in the MERMAID /v1/choices/
+    response (for example "growthforms" or "regions").
+    This is intended to be a singleton class.
+    """
+
+    def __init__(self, choice_set: str, *, _response: list[dict[str, Any]] | None = None):
+        response = _fetch_choices_response() if _response is None else _response
+        data = None
+        for item in response:
+            if item["name"] == choice_set:
+                data = item["data"]
+                break
+        if data is None:
+            raise ValueError(f"'{choice_set}' not found in /v1/choices/ response")
+        self.by_id = {entry["id"]: entry["name"] for entry in data}
+
+    def id_to_name(self, entry_id: str) -> str:
+        if entry_id == "":
+            return ""
+        return self.by_id[entry_id]
+
+
+class GrowthFormLibrary(ChoiceLibrary):
     """
     Information about MERMAID growth forms, primarily an id-to-name lookup.
     This is intended to be a singleton class.
     """
 
-    def __init__(self):
-        download_response = urllib.request.urlopen("https://api.datamermaid.org/v1/choices/")
-        response_json = json.loads(download_response.read())
-        data = None
-        for item in response_json:
-            if item["name"] == "growthforms":
-                data = item["data"]
-                break
-        if data is None:
-            raise ValueError("'growthforms' not found in /v1/choices/ response")
-        self.by_id = {gf["id"]: gf["name"] for gf in data}
+    def __init__(self, *, _response: list[dict[str, Any]] | None = None):
+        super().__init__("growthforms", _response=_response)
 
-    def id_to_name(self, gf_id: str) -> str:
-        if gf_id == "":
-            return ""
-        return self.by_id[gf_id]
+
+class RegionLibrary(ChoiceLibrary):
+    """
+    MERMAID region IDs and their names, from the /v1/choices/ region set.
+    The benthic attribute response carries region IDs and no names, so a
+    report that renders a region by name resolves it here.
+    This is intended to be a singleton class.
+    """
+
+    def __init__(self, *, _response: list[dict[str, Any]] | None = None):
+        super().__init__("regions", _response=_response)
 
 
 @functools.cache
@@ -160,7 +207,16 @@ def get_growth_form_library() -> GrowthFormLibrary:
     Lazily construct (and cache) the GF library singleton. See
     get_benthic_attribute_library().
     """
-    return GrowthFormLibrary()
+    return GrowthFormLibrary(_response=_cached_choices_response())
+
+
+@functools.cache
+def get_region_library() -> RegionLibrary:
+    """
+    Lazily construct (and cache) the region library singleton. See
+    get_benthic_attribute_library().
+    """
+    return RegionLibrary(_response=_cached_choices_response())
 
 
 @dataclasses.dataclass
@@ -242,12 +298,14 @@ class CoralNetMermaidMapping:
         }
 
     def _download_mapping(self):
-        endpoint_response = urllib.request.urlopen(self._endpoint)
+        endpoint_response = urllib.request.urlopen(self._endpoint, timeout=_HTTP_TIMEOUT_SECONDS)
         response_json = json.loads(endpoint_response.read())
         api_mapping = response_json["results"]
 
         while response_json["next"]:
-            endpoint_response = urllib.request.urlopen(response_json["next"])
+            endpoint_response = urllib.request.urlopen(
+                response_json["next"], timeout=_HTTP_TIMEOUT_SECONDS
+            )
             response_json = json.loads(endpoint_response.read())
             api_mapping.extend(response_json["results"])
 

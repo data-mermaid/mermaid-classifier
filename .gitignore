@@ -174,3 +174,9 @@ report_*.html
 
 # Ruff cache
 .ruff_cache/
+
+# Region probe builds (scripts/build_region_probe.py --out-dir)
+region_probe/
+
+# Region evaluation reports (scripts/evaluate_region_probe.py --out-dir)
+/region_eval/

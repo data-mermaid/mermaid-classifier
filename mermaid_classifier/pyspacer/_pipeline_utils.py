@@ -3,17 +3,20 @@ Pipeline utility helpers shared across the training pipeline modules.
 
 - section_profiling: context manager that records timing and memory usage
   for a named section of code.
-- download_features_parallel: parallel S3 feature-vector downloader.
+
+Importing this module attaches a console handler and a `train.log` file
+handler to the logger named "train", as a side effect of the module-scope
+`logging_config_for_script` call below. The parallel S3 feature-vector
+downloader, in ``mermaid_classifier.common.s3_utils``, carries no such side
+effect, which is what lets a lightweight consumer such as region-eval reach
+it on its own.
 """
 
-import concurrent.futures
-import os
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 import psutil
-from spacer.aws import get_s3_resource
 
 from mermaid_classifier.pyspacer.utils import logging_config_for_script
 
@@ -52,59 +55,3 @@ def section_profiling(profiled_sections: list[dict[str, object]], section_name: 
         f" Elapsed time = {section_profile['hms']},"
         f" Memory usage at end = {section_profile['memory_usage_at_end']}"
     )
-
-
-def download_features_parallel(
-    s3_keys: dict[tuple[str, str], str],
-    max_workers: int = 50,
-) -> set[tuple[str, str]]:
-    """
-    Download feature vectors from S3 in parallel.
-
-    Args:
-        s3_keys: Mapping of (bucket, key) → local_path for each file
-            to download.
-        max_workers: Number of concurrent download threads.
-
-    Returns:
-        Set of (bucket, key) tuples that failed to download.
-    """
-    total = len(s3_keys)
-    if total == 0:
-        return set()
-
-    logger.info(f"Downloading {total} feature vectors with {max_workers} workers...")
-
-    # Pre-create all unique parent directories.
-    unique_dirs = {os.path.dirname(local_path) for local_path in s3_keys.values()}
-    for d in unique_dirs:
-        os.makedirs(d, exist_ok=True)
-
-    failed: set[tuple[str, str]] = set()
-    succeeded = 0
-
-    def _download(item: tuple[tuple[str, str], str]) -> None:
-        (bucket, key), local_path = item
-        if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-            return
-        s3 = get_s3_resource()
-        part_path = local_path + ".part"
-        s3.Object(bucket, key).download_file(part_path)  # pyright: ignore[reportAttributeAccessIssue]  # boto3 S3 resource is untyped
-        os.rename(part_path, local_path)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_download, item): item for item in s3_keys.items()}
-        for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
-            (bucket, key), _local_path = futures[future]
-            try:
-                future.result()
-                succeeded += 1
-            except Exception as e:
-                failed.add((bucket, key))
-                logger.warning(f"Failed to download s3://{bucket}/{key}: {e}")
-            if i % 1000 == 0 or i == total:
-                logger.info(
-                    f"Download progress: {i}/{total} ({succeeded} ok, {len(failed)} failed)"
-                )
-
-    return failed

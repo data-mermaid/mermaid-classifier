@@ -16,6 +16,10 @@ def logging_config_for_script(name: str) -> logging.Logger:
     logging.config.dictConfig(
         {
             "version": 1,
+            # Loggers built before this call keep their handlers. Modules that
+            # configure at import time would otherwise silence every logger
+            # already created, including the ones reporting degraded state.
+            "disable_existing_loggers": False,
             "formatters": {
                 "default": {
                     "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",

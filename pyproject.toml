@@ -51,6 +51,11 @@ training = [
     # pyspacer uses scikit-learn, but we also use it directly for metrics.
     # Pinned in lockstep with PARITY_PROVEN_SKLEARN (see inference extra).
     "scikit-learn==1.5.2",
+    # Already a transitive dep via scikit-learn; used directly by
+    # pyspacer/metrics/classification.py for hierarchical clustering, whose
+    # output can shift across releases. Pinned to what uv.lock resolves so
+    # `uv lock --upgrade` cannot move report numbers unnoticed.
+    "scipy==1.17.1",
     # torch is already a transitive dep via pyspacer, but we import it
     # directly in torch_classifier.py so declare it here too. Declaring it
     # directly is also required for the [tool.uv.sources] CPU-wheel redirect

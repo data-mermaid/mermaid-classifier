@@ -7,11 +7,14 @@ validates feature vector availability, and produces pyspacer-ready
 train/ref/val splits.
 """
 
+import functools
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from contextlib import contextmanager
 from io import StringIO
+from typing import TextIO
 
 import duckdb
 import pandas as pd
@@ -25,17 +28,17 @@ from mermaid_classifier.common.benthic_attributes import (
     get_benthic_attribute_library,
     get_growth_form_library,
 )
+from mermaid_classifier.common.csv_utils import CsvSpec
 from mermaid_classifier.common.duckdb_utils import (
     duckdb_add_column,
     duckdb_grouped_rows,
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
-from mermaid_classifier.pyspacer._pipeline_utils import (
-    download_features_parallel,
-    section_profiling,
-)
+from mermaid_classifier.common.s3_utils import download_features_parallel
+from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
 from mermaid_classifier.pyspacer.label_specs import (
+    ImageExclusionFilter,
     LabelFilter,
     LabelRollupSpec,
 )
@@ -52,6 +55,18 @@ from mermaid_classifier.training.subsample import (
 )
 
 logger = logging_config_for_script("train")
+
+
+def _load_csv_spec[T: CsvSpec](path: str | None, factory: Callable[[TextIO], T]) -> T:
+    """A `CsvSpec` read from `path`, or the same type built from an empty CSV.
+
+    An unset path is the caller's "accept everything" default, not a file to
+    complain about missing.
+    """
+    if path:
+        with open(path) as csv_f:
+            return factory(csv_f)
+    return factory(StringIO(""))
 
 
 class TrainingDataset:
@@ -81,27 +96,21 @@ class TrainingDataset:
         # CoralNet data is defined by a manifest parquet (None disables it).
         self.coralnet_source_ids: list[str] = []
 
-        if options.label_rollup_spec_csv:
-            with open(options.label_rollup_spec_csv) as csv_f:
-                self.rollup_spec = LabelRollupSpec(csv_f)
-        else:
-            # Empty rollup-targets set, meaning nothing gets rolled up.
-            self.rollup_spec = LabelRollupSpec(StringIO(""))
+        self.rollup_spec = _load_csv_spec(options.label_rollup_spec_csv, LabelRollupSpec)
 
         if options.included_labels_csv and options.excluded_labels_csv:
             raise ValueError("Specify one of included labels or excluded labels, but not both.")
 
-        if options.included_labels_csv:
-            with open(options.included_labels_csv) as csv_f:
-                self.label_filter = LabelFilter(csv_f, inclusion=True)
-        elif options.excluded_labels_csv:
-            with open(options.excluded_labels_csv) as csv_f:
-                self.label_filter = LabelFilter(csv_f, inclusion=False)
-        else:
-            # No inclusion or exclusion set specified means we accept
-            # all labels.
-            # In other words, an empty exclusion set.
-            self.label_filter = LabelFilter(StringIO(""), inclusion=False)
+        # An empty exclusion set when neither is given, so every label
+        # is accepted.
+        self.label_filter = _load_csv_spec(
+            options.included_labels_csv or options.excluded_labels_csv,
+            functools.partial(LabelFilter, inclusion=bool(options.included_labels_csv)),
+        )
+
+        self.image_exclusion_filter = _load_csv_spec(
+            options.excluded_images_csv, ImageExclusionFilter
+        )
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
@@ -183,10 +192,25 @@ class TrainingDataset:
                 f"{img_after_filter:,}",
                 f"{img_after_rollup - img_after_filter:,}",
             )
+
+            # Remove any images excluded wholesale (e.g. a frozen
+            # evaluation probe's held-out set), regardless of label.
+            self.image_exclusion_filter.filter_in_duckdb(
+                duck_conn=self.duck_conn,
+                duck_table_name="annotations",
+            )
+            ann_after_exclusion, img_after_exclusion = _annotations_stats()
             logger.info(
-                "Rollups+filter retained %.1f%% of annotations, %.1f%% of unique images",
-                100.0 * ann_after_filter / max(ann_before, 1),
-                100.0 * img_after_filter / max(img_before, 1),
+                "After image exclusion: %s annotations (-%s), %s unique images (-%s)",
+                f"{ann_after_exclusion:,}",
+                f"{ann_after_filter - ann_after_exclusion:,}",
+                f"{img_after_exclusion:,}",
+                f"{img_after_filter - img_after_exclusion:,}",
+            )
+            logger.info(
+                "Rollups+filter+exclusion retained %.1f%% of annotations, %.1f%% of unique images",
+                100.0 * ann_after_exclusion / max(ann_before, 1),
+                100.0 * img_after_exclusion / max(img_before, 1),
             )
 
         if options.subsample is not None:
@@ -373,7 +397,7 @@ class TrainingDataset:
             query_start = "CREATE TABLE annotations AS"
         self.duck_conn.execute(
             query_start + f" SELECT"
-            f"  image_id, row, col,"
+            f"  CAST(image_id AS VARCHAR) AS image_id, row, col,"
             f"  benthic_attribute_id,"
             f"  COALESCE(growth_form_id, '') AS growth_form_id,"
             f" '{Sites.MERMAID.value}' AS site,"
@@ -669,7 +693,11 @@ class TrainingDataset:
             )
 
         if failed_keys:
-            logger.warning(f"{len(failed_keys)} feature vector download(s) failed.")
+            # The downloader's per-key warning lands on a different logger
+            # than train.log; naming the keys here reaches a post-mortem.
+            logger.warning(
+                f"{len(failed_keys)} feature vector download(s) failed: {sorted(failed_keys)}"
+            )
 
         with self.section_profiling("Building PySpacer labels"):
             # Build ImageLabels with filesystem DataLocations.
