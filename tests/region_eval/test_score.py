@@ -42,6 +42,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -992,6 +993,14 @@ class MinCoverageCliTest(unittest.TestCase):
         self.rows = _write_probe(self.probe_dir, self.features)
         self.model_dir = self.root / "model"
         _export_model(self.model_dir)
+        # main() takes score_model's default loader, which reads the live
+        # MERMAID API. The frozen map keeps the drift diagnostic offline.
+        patcher = mock.patch(
+            "mermaid_classifier.region_eval.score.get_benthic_attribute_library",
+            lambda: SimpleNamespace(region_ids_by_id=_live_map()()),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _shrink_cache(self, n_drop: int) -> None:
         kept = self.rows.iloc[: len(self.rows) - n_drop].reset_index(drop=True)

@@ -21,10 +21,14 @@ class SettingsOverride:
     until a call of disable().
 
     Example usage:
-    override = SettingsOverride(aws_anonymous=True, aws_region='ca-central-1')
+    override = SettingsOverride(aws_anonymous='True', aws_region='ca-central-1')
     override.enable()
     <some code that depends on the above settings>
     override.disable()
+
+    Values are set with setattr, which bypasses pydantic validation, so each
+    one must already be in the field's own type -- aws_anonymous is
+    Literal['False', 'True'], and production compares it as a string.
 
     Some parts are from
     https://rednafi.com/python/patch-pydantic-settings-in-pytest/
@@ -58,8 +62,10 @@ def override_settings(**kwargs):
     """
     override = SettingsOverride(**kwargs)
     override.enable()
-    yield
-    override.disable()
+    try:
+        yield
+    finally:
+        override.disable()
 
 
 class NoInitDataset(TrainingDataset):

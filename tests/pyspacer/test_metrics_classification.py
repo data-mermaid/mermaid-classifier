@@ -40,7 +40,7 @@ class ComputeConfusionMatricesTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1, 0, 1],
             est_indices=[0, 1, 1, 0],
-            classes=["a::", "b::"],
+            classes=["A1::", "B1::"],
         )
         result = compute_confusion_matrices(ctx)
 
@@ -60,7 +60,7 @@ class ComputeConfusionMatricesTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
-            classes=["a::", "b::"],
+            classes=["A1::", "B1::"],
         )
         result = compute_confusion_matrices(ctx)
 
@@ -82,7 +82,7 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
-            classes=["a::", "b::"],
+            classes=["A1::", "B1::"],
         )
         result = compute_precision_recall_f1(ctx)
 
@@ -107,7 +107,7 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
-            classes=["a::", "b::"],
+            classes=["A1::", "B1::"],
         )
         result = compute_precision_recall_f1(ctx)
 
@@ -129,7 +129,7 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[1, 1, 0, 0],
-            classes=["a::", "b::"],
+            classes=["A1::", "B1::"],
         )
         result = compute_precision_recall_f1(ctx)
 
@@ -153,7 +153,7 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1, 2, 2],
             est_indices=[0, 0, 1, 1, 2, 2],
-            classes=["a::", "b::", "c::"],
+            classes=["A1::", "B1::", "A2::"],
         )
         result = compute_balanced_accuracy_mcc(ctx)
 
@@ -168,7 +168,7 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[1, 1, 0, 0],
-            classes=["a::", "b::"],
+            classes=["A1::", "B1::"],
         )
         result = compute_balanced_accuracy_mcc(ctx)
 
@@ -183,7 +183,7 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
             est_indices=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            classes=["a::", "b::"],
+            classes=["A1::", "B1::"],
         )
         result = compute_balanced_accuracy_mcc(ctx)
 
@@ -207,13 +207,8 @@ class MetricsContextValidationTest(unittest.TestCase):
 
     def test_mismatched_label_ids_raises(self):
         """Class IDs not resolvable by ba_library should fail validation."""
-
-        class _BrokenBALibrary:
-            def bagf_id_to_name(self, bagf_id, gf_library):
-                raise KeyError(f"Unknown ID: {bagf_id}")
-
         val_results = make_val_results(gt_indices=[0], est_indices=[0], classes=["unknown::"])
-        ctx = self._make_ctx_with_val_results(val_results, ba_library=_BrokenBALibrary())
+        ctx = self._make_ctx_with_val_results(val_results)
         with self.assertRaises(MetricsContextError):
             ctx.validate()
 
@@ -222,7 +217,7 @@ class MetricsContextValidationTest(unittest.TestCase):
         ctx = _make_ctx(
             gt_indices=[0, 1],
             est_indices=[0, 1],
-            classes=["a::", "b::"],
+            classes=["A1::", "B1::"],
         )
         ctx.validate()  # Should not raise
 

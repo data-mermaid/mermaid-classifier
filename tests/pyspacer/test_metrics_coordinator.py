@@ -78,16 +78,10 @@ def _make_ctx() -> MetricsContext:
 
 def _make_bad_ctx() -> MetricsContext:
     """Build a context whose validate() will fail (unknown class in ba_library)."""
-
-    class _BadBALibrary:
-        def bagf_id_to_name(self, bagf_id, gf_library):
-            raise KeyError(f"unknown: {bagf_id}")
-
-    classes = ["UNKNOWN_CLASS::"]
-    val_results = make_val_results([0], [0], classes)
+    val_results = make_val_results([0], [0], ["UNKNOWN_CLASS::"])
     return MetricsContext(
         val_results=val_results,
-        ba_library=_BadBALibrary(),
+        ba_library=MockBALibrary(),
         gf_library=MockGFLibrary(),
         format_func=format_metric,
     )

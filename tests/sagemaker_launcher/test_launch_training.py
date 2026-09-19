@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -12,10 +13,15 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-# launch_training imports the SageMaker SDK at module level. That SDK is an
-# optional extra (`sagemaker`), deliberately excluded from the default test
-# install (`--extra pyspacer`), so skip this module entirely when it's absent.
-# Check `sagemaker.estimator` specifically: `sagemaker-mlflow` (a pyspacer-extra
+# Importing the SDK makes botocore resolve credentials, which probes the EC2
+# instance-metadata endpoint. These tests drive the SDK entirely through
+# MagicMock, so the probe is pure latency on a laptop and a real IMDS call on
+# an EC2 runner.
+os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
+
+# launch_training imports the SageMaker SDK at module level. That SDK lives in
+# the `sagemaker` extra, so skip this module entirely when it's absent.
+# Check `sagemaker.estimator` specifically: `sagemaker-mlflow` (a training-extra
 # dep) provides a partial `sagemaker` namespace without the full SDK.
 _HAS_SAGEMAKER = importlib.util.find_spec("sagemaker.estimator") is not None
 if _HAS_SAGEMAKER:

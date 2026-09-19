@@ -110,21 +110,15 @@ class ApplyEnvTest(unittest.TestCase):
 
 
 class BuildOptionsTest(unittest.TestCase):
-    """build_options() lazily imports pyspacer dataclasses and constructs them.
-
-    These tests DO import pyspacer (transitively). Skipped if the
-    pyspacer extras aren't installed.
-    """
+    """build_options() lazily imports pyspacer dataclasses and constructs them."""
 
     def test_build_options_produces_three_dataclasses(self):
-        try:
-            from mermaid_classifier.pyspacer.options import (
-                DatasetOptions,
-                MLflowOptions,
-                TrainingOptions,
-            )
-        except Exception:
-            self.skipTest("pyspacer extras not installed")
+        from mermaid_classifier.pyspacer.options import (
+            DatasetOptions,
+            MLflowOptions,
+            TrainingOptions,
+        )
+
         with TemporaryDirectory() as td:
             tmp = Path(td)
             (tmp / "rollups.csv").write_text("from_ba_id,from_gf_id,to_ba_id,to_gf_id\n")
