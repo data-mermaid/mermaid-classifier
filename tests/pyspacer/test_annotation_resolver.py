@@ -8,8 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
-
-from pyspacer._calibrated_model_fixture import make_calibrated_model
+from support.calibrated_model import make_calibrated_model
 
 
 class ResolveFilesystemDirectoryTest(unittest.TestCase):

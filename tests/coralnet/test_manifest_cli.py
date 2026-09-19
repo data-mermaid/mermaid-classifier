@@ -3,23 +3,17 @@
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import unittest
-from pathlib import Path
 
 import duckdb
 import pyarrow.parquet as pq
+from support.coralnet_tables import annotations_table, images_table
+from support.paths import add_scripts_to_path
 
-# Make scripts/ importable (same pattern as tests/pyspacer/test_build_feature_bucket.py).
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_DIR = REPO_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+add_scripts_to_path()
 
 from build_coralnet_manifest import main  # noqa: E402
-
-from coralnet.test_manifest import _annotations, _images  # noqa: E402
 
 
 class CliTest(unittest.TestCase):
@@ -28,9 +22,9 @@ class CliTest(unittest.TestCase):
         self.tmp = self.tmp_dir.name
         self.addCleanup(self.tmp_dir.cleanup)
         self.ann = os.path.join(self.tmp, "ann.parquet")
-        pq.write_table(_annotations(), self.ann)
+        pq.write_table(annotations_table(), self.ann)
         self.img = os.path.join(self.tmp, "img.parquet")
-        pq.write_table(_images(), self.img)
+        pq.write_table(images_table(), self.img)
         self.out = os.path.join(self.tmp, "manifest.parquet")
 
     def test_writes_manifest(self):

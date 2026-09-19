@@ -12,16 +12,15 @@ import csv
 import io
 import json
 import shutil
-import sys
 import tempfile
 import unittest
 import urllib.request
 from pathlib import Path
 from unittest import mock
 
-# Allow importing scripts/generate_training_config.py.
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from support.paths import add_scripts_to_path
+
+add_scripts_to_path()
 
 import generate_training_config as gtc  # noqa: E402
 

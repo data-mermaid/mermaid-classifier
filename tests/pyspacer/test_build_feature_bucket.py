@@ -21,10 +21,9 @@ from unittest import mock
 import pandas as pd
 
 # Make scripts/ importable.
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_DIR = REPO_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+from support.paths import add_scripts_to_path
+
+add_scripts_to_path()
 
 import build_feature_bucket as bfb  # noqa: E402
 

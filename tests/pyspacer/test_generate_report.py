@@ -7,16 +7,17 @@ import base64
 import struct
 
 # Adjust sys.path so we can import from scripts/.
-import sys
 import tempfile
 import unittest
 import zlib
 from pathlib import Path
 from unittest.mock import MagicMock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from support.paths import add_scripts_to_path
 
-from generate_report import (
+add_scripts_to_path()
+
+from generate_report import (  # noqa: E402
     _artifact_key,
     encode_png_as_base64,
     fetch_scalar_metrics,

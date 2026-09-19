@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+from support.calibrated_model import make_calibrated_model
 
 from mermaid_classifier.pyspacer.inference import (
     ManifestError,
@@ -16,7 +17,6 @@ from mermaid_classifier.pyspacer.inference import (
     export_artifact,
     load_predictor,
 )
-from pyspacer._calibrated_model_fixture import make_calibrated_model
 
 
 class ExportTest(unittest.TestCase):

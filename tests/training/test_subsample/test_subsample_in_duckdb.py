@@ -12,8 +12,8 @@ from __future__ import annotations
 import unittest
 
 import pandas as pd
-from pyspacer.test_train import override_settings
-from pyspacer.test_training_dataset_pipeline import _make_dataset
+from support.dataset import make_dataset
+from support.settings import override_settings
 
 from mermaid_classifier.training.subsample import SubsampleOptions
 
@@ -59,7 +59,7 @@ class SubsampleDeterminismTest(unittest.TestCase):
         self.addCleanup(self.override.__exit__, None, None, None)
 
     def _surviving_keys(self, threads: int, opts: SubsampleOptions) -> list[tuple]:
-        dataset = _make_dataset(self)
+        dataset = make_dataset(self)
         df = _synthetic_annotations()  # noqa: F841 — named in the DuckDB SQL below
         dataset.duck_conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
         dataset.duck_conn.execute(f"SET threads TO {threads}")

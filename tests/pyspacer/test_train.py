@@ -2,84 +2,16 @@ import importlib
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
 import pandas as pd
 from spacer.data_classes import DataLocation, ImageLabels
+from support.dataset import NoInitDataset
+from support.settings import SettingsOverride, override_settings
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
-from mermaid_classifier.pyspacer.dataset import TrainingDataset
-from mermaid_classifier.pyspacer.options import Artifacts, DatasetOptions, Sites
-from mermaid_classifier.pyspacer.settings import settings
-
-
-class SettingsOverride:
-    """
-    Override the specified Pydantic settings from a call of enable()
-    until a call of disable().
-
-    Example usage:
-    override = SettingsOverride(aws_anonymous='True', aws_region='ca-central-1')
-    override.enable()
-    <some code that depends on the above settings>
-    override.disable()
-
-    Values are set with setattr, which bypasses pydantic validation, so each
-    one must already be in the field's own type -- aws_anonymous is
-    Literal['False', 'True'], and production compares it as a string.
-
-    Some parts are from
-    https://rednafi.com/python/patch-pydantic-settings-in-pytest/
-    """
-
-    def __init__(self, **kwargs):
-        self.options = kwargs
-        super().__init__()
-
-    def enable(self):
-        # Make a copy of the original settings
-        self.original_settings = settings.model_copy()
-
-        # Patch the settings with kwargs
-        for key, val in self.options.items():
-            # Raise an error if kwargs contains a nonexistent setting
-            if not hasattr(settings, key):
-                raise ValueError(f"Unknown setting: {key}")
-            setattr(settings, key, val)
-
-    def disable(self):
-        # Restore the original settings
-        settings.__dict__.update(self.original_settings.__dict__)
-
-
-@contextmanager
-def override_settings(**kwargs):
-    """
-    Override the specified Pydantic settings for the duration of the
-    context manager.
-    """
-    override = SettingsOverride(**kwargs)
-    override.enable()
-    try:
-        yield
-    finally:
-        override.disable()
-
-
-class NoInitDataset(TrainingDataset):
-    """
-    init does a lot of stuff in TrainingDataset. When testing, we sometimes
-    just want access to the other methods of the class.
-    So here we make init barebones.
-    """
-
-    def __init__(self):
-        self._duck_conn = None
-        self.artifacts = Artifacts()
-        self._feature_temp_dir = None
-        self._feature_dir = "/tmp/mermaid_features_test"
+from mermaid_classifier.pyspacer.options import DatasetOptions, Sites
 
 
 class BaseTrainTest(unittest.TestCase):

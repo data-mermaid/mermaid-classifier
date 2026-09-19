@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from botocore.exceptions import ClientError
+from support.paths import add_scripts_to_path
 
-# Allow importing scripts/release_artifact.py (mirrors test_generate_training_config).
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+add_scripts_to_path()
 
 import release_artifact as ra  # noqa: E402
 
@@ -48,7 +46,7 @@ class ParseS3UriTest(unittest.TestCase):
 class ValidateArtifactTest(unittest.TestCase):
     def _export(self, tmp):
         """Export a real small artifact; return (model_pt, model_json)."""
-        from pyspacer._calibrated_model_fixture import make_calibrated_model
+        from support.calibrated_model import make_calibrated_model
 
         from mermaid_classifier.pyspacer.inference import export_artifact
 
@@ -187,7 +185,7 @@ class MainTest(unittest.TestCase):
         # A real exported pair the fetch seam will "return".
         self._tmp = tempfile.TemporaryDirectory()
         tmp = Path(self._tmp.name)
-        from pyspacer._calibrated_model_fixture import make_calibrated_model
+        from support.calibrated_model import make_calibrated_model
 
         from mermaid_classifier.pyspacer.inference import export_artifact
 

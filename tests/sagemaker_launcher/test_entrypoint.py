@@ -22,7 +22,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+from support.paths import REPO_ROOT
+
 ENTRYPOINT_PATH = REPO_ROOT / "scripts" / "sagemaker_train_entrypoint.py"
 
 

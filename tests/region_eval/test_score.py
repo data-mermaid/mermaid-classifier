@@ -38,7 +38,6 @@ Counts derived by hand off that table, and asserted as literals:
 import io
 import json
 import math
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,7 +47,10 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 from botocore.exceptions import ClientError
-from pyspacer._calibrated_model_fixture import make_calibrated_model
+from support.calibrated_model import make_calibrated_model
+
+# Allow importing scripts/evaluate_region_probe.py (mirrors test_release_artifact).
+from support.paths import add_scripts_to_path
 
 from mermaid_classifier.pyspacer.inference import export_artifact
 from mermaid_classifier.region_eval.decisions import RegionBlindBaseline
@@ -81,8 +83,7 @@ from mermaid_classifier.region_eval.score import (
     score_model,
 )
 
-# Allow importing scripts/evaluate_region_probe.py (mirrors test_release_artifact).
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+add_scripts_to_path()
 
 import evaluate_region_probe  # noqa: E402
 

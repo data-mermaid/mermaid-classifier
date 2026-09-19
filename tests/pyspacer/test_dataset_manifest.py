@@ -13,12 +13,13 @@ from unittest import mock
 
 import duckdb
 import pyarrow.parquet as pq
-from coralnet.test_manifest import _annotations, _images
+from support.coralnet_tables import annotations_table, images_table
+from support.dataset import NoInitDataset
+from support.settings import override_settings
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
 from mermaid_classifier.coralnet.manifest import build_manifest_relation, write_manifest
 from mermaid_classifier.pyspacer.options import DatasetOptions
-from pyspacer.test_train import NoInitDataset, override_settings
 
 _OPEN_DATA_COLUMNS = [
     "row",
@@ -56,9 +57,9 @@ class ManifestNormalizationTest(unittest.TestCase):
         self.addCleanup(self.tmp_dir.cleanup)
         tmp = self.tmp_dir.name
         ann = os.path.join(tmp, "a.parquet")
-        pq.write_table(_annotations(), ann)
+        pq.write_table(annotations_table(), ann)
         img = os.path.join(tmp, "i.parquet")
-        pq.write_table(_images(), img)
+        pq.write_table(images_table(), img)
         self.manifest = os.path.join(tmp, "m.parquet")
         write_manifest(build_manifest_relation(duckdb.connect(), ann, img), self.manifest)
 

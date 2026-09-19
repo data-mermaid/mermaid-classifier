@@ -9,10 +9,10 @@ removed in #61.)
 
 import ast
 import unittest
-from pathlib import Path
+
+from support.paths import REPO_ROOT
 
 # Repo root — two levels up from tests/pyspacer/.
-REPO_ROOT = Path(__file__).resolve().parents[2]
 SCANNED_DIRS = (REPO_ROOT / "mermaid_classifier", REPO_ROOT / "scripts")
 
 # Pickle-glue symbols that must never reach the train/eval/store path,

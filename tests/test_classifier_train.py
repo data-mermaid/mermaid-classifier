@@ -18,10 +18,10 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from support.paths import REPO_ROOT
+
 SCRIPT_PATH = REPO_ROOT / "scripts" / "classifier_train.py"
 EXAMPLE_CONFIG_DIR = REPO_ROOT / "sagemaker" / "configs" / "example"
 

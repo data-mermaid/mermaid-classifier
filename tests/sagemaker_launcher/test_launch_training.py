@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+from support.paths import add_scripts_to_path
+
+add_scripts_to_path()
 
 # Importing the SDK makes botocore resolve credentials, which probes the EC2
 # instance-metadata endpoint. These tests drive the SDK entirely through

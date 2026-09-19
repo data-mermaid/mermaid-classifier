@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import csv
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+from support.paths import add_scripts_to_path
 
-import launch_processing as lp  # type: ignore
+add_scripts_to_path()
+
+import launch_processing as lp  # type: ignore  # noqa: E402
 
 
 class ChunkSourcesTest(unittest.TestCase):
