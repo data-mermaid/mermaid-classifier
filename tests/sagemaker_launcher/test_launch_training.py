@@ -101,3 +101,30 @@ class BuildEstimatorKwargsTest(unittest.TestCase):
         )
         # YAML env preserved:
         self.assertEqual(kwargs["environment"]["MY_VAR"], "1")
+        # The container entrypoint shim dispatches on this.
+        self.assertEqual(
+            kwargs["environment"]["CONTAINER_ENTRYPOINT_SCRIPT"],
+            "scripts/sagemaker_train_entrypoint.py",
+        )
+
+    def test_a_yaml_env_block_cannot_redirect_the_container_entrypoint(self):
+        """CONTAINER_ENTRYPOINT_SCRIPT is what the container runs, so a job's
+        own env block must not be able to point it somewhere else."""
+        from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+
+        yaml_text = _minimal_yaml().replace(
+            '    MY_VAR: "1"',
+            '    MY_VAR: "1"\n    CONTAINER_ENTRYPOINT_SCRIPT: scripts/somewhere_else.py',
+        )
+        cfg = parse_run_config(yaml_text, kind="training", strict=False)
+        kwargs = lt.build_estimator_kwargs(
+            cfg=cfg,
+            run_id="mermaid-test-20260525T120000Z",
+            staging_bucket="dev-datamermaid-sm-data",
+            mlflow_uri="arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2",
+            sm_session=MagicMock(),
+        )
+        self.assertEqual(
+            kwargs["environment"]["CONTAINER_ENTRYPOINT_SCRIPT"],
+            "scripts/sagemaker_train_entrypoint.py",
+        )

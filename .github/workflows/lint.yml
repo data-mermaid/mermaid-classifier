@@ -39,7 +39,7 @@ jobs:
         # Real deps must be installed so basedpyright can resolve imports
         # (torch, pyspacer, scikit-learn, mlflow, duckdb, …).
         # --frozen fails CI if uv.lock is out of sync with pyproject.toml.
-        run: uv sync --frozen --extra training --group lint
+        run: uv sync --frozen --extra training --extra sagemaker --group lint
 
       - name: Check lockfile is in sync
         run: uv lock --check
