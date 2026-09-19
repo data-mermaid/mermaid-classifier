@@ -33,13 +33,15 @@ jobs:
           python-version: '3.12'
           enable-cache: true
 
-      - name: Install package with training extras
-        # The `training` extra carries the full test stack (it includes
-        # `[inference]`); this branch split the old `pyspacer` extra into
-        # `inference` + `training`.
+      - name: Install package with training and sagemaker extras
+        # `training` carries the full test stack and includes `inference`.
+        # `sagemaker` adds the SageMaker SDK, which `launch_training.py`
+        # imports at module scope: without it tests/sagemaker_launcher/
+        # test_launch_training.py skips itself and its coverage of
+        # expand_image_uri and build_estimator_kwargs is silently absent.
         # --frozen fails CI if uv.lock is out of sync with pyproject.toml,
         # rather than silently updating it. Keeps CI reproducible.
-        run: uv sync --frozen --extra training
+        run: uv sync --frozen --extra training --extra sagemaker
 
       - name: Run tests
         working-directory: tests

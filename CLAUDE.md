@@ -15,7 +15,9 @@ Python 3.12 (`.python-version`, `requires-python = ">=3.12"`). Use `uv`.
 ```bash
 uv sync --extra training          # full dev/test stack (superset of [inference])
 uv sync --extra inference         # serving-only: just pyspacer + pinned sklearn
-uv sync --frozen --extra training # what CI runs; fails if uv.lock is stale
+uv sync --extra training --extra sagemaker   # adds the SageMaker SDK, without
+                                  # which sagemaker_launcher/test_launch_training.py skips
+uv sync --frozen --extra training --extra sagemaker  # what CI runs; fails if uv.lock is stale
 
 # Tests — unittest, NOT pytest. Must run from the tests/ dir.
 cd tests && uv run python -m unittest -v
@@ -166,6 +168,12 @@ break the resulting cycle — more machinery than the separation buys.
 
 ## Conventions and gotchas
 
+- **A test package must not share a name with an installed dependency.**
+  The suite runs from `tests/`, which puts it on `sys.path`, so a
+  `tests/<name>/` package shadows `<name>` for the whole session. `tests/sagemaker/`
+  would shadow the SageMaker SDK, and a module that guards itself with
+  `find_spec` then skips silently even where the SDK is installed — which is
+  why the launcher's config tests live in `tests/sagemaker_launcher/`.
 - **`unittest -v <package>` silently runs 0 tests**: a bare package name
   (`region_eval`, `common`, …) exposes nothing to unittest's loader; name
   modules explicitly (`region_eval.test_metrics`). The full suite does

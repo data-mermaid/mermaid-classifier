@@ -46,7 +46,7 @@ This project uses [`uv`](https://docs.astral.sh/uv/). From a clone of the repo:
 | - | - |
 | Serving-only (load/run a trained classifier) | `uv sync --extra inference` |
 | Full training pipeline (superset of inference) | `uv sync --extra training` |
-| Exactly what CI installs (fails if `uv.lock` is stale) | `uv sync --frozen --extra training` |
+| Exactly what CI installs (fails if `uv.lock` is stale) | `uv sync --frozen --extra training --extra sagemaker` |
 
 The `inference` extra is intentionally minimal (just `pyspacer` + a pinned
 `scikit-learn`) so serving images stay light. `training` is a superset adding
