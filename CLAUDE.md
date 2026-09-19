@@ -174,6 +174,17 @@ break the resulting cycle — more machinery than the separation buys.
   would shadow the SageMaker SDK, and a module that guards itself with
   `find_spec` then skips silently even where the SDK is installed — which is
   why the launcher's config tests live in `tests/sagemaker_launcher/`.
+- **A new test package needs an `__init__.py`.** Discovery descends into
+  packages only, so a directory without one runs zero tests in the full suite
+  while `unittest <pkg>.<module>` still passes — green for its author and green
+  in CI, having executed nothing. `tests/test_suite_layout.py` fails if one is
+  missing.
+- **Shared fixtures live in `tests/support/`** — `paths` (repo root, and
+  putting `scripts/` on `sys.path`), `settings`, `dataset`, `calibrated_model`,
+  `coralnet_tables`. The rule is scope: a fixture used inside one test package
+  stays there (`pyspacer/metrics_test_helpers.py`, `region_eval/fixtures.py`),
+  and one crossing packages goes in `support/`. No test module imports from
+  another test module.
 - **`unittest -v <package>` silently runs 0 tests**: a bare package name
   (`region_eval`, `common`, …) exposes nothing to unittest's loader; name
   modules explicitly (`region_eval.test_metrics`). The full suite does
@@ -194,9 +205,13 @@ break the resulting cycle — more machinery than the separation buys.
   full set (`CORALNET_TRAIN_DATA_BUCKET`, `WEIGHTS_LOCATION`, `AWS_ANONYMOUS`,
   `MLFLOW_TRACKING_SERVER`, `SPACER_BATCH_SIZE`, …). `SPACER_BATCH_SIZE` is
   auto-derived from available RAM when unset.
-- **Test isolation**: `override_settings()` / `SettingsOverride` patch settings;
-  `NoInitDataset` bypasses the S3/API-hitting `TrainingDataset.__init__`;
-  `CoralNetMermaidMapping._download_mapping` is mocked.
+- **Test isolation**: `support.settings.override_settings()` /
+  `SettingsOverride` patch the settings singleton (always via the context
+  manager or `addCleanup`, since an unrestored override leaks into every later
+  test in the process); `support.dataset.NoInitDataset` bypasses the
+  S3/API-hitting `TrainingDataset.__init__`;
+  `CoralNetMermaidMapping._download_mapping` is mocked. The suite makes no
+  outbound network connections — anything new that would must be stubbed.
 - **Config dirs are repo-root-relative**: a committed training config is a
   `sagemaker/configs/<name>/` dir (`training_config.yaml` plus whichever of
   `sources.csv` / `rollups.csv` / `included_labels.csv` that run needs — the
