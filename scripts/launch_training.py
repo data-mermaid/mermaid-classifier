@@ -81,13 +81,13 @@ def build_estimator_kwargs(
 ) -> dict[str, Any]:
     job = cfg.job
     env = {
+        **job.env,
+        # Launcher-owned: sits after job.env so a YAML env block cannot
+        # redirect these. CONTAINER_ENTRYPOINT_SCRIPT is consumed by the
+        # container entrypoint shim (docker/jobs/training-entrypoint.sh) to
+        # dispatch to the named script (falls back to its default if unset).
         "MLFLOW_TRACKING_SERVER": mlflow_uri,
         "AWS_DEFAULT_REGION": REGION,
-        **job.env,
-        # Consumed by the container entrypoint shim
-        # (docker/jobs/training-entrypoint.sh) to dispatch to the named script,
-        # which falls back to its historic default if unset. Sits after
-        # job.env so a YAML env block cannot redirect the entrypoint.
         "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
     }
     kwargs = {

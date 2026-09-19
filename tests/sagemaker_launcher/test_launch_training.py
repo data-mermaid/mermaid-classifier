@@ -98,7 +98,9 @@ class BuildEstimatorKwargsTest(unittest.TestCase):
             kwargs["image_uri"],
             "554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-jobs:training-smoke",
         )
-        # MLflow URI is injected as env, NOT YAML-overridable.
+        # Environment carries the MLflow URI passed to build_estimator_kwargs;
+        # test_a_yaml_env_block_cannot_redirect_launcher_owned_env_keys covers
+        # that a YAML env block cannot override it.
         self.assertEqual(
             kwargs["environment"]["MLFLOW_TRACKING_SERVER"],
             "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2",
@@ -111,14 +113,18 @@ class BuildEstimatorKwargsTest(unittest.TestCase):
             "scripts/sagemaker_train_entrypoint.py",
         )
 
-    def test_a_yaml_env_block_cannot_redirect_the_container_entrypoint(self):
-        """CONTAINER_ENTRYPOINT_SCRIPT is what the container runs, so a job's
-        own env block must not be able to point it somewhere else."""
+    def test_a_yaml_env_block_cannot_redirect_launcher_owned_env_keys(self):
+        """CONTAINER_ENTRYPOINT_SCRIPT, MLFLOW_TRACKING_SERVER and
+        AWS_DEFAULT_REGION are the launcher's to set, so a job's own env
+        block must not be able to point any of them somewhere else."""
         from mermaid_classifier.sagemaker.launcher_config import parse_run_config
 
         yaml_text = _minimal_yaml().replace(
             '    MY_VAR: "1"',
-            '    MY_VAR: "1"\n    CONTAINER_ENTRYPOINT_SCRIPT: scripts/somewhere_else.py',
+            '    MY_VAR: "1"\n'
+            "    CONTAINER_ENTRYPOINT_SCRIPT: scripts/somewhere_else.py\n"
+            "    MLFLOW_TRACKING_SERVER: https://attacker.example/mlflow\n"
+            "    AWS_DEFAULT_REGION: us-west-2",
         )
         cfg = parse_run_config(yaml_text, kind="training", strict=False)
         kwargs = lt.build_estimator_kwargs(
@@ -132,3 +138,8 @@ class BuildEstimatorKwargsTest(unittest.TestCase):
             kwargs["environment"]["CONTAINER_ENTRYPOINT_SCRIPT"],
             "scripts/sagemaker_train_entrypoint.py",
         )
+        self.assertEqual(
+            kwargs["environment"]["MLFLOW_TRACKING_SERVER"],
+            "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2",
+        )
+        self.assertEqual(kwargs["environment"]["AWS_DEFAULT_REGION"], "us-east-1")
