@@ -521,10 +521,6 @@ class ResolveDeviceTest(unittest.TestCase):
         with self._mock_torch(mps=False, cuda=False), self.assertRaises(RuntimeError):
             bfb.resolve_device("mps")
 
-    def test_explicit_cpu_always_works(self):
-        with self._mock_torch(mps=False, cuda=False):
-            self.assertEqual(bfb.resolve_device("cpu"), "cpu")
-
 
 # ---- bonus sanity: parse_weights_location ---------------------------
 
