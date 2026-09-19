@@ -211,7 +211,10 @@ break the resulting cycle — more machinery than the separation buys.
   test in the process); `support.dataset.NoInitDataset` bypasses the
   S3/API-hitting `TrainingDataset.__init__`;
   `CoralNetMermaidMapping._download_mapping` is mocked. The suite makes no
-  outbound network connections — anything new that would must be stubbed.
+  outbound network connections, except DuckDB's `httpfs` extension install
+  fallback (`dataset.py`'s `duck_conn`, `build_coralnet_manifest.py`'s
+  `_configure_duckdb_s3`) when the extension isn't already installed locally —
+  anything new that would must be stubbed.
 - **Config dirs are repo-root-relative**: a committed training config is a
   `sagemaker/configs/<name>/` dir (`training_config.yaml` plus whichever of
   `sources.csv` / `rollups.csv` / `included_labels.csv` that run needs — the
