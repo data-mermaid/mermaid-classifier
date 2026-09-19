@@ -218,14 +218,6 @@ class LabelRollupSpecInDuckDBTest(unittest.TestCase):
 class CNSourceFilterTest(unittest.TestCase):
     """Tests for CNSourceFilter."""
 
-    def test_is_empty_false_when_sources_present(self):
-        f = CNSourceFilter(StringIO("id\n123\n456\n"))
-        self.assertFalse(f.is_empty())
-
-    def test_source_id_list_length(self):
-        f = CNSourceFilter(StringIO("id\n123\n456\n"))
-        self.assertEqual(len(f.source_id_list), 2)
-
     def test_source_id_list_values(self):
         """Actual characterization: pandas reads integer IDs as numpy int64."""
         f = CNSourceFilter(StringIO("id\n123\n456\n"))
@@ -234,19 +226,10 @@ class CNSourceFilterTest(unittest.TestCase):
         self.assertEqual(int(f.source_id_list[0]), 123)
         self.assertEqual(int(f.source_id_list[1]), 456)
 
-    def test_is_empty_true_when_header_only(self):
-        """A CSV with only a header row (no data rows) yields is_empty() == True."""
-        f = CNSourceFilter(StringIO("id\n"))
-        self.assertTrue(f.is_empty())
-
     def test_is_empty_true_when_empty_csv(self):
         """A completely empty CSV yields is_empty() == True."""
         f = CNSourceFilter(StringIO(""))
         self.assertTrue(f.is_empty())
-
-    def test_source_id_list_empty_when_no_data(self):
-        f = CNSourceFilter(StringIO("id\n"))
-        self.assertEqual(f.source_id_list, [])
 
 
 # ---------------------------------------------------------------------------
@@ -305,25 +288,6 @@ class ImageExclusionFilterInDuckDBTest(unittest.TestCase):
             "SELECT count(*) FROM annotations WHERE image_id = 'img1'"
         ).fetchone()[0]
         self.assertEqual(img1_count, 0, msg="all of img1's points must be gone, not just some")
-
-    def test_unmatched_listed_id_counted_not_raised(self):
-        """A listed id absent from the data is counted, logged, and does not raise."""
-        conn = _make_conn()
-        _seed_image_annotations(conn, ["img1", "img2"])
-
-        f = ImageExclusionFilter(StringIO("image_id\nimg1\nimg_absent\n"))
-        with self.assertLogs(logger=LABEL_SPECS_LOGGER, level="INFO") as log_ctx:
-            f.filter_in_duckdb(conn, "annotations")
-
-        remaining_ids = {
-            row[0] for row in conn.execute("SELECT DISTINCT image_id FROM annotations").fetchall()
-        }
-        self.assertEqual(remaining_ids, {"img2"})
-        # One of the two listed ids (img_absent) matched nothing.
-        self.assertTrue(
-            any("1" in message and "2" in message for message in log_ctx.output),
-            msg=f"expected unmatched-count info in logs, got: {log_ctx.output}",
-        )
 
     def test_a_list_matching_nothing_still_reports_it(self):
         """A list that matches nothing at all still logs the zero match

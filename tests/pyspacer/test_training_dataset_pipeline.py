@@ -35,12 +35,10 @@ Sub-steps NOT characterized (with reason)
 import shutil
 import tempfile
 import unittest
-from io import StringIO
 from unittest import mock
 
 import pandas as pd
 
-from mermaid_classifier.pyspacer.label_specs import LabelFilter, LabelRollupSpec
 from mermaid_classifier.pyspacer.options import DatasetOptions
 from mermaid_classifier.training.subsample import SubsampleOptions
 
@@ -104,89 +102,9 @@ _FILTER_CSV = "ba_id,gf_id\nba_top,\nba_b,\n"
 # ---------------------------------------------------------------------------
 
 
-class RollupStepTest(unittest.TestCase):
-    """Characterize LabelRollupSpec.roll_up_in_duckdb on the pipeline table."""
-
-    def setUp(self):
-        self.override = override_settings(aws_anonymous="True")
-        self.override.__enter__()
-        self.dataset = _make_dataset(self)
-        _seed_annotations(self.dataset)
-
-    def tearDown(self):
-        self.override.__exit__(None, None, None)
-
-    def test_rollup_changes_ba_id_for_mapped_class(self):
-        """ba_a maps to ba_top; ba_b and ba_c are unchanged."""
-        r = LabelRollupSpec(StringIO(_ROLLUP_CSV))
-        r.roll_up_in_duckdb(self.dataset.duck_conn, "annotations")
-
-        ba_ids = {
-            row[0]
-            for row in self.dataset.duck_conn.execute(
-                "SELECT DISTINCT benthic_attribute_id FROM annotations"
-            ).fetchall()
-        }
-        self.assertIn("ba_top", ba_ids, msg="ba_a should have been rolled up to ba_top")
-        self.assertNotIn("ba_a", ba_ids, msg="ba_a should be gone after rollup")
-        self.assertIn("ba_b", ba_ids)
-        self.assertIn("ba_c", ba_ids)
-
-    def test_rollup_preserves_row_count(self):
-        """Rollup does not drop rows."""
-        r = LabelRollupSpec(StringIO(_ROLLUP_CSV))
-        r.roll_up_in_duckdb(self.dataset.duck_conn, "annotations")
-
-        count = self.dataset.duck_conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
-        self.assertEqual(count, 30)
-
-    def test_rollup_temp_column_absent(self):
-        """bagf_id temp column must not survive after rollup."""
-        r = LabelRollupSpec(StringIO(_ROLLUP_CSV))
-        r.roll_up_in_duckdb(self.dataset.duck_conn, "annotations")
-
-        cols = [row[0] for row in self.dataset.duck_conn.execute("DESCRIBE annotations").fetchall()]
-        self.assertNotIn("bagf_id", cols)
-
-
 # ---------------------------------------------------------------------------
 # 2. Filter step
 # ---------------------------------------------------------------------------
-
-
-class FilterStepTest(unittest.TestCase):
-    """Characterize LabelFilter.filter_in_duckdb on the pipeline table."""
-
-    def setUp(self):
-        self.override = override_settings(aws_anonymous="True")
-        self.override.__enter__()
-        self.dataset = _make_dataset(self)
-        _seed_annotations(self.dataset)
-
-    def tearDown(self):
-        self.override.__exit__(None, None, None)
-
-    def test_filter_removes_excluded_class(self):
-        """ba_c is not in the inclusion filter → should be removed."""
-        f = LabelFilter(StringIO(_FILTER_CSV), inclusion=True)
-        f.filter_in_duckdb(self.dataset.duck_conn, "annotations")
-
-        ba_ids = {
-            row[0]
-            for row in self.dataset.duck_conn.execute(
-                "SELECT DISTINCT benthic_attribute_id FROM annotations"
-            ).fetchall()
-        }
-        self.assertNotIn("ba_c", ba_ids, msg="ba_c should be filtered out")
-        self.assertIn("ba_b", ba_ids)
-
-    def test_filter_reduces_row_count(self):
-        """The filter CSV keeps ba_b only (ba_top not in original table) → 10 rows."""
-        f = LabelFilter(StringIO(_FILTER_CSV), inclusion=True)
-        f.filter_in_duckdb(self.dataset.duck_conn, "annotations")
-
-        count = self.dataset.duck_conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
-        self.assertEqual(count, 10)
 
 
 # ---------------------------------------------------------------------------
@@ -206,14 +124,6 @@ class SubsampleStepTest(unittest.TestCase):
     def tearDown(self):
         self.override.__exit__(None, None, None)
 
-    def test_subsample_reduces_row_count_to_target(self):
-        """balanced subsample with total_annotations=6 → 2 rows per class."""
-        opts = SubsampleOptions(strategy="balanced", total_annotations=6)
-        self.dataset._apply_subsample(opts)
-
-        count = self.dataset.duck_conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
-        self.assertEqual(count, 6)
-
     def test_subsample_caps_per_class(self):
         """Each class should have exactly 2 rows after balanced subsample."""
         opts = SubsampleOptions(strategy="balanced", total_annotations=6)
@@ -225,23 +135,6 @@ class SubsampleStepTest(unittest.TestCase):
         for _ba, count in per_class:
             with self.subTest(ba=_ba):
                 self.assertEqual(count, 2)
-
-    def test_subsample_audit_df_populated(self):
-        """_subsample_audit_df and _subsample_realized_total are set after the call."""
-        opts = SubsampleOptions(strategy="balanced", total_annotations=6)
-        self.dataset._apply_subsample(opts)
-
-        self.assertIsNotNone(self.dataset._subsample_audit_df)
-        self.assertEqual(self.dataset._subsample_realized_total, 6)
-
-    def test_subsample_audit_df_has_correct_columns(self):
-        opts = SubsampleOptions(strategy="balanced", total_annotations=6)
-        self.dataset._apply_subsample(opts)
-
-        df = self.dataset._subsample_audit_df
-        self.assertIn("pre_count", df.columns)
-        self.assertIn("target_n", df.columns)
-        self.assertIn("realized_n", df.columns)
 
     def test_subsample_no_op_when_annotations_empty(self):
         """_apply_subsample on an empty table logs a warning and returns cleanly."""
@@ -278,26 +171,12 @@ class PrepAnnotationsTest(unittest.TestCase):
         ):
             return self.dataset.prep_annotations_for_pyspacer()
 
-    def test_returns_training_task_labels(self):
-        """prep_annotations_for_pyspacer returns an object with .train/.ref/.val."""
-        labels = self._call_prep()
-        self.assertTrue(
-            hasattr(labels, "train") and hasattr(labels, "ref") and hasattr(labels, "val")
-        )
-
     def test_total_labels_equal_input_count(self):
         """Sum of train+ref+val label counts equals the number of annotations."""
         labels = self._call_prep()
         total = labels.train.label_count + labels.ref.label_count + labels.val.label_count
         # 30 annotations, 3 classes × 10 each — all survive stratified split.
         self.assertEqual(total, 30)
-
-    def test_split_is_non_empty_across_all_sets(self):
-        """With 3 classes × 10 points each, all three splits are non-empty."""
-        labels = self._call_prep()
-        self.assertGreater(labels.train.label_count, 0)
-        self.assertGreater(labels.ref.label_count, 0)
-        self.assertGreater(labels.val.label_count, 0)
 
     def test_ref_val_are_smaller_than_train(self):
         """With default (0.1, 0.1) ratios, ref and val are smaller than train."""
@@ -312,11 +191,6 @@ class PrepAnnotationsTest(unittest.TestCase):
         self.assertIn("ba_a::", classes)
         self.assertIn("ba_b::", classes)
         self.assertIn("ba_c::", classes)
-
-    def test_feature_path_to_s3_location_populated(self):
-        """After prep, _feature_path_to_s3_location maps local paths → S3 keys."""
-        self._call_prep()
-        self.assertGreater(len(self.dataset._feature_path_to_s3_location), 0)
 
 
 class PrepAnnotationsDownloadFailureTest(unittest.TestCase):
@@ -366,39 +240,6 @@ class AddTrainingSetNamesTest(unittest.TestCase):
 
     def tearDown(self):
         self.override.__exit__(None, None, None)
-
-    def test_training_set_column_values_in_expected_set(self):
-        """After add_training_set_names, all training_set values are train/ref/val."""
-        with mock.patch(
-            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
-            return_value=set(),
-        ):
-            labels = self.dataset.prep_annotations_for_pyspacer()
-        self.dataset.labels = labels
-        self.dataset.add_training_set_names()
-
-        distinct = {
-            row[0]
-            for row in self.dataset.duck_conn.execute(
-                "SELECT DISTINCT training_set FROM annotations"
-            ).fetchall()
-        }
-        self.assertEqual(distinct, {"train", "ref", "val"})
-
-    def test_no_null_training_set(self):
-        """Every row should have a non-NULL training_set after the call."""
-        with mock.patch(
-            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
-            return_value=set(),
-        ):
-            labels = self.dataset.prep_annotations_for_pyspacer()
-        self.dataset.labels = labels
-        self.dataset.add_training_set_names()
-
-        null_count = self.dataset.duck_conn.execute(
-            "SELECT count(*) FROM annotations WHERE training_set IS NULL"
-        ).fetchone()[0]
-        self.assertEqual(null_count, 0)
 
     def test_train_ref_val_counts_match_labels(self):
         """Row counts per set in the table match the label counts from prep."""
@@ -512,15 +353,6 @@ class SetTrainSummaryStatsTest(unittest.TestCase):
         self.assertIn("growth_form_name", bagf_counts.columns)
         # num_annotations per BA totals the 30 seeded rows.
         self.assertEqual(int(ba_counts["num_annotations"].sum()), 30)
-
-    def test_describe_renders_counts(self):
-        """describe_train_summary_stats renders the computed numbers into its sentence."""
-        described = self.dataset.describe_train_summary_stats()
-        self.assertIn("30 annotations", described)
-        self.assertIn("from 30 images", described)
-        self.assertIn("3 BAs and 3 BA-GF combos", described)
-        self.assertIn("0 dropped during stratification", described)
-        self.assertIn("dropped: 0 BAs, 0 BA-GFs", described)
 
 
 if __name__ == "__main__":

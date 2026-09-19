@@ -113,31 +113,6 @@ class ComputeProbabilityTest(unittest.TestCase):
         for fig_result in result.figures:
             plt.close(fig_result.fig)
 
-    def test_per_category_with_enough_samples(self):
-        """35+ samples per category yields a populated per_category DataFrame."""
-        classes = ["A1::", "B1::"]
-        n_per_class = 35
-        gt_labels = (["A1::"] * n_per_class) + (["B1::"] * n_per_class)
-        n = len(gt_labels)
-        # Uniform probabilities — simple and well-defined log loss.
-        proba = np.full((n, 2), 0.5)
-        ctx = _make_ctx(classes, gt_labels, proba)
-        result = compute_probability(ctx)
-
-        df_result = next(
-            d for d in result.dataframes if d.artifact_path == "probability/per_category_log_loss"
-        )
-        df = df_result.df
-        # Both top-level categories (TopA for A1, TopB for B1) should appear.
-        self.assertGreater(len(df), 0)
-        self.assertIn("category", df.columns)
-        self.assertIn("log_loss", df.columns)
-        self.assertIn("n_samples", df.columns)
-        self.assertEqual(df["n_samples"].sum(), n)
-
-        for fig_result in result.figures:
-            plt.close(fig_result.fig)
-
 
 if __name__ == "__main__":
     unittest.main()

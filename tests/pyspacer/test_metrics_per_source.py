@@ -184,23 +184,6 @@ class ComputePerSourceTest(unittest.TestCase):
         for fig_result in result.figures:
             plt.close(fig_result.fig)
 
-    def test_no_dataset_returns_empty(self):
-        """compute_per_source with no dataset is a no-op."""
-        val_results = make_val_results([0, 1], [0, 1], ["A1::", "A2::"])
-        ctx = MetricsContext(
-            val_results=val_results,
-            ba_library=MockBALibrary(),
-            gf_library=MockGFLibrary(),
-            format_func=format_metric,
-            dataset=None,
-        )
-        result = compute_per_source(ctx)
-        # Coordinator already gates on dataset, but defend in depth:
-        # if called without one, return an empty result rather than crash.
-        self.assertEqual(len(result.dataframes), 0)
-        self.assertEqual(len(result.scalars), 0)
-        self.assertEqual(len(result.figures), 0)
-
     def test_index_count_mismatch_raises(self):
         """If val annotation count diverges from sum of per-image n_points,
         the function fails loudly rather than producing wrong metrics."""

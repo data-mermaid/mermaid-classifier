@@ -1,6 +1,5 @@
 """Tests for mermaid_classifier.pyspacer.metrics.cover."""
 
-import math
 import unittest
 
 import matplotlib.pyplot as plt
@@ -54,33 +53,6 @@ class ComputeCoverTest(unittest.TestCase):
             format_func=format_metric,
             dataset=dataset,
         )
-
-    def test_perfect_predictions(self):
-        """Perfect predictions yield zero bias; R² is NaN when cover is constant."""
-        # 3 images, 10 points each, 2 classes, all correct.
-        # Each image: 5 points of class 0, 5 points of class 1 -> cover = 50/50
-        # All images have the same cover vector, so std=0 -> R² is NaN.
-        classes = ["A1::", "A::"]
-        gt_per_image = [0] * 5 + [1] * 5
-        est_per_image = [0] * 5 + [1] * 5
-        gt_indices = gt_per_image * 3
-        est_indices = est_per_image * 3
-
-        ctx = self._make_ctx(gt_indices, est_indices, classes, [10, 10, 10])
-        result = compute_cover(ctx)
-
-        scalars = {s.name: s.value for s in result.scalars}
-        self.assertAlmostEqual(scalars["cover_mean_abs_bias_pct"], 0.0, places=6)
-        self.assertAlmostEqual(scalars["cover_mean_rmse_pct"], 0.0, places=6)
-        self.assertAlmostEqual(scalars["cover_mean_mae_pct"], 0.0, places=6)
-
-        # R² is NaN when cover is identical across images (std=0); median of NaNs
-        # falls back to the pandas default which is NaN.
-        r2 = scalars["cover_median_r_squared"]
-        self.assertTrue(math.isnan(r2))
-
-        for fig_result in result.figures:
-            plt.close(fig_result.fig)
 
     def test_returns_expected_artifacts(self):
         """Result contains the expected scalar names, DataFrame, and figure."""

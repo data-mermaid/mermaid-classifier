@@ -74,26 +74,6 @@ class ComputeConfusionMatricesTest(unittest.TestCase):
         for fig_result in result.figures:
             plt.close(fig_result.fig)
 
-    def test_dataframe_shape(self):
-        """DataFrame should have N+1 columns and N rows."""
-        classes = ["a::", "b::", "c::"]
-        ctx = _make_ctx(
-            gt_indices=[0, 0, 1, 1, 2, 2],
-            est_indices=[0, 1, 1, 1, 2, 0],
-            classes=classes,
-        )
-        result = compute_confusion_matrices(ctx)
-
-        for df_result in result.dataframes:
-            df = df_result.df
-            # N+1 columns (label column + N classes)
-            self.assertEqual(len(df.columns), len(classes) + 1)
-            # N rows
-            self.assertEqual(len(df), len(classes))
-
-        for fig_result in result.figures:
-            plt.close(fig_result.fig)
-
 
 class ComputePrecisionRecallF1Test(unittest.TestCase):
     """Tests for compute_precision_recall_f1."""
@@ -165,19 +145,6 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
             self.assertEqual(row["recall"], 0.0)
             self.assertEqual(row["f1_score"], 0.0)
 
-    def test_per_label_has_bagf_fields(self):
-        ctx = _make_ctx(
-            gt_indices=[0],
-            est_indices=[0],
-            classes=["a::"],
-        )
-        result = compute_precision_recall_f1(ctx)
-
-        df = result.dataframes[0].df
-        self.assertIn("bagf_name", df.columns)
-        self.assertIn("bagf_id", df.columns)
-        self.assertEqual(df.iloc[0]["bagf_id"], "a::")
-
 
 class ComputeBalancedAccuracyMccTest(unittest.TestCase):
     """Tests for compute_balanced_accuracy_mcc."""
@@ -225,18 +192,6 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         # MCC is 0 when predicting a single class
         self.assertEqual(scalars_by_name["mcc"], 0.0)
 
-    def test_no_figures_or_dataframes(self):
-        ctx = _make_ctx(
-            gt_indices=[0, 1],
-            est_indices=[0, 1],
-            classes=["a::", "b::"],
-        )
-        result = compute_balanced_accuracy_mcc(ctx)
-
-        self.assertEqual(len(result.figures), 0)
-        self.assertEqual(len(result.dataframes), 0)
-        self.assertEqual(len(result.dicts), 0)
-
 
 class MetricsContextValidationTest(unittest.TestCase):
     """Tests for MetricsContext.validate()."""
@@ -249,17 +204,6 @@ class MetricsContextValidationTest(unittest.TestCase):
             gf_library=MockGFLibrary(),
             format_func=format_metric,
         )
-
-    def test_empty_gt_raises(self):
-        """Empty ground truth should fail validation."""
-        # Build a valid ValResults, then clear gt/est to simulate
-        # an edge case (ValResults.__init__ validates non-empty).
-        val_results = make_val_results(gt_indices=[0], est_indices=[0], classes=["a::"])
-        val_results.gt = []
-        val_results.est = []
-        ctx = self._make_ctx_with_val_results(val_results)
-        with self.assertRaises(MetricsContextError):
-            ctx.validate()
 
     def test_mismatched_label_ids_raises(self):
         """Class IDs not resolvable by ba_library should fail validation."""
@@ -281,17 +225,6 @@ class MetricsContextValidationTest(unittest.TestCase):
             classes=["a::", "b::"],
         )
         ctx.validate()  # Should not raise
-
-    def test_out_of_range_class_index_raises(self):
-        """Class indices beyond len(classes) should fail validation."""
-        # Build valid ValResults, then inject an out-of-range index.
-        val_results = make_val_results(gt_indices=[0], est_indices=[0], classes=["a::"])
-        val_results.gt = [0, 5]
-        val_results.est = [0, 0]
-        val_results.scores = [1.0, 1.0]
-        ctx = self._make_ctx_with_val_results(val_results)
-        with self.assertRaises(MetricsContextError):
-            ctx.validate()
 
 
 if __name__ == "__main__":

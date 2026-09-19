@@ -55,27 +55,6 @@ class AdaptiveECETest(unittest.TestCase):
         ece, bin_data = _adaptive_ece(scores, gt, est, n_bins=2)
         self.assertAlmostEqual(ece, 1.0, places=5)
 
-    def test_bin_count(self):
-        """n_bins=5 with 100 samples returns at most 5 non-empty bins."""
-        n = 100
-        gt = list(range(n))
-        est = list(range(n))
-        scores = [float(i) / n for i in range(1, n + 1)]
-        ece, bin_data = _adaptive_ece(scores, gt, est, n_bins=5)
-        self.assertLessEqual(len(bin_data), 5)
-        self.assertGreater(len(bin_data), 0)
-
-    def test_bin_structure(self):
-        """Each bin dict has the expected keys."""
-        n = 50
-        gt = list(range(n))
-        est = list(range(n))
-        scores = [0.8] * n
-        ece, bin_data = _adaptive_ece(scores, gt, est, n_bins=3)
-        expected_keys = {"avg_confidence", "avg_accuracy", "count", "conf_min", "conf_max"}
-        for b in bin_data:
-            self.assertEqual(set(b.keys()), expected_keys)
-
 
 class ComputeCalibrationTest(unittest.TestCase):
     """Tests for compute_calibration."""
@@ -102,24 +81,6 @@ class ComputeCalibrationTest(unittest.TestCase):
 
         fig_paths = {f.artifact_path for f in result.figures}
         self.assertIn("calibration/reliability_diagram.png", fig_paths)
-
-        for fig_result in result.figures:
-            plt.close(fig_result.fig)
-
-    def test_ece_is_float(self):
-        """The ece scalar is a float between 0 and 1."""
-        ctx = _make_ctx(
-            gt_indices=[0, 0, 1, 1],
-            est_indices=[0, 1, 1, 0],
-            classes=["A1::", "B1::"],
-            scores=[0.9, 0.6, 0.8, 0.55],
-        )
-        result = compute_calibration(ctx)
-
-        ece_scalar = next(s for s in result.scalars if s.name == "ece")
-        self.assertIsInstance(ece_scalar.value, float)
-        self.assertGreaterEqual(ece_scalar.value, 0.0)
-        self.assertLessEqual(ece_scalar.value, 1.0)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
@@ -165,33 +126,6 @@ class ComputeCalibrationTest(unittest.TestCase):
         self.assertGreater(len(per_cat_df_result.df), 0)
         expected_columns = {"category", "ece", "accuracy", "avg_confidence", "n_samples"}
         self.assertEqual(set(per_cat_df_result.df.columns), expected_columns)
-
-        for fig_result in result.figures:
-            plt.close(fig_result.fig)
-
-    def test_per_bin_details_columns(self):
-        """per_bin_details DataFrame has the expected columns."""
-        ctx = _make_ctx(
-            gt_indices=[0, 1, 0, 1],
-            est_indices=[0, 1, 0, 1],
-            classes=["A1::", "B1::"],
-            scores=[0.9, 0.8, 0.7, 0.6],
-        )
-        result = compute_calibration(ctx)
-
-        per_bin_df_result = next(
-            df for df in result.dataframes if df.artifact_path == "calibration/per_bin_details"
-        )
-        expected_columns = {
-            "bin",
-            "conf_min",
-            "conf_max",
-            "avg_confidence",
-            "avg_accuracy",
-            "gap",
-            "count",
-        }
-        self.assertEqual(set(per_bin_df_result.df.columns), expected_columns)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)

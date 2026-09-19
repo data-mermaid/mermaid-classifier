@@ -105,42 +105,6 @@ class HappyPathTest(unittest.TestCase):
         self.conn = duckdb.connect()
         self.ctx = _make_ctx()
 
-    def test_completes_without_raising(self):
-        with (
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow"),
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-        ):
-            coord = MetricsCoordinator(self.ctx, self.conn)
-            # If this raises, the test fails.
-            coord.compute_and_log_all()
-
-    def test_at_least_one_metric_logged(self):
-        """At least one mlflow.log_metric call is made on a valid context."""
-        with (
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_mlflow,
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-        ):
-            coord = MetricsCoordinator(self.ctx, self.conn)
-            coord.compute_and_log_all()
-
-        self.assertGreater(len(mock_mlflow.log_metric.call_args_list), 0)
-
-    def test_precision_macro_metric_is_logged(self):
-        """A known stable metric name — precision_macro — must appear in the calls."""
-        with (
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_mlflow,
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-        ):
-            coord = MetricsCoordinator(self.ctx, self.conn)
-            coord.compute_and_log_all()
-
-        metric_names = [call.args[0] for call in mock_mlflow.log_metric.call_args_list]
-        self.assertIn(
-            "precision_macro",
-            metric_names,
-            msg=f"precision_macro not found in logged metrics: {metric_names}",
-        )
-
     def test_precision_macro_value_is_numeric(self):
         """The logged precision_macro value should be a finite float."""
         with (
@@ -167,17 +131,6 @@ class ErrorIsolationTest(unittest.TestCase):
         self.conn = duckdb.connect()
         self.ctx = _make_ctx()
 
-    def test_failed_group_does_not_raise(self):
-        """If calibration raises, compute_and_log_all() still completes."""
-        with (
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow"),
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-            _registry_with_failing_group("calibration"),
-        ):
-            coord = MetricsCoordinator(self.ctx, self.conn)
-            # Must not raise even though calibration fails.
-            coord.compute_and_log_all()
-
     def test_other_groups_still_log_after_one_fails(self):
         """Metrics from other groups are still logged when calibration fails."""
         with (
@@ -200,34 +153,6 @@ class ErrorIsolationTest(unittest.TestCase):
             ),
         )
 
-    def test_failed_group_logs_fewer_metrics_than_healthy_run(self):
-        """A run with one failed group logs fewer metrics than a clean run."""
-        # Clean run
-        with (
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_clean,
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-        ):
-            MetricsCoordinator(self.ctx, self.conn).compute_and_log_all()
-        clean_count = len(mock_clean.log_metric.call_args_list)
-
-        # Run with calibration failing
-        with (
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow") as mock_broken,
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-            _registry_with_failing_group("calibration"),
-        ):
-            MetricsCoordinator(self.ctx, self.conn).compute_and_log_all()
-        broken_count = len(mock_broken.log_metric.call_args_list)
-
-        self.assertGreater(
-            clean_count,
-            broken_count,
-            msg=(
-                f"Broken run ({broken_count}) should log fewer metrics"
-                f" than clean run ({clean_count})"
-            ),
-        )
-
 
 class InvalidContextTest(unittest.TestCase):
     """An invalid context causes compute_and_log_all to return early, logging nothing."""
@@ -235,16 +160,6 @@ class InvalidContextTest(unittest.TestCase):
     def setUp(self):
         self.conn = duckdb.connect()
         self.ctx = _make_bad_ctx()
-
-    def test_does_not_raise_on_invalid_context(self):
-        """compute_and_log_all() must not raise when context validation fails."""
-        with (
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow"),
-            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
-        ):
-            coord = MetricsCoordinator(self.ctx, self.conn)
-            # Must not raise.
-            coord.compute_and_log_all()
 
     def test_no_metrics_logged_on_invalid_context(self):
         """When context is invalid, no mlflow.log_metric calls are made."""

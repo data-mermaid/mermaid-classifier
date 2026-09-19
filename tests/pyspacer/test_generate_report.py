@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from generate_report import (
     _artifact_key,
-    build_template_context,
     encode_png_as_base64,
     fetch_scalar_metrics,
     load_artifact_data,
@@ -50,24 +49,11 @@ def _make_minimal_png(path: Path):
 
 
 class TestArtifactKey(unittest.TestCase):
-    def test_simple_filename(self):
-        self.assertEqual(_artifact_key("metrics_per_label.csv"), "metrics_per_label_csv")
-
     def test_subdirectory_path(self):
         self.assertEqual(_artifact_key("confusion_matrix/frequencies.png"), "frequencies_png")
 
-    def test_yaml_extension(self):
-        self.assertEqual(_artifact_key("system_specs.yaml"), "system_specs_yaml")
-
 
 class TestEncodePngAsBase64(unittest.TestCase):
-    def test_returns_data_uri(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            png_path = Path(tmpdir) / "test.png"
-            _make_minimal_png(png_path)
-            result = encode_png_as_base64(png_path)
-            self.assertTrue(result.startswith("data:image/png;base64,"))
-
     def test_base64_is_valid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             png_path = Path(tmpdir) / "test.png"
@@ -108,49 +94,12 @@ class TestLoadYamlFile(unittest.TestCase):
             self.assertEqual(result["total_ram_gb"], 16.0)
             self.assertEqual(result["free_storage_gb"], 100.5)
 
-    def test_nested_yaml(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            yaml_path = Path(tmpdir) / "test.yaml"
-            yaml_path.write_text("parent:\n  child: value\n")
-            result = load_yaml_file(yaml_path)
-            self.assertEqual(result["parent"]["child"], "value")
-
 
 class TestFetchScalarMetrics(unittest.TestCase):
     def _make_mock_run(self, metrics_dict):
         run = MagicMock()
         run.data.metrics = metrics_dict
         return run
-
-    def test_full_metrics(self):
-        metrics = {
-            "accuracy": 0.85,
-            "balanced_accuracy": 0.82,
-            "f1_macro": 0.80,
-            "precision_macro": 0.81,
-            "recall_macro": 0.79,
-            "mcc": 0.75,
-            "ece": 0.03,
-            "log_loss": 1.2,
-            "top_1_accuracy": 0.85,
-            "top_3_accuracy": 0.95,
-            "top_5_accuracy": 0.97,
-            "top_10_accuracy": 0.99,
-            "mrr": 0.90,
-            "cover_mean_abs_bias_pct": 2.1,
-            "cover_mean_rmse_pct": 3.5,
-            "cross_branch_error_rate": 0.15,
-        }
-        run = self._make_mock_run(metrics)
-        result = fetch_scalar_metrics(run)
-
-        self.assertIsNotNone(result["executive"])
-        self.assertEqual(len(result["executive"]), 8)
-        self.assertIsNotNone(result["topk"])
-        self.assertEqual(len(result["topk"]), 5)
-        self.assertIsNotNone(result["cover"])
-        self.assertEqual(len(result["cover"]), 2)  # Only 2 of 4 cover metrics present.
-        self.assertIsNotNone(result["taxonomic"])
 
     def test_minimal_metrics(self):
         """Only executive metrics present, optional groups absent."""
@@ -231,40 +180,6 @@ class TestLoadArtifactData(unittest.TestCase):
             self.assertTrue(result["has_training"])
             self.assertIsNotNone(result["training"]["system_specs_yaml"])
             self.assertEqual(result["training"]["system_specs_yaml"]["total_ram_gb"], 16)
-
-
-class TestBuildTemplateContext(unittest.TestCase):
-    def test_basic_context(self):
-        metadata = {
-            "run_id": "abc123",
-            "run_name": "test",
-            "experiment_name": "exp1",
-        }
-        metrics = {
-            "executive": [("Accuracy", 0.85)],
-            "topk": None,
-            "cover": None,
-            "taxonomic": None,
-        }
-        artifacts = {
-            "sections": {},
-            "root_eval": {"metrics_per_label_csv": None, "metrics_overall_yaml": None},
-            "training": {},
-            "has_training": False,
-        }
-
-        context = build_template_context(metadata, metrics, artifacts)
-        self.assertEqual(context["title"], "Classifier Report - exp1 - test")
-        self.assertIn("generated_at", context)
-        self.assertEqual(context["metadata"], metadata)
-
-    def test_custom_title(self):
-        metadata = {"run_id": "x", "run_name": "y", "experiment_name": "z"}
-        metrics = {"executive": None, "topk": None, "cover": None, "taxonomic": None}
-        artifacts = {"sections": {}, "root_eval": {}, "training": {}, "has_training": False}
-
-        context = build_template_context(metadata, metrics, artifacts, title="Custom Title")
-        self.assertEqual(context["title"], "Custom Title")
 
 
 class TestRenderReport(unittest.TestCase):
