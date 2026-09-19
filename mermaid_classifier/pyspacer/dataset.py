@@ -397,7 +397,7 @@ class TrainingDataset:
             query_start = "CREATE TABLE annotations AS"
         self.duck_conn.execute(
             query_start + f" SELECT"
-            f"  image_id, row, col,"
+            f"  CAST(image_id AS VARCHAR) AS image_id, row, col,"
             f"  benthic_attribute_id,"
             f"  COALESCE(growth_form_id, '') AS growth_form_id,"
             f" '{Sites.MERMAID.value}' AS site,"

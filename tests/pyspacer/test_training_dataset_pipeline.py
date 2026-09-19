@@ -14,6 +14,8 @@ pipeline steps forward from a seeded synthetic ``annotations`` table:
 
 Sub-steps characterized
 -----------------------
+- read_mermaid_data: image_id column lands as VARCHAR in the annotations
+  table even when the source parquet's image_id column is numeric
 - rollup_in_duckdb: row count + BA/GF values change as expected
 - filter_in_duckdb: excluded rows removed
 - _apply_subsample: row count drops to per-class cap; audit df populated
@@ -97,6 +99,57 @@ def _seed_annotations(dataset: NoInitDataset) -> None:
 
 _ROLLUP_CSV = "from_ba_id,from_gf_id,to_ba_id,to_gf_id\nba_a,,ba_top,\n"
 _FILTER_CSV = "ba_id,gf_id\nba_top,\nba_b,\n"
+
+
+# ---------------------------------------------------------------------------
+# 0. MERMAID ingestion (read_mermaid_data)
+# ---------------------------------------------------------------------------
+
+
+class ReadMermaidDataImageIdTest(unittest.TestCase):
+    """Characterize read_mermaid_data's image_id column typing."""
+
+    def setUp(self):
+        self.override = override_settings(aws_anonymous="True")
+        self.override.__enter__()
+        self.dataset = _make_dataset(self)
+
+    def tearDown(self):
+        self.override.__exit__(None, None, None)
+
+    def test_numeric_image_id_ingests_as_varchar(self):
+        """ImageExclusionFilter.filter_in_duckdb compares image_id as a string,
+        so a MERMAID parquet's image_id column must land as VARCHAR in the
+        annotations table even when the source column is numeric.
+        """
+        mermaid_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL
+            {
+                "image_id": [12345, 67890],
+                "row": [10, 20],
+                "col": [1, 2],
+                "benthic_attribute_id": ["ba_a", "ba_b"],
+                "growth_form_id": ["", ""],
+            }
+        )
+        self.dataset.duck_conn.execute(
+            "CREATE TABLE mermaid_parquet_input AS SELECT * FROM mermaid_df"
+        )
+
+        with tempfile.NamedTemporaryFile(delete_on_close=False) as parquet_f:
+            # DuckDB will reopen the file, so close it first.
+            parquet_f.close()
+            self.dataset.duck_conn.execute(
+                f"COPY (SELECT * FROM mermaid_parquet_input) TO '{parquet_f.name}' (FORMAT parquet)"
+            )
+
+            with override_settings(mermaid_annotations_parquet_pattern=parquet_f.name):
+                self.dataset.read_mermaid_data()
+
+        column_types = {
+            row[0]: row[1]
+            for row in self.dataset.duck_conn.execute("DESCRIBE annotations").fetchall()
+        }
+        self.assertEqual(column_types["image_id"], "VARCHAR")
 
 
 # ---------------------------------------------------------------------------
