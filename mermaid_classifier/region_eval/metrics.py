@@ -233,7 +233,11 @@ class ScoredPoints:
     `source_positions[i]` is the row point i was prepared from, so a column
     held outside this slice -- a probability matrix over the caller's rows,
     say -- indexes onto the same points instead of being filtered a second
-    time and trusted to agree.
+    time and trusted to agree. `n_source_rows` is that column's required
+    length: the row count of the caller's original arrays, which
+    `n_points + n_unrecorded_region_excluded` only reconstructs correctly for
+    an unrestricted slice, since `_restrict` narrows `n_points` but carries
+    `n_unrecorded_region_excluded` forward whole.
     """
 
     image_ids: tuple[str, ...]
@@ -257,6 +261,7 @@ class ScoredPoints:
     unmapped_attribute_ids: frozenset[str]
     source_positions: NDArray[np.intp]
     n_unrecorded_region_excluded: int
+    n_source_rows: int
 
     @property
     def n_points(self) -> int:
@@ -376,6 +381,7 @@ def prepare_scored_points(
         unmapped_attribute_ids=unmapped,
         source_positions=np.asarray(scorable, dtype=np.intp),
         n_unrecorded_region_excluded=len(unscorable),
+        n_source_rows=len(image_region_ids),
     )
 
 
@@ -480,7 +486,10 @@ def _restrict(points: ScoredPoints, positions: NDArray[np.intp]) -> ScoredPoints
 
     The region set and the excluded count describe the whole scored slice, so
     a subset inherits them: discriminating labels must mean the same thing in
-    both populations for their rates to be comparable.
+    both populations for their rates to be comparable. `n_source_rows`
+    likewise stays the row count of the caller's original arrays, not of this
+    narrower slice, since it is what a column indexed by `source_positions`
+    must still be measured against.
     """
     index = [int(position) for position in positions]
     return ScoredPoints(
@@ -505,6 +514,7 @@ def _restrict(points: ScoredPoints, positions: NDArray[np.intp]) -> ScoredPoints
         unmapped_attribute_ids=points.unmapped_attribute_ids,
         source_positions=points.source_positions[positions],
         n_unrecorded_region_excluded=points.n_unrecorded_region_excluded,
+        n_source_rows=points.n_source_rows,
     )
 
 

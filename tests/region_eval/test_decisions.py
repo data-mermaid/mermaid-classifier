@@ -346,8 +346,12 @@ class MaskingCounterfactualTest(unittest.TestCase):
     def test_unrecorded_image_regions_are_dropped_and_counted_without_raising(self):
         """A "" region reaching `is_out_of_region` raises, and the metrics
         orchestrator swallows what a group raises, so the whole counterfactual
-        would vanish rather than report four points and one exclusion."""
-        rows = (*MASKING_ROWS, ("image-e", "", PACIFIC_LABEL, (0.10, 0.10, 0.80)))
+        would vanish rather than report four points and one exclusion. The
+        unrecorded row leads the list, so `source_positions` falling back to
+        the identity mapping would pair M1's image and region with this row's
+        global-leaning probabilities instead of M1's own out-of-region ones,
+        changing which predictions masking counts as fixed."""
+        rows = (("image-e", "", PACIFIC_LABEL, (0.90, 0.05, 0.05)), *MASKING_ROWS)
 
         result = _masking(rows)
 
@@ -644,8 +648,13 @@ class ConfidenceStratificationTest(unittest.TestCase):
     def test_unrecorded_image_regions_are_dropped_and_counted_without_raising(self):
         """C7 would raise inside `is_out_of_region` and take the whole
         stratification with it. Its 0.99 is also the highest score present, so
-        admitting it would move the AUROC as well as the top bin."""
-        result = _stratify(CONFIDENCE_ROWS, bin_edges=QUARTILE_EDGES)
+        admitting it would move the AUROC as well as the top bin. C7 leads the
+        list here, so `source_positions` falling back to the identity mapping
+        would shift every remaining confidence onto the wrong point instead of
+        merely dropping a trailing one."""
+        rows = (CONFIDENCE_ROWS[-1], *CONFIDENCE_ROWS[:-1])
+
+        result = _stratify(rows, bin_edges=QUARTILE_EDGES)
 
         self.assertEqual(result.n_unrecorded_region_excluded, 1)
         self.assertEqual(result.n_points, 6)
@@ -656,6 +665,16 @@ class ConfidenceStratificationTest(unittest.TestCase):
         still counting in `n_discriminating`, so the per-bin counts would stop
         summing to the total without saying so."""
         rows = ((TROPICAL_ATLANTIC, PACIFIC_LABEL, 1.5),)
+
+        with self.assertRaises(ValueError):
+            _stratify(rows)
+
+    def test_confidence_of_nan_is_rejected_as_outside_the_bins(self):
+        """NaN falls neither below the lowest edge nor above the highest, so a
+        range test built from those two comparisons alone would wave it
+        through. It would then count in `n_discriminating` while landing in no
+        bin, so the per-bin counts would stop summing to the total."""
+        rows = ((TROPICAL_ATLANTIC, PACIFIC_LABEL, math.nan),)
 
         with self.assertRaises(ValueError):
             _stratify(rows)

@@ -470,7 +470,7 @@ def confidence_stratification(
         raise ValueError(f"bin_edges must increase strictly, got {list(bin_edges)}")
 
     confidences = np.asarray(pred_confidences, dtype=np.float64)[points.source_positions]
-    outside = (confidences < bin_edges[0]) | (confidences > bin_edges[-1])
+    outside = ~((confidences >= bin_edges[0]) & (confidences <= bin_edges[-1]))
     if outside.any():
         stray = float(confidences[outside][0])
         raise ValueError(
@@ -540,9 +540,13 @@ def _check_source_rows(points: ScoredPoints, **lengths: int) -> None:
     """Reject a column not indexed over the rows `points` was prepared from.
 
     `source_positions` indexes back into those rows, so a column of any other
-    length would align onto the wrong points rather than fail.
+    length would align onto the wrong points rather than fail. `n_source_rows`
+    carries that row count directly rather than reconstructing it from
+    `n_points + n_unrecorded_region_excluded`, which only agrees with it for
+    an unrestricted `points` -- a restriction narrows `n_points` but inherits
+    `n_unrecorded_region_excluded` whole.
     """
-    expected = points.n_points + points.n_unrecorded_region_excluded
+    expected = points.n_source_rows
     for name, length in lengths.items():
         if length != expected:
             raise ValueError(
