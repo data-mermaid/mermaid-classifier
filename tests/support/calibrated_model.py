@@ -1,13 +1,32 @@
-"""Builds a small fitted CalibratedClassifierCV(TorchMLPClassifier) the same
-way MermaidTrainer does, with no network or MLflow. Shared across artifact
-tests."""
+"""Builds a small fitted CalibratedClassifierCV(TorchMLPClassifier) via
+MermaidTrainer's real calibration path, with no network or MLflow. Shared
+across artifact tests."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from types import SimpleNamespace
+
 import numpy as np
-from sklearn.calibration import CalibratedClassifierCV, _fit_calibrator
 
 from mermaid_classifier.pyspacer.torch_classifier import TorchMLPClassifier
+from mermaid_classifier.pyspacer.trainer import MermaidTrainer
+
+
+class _BatchedRefLabels:
+    """Stands in for spacer's ImageLabels: MermaidTrainer._calibrate_in_batches
+    calls only load_data_in_batches on its ref_labels argument, so this
+    replays the already-generated feature/label arrays through it in
+    fixed-size chunks."""
+
+    def __init__(self, x: np.ndarray, y: np.ndarray) -> None:
+        self._x = x
+        self._y = y
+
+    def load_data_in_batches(self, batch_size: int) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        for start in range(0, len(self._x), batch_size):
+            end = start + batch_size
+            yield self._x[start:end], self._y[start:end]
 
 
 def make_calibrated_model(
@@ -18,9 +37,11 @@ def make_calibrated_model(
 ):
     """Return (fitted CalibratedClassifierCV, representative feature batch).
 
-    Mirrors MermaidTrainer._calibrate_in_batches: train a TorchMLPClassifier,
-    then wrap it in CalibratedClassifierCV(cv="prefit") with a single
-    sigmoid-calibrated inner classifier fit via _fit_calibrator.
+    Drives MermaidTrainer._calibrate_in_batches directly instead of
+    reassembling its calibration steps, so this fixture tracks production
+    by construction. The method reads only self.batch_size off the
+    trainer, so it runs unbound against a lightweight stand-in rather than
+    a real MermaidTrainer, which would pull in settings and MLflow.
     """
     rng = np.random.default_rng(seed)
     classes = np.array([f"ba{i}::gf{i}" for i in range(n_classes)])
@@ -35,12 +56,8 @@ def make_calibrated_model(
     for _ in range(20):
         clf.partial_fit(X, y, classes=classes.tolist())
 
-    # CalibratedClassifierCV has no decision_function on TorchMLPClassifier,
-    # so calibration runs on predict_proba (softmax) outputs.
-    predictions = clf.predict_proba(X)
-    calibrated_inner = _fit_calibrator(clf, predictions, y, clf.classes_, method="sigmoid")
-    wrapper = CalibratedClassifierCV(clf, cv="prefit")
-    wrapper.calibrated_classifiers_ = [calibrated_inner]
-    wrapper.classes_ = clf.classes_
+    trainer_stub = SimpleNamespace(batch_size=128)
+    ref_labels = _BatchedRefLabels(X, y)
+    wrapper = MermaidTrainer._calibrate_in_batches(trainer_stub, clf, ref_labels)
 
     return wrapper, X
