@@ -177,3 +177,6 @@ report_*.html
 
 # Region probe builds (scripts/build_region_probe.py --out-dir)
 region_probe/
+
+# Region evaluation reports (scripts/evaluate_region_probe.py --out-dir)
+/region_eval/
