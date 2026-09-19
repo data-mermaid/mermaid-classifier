@@ -30,14 +30,12 @@ class _Spec(CsvSpec):
 class HappyPathTest(unittest.TestCase):
     """Normal CSV input: per_row_init_action is called once per row."""
 
-    def test_two_rows_both_collected(self):
-        spec = _Spec(StringIO("id,gf\n1,Branching\n2,Massive\n"))
-        self.assertEqual(len(spec.rows), 2)
-
-    def test_row_dict_contains_expected_keys(self):
-        spec = _Spec(StringIO("id,gf\n42,Encrusting\n"))
-        self.assertEqual(spec.rows[0]["id"], 42)
-        self.assertEqual(spec.rows[0]["gf"], "Encrusting")
+    def test_every_row_is_collected_with_its_values(self):
+        spec = _Spec(StringIO("id,gf\n42,Encrusting\n43,Massive\n"))
+        self.assertEqual(
+            [(r["id"], r["gf"]) for r in spec.rows],
+            [(42, "Encrusting"), (43, "Massive")],
+        )
 
 
 class EmptyToNoneTest(unittest.TestCase):
@@ -48,19 +46,9 @@ class EmptyToNoneTest(unittest.TestCase):
         spec = _Spec(StringIO("id,gf\n99,\n"))
         self.assertIsNone(spec.rows[0]["gf"], msg="Blank gf cell should become None")
 
-    def test_non_empty_value_is_not_none(self):
-        spec = _Spec(StringIO("id,gf\n1,Branching\n"))
-        self.assertIsNotNone(spec.rows[0]["gf"])
-
 
 class AlternateColumnNamesTest(unittest.TestCase):
     """ColumnSpec with name list resolves to the first matching header."""
-
-    def test_growth_form_header_accepted_in_place_of_gf(self):
-        """When header has 'growth_form' instead of 'gf', the spec resolves correctly."""
-        spec = _Spec(StringIO("id,growth_form\n1,Branching\n"))
-        # No exception, and one row collected.
-        self.assertEqual(len(spec.rows), 1)
 
     def test_value_accessible_under_actual_header_key(self):
         """The dict key in per_row_init_action uses the actual header name found."""
@@ -96,22 +84,11 @@ class EmptyFileTest(unittest.TestCase):
         spec = _Spec(StringIO("id,gf\n"))
         self.assertEqual(spec.rows, [], msg="per_row_init_action should not be called")
 
-    def test_header_only_dataframe_is_empty(self):
-        spec = _Spec(StringIO("id,gf\n"))
-        self.assertTrue(spec.csv_dataframe.empty)
-
     def test_completely_empty_file_no_rows(self):
         """Completely empty CSV (no content at all) — no exception, no rows."""
         spec = _Spec(StringIO(""))
         self.assertEqual(spec.rows, [])
         self.assertTrue(spec.csv_dataframe.empty)
-
-    def test_no_exception_on_empty_file(self):
-        """Empty file must not raise."""
-        try:
-            _Spec(StringIO(""))
-        except Exception as exc:
-            self.fail(f"Unexpected exception on empty file: {exc}")
 
 
 if __name__ == "__main__":

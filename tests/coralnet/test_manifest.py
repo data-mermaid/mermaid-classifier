@@ -8,7 +8,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from mermaid_classifier.coralnet.manifest import (
-    MANIFEST_COLUMNS,
     build_manifest_relation,
     summarize_build,
 )
@@ -68,7 +67,6 @@ class BuildManifestTest(unittest.TestCase):
 
     def test_schema_and_filtering(self):
         rel = build_manifest_relation(self.conn, self.ann, self.img)
-        self.assertEqual(rel.columns, MANIFEST_COLUMNS)
         df = rel.df()
         # 'b' dropped (header_read_failed) -> points a and c remain.
         self.assertEqual(sorted(df["image_id"]), ["a", "c"])

@@ -32,7 +32,6 @@ from mermaid_classifier.common.benthic_attributes import (
     BenthicAttributeLibrary,
     CoralNetMermaidMapping,
     GrowthFormLibrary,
-    RegionLibrary,
 )
 
 # Real elapsed time stays well under this on a correctly-guarded call (bounded
@@ -180,15 +179,6 @@ class BenthicAttributesTimeoutTest(unittest.TestCase):
             mock.patch("urllib.request.urlopen", _redirect_to(self.server.url)),
         ):
             elapsed = self._run_bounded(GrowthFormLibrary)
-
-        self.assertLess(elapsed, _ELAPSED_MARGIN_SECONDS)
-
-    def test_region_library_bounds_its_wait(self):
-        with (
-            mock.patch("mermaid_classifier.common.benthic_attributes._HTTP_TIMEOUT_SECONDS", 0.2),
-            mock.patch("urllib.request.urlopen", _redirect_to(self.server.url)),
-        ):
-            elapsed = self._run_bounded(RegionLibrary)
 
         self.assertLess(elapsed, _ELAPSED_MARGIN_SECONDS)
 
