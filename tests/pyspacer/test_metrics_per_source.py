@@ -6,15 +6,11 @@ from collections import OrderedDict
 import matplotlib.pyplot as plt
 from spacer.data_classes import DataLocation
 
-from mermaid_classifier.pyspacer.metrics._context import MetricsContext
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
+from mermaid_classifier.pyspacer.metrics import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.per_source import compute_per_source
 
 from .metrics_test_helpers import (
-    MockBALibrary,
-    MockGFLibrary,
-    format_metric,
-    make_val_results,
+    make_ctx,
 )
 
 
@@ -48,14 +44,11 @@ class _MockDataset:
 
 
 def _make_ctx(image_specs, source_map, gt_indices, est_indices, classes):
-    val_results = make_val_results(gt_indices, est_indices, classes)
-    dataset = _MockDataset(image_specs, source_map)
-    return MetricsContext(
-        val_results=val_results,
-        ba_library=MockBALibrary(),
-        gf_library=MockGFLibrary(),
-        format_func=format_metric,
-        dataset=dataset,
+    return make_ctx(
+        gt_indices,
+        est_indices,
+        classes,
+        dataset=_MockDataset(image_specs, source_map),
     )
 
 

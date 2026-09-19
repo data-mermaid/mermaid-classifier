@@ -4,15 +4,16 @@ import unittest
 
 import matplotlib.pyplot as plt
 import numpy as np
-from spacer.data_classes import ValResults
 
-from mermaid_classifier.pyspacer.metrics._context import MetricsContext
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
+from mermaid_classifier.pyspacer.metrics import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.ranking import (
     _compute_topk_mrr,
     compute_ranking,
 )
-from pyspacer.metrics_test_helpers import MockBALibrary, MockClf, MockGFLibrary, format_metric
+from pyspacer.metrics_test_helpers import (
+    MockClf,
+    make_ctx,
+)
 
 
 class ComputeTopKMRRTest(unittest.TestCase):
@@ -79,17 +80,11 @@ class ComputeRankingTest(unittest.TestCase):
                 [0.8, 0.1, 0.1],
             ]
         )
-        val_results = ValResults(
+        self.ctx = make_ctx(
+            [0, 1, 2, 0],
+            [0, 1, 2, 0],
+            classes,
             scores=[0.8] * n,
-            gt=[0, 1, 2, 0],
-            est=[0, 1, 2, 0],
-            classes=classes,
-        )
-        self.ctx = MetricsContext(
-            val_results=val_results,
-            ba_library=MockBALibrary(),
-            gf_library=MockGFLibrary(),
-            format_func=format_metric,
             clf=MockClf(classes),
             val_proba=proba,
             val_gt_labels=gt_labels,

@@ -4,29 +4,14 @@ import unittest
 
 import matplotlib.pyplot as plt
 
-from mermaid_classifier.pyspacer.metrics._context import MetricsContext
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
+from mermaid_classifier.pyspacer.metrics import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.calibration import (
     _adaptive_ece,
     compute_calibration,
 )
 from pyspacer.metrics_test_helpers import (
-    MockBALibrary,
-    MockGFLibrary,
-    format_metric,
-    make_val_results,
+    make_ctx,
 )
-
-
-def _make_ctx(gt_indices, est_indices, classes, scores=None):
-    """Build a MetricsContext from simple index lists."""
-    val_results = make_val_results(gt_indices, est_indices, classes, scores)
-    return MetricsContext(
-        val_results=val_results,
-        ba_library=MockBALibrary(),
-        gf_library=MockGFLibrary(),
-        format_func=format_metric,
-    )
 
 
 class AdaptiveECETest(unittest.TestCase):
@@ -62,7 +47,7 @@ class ComputeCalibrationTest(unittest.TestCase):
     def test_returns_expected_artifacts(self):
         """Result contains ece scalar, per_bin_details df, reliability_diagram
         figure, and per_category_ece df."""
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 1, 0, 1],
             est_indices=[0, 1, 1, 0],
             classes=["A1::", "B1::"],
@@ -88,7 +73,7 @@ class ComputeCalibrationTest(unittest.TestCase):
     def test_per_category_ece_respects_min_samples(self):
         """With fewer than 30 samples per category, per_category_ece is empty."""
         # Only 4 samples total, well below the 30-sample minimum.
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 1, 1, 0],
             classes=["A1::", "B1::"],
@@ -112,7 +97,7 @@ class ComputeCalibrationTest(unittest.TestCase):
         est_indices = [0] * n_per_class + [1] * n_per_class
         scores = [0.9] * n_per_class + [0.8] * n_per_class
 
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=gt_indices,
             est_indices=est_indices,
             classes=["A1::", "B1::"],

@@ -4,14 +4,10 @@ import unittest
 
 import matplotlib.pyplot as plt
 
-from mermaid_classifier.pyspacer.metrics._context import MetricsContext
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
+from mermaid_classifier.pyspacer.metrics import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.cover import compute_cover
 from pyspacer.metrics_test_helpers import (
-    MockBALibrary,
-    MockGFLibrary,
-    format_metric,
-    make_val_results,
+    make_ctx,
 )
 
 
@@ -43,15 +39,11 @@ class ComputeCoverTest(unittest.TestCase):
     """Tests for compute_cover."""
 
     def _make_ctx(self, gt_indices, est_indices, classes, image_sizes):
-        val_labels = _MockValLabels(image_sizes)
-        dataset = _MockDataset(val_labels)
-        val_results = make_val_results(gt_indices, est_indices, classes)
-        return MetricsContext(
-            val_results=val_results,
-            ba_library=MockBALibrary(),
-            gf_library=MockGFLibrary(),
-            format_func=format_metric,
-            dataset=dataset,
+        return make_ctx(
+            gt_indices,
+            est_indices,
+            classes,
+            dataset=_MockDataset(_MockValLabels(image_sizes)),
         )
 
     def test_returns_expected_artifacts(self):

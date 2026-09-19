@@ -4,26 +4,11 @@ import unittest
 
 import matplotlib.pyplot as plt
 
-from mermaid_classifier.pyspacer.metrics._context import MetricsContext
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
+from mermaid_classifier.pyspacer.metrics import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.taxonomic import compute_taxonomic
 from pyspacer.metrics_test_helpers import (
-    MockBALibrary,
-    MockGFLibrary,
-    format_metric,
-    make_val_results,
+    make_ctx,
 )
-
-
-def _make_ctx(gt_indices, est_indices, classes, gf_library=None):
-    """Build a MetricsContext from simple index lists."""
-    val_results = make_val_results(gt_indices, est_indices, classes)
-    return MetricsContext(
-        val_results=val_results,
-        ba_library=MockBALibrary(),
-        gf_library=gf_library or MockGFLibrary(),
-        format_func=format_metric,
-    )
 
 
 class ErrorAttributionTest(unittest.TestCase):
@@ -31,7 +16,7 @@ class ErrorAttributionTest(unittest.TestCase):
 
     def test_perfect_predictions(self):
         """No errors -> both error rates are 0.0 and attribution df is empty."""
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 1, 2, 3],
             est_indices=[0, 1, 2, 3],
             classes=["A1::", "A2::", "B1::", "B2::"],
@@ -53,7 +38,7 @@ class ErrorAttributionTest(unittest.TestCase):
 
     def test_cross_branch_errors(self):
         """A1->B1 predictions -> cross_branch_error_rate > 0."""
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 0, 0],
             est_indices=[2, 2, 2, 2],
             classes=["A1::", "A2::", "B1::", "B2::"],
@@ -68,7 +53,7 @@ class ErrorAttributionTest(unittest.TestCase):
 
     def test_within_branch_errors(self):
         """A1->A2 predictions -> within_branch_error_rate > 0."""
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 0, 0],
             est_indices=[1, 1, 1, 1],
             classes=["A1::", "A2::", "B1::", "B2::"],
@@ -88,7 +73,7 @@ class GrowthFormDifferentiationTest(unittest.TestCase):
 
     def test_no_growth_forms(self):
         """All classes have empty GF -> gf_accuracy_gf_relevant == 0.0."""
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 1, 2, 3],
             est_indices=[0, 1, 2, 3],
             classes=["A1::", "A2::", "B1::", "B2::"],
@@ -133,11 +118,10 @@ class ComputeTaxonomicIntegrationTest(unittest.TestCase):
         # Use classes with growth forms and imperfect predictions so that
         # error attribution and GF differentiation figures are generated.
         classes = ["A1::gf1", "A2::gf2", "B1::", "B2::"]
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 1, 1, 2, 2, 3, 3],
             est_indices=[0, 1, 1, 0, 2, 3, 3, 2],
             classes=classes,
-            gf_library=MockGFLibrary(),
         )
         result = compute_taxonomic(ctx)
 

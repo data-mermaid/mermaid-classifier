@@ -25,10 +25,7 @@ import duckdb
 from mermaid_classifier.pyspacer.metrics import MetricsContext, MetricsCoordinator
 from mermaid_classifier.pyspacer.metrics import registry as metrics_registry
 from pyspacer.metrics_test_helpers import (
-    MockBALibrary,
-    MockGFLibrary,
-    format_metric,
-    make_val_results,
+    make_ctx,
 )
 
 
@@ -64,27 +61,16 @@ def _make_ctx() -> MetricsContext:
     """Build a minimal valid MetricsContext with 3 classes and 7 predictions."""
     # Classes must be keys that MockBALibrary.by_id knows (A1, A2, B1)
     # combined with an empty GF string to form valid bagf IDs.
-    classes = ["A1::", "A2::", "B1::"]
-    gt = [0, 1, 2, 0, 1, 2, 0]
-    est = [0, 1, 2, 1, 0, 2, 0]
-    val_results = make_val_results(gt, est, classes)
-    return MetricsContext(
-        val_results=val_results,
-        ba_library=MockBALibrary(),
-        gf_library=MockGFLibrary(),
-        format_func=format_metric,
+    return make_ctx(
+        gt_indices=[0, 1, 2, 0, 1, 2, 0],
+        est_indices=[0, 1, 2, 1, 0, 2, 0],
+        classes=["A1::", "A2::", "B1::"],
     )
 
 
 def _make_bad_ctx() -> MetricsContext:
     """Build a context whose validate() will fail (unknown class in ba_library)."""
-    val_results = make_val_results([0], [0], ["UNKNOWN_CLASS::"])
-    return MetricsContext(
-        val_results=val_results,
-        ba_library=MockBALibrary(),
-        gf_library=MockGFLibrary(),
-        format_func=format_metric,
-    )
+    return make_ctx(gt_indices=[0], est_indices=[0], classes=["UNKNOWN_CLASS::"])
 
 
 # ---------------------------------------------------------------------------

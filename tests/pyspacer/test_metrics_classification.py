@@ -4,11 +4,11 @@ import unittest
 
 import matplotlib.pyplot as plt
 
-from mermaid_classifier.pyspacer.metrics._context import (
+from mermaid_classifier.pyspacer.metrics import (
+    MetricGroupResult,
     MetricsContext,
     MetricsContextError,
 )
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.classification import (
     compute_balanced_accuracy_mcc,
     compute_confusion_matrices,
@@ -18,26 +18,16 @@ from pyspacer.metrics_test_helpers import (
     MockBALibrary,
     MockGFLibrary,
     format_metric,
+    make_ctx,
     make_val_results,
 )
-
-
-def _make_ctx(gt_indices, est_indices, classes):
-    """Build a MetricsContext from simple index lists."""
-    val_results = make_val_results(gt_indices, est_indices, classes)
-    return MetricsContext(
-        val_results=val_results,
-        ba_library=MockBALibrary(),
-        gf_library=MockGFLibrary(),
-        format_func=format_metric,
-    )
 
 
 class ComputeConfusionMatricesTest(unittest.TestCase):
     """Tests for compute_confusion_matrices."""
 
     def test_returns_metric_group_result(self):
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 1, 0, 1],
             est_indices=[0, 1, 1, 0],
             classes=["A1::", "B1::"],
@@ -57,7 +47,7 @@ class ComputeConfusionMatricesTest(unittest.TestCase):
 
     def test_normalized_diagonal_values(self):
         """Perfect predictions should have 100 on the diagonal."""
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
             classes=["A1::", "B1::"],
@@ -79,7 +69,7 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
     """Tests for compute_precision_recall_f1."""
 
     def test_returns_metric_group_result(self):
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
             classes=["A1::", "B1::"],
@@ -104,7 +94,7 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
         self.assertIn("precision_macro", result.dicts[0].data)
 
     def test_perfect_predictions(self):
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[0, 0, 1, 1],
             classes=["A1::", "B1::"],
@@ -126,7 +116,7 @@ class ComputePrecisionRecallF1Test(unittest.TestCase):
     def test_all_wrong_predictions(self):
         """When all predictions are wrong, macro F1 should be 0.0,
         not raise ZeroDivisionError."""
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[1, 1, 0, 0],
             classes=["A1::", "B1::"],
@@ -150,7 +140,7 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
     """Tests for compute_balanced_accuracy_mcc."""
 
     def test_perfect_predictions(self):
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 1, 1, 2, 2],
             est_indices=[0, 0, 1, 1, 2, 2],
             classes=["A1::", "B1::", "A2::"],
@@ -165,7 +155,7 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         self.assertEqual(scalars_by_name["mcc"], 1.0)
 
     def test_all_wrong_binary(self):
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 1, 1],
             est_indices=[1, 1, 0, 0],
             classes=["A1::", "B1::"],
@@ -180,7 +170,7 @@ class ComputeBalancedAccuracyMccTest(unittest.TestCase):
         # 8 samples of class 0, 2 samples of class 1.
         # All predicted as class 0. Balanced accuracy should be 0.5
         # (50% recall on class 0, 0% recall on class 1, averaged).
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
             est_indices=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             classes=["A1::", "B1::"],
@@ -214,7 +204,7 @@ class MetricsContextValidationTest(unittest.TestCase):
 
     def test_valid_context_passes(self):
         """A well-formed context should pass validation without error."""
-        ctx = _make_ctx(
+        ctx = make_ctx(
             gt_indices=[0, 1],
             est_indices=[0, 1],
             classes=["A1::", "B1::"],

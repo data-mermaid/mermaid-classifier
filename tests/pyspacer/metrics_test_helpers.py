@@ -6,6 +6,7 @@ import numpy as np
 from spacer.data_classes import ValResults
 
 from mermaid_classifier.common.benthic_attributes import BAGF_SEP, split_ba_gf
+from mermaid_classifier.pyspacer.metrics import MetricsContext
 
 
 class MockBALibrary:
@@ -90,3 +91,20 @@ def make_val_results(gt_indices, est_indices, classes, scores=None):
 
 def format_metric(value):
     return round(float(value), 3)
+
+
+def make_ctx(gt_indices, est_indices, classes, *, scores=None, **overrides):
+    """A MetricsContext over the mock taxonomy.
+
+    `classes` must be BA+GF ids MockBALibrary knows, since validate() resolves
+    every one of them. Anything in `overrides` goes straight to MetricsContext,
+    so a caller adds `dataset=`, `clf=`, `val_proba=` or its own `gf_library=`
+    without needing a second builder.
+    """
+    overrides.setdefault("ba_library", MockBALibrary())
+    overrides.setdefault("gf_library", MockGFLibrary())
+    overrides.setdefault("format_func", format_metric)
+    return MetricsContext(
+        val_results=make_val_results(gt_indices, est_indices, classes, scores),
+        **overrides,
+    )

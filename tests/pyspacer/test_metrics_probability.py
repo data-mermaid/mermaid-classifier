@@ -5,12 +5,13 @@ import unittest
 
 import matplotlib.pyplot as plt
 import numpy as np
-from spacer.data_classes import ValResults
 
-from mermaid_classifier.pyspacer.metrics._context import MetricsContext
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
+from mermaid_classifier.pyspacer.metrics import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.probability import compute_probability
-from pyspacer.metrics_test_helpers import MockBALibrary, MockClf, MockGFLibrary, format_metric
+from pyspacer.metrics_test_helpers import (
+    MockClf,
+    make_ctx,
+)
 
 
 def _make_ctx(classes, gt_labels, proba):
@@ -20,17 +21,11 @@ def _make_ctx(classes, gt_labels, proba):
     gt_indices = [class_to_idx[g] for g in gt_labels]
     est_indices = gt_indices  # exact predictions (irrelevant to probability metrics)
 
-    val_results = ValResults(
+    return make_ctx(
+        gt_indices,
+        est_indices,
+        classes,
         scores=[0.9] * n,
-        gt=gt_indices,
-        est=est_indices,
-        classes=classes,
-    )
-    return MetricsContext(
-        val_results=val_results,
-        ba_library=MockBALibrary(),
-        gf_library=MockGFLibrary(),
-        format_func=format_metric,
         clf=MockClf(classes),
         val_proba=proba,
         val_gt_labels=gt_labels,
