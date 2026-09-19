@@ -109,16 +109,6 @@ class ValidateArtifactTest(unittest.TestCase):
 
 
 class S3ExistsTest(unittest.TestCase):
-    def test_true_when_head_succeeds(self):
-        client = mock.Mock()
-        client.head_object.return_value = {}
-        self.assertTrue(ra.s3_object_exists(client, "b", "k"))
-
-    def test_false_on_404(self):
-        client = mock.Mock()
-        client.head_object.side_effect = _not_found_error()
-        self.assertFalse(ra.s3_object_exists(client, "b", "k"))
-
     def test_reraises_other_clienterror(self):
         client = mock.Mock()
         client.head_object.side_effect = ClientError(

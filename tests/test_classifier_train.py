@@ -39,8 +39,13 @@ class ClassifierTrainMainTest(unittest.TestCase):
     def setUp(self):
         self.module = _load_module()
 
-    def test_runs_committed_config_through_runner(self):
-        """main() loads the config, builds options, and runs the runner once."""
+    def test_the_chosen_config_reaches_the_runner_and_it_is_run(self):
+        """main() wires the chosen config's values into the runner, then runs it.
+
+        The manifest URI is the assertion rather than a boolean field: a
+        hardcoded default could match `include_mermaid: false` by accident,
+        but nothing produces this URI except the example config.
+        """
         runner_instance = MagicMock(name="runner_instance")
         runner_class = MagicMock(name="MLflowTrainingRunner", return_value=runner_instance)
 
@@ -50,34 +55,13 @@ class ClassifierTrainMainTest(unittest.TestCase):
         ):
             self.module.main(["--config-dir", str(EXAMPLE_CONFIG_DIR)])
 
-        # Runner constructed exactly once, with the three option dataclasses
-        # built from the config, then run() called once.
-        runner_class.assert_called_once()
-        kwargs = runner_class.call_args.kwargs
-        self.assertIn("dataset_options", kwargs)
-        self.assertIn("training_options", kwargs)
-        self.assertIn("mlflow_options", kwargs)
-        runner_instance.run.assert_called_once_with()
-
-    def test_options_reflect_the_chosen_config(self):
-        """The DatasetOptions handed to the runner come from the chosen config's YAML."""
-        from mermaid_classifier.sagemaker.config import TrainingRunConfig
-
-        expected = TrainingRunConfig.from_yaml_path(
-            EXAMPLE_CONFIG_DIR / self.module.CONFIG_FILENAME
-        )
-
-        runner_class = MagicMock(return_value=MagicMock())
-        with (
-            patch.object(self.module, "_resolve_local_aws_credentials"),
-            patch.object(self.module, "_resolve_runner_factory", return_value=runner_class),
-        ):
-            self.module.main(["--config-dir", str(EXAMPLE_CONFIG_DIR)])
-
         dataset_options = runner_class.call_args.kwargs["dataset_options"]
-        # include_mermaid is a stable, simple field carried straight through
-        # from the YAML's dataset block into DatasetOptions.
-        self.assertEqual(dataset_options.include_mermaid, expected.dataset.include_mermaid)
+        self.assertEqual(
+            dataset_options.coralnet_manifest_uri,
+            "s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/example/"
+            "coralnet_classifier_manifest_example.parquet",
+        )
+        runner_instance.run.assert_called_once_with()
 
     def test_default_config_dir_is_in_repo_and_loads(self):
         """The default config dir is repo-root-relative and its config loads.
