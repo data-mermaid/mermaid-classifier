@@ -14,6 +14,8 @@ pipeline steps forward from a seeded synthetic ``annotations`` table:
 
 Sub-steps characterized
 -----------------------
+- read_mermaid_data: image_id column lands as VARCHAR in the annotations
+  table even when the source parquet's image_id column is numeric
 - _apply_subsample: row count drops to per-class cap; audit df populated
 - prep_annotations_for_pyspacer: returns TrainingTaskLabels with .train/.ref/.val;
   total points across splits equals input count; split respects ref_val_ratios
@@ -30,6 +32,7 @@ Sub-steps NOT characterized (with reason)
   MERMAID Parquet from S3 via DuckDB, which is impractical to run offline.
 """
 
+import tempfile
 import unittest
 from unittest import mock
 
@@ -71,7 +74,58 @@ def _seed_annotations(dataset: NoInitDataset) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 1. Subsample step
+# 1. MERMAID ingestion (read_mermaid_data)
+# ---------------------------------------------------------------------------
+
+
+class ReadMermaidDataImageIdTest(unittest.TestCase):
+    """Characterize read_mermaid_data's image_id column typing."""
+
+    def setUp(self):
+        self.override = override_settings(aws_anonymous="True")
+        self.override.__enter__()
+        self.dataset = make_dataset(self)
+
+    def tearDown(self):
+        self.override.__exit__(None, None, None)
+
+    def test_numeric_image_id_ingests_as_varchar(self):
+        """ImageExclusionFilter.filter_in_duckdb compares image_id as a string,
+        so a MERMAID parquet's image_id column must land as VARCHAR in the
+        annotations table even when the source column is numeric.
+        """
+        mermaid_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL
+            {
+                "image_id": [12345, 67890],
+                "row": [10, 20],
+                "col": [1, 2],
+                "benthic_attribute_id": ["ba_a", "ba_b"],
+                "growth_form_id": ["", ""],
+            }
+        )
+        self.dataset.duck_conn.execute(
+            "CREATE TABLE mermaid_parquet_input AS SELECT * FROM mermaid_df"
+        )
+
+        with tempfile.NamedTemporaryFile(delete_on_close=False) as parquet_f:
+            # DuckDB will reopen the file, so close it first.
+            parquet_f.close()
+            self.dataset.duck_conn.execute(
+                f"COPY (SELECT * FROM mermaid_parquet_input) TO '{parquet_f.name}' (FORMAT parquet)"
+            )
+
+            with override_settings(mermaid_annotations_parquet_pattern=parquet_f.name):
+                self.dataset.read_mermaid_data()
+
+        column_types = {
+            row[0]: row[1]
+            for row in self.dataset.duck_conn.execute("DESCRIBE annotations").fetchall()
+        }
+        self.assertEqual(column_types["image_id"], "VARCHAR")
+
+
+# ---------------------------------------------------------------------------
+# 2. Subsample step
 # ---------------------------------------------------------------------------
 
 
@@ -111,7 +165,7 @@ class SubsampleStepTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2. prep_annotations_for_pyspacer + split
+# 3. prep_annotations_for_pyspacer + split
 # ---------------------------------------------------------------------------
 
 
@@ -188,7 +242,7 @@ class PrepAnnotationsDownloadFailureTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. add_training_set_names
+# 4. add_training_set_names
 # ---------------------------------------------------------------------------
 
 
@@ -226,7 +280,7 @@ class AddTrainingSetNamesTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. set_train_summary_stats / describe_train_summary_stats
+# 5. set_train_summary_stats / describe_train_summary_stats
 # ---------------------------------------------------------------------------
 
 

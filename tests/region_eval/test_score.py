@@ -711,6 +711,53 @@ class ProbeIntegrityTest(WrittenProbeTestCase):
             decisions_table(permuted_score).drop(columns=["model"]),
         )
 
+    def test_a_manifest_content_hash_disagreeing_with_the_parquet_is_refused(self):
+        """A published prefix can hold one build's manifest beside another
+        build's parquet -- the check-then-act race `build_region_probe.py`'s
+        `publish_probe` discloses in its own docstring. Nothing before this
+        check ever compared the manifest's recorded hash to the rows just
+        read, so that mismatch loaded silently and the resulting score
+        claimed a provenance it did not have.
+        """
+        manifest_path = self.probe_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["content_hash"] = "not-the-real-hash"
+        manifest_path.write_text(json.dumps(manifest))
+
+        with self.assertRaisesRegex(ValueError, "content_hash"):
+            load_probe(self.probe_dir)
+
+    def test_a_manifest_region_snapshot_hash_disagreeing_with_ba_regions_is_refused(self):
+        """`ba_regions.json` is uploaded by a separate publish call from
+        `manifest.json` and `probe_points.parquet`, so a prefix can hold one
+        build's region snapshot beside another build's manifest. Nothing before
+        this check ever compared the manifest's recorded region_snapshot_hash to
+        the region map just read, so that mismatch loaded silently and every
+        out-of-region rate in the report was computed against the wrong region
+        predicates.
+        """
+        manifest_path = self.probe_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["region_snapshot_hash"] = "not-the-real-hash"
+        manifest_path.write_text(json.dumps(manifest))
+
+        with self.assertRaisesRegex(ValueError, "region_snapshot_hash"):
+            load_probe(self.probe_dir)
+
+    def test_a_manifest_without_a_content_hash_key_loads(self):
+        """A probe built before `content_hash` was written into the manifest
+        has nothing to cross-check against, so the absence of the key is not
+        itself a disagreement.
+        """
+        manifest_path = self.probe_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        del manifest["content_hash"]
+        manifest_path.write_text(json.dumps(manifest))
+
+        probe = load_probe(self.probe_dir)
+
+        self.assertEqual(probe.content_hash, probe_content_hash(self.rows))
+
     def test_load_probe_build_branch_hashes_the_full_row_set_not_the_survivors(self):
         """`load_probe`'s build-from-scratch branch is the one production
         call site of `write_feature_cache`; a test that never passes

@@ -64,6 +64,9 @@ class _BlackHoleServer:
         self._held_conn = conn
 
     def close(self) -> None:
+        # Bounds the wait for _held_conn's assignment rather than guaranteeing it;
+        # a timeout here leaves the socket to leak exactly as it would with no join.
+        self._thread.join(timeout=0.5)
         if self._held_conn is not None:
             self._held_conn.close()
         self._listener.close()

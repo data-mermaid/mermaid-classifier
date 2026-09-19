@@ -389,6 +389,10 @@ def _load_local_probe(
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
 
     content_hash = probe_content_hash(rows)
+    _check_manifest_content_hash(manifest, content_hash, manifest_path)
+    _check_manifest_region_snapshot_hash(
+        manifest, region_snapshot_hash(region_ids_by_attribute), manifest_path
+    )
 
     features_path = probe_dir / PROBE_FEATURES_FILE
     if features_path.exists():
@@ -468,6 +472,46 @@ def check_feature_coverage(features: ProbeFeatures, min_coverage: float) -> None
             f" for a local probe dir, delete {PROBE_FEATURES_FILE} there and rerun to retry"
             f" the download (a probe read from s3:// already rebuilds into a scratch"
             f" directory on every run)"
+        )
+
+
+def _check_manifest_content_hash(
+    manifest: dict[str, Any], content_hash: str, manifest_path: Path
+) -> None:
+    """Refuse a manifest that names a different build than these exact rows.
+
+    A published prefix's `manifest.json` and `probe_points.parquet` are
+    written by separate calls, so a prefix can end up holding one build's
+    manifest beside another build's parquet. A manifest carrying no
+    `content_hash` predates the field and has nothing to disagree with, so
+    only a manifest that records a hash and disagrees is refused.
+    """
+    manifest_hash = manifest.get("content_hash")
+    if manifest_hash is not None and manifest_hash != content_hash:
+        raise ValueError(
+            f"{manifest_path} content_hash {manifest_hash!r} disagrees with"
+            f" {PROBE_POINTS_FILE}'s {content_hash!r}: the manifest was not built for"
+            " these rows. Rebuild the probe with scripts/build_region_probe.py."
+        )
+
+
+def _check_manifest_region_snapshot_hash(
+    manifest: dict[str, Any], region_snapshot_hash_value: str, manifest_path: Path
+) -> None:
+    """Refuse a manifest that names a different region snapshot than `ba_regions.json`.
+
+    `ba_regions.json` is uploaded by a separate publish call from `manifest.json`
+    and `probe_points.parquet`, so a prefix can hold one build's region snapshot
+    beside another build's manifest. A manifest carrying no `region_snapshot_hash`
+    predates the field and has nothing to disagree with, so only a manifest that
+    records a hash and disagrees is refused.
+    """
+    manifest_hash = manifest.get("region_snapshot_hash")
+    if manifest_hash is not None and manifest_hash != region_snapshot_hash_value:
+        raise ValueError(
+            f"{manifest_path} region_snapshot_hash {manifest_hash!r} disagrees with"
+            f" {PROBE_REGIONS_FILE}'s {region_snapshot_hash_value!r}: the manifest was not built"
+            " for this region snapshot. Rebuild the probe with scripts/build_region_probe.py."
         )
 
 
