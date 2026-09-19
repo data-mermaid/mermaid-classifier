@@ -170,6 +170,12 @@ def build_feature_cache(
     rows = np.asarray(probe_rows["row"], dtype=np.int64)
     cols = np.asarray(probe_rows["col"], dtype=np.int64)
 
+    # --source-uri is a free-form CLI argument, so image_id -- otherwise a
+    # trusted MERMAID UUID -- is checked before it can escape download_dir.
+    for image_id in image_ids:
+        if not image_id or "/" in image_id or "\\" in image_id or image_id in {".", ".."}:
+            raise ValueError(f"malformed image_id: {image_id!r}")
+
     wanted: dict[str, list[int]] = {}
     for position, image_id in enumerate(image_ids):
         wanted.setdefault(image_id, []).append(position)

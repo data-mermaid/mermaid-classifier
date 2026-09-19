@@ -237,6 +237,42 @@ class FeatureCacheTest(unittest.TestCase):
         self.assertIn("throttled", messages)
         self.assertIn("download", messages.lower())
 
+    def test_an_image_id_containing_a_path_separator_raises_without_downloading(self):
+        probe = _probe_rows({"a/b": [(10, 20)]})
+
+        with (
+            mock.patch(
+                "mermaid_classifier.region_eval.features.download_features_parallel"
+            ) as mock_download,
+            self.assertRaises(ValueError),
+        ):
+            build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
+
+        mock_download.assert_not_called()
+
+    def test_a_bare_dotdot_image_id_raises_without_downloading(self):
+        probe = _probe_rows({"..": [(10, 20)]})
+
+        with (
+            mock.patch(
+                "mermaid_classifier.region_eval.features.download_features_parallel"
+            ) as mock_download,
+            self.assertRaises(ValueError),
+        ):
+            build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
+
+        mock_download.assert_not_called()
+
+    def test_a_well_formed_uuid_image_id_still_works(self):
+        image_id = "5e5e5e5e-0000-4000-8000-000000000003"
+        self._write_feature_file(image_id, [(10, 20)])
+        probe = _probe_rows({image_id: [(10, 20)]})
+
+        cache = build_feature_cache(probe, self.root, feature_dim=DIM, workers=2)
+
+        self.assertEqual(list(cache.image_ids), [image_id])
+        self._assert_aligned(cache)
+
     def test_written_cache_round_trips_its_arrays(self):
         self._write_feature_file("i1", [(10, 20)])
         # write_feature_cache hashes the full PROBE_COLUMNS schema, wider than
