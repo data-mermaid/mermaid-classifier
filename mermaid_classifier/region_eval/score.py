@@ -568,8 +568,8 @@ def score_model(
         metrics=metrics,
         triage=triage,
         decisions=compute_decisions(
+            points,
             probe=probe,
-            predictions=predictions,
             probabilities=probabilities,
             classes=classes,
             options=resolved,
@@ -582,9 +582,9 @@ def score_model(
 
 
 def compute_decisions(
+    points: ScoredPoints,
     *,
     probe: LoadedProbe,
-    predictions: Sequence[str],
     probabilities: NDArray[np.float64],
     classes: Sequence[str],
     options: RegionMetricsOptions,
@@ -592,41 +592,29 @@ def compute_decisions(
 ) -> DecisionStatistics:
     """The four statistics that separate the mitigations from one another.
 
-    All four read the probe's frozen region map, so a curation change upstream
-    cannot move them. The within-branch share also needs the frozen ancestry,
-    and a probe without it leaves that one statistic uncomputed rather than
+    All four read the probe's frozen region map through `points`, so a
+    curation change upstream cannot move them. `probabilities` stays indexed
+    over the probe's own rows, which `points.source_positions` aligns onto the
+    scored slice. The within-branch share also needs the frozen ancestry, and
+    a probe without it leaves that one statistic uncomputed rather than
     failing a run whose other three are complete.
     """
-    features = probe.features
     confidences = probabilities.max(axis=1).tolist()
 
     ancestry = probe.ancestry_by_attribute
     within_branch = (
-        None
-        if ancestry is None
-        else within_branch_share(
-            image_region_ids=features.region_ids,
-            gt_labels=features.gt_labels,
-            pred_labels=predictions,
-            region_ids_by_attribute=probe.region_ids_by_attribute,
-            ancestry_by_attribute=ancestry,
-        )
+        None if ancestry is None else within_branch_share(points, ancestry_by_attribute=ancestry)
     )
 
     return DecisionStatistics(
         region_blind=region_blind_baseline(
-            image_ids=features.image_ids,
-            image_region_ids=features.region_ids,
-            pred_labels=predictions,
-            region_ids_by_attribute=probe.region_ids_by_attribute,
+            points,
             n_permutations=n_permutations,
             alpha=options.alpha,
             seed=options.seed,
         ),
         masking=masking_counterfactual(
-            image_ids=features.image_ids,
-            image_region_ids=features.region_ids,
-            gt_labels=features.gt_labels,
+            points,
             probabilities=probabilities,
             model_classes=classes,
             region_ids_by_attribute=probe.region_ids_by_attribute,
@@ -634,12 +622,7 @@ def compute_decisions(
             alpha=options.alpha,
             seed=options.seed,
         ),
-        confidence=confidence_stratification(
-            image_region_ids=features.region_ids,
-            pred_labels=predictions,
-            pred_confidences=confidences,
-            region_ids_by_attribute=probe.region_ids_by_attribute,
-        ),
+        confidence=confidence_stratification(points, pred_confidences=confidences),
         within_branch=within_branch,
         within_branch_status=(STATUS_NOT_COMPUTED if within_branch is None else STATUS_COMPUTED),
         within_branch_reason=(

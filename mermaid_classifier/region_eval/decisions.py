@@ -29,16 +29,19 @@ anyone tunes a cutoff that cannot work.
 
 Pure formulas over arrays. Nothing here reaches S3, MLflow, a model file or a
 plotting backend, and nothing here reads the live benthic-attribute library:
-the region map arrives from the caller as a frozen snapshot, so a curation
-change upstream cannot move a model's score for reasons unrelated to the model.
-Taxonomic ancestry arrives the same way. `pyspacer.metrics._taxonomy_helpers`
-holds the equivalent lookups, but importing it pulls boto3, duckdb, matplotlib
-and mlflow in through its package `__init__`, which this module stays clear of.
+the region map arrives from the caller as a frozen snapshot, resolved per point
+in `ScoredPoints`, so a curation change upstream cannot move a model's score
+for reasons unrelated to the model. Taxonomic ancestry arrives the same way.
+`pyspacer.metrics._taxonomy_helpers` holds the equivalent lookups, but
+importing it pulls boto3, duckdb, matplotlib and mlflow in through its package
+`__init__`, which this module stays clear of.
 
-Every entry point filters points whose image region is unrecorded and reports
-how many. The region predicates raise on that sentinel and a metrics
-orchestrator swallows what a metric group raises, so an unfiltered point would
-erase the whole result rather than skew it.
+Every entry point takes the `ScoredPoints` slice `metrics.prepare_scored_points`
+builds, which holds the region verdicts already derived from that snapshot and
+reports how many points it dropped for an unrecorded image region. The region
+predicates raise on that sentinel and a metrics orchestrator swallows what a
+metric group raises, so an unfiltered point would erase the whole result rather
+than skew it.
 """
 
 import dataclasses
@@ -50,11 +53,10 @@ from numpy.typing import NDArray
 from sklearn.metrics import roc_auc_score
 
 from mermaid_classifier.common.benthic_attributes import split_ba_gf
+from mermaid_classifier.region_eval.metrics import ScoredPoints
 from mermaid_classifier.region_eval.region_rules import (
     cluster_bootstrap_ci,
     is_out_of_region,
-    is_region_discriminating,
-    partition_by_recorded_region,
     permutation_baseline,
 )
 
@@ -99,11 +101,8 @@ class RegionBlindBaseline:
 
 
 def region_blind_baseline(
+    points: ScoredPoints,
     *,
-    image_ids: Sequence[str],
-    image_region_ids: Sequence[str],
-    pred_labels: Sequence[str],
-    region_ids_by_attribute: Mapping[str, frozenset[str]],
     n_permutations: int = DEFAULT_N_PERMUTATIONS,
     alpha: float = 0.05,
     seed: int = 0,
@@ -112,40 +111,21 @@ def region_blind_baseline(
 
     Regions are permuted between images rather than between points, since an
     image's region is a property of the image; a within-image shuffle would
-    leave every point where it was. `region_ids_by_attribute` is a frozen
-    snapshot keyed by benthic-attribute id, and an attribute it omits counts
-    as unrecorded.
+    leave every point where it was. The permuted rate is read over the same
+    frozen region lists `points` resolved its own verdicts from.
 
     Seeded, and deterministic for a given seed and input.
     """
-    _check_lengths(
-        image_ids=len(image_ids),
-        image_region_ids=len(image_region_ids),
-        pred_labels=len(pred_labels),
-    )
-    scorable, n_excluded = _partition(image_region_ids)
-    images = [image_ids[position] for position in scorable]
-    regions = [image_region_ids[position] for position in scorable]
-    allowed = [
-        _allowed_regions(pred_labels[position], region_ids_by_attribute) for position in scorable
-    ]
-
-    observed_regions = frozenset(regions)
-    n_region_unknown = sum(1 for allowed_ids in allowed if not allowed_ids)
-    n_discriminating = sum(
-        1 for allowed_ids in allowed if is_region_discriminating(allowed_ids, observed_regions)
-    )
-    n_out_of_region = sum(
-        1
-        for allowed_ids, region in zip(allowed, regions, strict=True)
-        if is_out_of_region(allowed_ids, region)
-    )
+    allowed = points.pred_allowed
+    n_region_unknown = int(points.pred_region_unknown.sum())
+    n_discriminating = int(points.pred_discriminating.sum())
+    n_out_of_region = int(points.pred_out_of_region.sum())
 
     if n_discriminating == 0:
         return RegionBlindBaseline(
-            n_points=len(scorable),
-            n_images=len(set(images)),
-            n_unrecorded_region_excluded=n_excluded,
+            n_points=points.n_points,
+            n_images=points.n_images,
+            n_unrecorded_region_excluded=points.n_unrecorded_region_excluded,
             n_region_unknown=n_region_unknown,
             n_discriminating=0,
             n_out_of_region=n_out_of_region,
@@ -168,15 +148,19 @@ def region_blind_baseline(
 
     recording, per_permutation = _recording(rate)
     baseline_rate = permutation_baseline(
-        images, regions, recording, n_permutations=n_permutations, seed=seed
+        points.image_ids,
+        points.image_region_ids,
+        recording,
+        n_permutations=n_permutations,
+        seed=seed,
     )
     distribution = np.asarray(per_permutation, dtype=np.float64)
     observed_rate = n_out_of_region / n_discriminating
 
     return RegionBlindBaseline(
-        n_points=len(scorable),
-        n_images=len(set(images)),
-        n_unrecorded_region_excluded=n_excluded,
+        n_points=points.n_points,
+        n_images=points.n_images,
+        n_unrecorded_region_excluded=points.n_unrecorded_region_excluded,
         n_region_unknown=n_region_unknown,
         n_discriminating=n_discriminating,
         n_out_of_region=n_out_of_region,
@@ -235,10 +219,8 @@ class MaskingCounterfactual:
 
 
 def masking_counterfactual(
+    points: ScoredPoints,
     *,
-    image_ids: Sequence[str],
-    image_region_ids: Sequence[str],
-    gt_labels: Sequence[str],
     probabilities: NDArray[np.float64],
     model_classes: Sequence[str],
     region_ids_by_attribute: Mapping[str, frozenset[str]],
@@ -248,8 +230,12 @@ def masking_counterfactual(
 ) -> MaskingCounterfactual:
     """Re-score every prediction with the out-of-region classes zeroed.
 
-    `probabilities` is one row per point over `model_classes` in that column
-    order. Classes incompatible with the image's region are zeroed and the
+    `probabilities` is one row per point `points` was prepared from, over
+    `model_classes` in that column order, and `points.source_positions` picks
+    out the rows that survived preparation. `region_ids_by_attribute` is the
+    frozen snapshot behind `points`, needed again here because the mask spans
+    the model's whole label space rather than the classes it happened to
+    predict. Classes incompatible with the image's region are zeroed and the
     remaining row is re-argmaxed; renormalising first would change the scale
     but not the argmax (when probabilities are non-negative), so it is skipped.
     A class with no recorded regions is never zeroed: unrecorded is not
@@ -266,26 +252,21 @@ def masking_counterfactual(
     difference.
     """
     probability_matrix = np.asarray(probabilities, dtype=np.float64)
-    _check_lengths(
-        image_ids=len(image_ids),
-        image_region_ids=len(image_region_ids),
-        gt_labels=len(gt_labels),
-        probabilities=len(probability_matrix),
-    )
+    _check_source_rows(points, probabilities=len(probability_matrix))
     if probability_matrix.ndim != 2 or probability_matrix.shape[1] != len(model_classes):
         raise ValueError(
-            f"probabilities must be (n_points, {len(model_classes)}),"
+            f"probabilities must be (n_source_points, {len(model_classes)}),"
             f" got {probability_matrix.shape}"
         )
 
-    scorable, n_excluded = _partition(image_region_ids)
-    images = [image_ids[position] for position in scorable]
-    regions = [image_region_ids[position] for position in scorable]
-    truths = [gt_labels[position] for position in scorable]
-    point_probabilities = probability_matrix[scorable]
+    images = points.image_ids
+    truths = points.gt_labels
+    point_probabilities = probability_matrix[points.source_positions]
 
     class_allowed = [_allowed_regions(label, region_ids_by_attribute) for label in model_classes]
-    unique_regions, region_of_point = np.unique(np.asarray(regions), return_inverse=True)
+    unique_regions, region_of_point = np.unique(
+        np.asarray(points.image_region_ids), return_inverse=True
+    )
     permitted_by_unique_region = np.array(
         [
             [not is_out_of_region(allowed_ids, region) for allowed_ids in class_allowed]
@@ -296,7 +277,7 @@ def masking_counterfactual(
     permitted_matrix = permitted_by_unique_region[region_of_point]
     class_index = {label: index for index, label in enumerate(model_classes)}
 
-    n_points = len(scorable)
+    n_points = points.n_points
     point_positions = np.arange(n_points)
     unmasked_index = np.argmax(point_probabilities, axis=1)
     any_permitted = permitted_matrix.any(axis=1)
@@ -338,8 +319,8 @@ def masking_counterfactual(
 
     return MaskingCounterfactual(
         n_points=n_points,
-        n_images=len(set(images)),
-        n_unrecorded_region_excluded=n_excluded,
+        n_images=points.n_images,
+        n_unrecorded_region_excluded=points.n_unrecorded_region_excluded,
         n_region_unknown_classes=sum(1 for allowed_ids in class_allowed if not allowed_ids),
         n_no_permitted_class=n_no_permitted_class,
         n_accuracy_points=n_accuracy_points,
@@ -385,11 +366,8 @@ class WithinBranchShare:
 
 
 def within_branch_share(
+    points: ScoredPoints,
     *,
-    image_region_ids: Sequence[str],
-    gt_labels: Sequence[str],
-    pred_labels: Sequence[str],
-    region_ids_by_attribute: Mapping[str, frozenset[str]],
     ancestry_by_attribute: Mapping[str, Sequence[str]],
 ) -> WithinBranchShare:
     """The share of out-of-region predictions sharing an ancestor with the truth.
@@ -402,40 +380,22 @@ def within_branch_share(
     The ancestry is a caller-supplied snapshot for the same reason the region
     map is: a taxonomy edit upstream must not move a model's score.
     """
-    _check_lengths(
-        image_region_ids=len(image_region_ids),
-        gt_labels=len(gt_labels),
-        pred_labels=len(pred_labels),
-    )
-    scorable, n_excluded = _partition(image_region_ids)
-
-    n_region_unknown = 0
-    n_out_of_region = 0
     n_ancestry_unknown = 0
     n_within_branch = 0
-    for position in scorable:
-        pred_attribute = split_ba_gf(pred_labels[position])[0]
-        allowed = region_ids_by_attribute.get(pred_attribute, frozenset())
-        if not allowed:
-            n_region_unknown += 1
-            continue
-        if not is_out_of_region(allowed, image_region_ids[position]):
-            continue
-
-        n_out_of_region += 1
-        gt_attribute = split_ba_gf(gt_labels[position])[0]
-        pred_path = ancestry_by_attribute.get(pred_attribute)
-        gt_path = ancestry_by_attribute.get(gt_attribute)
+    for position in np.flatnonzero(points.pred_out_of_region):
+        pred_path = ancestry_by_attribute.get(points.pred_attribute_ids[position])
+        gt_path = ancestry_by_attribute.get(points.gt_attribute_ids[position])
         if pred_path is None or gt_path is None:
             n_ancestry_unknown += 1
         elif _shares_ancestor(gt_path, pred_path):
             n_within_branch += 1
 
+    n_out_of_region = int(points.pred_out_of_region.sum())
     n_evaluable = n_out_of_region - n_ancestry_unknown
     return WithinBranchShare(
-        n_points=len(scorable),
-        n_unrecorded_region_excluded=n_excluded,
-        n_region_unknown=n_region_unknown,
+        n_points=points.n_points,
+        n_unrecorded_region_excluded=points.n_unrecorded_region_excluded,
+        n_region_unknown=int(points.pred_region_unknown.sum()),
         n_out_of_region=n_out_of_region,
         n_ancestry_unknown=n_ancestry_unknown,
         n_evaluable=n_evaluable,
@@ -490,54 +450,38 @@ class ConfidenceStratification:
 
 
 def confidence_stratification(
+    points: ScoredPoints,
     *,
-    image_region_ids: Sequence[str],
-    pred_labels: Sequence[str],
     pred_confidences: Sequence[float],
-    region_ids_by_attribute: Mapping[str, frozenset[str]],
     bin_edges: Sequence[float] = DEFAULT_CONFIDENCE_BIN_EDGES,
 ) -> ConfidenceStratification:
     """Bin the out-of-region rate by confidence, and rank one against the other.
 
     `pred_confidences[i]` is the probability the model gave the label it
-    predicted. Every confidence must fall inside `bin_edges`, which are
-    strictly increasing: a score outside them would vanish from the bins while
-    still counting in the totals.
+    predicted, one per point `points` was prepared from. Every confidence a
+    scored point carries must fall inside `bin_edges`, which are strictly
+    increasing: a score outside them would vanish from the bins while still
+    counting in the totals.
     """
-    _check_lengths(
-        image_region_ids=len(image_region_ids),
-        pred_labels=len(pred_labels),
-        pred_confidences=len(pred_confidences),
-    )
+    _check_source_rows(points, pred_confidences=len(pred_confidences))
     if len(bin_edges) < 2:
         raise ValueError(f"bin_edges must hold at least two edges, got {list(bin_edges)}")
     if any(upper <= lower for lower, upper in zip(bin_edges, bin_edges[1:], strict=False)):
         raise ValueError(f"bin_edges must increase strictly, got {list(bin_edges)}")
 
-    scorable, n_excluded = _partition(image_region_ids)
-    regions = [image_region_ids[position] for position in scorable]
-    observed_regions = frozenset(regions)
+    confidences = np.asarray(pred_confidences, dtype=np.float64)[points.source_positions]
+    outside = (confidences < bin_edges[0]) | (confidences > bin_edges[-1])
+    if outside.any():
+        stray = float(confidences[outside][0])
+        raise ValueError(
+            f"confidence {stray} falls outside the bins [{bin_edges[0]}, {bin_edges[-1]}]"
+        )
 
-    n_region_unknown = 0
-    scores: list[float] = []
-    events: list[bool] = []
-    for position in scorable:
-        confidence = float(pred_confidences[position])
-        if not bin_edges[0] <= confidence <= bin_edges[-1]:
-            raise ValueError(
-                f"confidence {confidence} falls outside the bins [{bin_edges[0]}, {bin_edges[-1]}]"
-            )
-        allowed = _allowed_regions(pred_labels[position], region_ids_by_attribute)
-        if not allowed:
-            n_region_unknown += 1
-            continue
-        if not is_region_discriminating(allowed, observed_regions):
-            continue
-        scores.append(confidence)
-        events.append(is_out_of_region(allowed, image_region_ids[position]))
-
-    score_values = np.asarray(scores, dtype=np.float64)
-    event_values = np.asarray(events, dtype=bool)
+    # `pred_discriminating` is False for an attribute with no recorded regions
+    # as well, so one mask drops both kinds of point that carry no evidence.
+    discriminating = points.pred_discriminating
+    score_values = confidences[discriminating]
+    event_values = points.pred_out_of_region[discriminating]
 
     bins: list[ConfidenceBin] = []
     for index, (lower, upper) in enumerate(zip(bin_edges, bin_edges[1:], strict=False)):
@@ -556,10 +500,10 @@ def confidence_stratification(
         )
 
     return ConfidenceStratification(
-        n_points=len(scorable),
-        n_unrecorded_region_excluded=n_excluded,
-        n_region_unknown=n_region_unknown,
-        n_discriminating=len(scores),
+        n_points=points.n_points,
+        n_unrecorded_region_excluded=points.n_unrecorded_region_excluded,
+        n_region_unknown=int(points.pred_region_unknown.sum()),
+        n_discriminating=int(score_values.size),
         n_out_of_region=int(event_values.sum()),
         auroc=_auroc(score_values, event_values),
         bins=tuple(bins),
@@ -592,16 +536,18 @@ def _allowed_regions(
     return region_ids_by_attribute.get(split_ba_gf(label)[0], frozenset())
 
 
-def _partition(image_region_ids: Sequence[str]) -> tuple[list[int], int]:
-    """Positions with a recorded image region, and how many lack one."""
-    scorable, unscorable = partition_by_recorded_region(image_region_ids)
-    return scorable, len(unscorable)
+def _check_source_rows(points: ScoredPoints, **lengths: int) -> None:
+    """Reject a column not indexed over the rows `points` was prepared from.
 
-
-def _check_lengths(**lengths: int) -> None:
-    """Reject ragged parallel inputs, which would silently misalign points."""
-    if len(set(lengths.values())) > 1:
-        raise ValueError(f"inputs must be the same length, got {lengths}")
+    `source_positions` indexes back into those rows, so a column of any other
+    length would align onto the wrong points rather than fail.
+    """
+    expected = points.n_points + points.n_unrecorded_region_excluded
+    for name, length in lengths.items():
+        if length != expected:
+            raise ValueError(
+                f"{name} must hold one row per source point, got {length} for {expected}"
+            )
 
 
 def _ratio(numerator: int, denominator: int) -> float:

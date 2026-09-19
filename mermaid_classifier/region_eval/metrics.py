@@ -229,6 +229,11 @@ class ScoredPoints:
     actually contains and is what "region-discriminating" is judged against,
     so it stays fixed across the nested populations rather than being
     recomputed on a subset.
+
+    `source_positions[i]` is the row point i was prepared from, so a column
+    held outside this slice -- a probability matrix over the caller's rows,
+    say -- indexes onto the same points instead of being filtered a second
+    time and trusted to agree.
     """
 
     image_ids: tuple[str, ...]
@@ -250,6 +255,7 @@ class ScoredPoints:
     correct: NDArray[np.bool_]
     observed_region_ids: frozenset[str]
     unmapped_attribute_ids: frozenset[str]
+    source_positions: NDArray[np.intp]
     n_unrecorded_region_excluded: int
 
     @property
@@ -368,6 +374,7 @@ def prepare_scored_points(
         ),
         observed_region_ids=observed,
         unmapped_attribute_ids=unmapped,
+        source_positions=np.asarray(scorable, dtype=np.intp),
         n_unrecorded_region_excluded=len(unscorable),
     )
 
@@ -496,6 +503,7 @@ def _restrict(points: ScoredPoints, positions: NDArray[np.intp]) -> ScoredPoints
         correct=points.correct[positions],
         observed_region_ids=points.observed_region_ids,
         unmapped_attribute_ids=points.unmapped_attribute_ids,
+        source_positions=points.source_positions[positions],
         n_unrecorded_region_excluded=points.n_unrecorded_region_excluded,
     )
 

@@ -30,6 +30,7 @@ from mermaid_classifier.region_eval.decisions import (
     region_blind_baseline,
     within_branch_share,
 )
+from mermaid_classifier.region_eval.metrics import prepare_scored_points
 
 TROPICAL_ATLANTIC = "1a1a1a1a-0000-4000-8000-000000000001"
 CENTRAL_INDO_PACIFIC = "1a1a1a1a-0000-4000-8000-000000000002"
@@ -82,15 +83,21 @@ AWARE_ROWS = (
 
 
 def _baseline(rows, **kwargs):
-    return region_blind_baseline(
+    """The baseline over `rows`, which carry no ground truth to prepare with.
+
+    The statistic reads predictions alone, so the predictions stand in as the
+    truth column `prepare_scored_points` requires.
+    """
+    predictions = [row[2] for row in rows]
+    points = prepare_scored_points(
         image_ids=[row[0] for row in rows],
         image_region_ids=[row[1] for row in rows],
-        pred_labels=[row[2] for row in rows],
+        gt_labels=predictions,
+        pred_labels=predictions,
         region_ids_by_attribute=REGION_IDS_BY_ATTRIBUTE,
-        n_permutations=400,
-        seed=0,
-        **kwargs,
+        model_classes=(),
     )
+    return region_blind_baseline(points, n_permutations=400, seed=0, **kwargs)
 
 
 class RegionBlindBaselineTest(unittest.TestCase):
@@ -217,11 +224,23 @@ IN_REGION_ROWS = (
 
 
 def _masking(rows, *, model_classes=MASKING_CLASSES, **kwargs):
-    return masking_counterfactual(
+    """The counterfactual over `rows`, whose argmax is the model's prediction.
+
+    The probability matrix stays indexed over every row, unrecorded regions
+    included, which is the alignment `source_positions` carries.
+    """
+    probabilities = np.array([row[3] for row in rows], dtype=np.float64)
+    points = prepare_scored_points(
         image_ids=[row[0] for row in rows],
         image_region_ids=[row[1] for row in rows],
         gt_labels=[row[2] for row in rows],
-        probabilities=np.array([row[3] for row in rows], dtype=np.float64),
+        pred_labels=[model_classes[int(index)] for index in probabilities.argmax(axis=1)],
+        region_ids_by_attribute=REGION_IDS_BY_ATTRIBUTE,
+        model_classes=model_classes,
+    )
+    return masking_counterfactual(
+        points,
+        probabilities=probabilities,
         model_classes=model_classes,
         region_ids_by_attribute=REGION_IDS_BY_ATTRIBUTE,
         **kwargs,
@@ -391,14 +410,16 @@ BRANCH_ROWS = (
 
 
 def _branch(rows, **kwargs):
-    return within_branch_share(
+    """The share over `rows`, every one of which sits in the same image."""
+    points = prepare_scored_points(
+        image_ids=["image-a"] * len(rows),
         image_region_ids=[row[0] for row in rows],
         gt_labels=[row[1] for row in rows],
         pred_labels=[row[2] for row in rows],
         region_ids_by_attribute=BRANCH_REGION_IDS,
-        ancestry_by_attribute=ANCESTRY,
-        **kwargs,
+        model_classes=(),
     )
+    return within_branch_share(points, ancestry_by_attribute=ANCESTRY, **kwargs)
 
 
 class WithinBranchShareTest(unittest.TestCase):
@@ -512,13 +533,22 @@ QUARTILE_EDGES = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 
 def _stratify(rows, **kwargs):
-    return confidence_stratification(
+    """The stratification over `rows`, which carry no ground truth.
+
+    The statistic reads predictions alone, so the predictions stand in as the
+    truth column `prepare_scored_points` requires, and the confidences stay
+    indexed over every row.
+    """
+    predictions = [row[1] for row in rows]
+    points = prepare_scored_points(
+        image_ids=["image-a"] * len(rows),
         image_region_ids=[row[0] for row in rows],
-        pred_labels=[row[1] for row in rows],
-        pred_confidences=[row[2] for row in rows],
+        gt_labels=predictions,
+        pred_labels=predictions,
         region_ids_by_attribute=REGION_IDS_BY_ATTRIBUTE,
-        **kwargs,
+        model_classes=(),
     )
+    return confidence_stratification(points, pred_confidences=[row[2] for row in rows], **kwargs)
 
 
 def _auroc_of(positives, negatives):
