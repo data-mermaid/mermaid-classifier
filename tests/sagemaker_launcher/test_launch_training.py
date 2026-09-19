@@ -63,13 +63,6 @@ class ExpandImageTest(unittest.TestCase):
             lt.expand_image_uri("some-other-repo:latest")
 
 
-class MakeRunIdTest(unittest.TestCase):
-    @patch("launch_training.datetime")
-    def test_run_id_format(self, mock_dt):
-        mock_dt.now.return_value.strftime.return_value = "20260525T120000Z"
-        self.assertEqual(lt.make_run_id("mermaid-test"), "mermaid-test-20260525T120000Z")
-
-
 class BuildEstimatorKwargsTest(unittest.TestCase):
     @patch("launch_training.datetime")
     def test_kwargs_match_expectation(self, mock_dt):

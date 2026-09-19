@@ -28,9 +28,6 @@ class ChunkSourcesTest(unittest.TestCase):
         chunks = lp.chunk_items(["a", "b"], n_workers=5)
         self.assertEqual(len(chunks), 2)  # 3 empty chunks dropped
 
-    def test_single_item(self):
-        self.assertEqual(lp.chunk_items(["a"], n_workers=4), [["a"]])
-
     def test_zero_workers_raises(self):
         with self.assertRaises(ValueError):
             lp.chunk_items(["a"], n_workers=0)

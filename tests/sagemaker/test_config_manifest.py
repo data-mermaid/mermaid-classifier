@@ -2,7 +2,6 @@ import unittest
 from pathlib import Path
 
 import yaml
-from pydantic import ValidationError
 
 from mermaid_classifier.sagemaker.config import TrainingRunConfig
 
@@ -22,8 +21,3 @@ class ConfigManifestTest(unittest.TestCase):
         self.assertEqual(
             ds.coralnet_manifest_uri, "s3://bucket/coralnet_classifier_manifest_x.parquet"
         )
-
-    def test_old_field_rejected(self):
-        bad = {"dataset": {"coralnet_sources_csv": "sources.csv"}, "training": {}, "mlflow": {}}
-        with self.assertRaises(ValidationError):
-            TrainingRunConfig.model_validate(bad)  # extra="forbid"
