@@ -1,6 +1,5 @@
 """A TrainingDataset that skips the S3 and API work its __init__ does."""
 
-import shutil
 import tempfile
 import unittest
 
@@ -18,8 +17,12 @@ class NoInitDataset(TrainingDataset):
     def __init__(self):
         self._duck_conn = None
         self.artifacts = Artifacts()
-        self._feature_temp_dir = None
-        self._feature_dir = "/tmp/mermaid_features_test"
+        # Matches TrainingDataset's own temp-dir shape: unpredictable path,
+        # self-cleaning on garbage collection.
+        self._feature_temp_dir = tempfile.TemporaryDirectory(
+            prefix="mermaid_features_test_", ignore_cleanup_errors=True
+        )
+        self._feature_dir = self._feature_temp_dir.name
 
 
 def make_dataset(test_case: unittest.TestCase) -> NoInitDataset:
@@ -29,8 +32,7 @@ def make_dataset(test_case: unittest.TestCase) -> NoInitDataset:
     stays hermetic and doesn't leak directories.
     """
     dataset = NoInitDataset()
-    dataset._feature_dir = tempfile.mkdtemp()
-    test_case.addCleanup(shutil.rmtree, dataset._feature_dir, ignore_errors=True)
+    test_case.addCleanup(dataset.cleanup)
     dataset.profiled_sections = []
     dataset._feature_path_to_s3_location = {}
     dataset.feature_loc_to_source = {}
