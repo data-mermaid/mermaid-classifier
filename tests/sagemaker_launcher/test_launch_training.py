@@ -27,8 +27,19 @@ if _HAS_SAGEMAKER:
 
 
 def setUpModule():
-    if not _HAS_SAGEMAKER:
-        raise unittest.SkipTest("sagemaker SDK not installed (`sagemaker` extra)")
+    # CI installs the `sagemaker` extra, so a missing SDK there means the extra
+    # was dropped from the workflow or a tests/<name>/ package is shadowing it
+    # again -- both regress this module back to silently skipped. Locally, the
+    # extra is optional, so a missing SDK there is expected and just skips.
+    if _HAS_SAGEMAKER:
+        return
+    if os.environ.get("CI"):
+        raise RuntimeError(
+            "sagemaker.estimator does not import under CI, where the `sagemaker` "
+            "extra is installed: either the extra was dropped from the workflow, "
+            "or a tests/<name>/ package is shadowing the SDK."
+        )
+    raise unittest.SkipTest("sagemaker SDK not installed (`sagemaker` extra)")
 
 
 def _minimal_yaml() -> str:
