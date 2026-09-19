@@ -17,10 +17,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Harden the runner (Audit all outbound calls)
+      - name: Harden the runner (Block outbound calls)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          # download.pytorch.org: uv.lock references both pytorch hosts,
+          # though only the r2 one appeared in the audit.
+          # extensions.duckdb.org:80: httpfs install_extension fallback in
+          # pyspacer/dataset.py. Port 80, not 443 -- do not "correct" it.
+          allowed-endpoints: >
+            github.com:443
+            raw.githubusercontent.com:443
+            releases.astral.sh:443
+            results-receiver.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            download.pytorch.org:443
+            download-r2.pytorch.org:443
+            extensions.duckdb.org:80
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
