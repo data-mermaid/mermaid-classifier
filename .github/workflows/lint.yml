@@ -25,6 +25,9 @@ jobs:
           egress-policy: block
           # download.pytorch.org: uv.lock references both pytorch hosts,
           # though only the r2 one appeared in the audit.
+          # release-assets.githubusercontent.com / objects.githubusercontent.com:
+          # cover uv's managed-Python download path, which release-asset
+          # requests to github.com redirect to.
           allowed-endpoints: >
             github.com:443
             raw.githubusercontent.com:443
@@ -35,6 +38,8 @@ jobs:
             files.pythonhosted.org:443
             download.pytorch.org:443
             download-r2.pytorch.org:443
+            release-assets.githubusercontent.com:443
+            objects.githubusercontent.com:443
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
