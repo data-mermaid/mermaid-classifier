@@ -19,10 +19,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Harden the runner (Audit all outbound calls)
+      - name: Harden the runner (Block outbound calls)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          # download.pytorch.org: uv.lock references both pytorch hosts,
+          # though only the r2 one appeared in the audit.
+          # release-assets.githubusercontent.com / objects.githubusercontent.com:
+          # cover uv's managed-Python download path, which release-asset
+          # requests to github.com redirect to.
+          allowed-endpoints: >
+            github.com:443
+            raw.githubusercontent.com:443
+            releases.astral.sh:443
+            results-receiver.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            download.pytorch.org:443
+            download-r2.pytorch.org:443
+            release-assets.githubusercontent.com:443
+            objects.githubusercontent.com:443
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
@@ -37,9 +54,12 @@ jobs:
 
       - name: Install package with training extras and lint group
         # Real deps must be installed so basedpyright can resolve imports
-        # (torch, pyspacer, scikit-learn, mlflow, duckdb, …).
+        # (torch, pyspacer, scikit-learn, mlflow, duckdb, …). `sagemaker` lets
+        # basedpyright resolve the SageMaker SDK imported at module scope in
+        # scripts/launch_training.py, instead of skipping it as an unresolved
+        # import, and it supplies tqdm.
         # --frozen fails CI if uv.lock is out of sync with pyproject.toml.
-        run: uv sync --frozen --extra training --group lint
+        run: uv sync --frozen --extra training --extra sagemaker --group lint
 
       - name: Check lockfile is in sync
         run: uv lock --check

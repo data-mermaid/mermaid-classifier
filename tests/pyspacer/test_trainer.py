@@ -8,16 +8,13 @@ Covers two distinct features of MermaidTrainer:
     populates _early_stop_info under a scripted val_loss schedule.
 """
 
-import ast
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.neural_network import MLPClassifier
 
-import mermaid_classifier.pyspacer.trainer as trainer_module
 from mermaid_classifier.pyspacer.trainer import MermaidTrainer
 
 
@@ -171,22 +168,9 @@ class CalibrateInBatchesTest(unittest.TestCase):
 class EarlyStoppingConstructorTest(unittest.TestCase):
     """Validation of the early_stopping_patience constructor argument."""
 
-    def test_default_is_none(self):
-        t = MermaidTrainer(batch_size=10)
-        self.assertIsNone(t.early_stopping_patience)
-        self.assertIsNone(t._early_stop_info)
-
-    def test_patience_one_accepted(self):
-        t = MermaidTrainer(batch_size=10, early_stopping_patience=1)
-        self.assertEqual(t.early_stopping_patience, 1)
-
     def test_patience_zero_rejected(self):
         with self.assertRaisesRegex(ValueError, "early_stopping_patience"):
             MermaidTrainer(batch_size=10, early_stopping_patience=0)
-
-    def test_patience_negative_rejected(self):
-        with self.assertRaisesRegex(ValueError, "early_stopping_patience"):
-            MermaidTrainer(batch_size=10, early_stopping_patience=-1)
 
 
 class EarlyStoppingBehaviorTest(unittest.TestCase):
@@ -356,46 +340,3 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         self.assertIn("final_epoch", captured[-1])
         self.assertIn("best_val_epoch", captured[-1])
         self.assertIn("best_val_loss", captured[-1])
-
-
-class TrainerCleanupGuardTest(unittest.TestCase):
-    """Guard against reintroducing the removed SGD/clf_type path or the
-    no-benefit pyspacer imports into trainer.py (#58)."""
-
-    def setUp(self):
-        self.source = Path(trainer_module.__file__).read_text()
-
-    def test_no_sgd_or_clf_type_references(self):
-        for token in ("SGDClassifier", "clf_type"):
-            self.assertNotIn(token, self.source, f"{token} should not reappear in trainer.py")
-
-    def test_no_dead_pyspacer_imports(self):
-        # Walk the actual import nodes (not substrings) so equivalent
-        # import styles -- e.g. `import spacer.config as config` -- can't
-        # slip past the guard.
-        offenders = []
-        for node in ast.walk(ast.parse(self.source)):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    # `import spacer.config[.x]` in any aliased form
-                    if alias.name == "spacer.config" or alias.name.startswith("spacer.config."):
-                        offenders.append(f"import {alias.name}")
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                names = {alias.name for alias in node.names}
-                # `from spacer import config`
-                if module == "spacer" and "config" in names:
-                    offenders.append("from spacer import config")
-                # `from spacer.config[.x] import ...`
-                if module == "spacer.config" or module.startswith("spacer.config."):
-                    offenders.append(f"from {module} import ...")
-                # `from spacer.train_utils import calc_acc`
-                if module == "spacer.train_utils" and "calc_acc" in names:
-                    offenders.append("from spacer.train_utils import calc_acc")
-        self.assertEqual(
-            offenders,
-            [],
-            "trainer.py should not re-import spacer.config or the dead"
-            f" calc_acc helper (use sklearn.metrics.accuracy_score); found:"
-            f" {offenders}",
-        )

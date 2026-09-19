@@ -15,7 +15,9 @@ Python 3.12 (`.python-version`, `requires-python = ">=3.12"`). Use `uv`.
 ```bash
 uv sync --extra training          # full dev/test stack (superset of [inference])
 uv sync --extra inference         # serving-only: just pyspacer + pinned sklearn
-uv sync --frozen --extra training # what CI runs; fails if uv.lock is stale
+uv sync --extra training --extra sagemaker   # adds the SageMaker SDK, without
+                                  # which sagemaker_launcher/test_launch_training.py skips
+uv sync --frozen --extra training --extra sagemaker  # what CI runs; fails if uv.lock is stale
 
 # Tests — unittest, NOT pytest. Must run from the tests/ dir.
 cd tests && uv run python -m unittest -v
@@ -80,8 +82,10 @@ pickle (`inference/export.py` → `export_artifact`, `inference/loader.py` →
 because `CalibratedClassifierCV` calibration semantics can shift between
 releases. `PARITY_PROVEN_SKLEARN` (`pyspacer/inference/__init__.py`) records the
 version the TorchScript-vs-sklearn parity was proven against; a mismatch raises
-`SklearnPinError` at export and fails a guard test (`test_sklearn_pin.py`). If
-you bump sklearn, you must re-prove parity and update the pin + constant together.
+`SklearnPinError` at export, which fails every test that exports an artifact —
+45 of them across `test_portable_artifact.py`, `test_release_artifact.py`,
+`test_mlflow_model.py`, `test_annotation_resolver.py` and `region_eval/test_score.py`.
+If you bump sklearn, you must re-prove parity and update the pin + constant together.
 
 ### Training pipeline (`pyspacer/dataset.py`, `pyspacer/runner.py`)
 
@@ -164,6 +168,23 @@ break the resulting cycle — more machinery than the separation buys.
 
 ## Conventions and gotchas
 
+- **A test package must not share a name with an installed dependency.**
+  The suite runs from `tests/`, which puts it on `sys.path`, so a
+  `tests/<name>/` package shadows `<name>` for the whole session. `tests/sagemaker/`
+  would shadow the SageMaker SDK, and a module that guards itself with
+  `find_spec` then skips silently even where the SDK is installed — which is
+  why the launcher's config tests live in `tests/sagemaker_launcher/`.
+- **A new test package needs an `__init__.py`.** Discovery descends into
+  packages only, so a directory without one runs zero tests in the full suite
+  while `unittest <pkg>.<module>` still passes — green for its author and green
+  in CI, having executed nothing. `tests/test_suite_layout.py` fails if one is
+  missing.
+- **Shared fixtures live in `tests/support/`** — `paths` (repo root, and
+  putting `scripts/` on `sys.path`), `settings`, `dataset`, `calibrated_model`,
+  `coralnet_tables`. The rule is scope: a fixture used inside one test package
+  stays there (`pyspacer/metrics_test_helpers.py`, `region_eval/fixtures.py`),
+  and one crossing packages goes in `support/`. No test module imports from
+  another test module.
 - **`unittest -v <package>` silently runs 0 tests**: a bare package name
   (`region_eval`, `common`, …) exposes nothing to unittest's loader; name
   modules explicitly (`region_eval.test_metrics`). The full suite does
@@ -184,9 +205,16 @@ break the resulting cycle — more machinery than the separation buys.
   full set (`CORALNET_TRAIN_DATA_BUCKET`, `WEIGHTS_LOCATION`, `AWS_ANONYMOUS`,
   `MLFLOW_TRACKING_SERVER`, `SPACER_BATCH_SIZE`, …). `SPACER_BATCH_SIZE` is
   auto-derived from available RAM when unset.
-- **Test isolation**: `override_settings()` / `SettingsOverride` patch settings;
-  `NoInitDataset` bypasses the S3/API-hitting `TrainingDataset.__init__`;
-  `CoralNetMermaidMapping._download_mapping` is mocked.
+- **Test isolation**: `support.settings.override_settings()` /
+  `SettingsOverride` patch the settings singleton (always via the context
+  manager or `addCleanup`, since an unrestored override leaks into every later
+  test in the process); `support.dataset.NoInitDataset` bypasses the
+  S3/API-hitting `TrainingDataset.__init__`;
+  `CoralNetMermaidMapping._download_mapping` is mocked. The suite makes no
+  outbound network connections, except DuckDB's `httpfs` extension install
+  fallback (`dataset.py`'s `duck_conn`, `build_coralnet_manifest.py`'s
+  `_configure_duckdb_s3`) when the extension isn't already installed locally —
+  anything new that would must be stubbed.
 - **Config dirs are repo-root-relative**: a committed training config is a
   `sagemaker/configs/<name>/` dir (`training_config.yaml` plus whichever of
   `sources.csv` / `rollups.csv` / `included_labels.csv` that run needs — the

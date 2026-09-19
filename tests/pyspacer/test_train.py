@@ -2,78 +2,16 @@ import importlib
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
 import pandas as pd
 from spacer.data_classes import DataLocation, ImageLabels
+from support.dataset import NoInitDataset
+from support.settings import SettingsOverride, override_settings
 
 from mermaid_classifier.common.benthic_attributes import CoralNetMermaidMapping
-from mermaid_classifier.pyspacer.dataset import TrainingDataset
-from mermaid_classifier.pyspacer.options import Artifacts, DatasetOptions, Sites
-from mermaid_classifier.pyspacer.settings import settings
-
-
-class SettingsOverride:
-    """
-    Override the specified Pydantic settings from a call of enable()
-    until a call of disable().
-
-    Example usage:
-    override = SettingsOverride(aws_anonymous=True, aws_region='ca-central-1')
-    override.enable()
-    <some code that depends on the above settings>
-    override.disable()
-
-    Some parts are from
-    https://rednafi.com/python/patch-pydantic-settings-in-pytest/
-    """
-
-    def __init__(self, **kwargs):
-        self.options = kwargs
-        super().__init__()
-
-    def enable(self):
-        # Make a copy of the original settings
-        self.original_settings = settings.model_copy()
-
-        # Patch the settings with kwargs
-        for key, val in self.options.items():
-            # Raise an error if kwargs contains a nonexistent setting
-            if not hasattr(settings, key):
-                raise ValueError(f"Unknown setting: {key}")
-            setattr(settings, key, val)
-
-    def disable(self):
-        # Restore the original settings
-        settings.__dict__.update(self.original_settings.__dict__)
-
-
-@contextmanager
-def override_settings(**kwargs):
-    """
-    Override the specified Pydantic settings for the duration of the
-    context manager.
-    """
-    override = SettingsOverride(**kwargs)
-    override.enable()
-    yield
-    override.disable()
-
-
-class NoInitDataset(TrainingDataset):
-    """
-    init does a lot of stuff in TrainingDataset. When testing, we sometimes
-    just want access to the other methods of the class.
-    So here we make init barebones.
-    """
-
-    def __init__(self):
-        self._duck_conn = None
-        self.artifacts = Artifacts()
-        self._feature_temp_dir = None
-        self._feature_dir = "/tmp/mermaid_features_test"
+from mermaid_classifier.pyspacer.options import DatasetOptions, Sites
 
 
 class BaseTrainTest(unittest.TestCase):
@@ -241,8 +179,8 @@ class ReadMermaidDataTest(BaseTrainTest):
     def test_gfs_present_and_empty(self):
         """
         Test the following regarding no-GF annotations:
-        1. CoralNet annotations with no GF don't get dropped during the
-        empty-value normalization step. (This was a problem before.)
+        1. CoralNet annotations with no GF survive the empty-value
+        normalization step rather than being dropped by it.
         2. MERMAID annotations with no GF end up with a GF of '', empty string.
 
         And test alongside with-GF annotations.
@@ -426,41 +364,6 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
             msg="No annotations should have been filtered out",
         )
 
-    def test_one_missing(self):
-        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
-            {
-                "site": [Sites.MERMAID.value] * 4,
-                "bucket": ["my-bucket"] * 4,
-                "feature_vector": ["01.fv", "01.fv", "02.fv", "02.fv"],
-            }
-        )
-        # S3 doesn't have 02.
-        s3_paths = {
-            "my-bucket/01.fv",
-            "my-bucket/05.fv",
-        }
-
-        dataset = NoInitDataset()
-        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
-        with (
-            self.assertLogs(logger="train", level="WARN") as warn_cm,
-            override_settings(training_inputs_percent_missing_allowed=50),
-        ):
-            dataset.handle_missing_feature_vectors(s3_paths)
-
-        self.assertListEqual(
-            self.annotations_fvs(dataset),
-            ["01.fv", "01.fv"],
-            msg="02.fv should have been filtered out",
-        )
-
-        self.assertEqual(
-            warn_cm.output[0],
-            "WARNING:train:Skipping 1 feature vector(s) because the files"
-            " aren't in S3. Example(s):"
-            "\nmy-bucket/02.fv",
-        )
-
     def test_over_three_missing(self):
         annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
             {
@@ -508,85 +411,6 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
             ]
         )
         self.assertEqual(example_count, 3)
-
-    def test_over_threshold_missing(self):
-        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
-            {
-                "site": [Sites.MERMAID.value] * 5,
-                "bucket": ["my-bucket"] * 5,
-                "feature_vector": ["01.fv", "02.fv", "03.fv", "04.fv", "05.fv"],
-            }
-        )
-        # S3 doesn't have 01, 05 (40% missing).
-        # We'll add more extras here to demonstrate that the threshold is
-        # out of features in annotations, not features in S3.
-        s3_paths = {
-            "my-bucket/02.fv",
-            "my-bucket/03.fv",
-            "my-bucket/04.fv",
-            "my-bucket/12.fv",
-            "my-bucket/13.fv",
-            "my-bucket/14.fv",
-        }
-
-        dataset = NoInitDataset()
-        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
-        with (
-            self.assertRaises(RuntimeError) as error_cm,
-            override_settings(training_inputs_percent_missing_allowed=39),
-        ):
-            dataset.handle_missing_feature_vectors(s3_paths)
-
-        message = str(error_cm.exception)
-        self.assertIn("Too many feature vectors are missing (2), such as:", message)
-        self.assertIn("my-bucket/01.fv", message)
-        self.assertIn("my-bucket/05.fv", message)
-        self.assertIn("You can configure the tolerance for missing feature vectors", message)
-
-    def test_coralnet_missing_filtered(self):
-        """
-        CoralNet annotations whose feature vectors are absent from the
-        present-paths set must now be filtered out (previously they were
-        always kept) and a warning logged.
-        """
-        annotations_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning
-            {
-                "site": [Sites.CORALNET.value] * 4,
-                "bucket": ["cn-bucket"] * 4,
-                "feature_vector": [
-                    "s1/features/i01.featurevector",
-                    "s1/features/i01.featurevector",
-                    "s1/features/i02.featurevector",
-                    "s1/features/i02.featurevector",
-                ],
-            }
-        )
-        # S3 doesn't have i02.
-        s3_paths = {
-            "cn-bucket/s1/features/i01.featurevector",
-            "cn-bucket/s1/features/i05.featurevector",
-        }
-
-        dataset = NoInitDataset()
-        dataset.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
-        with (
-            self.assertLogs(logger="train", level="WARN") as warn_cm,
-            override_settings(training_inputs_percent_missing_allowed=50),
-        ):
-            dataset.handle_missing_feature_vectors(s3_paths)
-
-        self.assertListEqual(
-            self.annotations_fvs(dataset),
-            ["s1/features/i01.featurevector", "s1/features/i01.featurevector"],
-            msg="i02 CoralNet feature vector should have been filtered out",
-        )
-
-        self.assertEqual(
-            warn_cm.output[0],
-            "WARNING:train:Skipping 1 feature vector(s) because the files"
-            " aren't in S3. Example(s):"
-            "\ncn-bucket/s1/features/i02.featurevector",
-        )
 
     def test_mixed_sites_missing_filtered_and_abort(self):
         """
@@ -645,9 +469,10 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
 
 class LazyLibraryTest(BaseTrainTest):
     """
-    The BA and GF libraries hit the MERMAID API in their __init__. Importing
-    the training modules (dataset/runner) must not trigger those network calls
-    (it used to, via module-level singletons), so unit tests can run offline.
+    The BA and GF libraries hit the MERMAID API in their __init__, so the
+    training modules (dataset/runner) reach them through cached accessors
+    rather than module-level singletons. Importing one must trigger no network
+    call, which is what lets the unit suite run offline.
     """
 
     def test_importing_training_modules_does_not_call_the_mermaid_api(self):

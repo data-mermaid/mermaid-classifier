@@ -109,9 +109,13 @@ def build_processing_request(
         },
         "StoppingCondition": {"MaxRuntimeInSeconds": job.max_runtime_hours * 3600},
         "Environment": {
+            **job.env,
+            # Launcher-owned: sits after job.env so a YAML env block cannot
+            # redirect these. The features image (features-entrypoint.sh) execs
+            # build_feature_bucket.py directly and ignores this var; only the
+            # training image's shim dispatches on it.
             "AWS_DEFAULT_REGION": REGION,
             "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
-            **job.env,
         },
         "Tags": (
             [

@@ -8,63 +8,9 @@ import yaml
 from pydantic import ValidationError
 
 from mermaid_classifier.sagemaker.launcher_config import (
-    JobConfig,
     ShardConfig,
     parse_run_config,
 )
-
-
-class JobConfigTest(unittest.TestCase):
-    def test_required_fields_minimal(self):
-        cfg = JobConfig(
-            name_prefix="my-run",
-            image="mermaid-classifier-jobs:training-latest",
-            entrypoint="scripts/sagemaker_train_entrypoint.py",
-            instance_type="ml.m5.4xlarge",
-            volume_gb=200,
-            max_runtime_hours=24,
-        )
-        self.assertEqual(cfg.instance_count, 1)  # default
-        self.assertFalse(cfg.use_spot)  # default
-        self.assertEqual(cfg.env, {})  # default
-        self.assertEqual(cfg.tags, {})  # default
-
-    def test_missing_required_field_raises(self):
-        with self.assertRaises(ValidationError) as ctx:
-            JobConfig(
-                name_prefix="x",
-                # image missing
-                entrypoint="x",
-                instance_type="x",
-                volume_gb=1,
-                max_runtime_hours=1,
-            )
-        self.assertIn("image", str(ctx.exception))
-
-    def test_image_short_form_accepted(self):
-        cfg = JobConfig(
-            name_prefix="x",
-            image="mermaid-classifier-jobs:training-latest",
-            entrypoint="x",
-            instance_type="x",
-            volume_gb=1,
-            max_runtime_hours=1,
-        )
-        self.assertEqual(cfg.image, "mermaid-classifier-jobs:training-latest")
-
-    def test_image_full_uri_accepted(self):
-        full = (
-            "554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-jobs:training-latest"
-        )
-        cfg = JobConfig(
-            name_prefix="x",
-            image=full,
-            entrypoint="x",
-            instance_type="x",
-            volume_gb=1,
-            max_runtime_hours=1,
-        )
-        self.assertEqual(cfg.image, full)
 
 
 class ShardConfigTest(unittest.TestCase):

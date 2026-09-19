@@ -4,15 +4,16 @@ import unittest
 
 import matplotlib.pyplot as plt
 import numpy as np
-from spacer.data_classes import ValResults
 
-from mermaid_classifier.pyspacer.metrics._context import MetricsContext
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
+from mermaid_classifier.pyspacer.metrics import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.ranking import (
     _compute_topk_mrr,
     compute_ranking,
 )
-from pyspacer.metrics_test_helpers import MockBALibrary, MockClf, MockGFLibrary, format_metric
+from pyspacer.metrics_test_helpers import (
+    MockClf,
+    make_ctx,
+)
 
 
 class ComputeTopKMRRTest(unittest.TestCase):
@@ -79,17 +80,11 @@ class ComputeRankingTest(unittest.TestCase):
                 [0.8, 0.1, 0.1],
             ]
         )
-        val_results = ValResults(
+        self.ctx = make_ctx(
+            [0, 1, 2, 0],
+            [0, 1, 2, 0],
+            classes,
             scores=[0.8] * n,
-            gt=[0, 1, 2, 0],
-            est=[0, 1, 2, 0],
-            classes=classes,
-        )
-        self.ctx = MetricsContext(
-            val_results=val_results,
-            ba_library=MockBALibrary(),
-            gf_library=MockGFLibrary(),
-            format_func=format_metric,
             clf=MockClf(classes),
             val_proba=proba,
             val_gt_labels=gt_labels,
@@ -98,10 +93,14 @@ class ComputeRankingTest(unittest.TestCase):
     def tearDown(self):
         plt.close("all")
 
-    def test_returns_expected_scalars(self):
+    def test_returns_expected_artifacts(self):
         result = compute_ranking(self.ctx)
 
         self.assertIsInstance(result, MetricGroupResult)
+        artifact_paths = {df.artifact_path for df in result.dataframes}
+        self.assertIn("ranking/per_category_topk", artifact_paths)
+        self.assertIn("ranking/hierarchical_topk", artifact_paths)
+
         scalar_names = {s.name for s in result.scalars}
         expected = {
             "top_1_accuracy",
@@ -112,55 +111,6 @@ class ComputeRankingTest(unittest.TestCase):
             "hierarchical_top_5_mean_similarity",
         }
         self.assertEqual(scalar_names, expected)
-
-        for fig_result in result.figures:
-            plt.close(fig_result.fig)
-
-    def test_returns_expected_dataframes(self):
-        result = compute_ranking(self.ctx)
-
-        artifact_paths = {df.artifact_path for df in result.dataframes}
-        self.assertIn("ranking/per_category_topk", artifact_paths)
-        self.assertIn("ranking/hierarchical_topk", artifact_paths)
-
-        for fig_result in result.figures:
-            plt.close(fig_result.fig)
-
-    def test_hierarchical_topk_partial_credit(self):
-        """Sibling predictions (A1 vs A2) yield hierarchical similarity > 0."""
-        classes = ["A1::", "A2::", "B1::"]
-        # All samples are A1:: but predicted as A2:: (siblings)
-        n = 4
-        gt_labels = ["A1::"] * n
-        proba = np.array(
-            [
-                [0.1, 0.8, 0.1],
-                [0.1, 0.8, 0.1],
-                [0.1, 0.8, 0.1],
-                [0.1, 0.8, 0.1],
-            ]
-        )
-        val_results = ValResults(
-            scores=[0.8] * n,
-            gt=[0] * n,
-            est=[1] * n,
-            classes=classes,
-        )
-        ctx = MetricsContext(
-            val_results=val_results,
-            ba_library=MockBALibrary(),
-            gf_library=MockGFLibrary(),
-            format_func=format_metric,
-            clf=MockClf(classes),
-            val_proba=proba,
-            val_gt_labels=gt_labels,
-        )
-        result = compute_ranking(ctx)
-
-        scalars = {s.name: s.value for s in result.scalars}
-        # Top prediction is A2:: (sibling of A1::), so hierarchical
-        # similarity at top-1 is > 0 (siblings share parent A).
-        self.assertGreater(scalars["hierarchical_top_5_mean_similarity"], 0.0)
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)

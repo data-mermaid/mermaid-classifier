@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
+import os
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+from support.paths import add_scripts_to_path
 
-# launch_training imports the SageMaker SDK at module level. That SDK is an
-# optional extra (`sagemaker`), deliberately excluded from the default test
-# install (`--extra pyspacer`), so skip this module entirely when it's absent.
-# Check `sagemaker.estimator` specifically: `sagemaker-mlflow` (a pyspacer-extra
+add_scripts_to_path()
+
+# Importing the SDK makes botocore resolve credentials, which probes the EC2
+# instance-metadata endpoint. These tests drive the SDK entirely through
+# MagicMock, so the probe is pure latency on a laptop and a real IMDS call on
+# an EC2 runner.
+os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
+
+# launch_training imports the SageMaker SDK at module level. That SDK lives in
+# the `sagemaker` extra, so skip this module entirely when it's absent.
+# Check `sagemaker.estimator` specifically: `sagemaker-mlflow` (a training-extra
 # dep) provides a partial `sagemaker` namespace without the full SDK.
 _HAS_SAGEMAKER = importlib.util.find_spec("sagemaker.estimator") is not None
 if _HAS_SAGEMAKER:
@@ -23,8 +27,19 @@ if _HAS_SAGEMAKER:
 
 
 def setUpModule():
-    if not _HAS_SAGEMAKER:
-        raise unittest.SkipTest("sagemaker SDK not installed (`sagemaker` extra)")
+    # CI installs the `sagemaker` extra, so a missing SDK there means the extra
+    # was dropped from the workflow or a tests/<name>/ package is shadowing it
+    # again -- both regress this module back to silently skipped. Locally, the
+    # extra is optional, so a missing SDK there is expected and just skips.
+    if _HAS_SAGEMAKER:
+        return
+    if os.environ.get("CI"):
+        raise RuntimeError(
+            "sagemaker.estimator does not import under CI, where the `sagemaker` "
+            "extra is installed: either the extra was dropped from the workflow, "
+            "or a tests/<name>/ package is shadowing the SDK."
+        )
+    raise unittest.SkipTest("sagemaker SDK not installed (`sagemaker` extra)")
 
 
 def _minimal_yaml() -> str:
@@ -63,13 +78,6 @@ class ExpandImageTest(unittest.TestCase):
             lt.expand_image_uri("some-other-repo:latest")
 
 
-class MakeRunIdTest(unittest.TestCase):
-    @patch("launch_training.datetime")
-    def test_run_id_format(self, mock_dt):
-        mock_dt.now.return_value.strftime.return_value = "20260525T120000Z"
-        self.assertEqual(lt.make_run_id("mermaid-test"), "mermaid-test-20260525T120000Z")
-
-
 class BuildEstimatorKwargsTest(unittest.TestCase):
     @patch("launch_training.datetime")
     def test_kwargs_match_expectation(self, mock_dt):
@@ -101,10 +109,48 @@ class BuildEstimatorKwargsTest(unittest.TestCase):
             kwargs["image_uri"],
             "554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-classifier-jobs:training-smoke",
         )
-        # MLflow URI is injected as env, NOT YAML-overridable.
+        # Environment carries the MLflow URI passed to build_estimator_kwargs;
+        # test_a_yaml_env_block_cannot_redirect_launcher_owned_env_keys covers
+        # that a YAML env block cannot override it.
         self.assertEqual(
             kwargs["environment"]["MLFLOW_TRACKING_SERVER"],
             "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2",
         )
         # YAML env preserved:
         self.assertEqual(kwargs["environment"]["MY_VAR"], "1")
+        # The container entrypoint shim dispatches on this.
+        self.assertEqual(
+            kwargs["environment"]["CONTAINER_ENTRYPOINT_SCRIPT"],
+            "scripts/sagemaker_train_entrypoint.py",
+        )
+
+    def test_a_yaml_env_block_cannot_redirect_launcher_owned_env_keys(self):
+        """CONTAINER_ENTRYPOINT_SCRIPT, MLFLOW_TRACKING_SERVER and
+        AWS_DEFAULT_REGION are the launcher's to set, so a job's own env
+        block must not be able to point any of them somewhere else."""
+        from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+
+        yaml_text = _minimal_yaml().replace(
+            '    MY_VAR: "1"',
+            '    MY_VAR: "1"\n'
+            "    CONTAINER_ENTRYPOINT_SCRIPT: scripts/somewhere_else.py\n"
+            "    MLFLOW_TRACKING_SERVER: https://attacker.example/mlflow\n"
+            "    AWS_DEFAULT_REGION: us-west-2",
+        )
+        cfg = parse_run_config(yaml_text, kind="training", strict=False)
+        kwargs = lt.build_estimator_kwargs(
+            cfg=cfg,
+            run_id="mermaid-test-20260525T120000Z",
+            staging_bucket="dev-datamermaid-sm-data",
+            mlflow_uri="arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2",
+            sm_session=MagicMock(),
+        )
+        self.assertEqual(
+            kwargs["environment"]["CONTAINER_ENTRYPOINT_SCRIPT"],
+            "scripts/sagemaker_train_entrypoint.py",
+        )
+        self.assertEqual(
+            kwargs["environment"]["MLFLOW_TRACKING_SERVER"],
+            "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2",
+        )
+        self.assertEqual(kwargs["environment"]["AWS_DEFAULT_REGION"], "us-east-1")

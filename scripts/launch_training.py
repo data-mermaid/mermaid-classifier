@@ -24,15 +24,9 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from sagemaker.estimator import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
-    Estimator,
-)
-from sagemaker.inputs import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
-    TrainingInput,
-)
-from sagemaker.session import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
-    Session,
-)
+from sagemaker.estimator import Estimator
+from sagemaker.inputs import TrainingInput
+from sagemaker.session import Session
 
 from mermaid_classifier.sagemaker.launcher_config import parse_run_config
 
@@ -81,9 +75,14 @@ def build_estimator_kwargs(
 ) -> dict[str, Any]:
     job = cfg.job
     env = {
+        **job.env,
+        # Launcher-owned: sits after job.env so a YAML env block cannot
+        # redirect these. CONTAINER_ENTRYPOINT_SCRIPT is consumed by the
+        # container entrypoint shim (docker/jobs/training-entrypoint.sh) to
+        # dispatch to the named script (falls back to its default if unset).
         "MLFLOW_TRACKING_SERVER": mlflow_uri,
         "AWS_DEFAULT_REGION": REGION,
-        **job.env,
+        "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
     }
     kwargs = {
         "image_uri": expand_image_uri(job.image),
@@ -187,11 +186,6 @@ def main(argv: list[str] | None = None) -> None:
     if cfg.training:
         for name, ch in cfg.training.channels.items():
             inputs[name] = TrainingInput(s3_data=ch.s3_uri, input_mode=ch.input_mode)
-
-    # CONTAINER_ENTRYPOINT_SCRIPT is consumed by the container entrypoint
-    # shim (docker/jobs/training-entrypoint.sh) to dispatch to the named
-    # script. Falls back to the historic default if unset.
-    estimator.environment["CONTAINER_ENTRYPOINT_SCRIPT"] = cfg.job.entrypoint
 
     log.info("Submitting TrainingJob...")
     estimator.fit(inputs=inputs, wait=True, logs="All", job_name=run_id)

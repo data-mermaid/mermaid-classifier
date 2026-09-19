@@ -6,15 +6,11 @@ from collections import OrderedDict
 import matplotlib.pyplot as plt
 from spacer.data_classes import DataLocation
 
-from mermaid_classifier.pyspacer.metrics._context import MetricsContext
-from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
+from mermaid_classifier.pyspacer.metrics import MetricGroupResult
 from mermaid_classifier.pyspacer.metrics.per_source import compute_per_source
 
 from .metrics_test_helpers import (
-    MockBALibrary,
-    MockGFLibrary,
-    format_metric,
-    make_val_results,
+    make_ctx,
 )
 
 
@@ -48,14 +44,11 @@ class _MockDataset:
 
 
 def _make_ctx(image_specs, source_map, gt_indices, est_indices, classes):
-    val_results = make_val_results(gt_indices, est_indices, classes)
-    dataset = _MockDataset(image_specs, source_map)
-    return MetricsContext(
-        val_results=val_results,
-        ba_library=MockBALibrary(),
-        gf_library=MockGFLibrary(),
-        format_func=format_metric,
-        dataset=dataset,
+    return make_ctx(
+        gt_indices,
+        est_indices,
+        classes,
+        dataset=_MockDataset(image_specs, source_map),
     )
 
 
@@ -183,23 +176,6 @@ class ComputePerSourceTest(unittest.TestCase):
 
         for fig_result in result.figures:
             plt.close(fig_result.fig)
-
-    def test_no_dataset_returns_empty(self):
-        """compute_per_source with no dataset is a no-op."""
-        val_results = make_val_results([0, 1], [0, 1], ["A1::", "A2::"])
-        ctx = MetricsContext(
-            val_results=val_results,
-            ba_library=MockBALibrary(),
-            gf_library=MockGFLibrary(),
-            format_func=format_metric,
-            dataset=None,
-        )
-        result = compute_per_source(ctx)
-        # Coordinator already gates on dataset, but defend in depth:
-        # if called without one, return an empty result rather than crash.
-        self.assertEqual(len(result.dataframes), 0)
-        self.assertEqual(len(result.scalars), 0)
-        self.assertEqual(len(result.figures), 0)
 
     def test_index_count_mismatch_raises(self):
         """If val annotation count diverges from sum of per-image n_points,

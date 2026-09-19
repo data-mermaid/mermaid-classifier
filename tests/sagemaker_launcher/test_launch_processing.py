@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import csv
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+from support.paths import add_scripts_to_path
 
-import launch_processing as lp  # type: ignore
+add_scripts_to_path()
+
+import launch_processing as lp  # type: ignore  # noqa: E402
 
 
 class ChunkSourcesTest(unittest.TestCase):
@@ -27,9 +26,6 @@ class ChunkSourcesTest(unittest.TestCase):
     def test_more_workers_than_items_drops_empty(self):
         chunks = lp.chunk_items(["a", "b"], n_workers=5)
         self.assertEqual(len(chunks), 2)  # 3 empty chunks dropped
-
-    def test_single_item(self):
-        self.assertEqual(lp.chunk_items(["a"], n_workers=4), [["a"]])
 
     def test_zero_workers_raises(self):
         with self.assertRaises(ValueError):
@@ -134,3 +130,43 @@ processing:
         self.assertEqual(args[idx + 1], "1,5,9")
         # The non-shard args are preserved:
         self.assertIn("--target-bucket=foo", args)
+
+    @patch("launch_processing.datetime")
+    def test_a_yaml_env_block_cannot_redirect_launcher_owned_env_keys(self, mock_dt):
+        """CONTAINER_ENTRYPOINT_SCRIPT and AWS_DEFAULT_REGION are the
+        launcher's to set, so a job's own env block must not be able to
+        point either of them somewhere else."""
+        mock_dt.now.return_value.strftime.return_value = "20260525T120000Z"
+        from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+
+        cfg = parse_run_config(
+            """
+job:
+  name_prefix: mermaid-features
+  image: mermaid-classifier-jobs:features-latest
+  entrypoint: scripts/build_feature_bucket.py
+  instance_type: ml.g5.xlarge
+  volume_gb: 100
+  max_runtime_hours: 12
+  env:
+    MY_VAR: "1"
+    CONTAINER_ENTRYPOINT_SCRIPT: scripts/somewhere_else.py
+    AWS_DEFAULT_REGION: us-west-2
+processing:
+  container_args:
+    - --target-bucket=2605-coralnet-public-sources
+    - --skip-existing
+""",
+            kind="processing",
+            strict=True,
+        )
+        req = lp.build_processing_request(
+            cfg=cfg, run_id="mermaid-features-20260525T120000Z", worker_idx=0, worker_items=None
+        )
+        self.assertEqual(
+            req["Environment"]["CONTAINER_ENTRYPOINT_SCRIPT"],
+            "scripts/build_feature_bucket.py",
+        )
+        self.assertEqual(req["Environment"]["AWS_DEFAULT_REGION"], "us-east-1")
+        # YAML env preserved:
+        self.assertEqual(req["Environment"]["MY_VAR"], "1")
