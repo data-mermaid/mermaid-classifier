@@ -24,15 +24,9 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from sagemaker.estimator import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
-    Estimator,
-)
-from sagemaker.inputs import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
-    TrainingInput,
-)
-from sagemaker.session import (  # pyright: ignore[reportMissingImports]  # sagemaker not in lint env
-    Session,
-)
+from sagemaker.estimator import Estimator
+from sagemaker.inputs import TrainingInput
+from sagemaker.session import Session
 
 from mermaid_classifier.sagemaker.launcher_config import parse_run_config
 
