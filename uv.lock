@@ -1698,7 +1698,7 @@ requires-dist = [
     { name = "sagemaker-mlflow", marker = "extra == 'training'" },
     { name = "scikit-learn", marker = "extra == 'inference'", specifier = "==1.5.2" },
     { name = "scikit-learn", marker = "extra == 'training'", specifier = "==1.5.2" },
-    { name = "scipy", marker = "extra == 'training'" },
+    { name = "scipy", marker = "extra == 'training'", specifier = "==1.17.1" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'training'", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'training'" },
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'training'", index = "https://download.pytorch.org/whl/cpu" },
