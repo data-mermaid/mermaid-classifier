@@ -3,7 +3,6 @@ CSV-defined label specifications for the training pipeline.
 
 - LabelFilter: include/exclude specific BA+GF combos from training data.
 - LabelRollupSpec: roll up fine-grained BA+GF combos to coarser categories.
-- CNSourceFilter: specify which CoralNet sources to include.
 - ImageExclusionFilter: withhold specific images from training data.
 """
 
@@ -27,6 +26,37 @@ from mermaid_classifier.common.duckdb_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _project_bagf_column(
+    duck_conn: duckdb.DuckDBPyConnection,
+    duck_table_name: str,
+    ba_id_column_name: str,
+    gf_id_column_name: str,
+) -> None:
+    """
+    Add a bagf_id column to the given DuckDB table, concatenating the BA
+    and GF id columns so a filter or rollup can operate on a single column.
+    """
+    # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
+    # If there's no GF, then the result is the BA plus separator.
+    duck_conn.execute(
+        f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+        f" SELECT"
+        f"  *,"
+        f"  concat_ws("
+        f"   '{BAGF_SEP}', {ba_id_column_name}, {gf_id_column_name})"
+        f"   AS bagf_id"
+        f" FROM {duck_table_name}"
+    )
+
+
+def _drop_bagf_column(
+    duck_conn: duckdb.DuckDBPyConnection,
+    duck_table_name: str,
+) -> None:
+    """Drop the bagf_id column added by `_project_bagf_column`."""
+    duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP bagf_id")
 
 
 class LabelFilter(CsvSpec):
@@ -72,17 +102,11 @@ class LabelFilter(CsvSpec):
         benthic attribute ID and growth form ID columns, and this
         instance's filter rules.
         """
-        # Concatenate BA+GF so that we can define the filter as a
-        # single-column operation.
-        # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
-        duck_conn.execute(
-            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-            f" SELECT"
-            f"  *,"
-            f"  concat_ws("
-            f"   '{BAGF_SEP}', {ba_id_column_name}, {gf_id_column_name})"
-            f"   AS bagf_id"
-            f" FROM {duck_table_name}"
+        _project_bagf_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            ba_id_column_name=ba_id_column_name,
+            gf_id_column_name=gf_id_column_name,
         )
 
         # Filter.
@@ -93,8 +117,7 @@ class LabelFilter(CsvSpec):
             inclusion_func=self.accepts_bagf,
         )
 
-        # Don't need the combined BAGF column anymore.
-        duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP bagf_id")
+        _drop_bagf_column(duck_conn=duck_conn, duck_table_name=duck_table_name)
 
 
 class LabelRollupSpec(CsvSpec):
@@ -144,18 +167,11 @@ class LabelRollupSpec(CsvSpec):
         Roll up the BA IDs and GF IDs in the given DuckDB table,
         based on this instance's rollup rules.
         """
-        # Concatenate BA+GF so that we can define the rollup as a
-        # single-column transform.
-        # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
-        # If there's no GF, then the result is the BA plus separator.
-        duck_conn.execute(
-            f"CREATE OR REPLACE TABLE {duck_table_name} AS"
-            f" SELECT"
-            f"  *,"
-            f"  concat_ws("
-            f"   '{BAGF_SEP}', {ba_id_column_name}, {gf_id_column_name})"
-            f"   AS bagf_id"
-            f" FROM {duck_table_name}"
+        _project_bagf_column(
+            duck_conn=duck_conn,
+            duck_table_name=duck_table_name,
+            ba_id_column_name=ba_id_column_name,
+            gf_id_column_name=gf_id_column_name,
         )
 
         # Apply the rollup.
@@ -191,31 +207,7 @@ class LabelRollupSpec(CsvSpec):
             new_values_column_name=f"rollup_{gf_id_column_name}",
         )
 
-        # Don't need the combined BAGF column anymore.
-        duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP bagf_id")
-
-
-class CNSourceFilter(CsvSpec):
-    column_specs = [
-        ColumnSpec(name="id", allow_blank=False),
-    ]
-
-    source_id_list: list[str]
-
-    def __init__(self, csv_file: typing.TextIO):
-        """
-        Initialize using a CSV file that specifies a set
-        of CoralNet sources.
-        """
-        self.source_id_list = []
-
-        super().__init__(csv_file=csv_file)
-
-    def per_row_init_action(self, row: dict[str, str | None]) -> None:
-        self.source_id_list.append(row["id"] or "")
-
-    def is_empty(self) -> bool:
-        return len(self.source_id_list) == 0
+        _drop_bagf_column(duck_conn=duck_conn, duck_table_name=duck_table_name)
 
 
 class ImageExclusionFilter(CsvSpec):

@@ -14,7 +14,7 @@ from support.extractor import make_extractor_spec
 
 class ResolveFilesystemDirectoryTest(unittest.TestCase):
     def test_trailing_slash_is_tolerated(self):
-        from mermaid_classifier.pyspacer.annotation import (
+        from mermaid_classifier.pyspacer.artifact_resolve import (
             resolve_classifier_artifact,
         )
 
@@ -32,7 +32,7 @@ class ResolveMlflowModelIdTest(unittest.TestCase):
     def test_round_trip_resolves_and_matches_source(self):
         import mlflow
 
-        from mermaid_classifier.pyspacer.annotation import (
+        from mermaid_classifier.pyspacer.artifact_resolve import (
             resolve_classifier_artifact,
         )
         from mermaid_classifier.pyspacer.inference import (
@@ -60,7 +60,7 @@ class ResolveMlflowModelIdTest(unittest.TestCase):
             # mlflow_connect() would reset the tracking URI to the production
             # server; patch it to a no-op so resolution stays on sqlite.
             with mock.patch(
-                "mermaid_classifier.pyspacer.annotation.mlflow_connect",
+                "mermaid_classifier.pyspacer.artifact_resolve.mlflow_connect",
                 return_value=None,
             ):
                 pt, js = resolve_classifier_artifact(info.model_id)
