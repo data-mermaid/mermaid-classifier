@@ -135,10 +135,26 @@ class DatasetOptions:
         -- equalize counts per class (capped at available rows).
     See ``mermaid_classifier.training.subsample`` for the full list and
     instructions on adding new strategies.
+
+    feature_extractor_weights
+
+    URI of the EfficientNet weights that produced this run's feature
+    vectors. Where a feature prefix carries an ``_extractor_spec.json``
+    sidecar the two must agree; where it does not -- CoralNet's public
+    bucket, which we read but do not write -- this is the only record of
+    what the vectors mean.
     """
 
     include_mermaid: bool = True
     coralnet_manifest_uri: str | None = None
+    # Which EfficientNet produced the .featurevector files this run trains
+    # on. A head is fitted to feature vectors, never to pixels, so this is
+    # the run's statement of what its inputs mean; TrainingDataset hashes it
+    # and seals the result into the released manifest. Required in practice
+    # for any source whose prefix carries no _extractor_spec.json — which
+    # TrainingDataset enforces, since a dataclass cannot put a mandatory
+    # field after defaulted ones.
+    feature_extractor_weights: str | None = None
     drop_growthforms: bool = False
     label_rollup_spec_csv: str | None = None
     included_labels_csv: str | None = None

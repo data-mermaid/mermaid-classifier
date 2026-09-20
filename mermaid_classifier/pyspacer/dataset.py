@@ -8,6 +8,7 @@ train/ref/val splits.
 """
 
 import functools
+import json
 import os
 import re
 import tempfile
@@ -37,6 +38,11 @@ from mermaid_classifier.common.duckdb_utils import (
 )
 from mermaid_classifier.common.s3_utils import download_features_parallel
 from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
+from mermaid_classifier.pyspacer.extraction import (
+    SIDECAR_FILENAME,
+    extractor_spec_from_weights,
+)
+from mermaid_classifier.pyspacer.inference import ExtractorSpec
 from mermaid_classifier.pyspacer.label_specs import (
     ImageExclusionFilter,
     LabelFilter,
@@ -120,6 +126,10 @@ class TrainingDataset:
             token=settings.aws_session_token,
         )
         self._duck_conn = None
+
+        # Set once the feature sources are resolved; runner.py seals it
+        # into the exported manifest.
+        self.extractor_spec: ExtractorSpec | None = None
 
         self.feature_loc_to_source: dict[DataLocation, tuple[str, str]] = {}
 
@@ -218,6 +228,14 @@ class TrainingDataset:
                 self._apply_subsample(options.subsample)
 
         if options.include_mermaid or options.coralnet_manifest_uri:
+            feature_prefixes = self.feature_source_prefixes()
+
+            # Before the listing below, which is the slow part: a run whose
+            # feature sources disagree about their extractor is not worth
+            # enumerating.
+            with self.section_profiling("Resolving feature-extractor provenance"):
+                self.extractor_spec = self.resolve_extractor_spec(feature_prefixes)
+
             # We'll check the annotation data's feature paths against the
             # feature vectors that are actually present in S3, for every
             # site that has annotations.
@@ -227,12 +245,8 @@ class TrainingDataset:
                 # (this can take a while). The listings return `bucket/key`
                 # strings, which match the `feature_full` we build per row.
                 present: set[str] = set()
-                if options.include_mermaid:
-                    mermaid_bucket = settings.mermaid_train_data_bucket
-                    present |= set(self.s3.find(path=f"s3://{mermaid_bucket}/mermaid/"))
-                if options.coralnet_manifest_uri:
-                    coralnet_bucket = settings.coralnet_train_data_bucket
-                    present |= set(self.s3.find(path=f"s3://{coralnet_bucket}/"))
+                for prefix in feature_prefixes:
+                    present |= set(self.s3.find(path=prefix))
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(present)
 
@@ -550,6 +564,78 @@ class TrainingDataset:
 
         # Result should be [] if doesn't exist, which 'bools' to False.
         return bool(table_query_result)
+
+    def feature_source_prefixes(self) -> list[str]:
+        """The S3 prefixes this run's `.featurevector` files are read from."""
+        prefixes: list[str] = []
+        if self.options.include_mermaid:
+            prefixes.append(f"s3://{settings.mermaid_train_data_bucket}/mermaid/")
+        if self.options.coralnet_manifest_uri:
+            prefixes.append(f"s3://{settings.coralnet_train_data_bucket}/")
+        return prefixes
+
+    def read_extractor_sidecar(self, prefix: str) -> ExtractorSpec | None:
+        """The spec the job that wrote `prefix` left there, if it left one.
+
+        None for a prefix we read but do not produce -- CoralNet's public
+        bucket -- which the run's own declaration has to cover instead.
+        """
+        key = prefix + SIDECAR_FILENAME
+        if not self.s3.exists(key):
+            return None
+        return ExtractorSpec.from_dict(json.loads(self.s3.cat_file(key)))
+
+    def resolve_extractor_spec(self, prefixes: list[str]) -> ExtractorSpec:
+        """One extractor for the whole run, or refuse to train.
+
+        A head fitted across two feature spaces is wrong in a way no later
+        gate detects: the artifact loads, the parity gate passes, and every
+        score is drawn from a distribution the head never saw. So sources
+        that disagree stop the run here.
+
+        `dataset.feature_extractor_weights` is checked against every sidecar
+        rather than merely filling gaps, which is what catches a config
+        naming weights the bucket was not built with.
+        """
+        declared = (
+            extractor_spec_from_weights(self.options.feature_extractor_weights)
+            if self.options.feature_extractor_weights
+            else None
+        )
+
+        found: dict[str, ExtractorSpec] = {}
+        for prefix in prefixes:
+            sidecar = self.read_extractor_sidecar(prefix)
+            if sidecar is not None:
+                found[prefix] = sidecar
+            elif declared is not None:
+                found[prefix] = declared
+            else:
+                raise ValueError(
+                    f"{prefix} carries no {SIDECAR_FILENAME}, and this run declares no"
+                    " dataset.feature_extractor_weights, so nothing records which"
+                    " extractor produced its feature vectors. Set that field in the"
+                    " training config."
+                )
+        if declared is not None:
+            found["dataset.feature_extractor_weights"] = declared
+
+        if len({spec.identity() for spec in found.values()}) > 1:
+            detail = "\n".join(f"  {src}: {spec.describe()}" for src, spec in found.items())
+            raise ValueError(
+                "Feature sources disagree about which extractor produced them, so"
+                f" their vectors are not comparable:\n{detail}"
+            )
+
+        # Prefer a producer's own record over the run's declaration: both
+        # name the same bytes, but the sidecar names where they were used.
+        spec = next(
+            (found[prefix] for prefix in prefixes if prefix in found),
+            declared,
+        )
+        assert spec is not None  # every prefix either resolved or raised above
+        logger.info("Feature extractor for this run: %s", spec.describe())
+        return spec
 
     def handle_missing_feature_vectors(self, present_feature_paths: set[str]) -> None:
         # Check every site's annotation feature paths against the set of

@@ -22,19 +22,22 @@ RUN apt-get update && \
 
 WORKDIR /opt/ml/code
 
-# Install project + pyspacer extras. We use pip (not uv) inside the
-# container; the base image ships pip but not uv, and pulling uv just
+# Install the project and its training extra. We use pip (not uv) inside
+# the container; the base image ships pip but not uv, and pulling uv just
 # to install once isn't worth the complexity.
 COPY pyproject.toml /opt/ml/code/pyproject.toml
 COPY README.md /opt/ml/code/README.md
 COPY mermaid_classifier /opt/ml/code/mermaid_classifier
 COPY scripts /opt/ml/code/scripts
 
-# Editable install so scripts/ stays importable as a top-level module.
+# build_feature_bucket.py reaches the whole pipeline -- spacer, pandas,
+# the settings layer -- so it needs [training], not the serving subset.
 # Pulls in pyspacer 0.14.0 (pinned in pyproject.toml) and its transitive
 # deps. pip will reconcile torch with whatever pyspacer needs.
+# entrypoint.sh runs the script by path, so an editable install is only
+# about installing from the copied source, not about import resolution.
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e ".[pyspacer]"
+    pip install --no-cache-dir -e ".[training]"
 
 COPY docker/jobs/features-entrypoint.sh /opt/ml/code/entrypoint.sh
 RUN chmod +x /opt/ml/code/entrypoint.sh

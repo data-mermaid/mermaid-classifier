@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from botocore.exceptions import ClientError
+from support.extractor import make_extractor_spec
 from support.paths import add_scripts_to_path
 
 add_scripts_to_path()
@@ -51,7 +52,9 @@ class ValidateArtifactTest(unittest.TestCase):
         from mermaid_classifier.pyspacer.inference import export_artifact
 
         model, X = make_calibrated_model()
-        model_pt, _manifest, _ = export_artifact(model, tmp, X)
+        model_pt, _manifest, _ = export_artifact(
+            model, tmp, X, extractor=make_extractor_spec(X.shape[1])
+        )
         return Path(model_pt), Path(tmp) / "model.json"
 
     def test_valid_artifact_returns_manifest(self):
@@ -190,36 +193,51 @@ class MainTest(unittest.TestCase):
         from mermaid_classifier.pyspacer.inference import export_artifact
 
         model, X = make_calibrated_model()
-        model_pt, _m, _ = export_artifact(model, tmp, X)
+        self._spec = make_extractor_spec(X.shape[1])
+        model_pt, _m, _ = export_artifact(model, tmp, X, extractor=self._spec)
         self._pair = (Path(model_pt), tmp / "model.json")
         self.addCleanup(self._tmp.cleanup)
 
-    def _run(self, client, cwd):
+    def _run(self, client, cwd, weights_sha256=None):
+        """Run main() with the MLflow fetch and the weights hash stubbed.
+
+        `weights_sha256` defaults to what the manifest records, i.e. the
+        weights the model was actually trained through.
+        """
         argv = ["--mlflow-model-id", "m-" + "a" * 30, "--version", "v9"]
         with (
             mock.patch.object(ra.boto3, "client", return_value=client),
             mock.patch.object(ra, "resolve_classifier_artifact", return_value=self._pair),
+            mock.patch.object(
+                ra,
+                "sha256_of_uri",
+                return_value=weights_sha256 or self._spec.weights_sha256,
+            ),
             mock.patch.object(ra.Path, "cwd", return_value=cwd),
         ):
             return ra.main(argv)
 
     def test_happy_path_uploads_and_emits(self):
         client = mock.Mock()
-        # weights source exists (True), destination model.pt absent (404).
-        client.head_object.side_effect = [{}, _not_found_error()]
+        # destination model.pt absent (404), then weights source exists.
+        client.head_object.side_effect = [_not_found_error(), {}]
         with tempfile.TemporaryDirectory() as cwd:
             rc = self._run(client, Path(cwd))
             self.assertEqual(rc, 0)
             self.assertEqual(client.upload_file.call_count, 2)
-            client.copy_object.assert_called_once()
+            # The extractor copied is the one the manifest names, not a default.
+            client.copy_object.assert_called_once_with(
+                Bucket="mermaid-config",
+                Key="classifier/v9/efficientnet.pt",
+                CopySource={"Bucket": "test-bucket", "Key": "efficientnet.pt"},
+            )
             # Artifacts copied to CWD for the workflow to attach.
             self.assertTrue((Path(cwd) / "model.pt").is_file())
             self.assertTrue((Path(cwd) / "model.json").is_file())
 
     def test_existing_version_fails_before_any_write(self):
         client = mock.Mock()
-        # weights source exists (True), destination model.pt ALSO exists (True).
-        client.head_object.side_effect = [{}, {}]
+        client.head_object.side_effect = [{}]  # destination model.pt exists
         with tempfile.TemporaryDirectory() as cwd, self.assertRaises(SystemExit):
             self._run(client, Path(cwd))
         client.upload_file.assert_not_called()
@@ -227,7 +245,73 @@ class MainTest(unittest.TestCase):
 
     def test_missing_weights_source_fails_before_any_write(self):
         client = mock.Mock()
-        client.head_object.side_effect = [_not_found_error()]  # weights absent
+        # destination absent, then the weights the manifest names are absent.
+        client.head_object.side_effect = [_not_found_error(), _not_found_error()]
         with tempfile.TemporaryDirectory() as cwd, self.assertRaises(SystemExit):
             self._run(client, Path(cwd))
         client.upload_file.assert_not_called()
+        client.copy_object.assert_not_called()
+
+    def test_weights_hash_mismatch_fails_before_any_write(self):
+        # The object exists at the URI the manifest names, but is not the file
+        # the head was trained through. Shipping the two together would
+        # mis-score every image while every other gate passed.
+        client = mock.Mock()
+        client.head_object.side_effect = [_not_found_error(), {}]
+        with tempfile.TemporaryDirectory() as cwd, self.assertRaises(SystemExit) as ctx:
+            self._run(client, Path(cwd), weights_sha256="b" * 64)
+        self.assertIn("b" * 64, str(ctx.exception))
+        self.assertIn(self._spec.weights_sha256, str(ctx.exception))
+        client.upload_file.assert_not_called()
+        client.copy_object.assert_not_called()
+
+    def test_override_uri_still_has_to_hash_to_the_manifest(self):
+        client = mock.Mock()
+        client.head_object.side_effect = [_not_found_error(), {}]
+        argv = [
+            "--mlflow-model-id",
+            "m-" + "a" * 30,
+            "--version",
+            "v9",
+            "--extractor-weights-uri",
+            "s3://elsewhere/other.pt",
+        ]
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(ra.boto3, "client", return_value=client),
+            mock.patch.object(ra, "resolve_classifier_artifact", return_value=self._pair),
+            mock.patch.object(ra, "sha256_of_uri", return_value="c" * 64),
+            mock.patch.object(ra.Path, "cwd", return_value=Path(cwd)),
+            self.assertRaises(SystemExit),
+        ):
+            ra.main(argv)
+        client.upload_file.assert_not_called()
+        client.copy_object.assert_not_called()
+
+
+class ManifestWithoutExtractorTest(unittest.TestCase):
+    """An artifact that cannot say which extractor produced its training
+    features cannot be released: the release is what pairs a head with a
+    backbone, and there would be nothing to pair it against."""
+
+    def test_validate_artifact_refuses(self):
+        from support.calibrated_model import make_calibrated_model
+
+        from mermaid_classifier.pyspacer.inference import ManifestError, export_artifact
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model, X = make_calibrated_model()
+            model_pt, _m, _ = export_artifact(
+                model, tmp, X, extractor=make_extractor_spec(X.shape[1])
+            )
+            model_json = Path(tmp) / "model.json"
+            manifest = json.loads(model_json.read_text())
+            del manifest["feature_extraction"]
+            model_json.write_text(json.dumps(manifest))
+
+            with self.assertRaises(ManifestError):
+                ra.validate_artifact(Path(model_pt), model_json)
+
+
+if __name__ == "__main__":
+    unittest.main()

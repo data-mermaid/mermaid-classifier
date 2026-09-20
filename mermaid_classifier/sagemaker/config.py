@@ -77,6 +77,9 @@ class DatasetConfig(BaseModel):
     # to the same S3 prefix so the same resolution works in the
     # container.
     coralnet_manifest_uri: str | None = None
+    # Required: a run must say which extractor produced the feature vectors
+    # it trains on. Absent, the released artifact could not record it either.
+    feature_extractor_weights: str
     drop_growthforms: bool = False
     label_rollup_spec_csv: str | None = None
     included_labels_csv: str | None = None
@@ -208,6 +211,7 @@ class TrainingRunConfig(BaseModel):
         dataset_options = DatasetOptions(
             include_mermaid=d.include_mermaid,
             coralnet_manifest_uri=d.coralnet_manifest_uri,
+            feature_extractor_weights=d.feature_extractor_weights,
             drop_growthforms=d.drop_growthforms,
             label_rollup_spec_csv=_resolve(d.label_rollup_spec_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None

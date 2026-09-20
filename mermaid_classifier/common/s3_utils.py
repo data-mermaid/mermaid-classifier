@@ -1,4 +1,5 @@
-"""Shared S3 helpers: bucket/key URI parsing and parallel feature downloads.
+"""Shared S3 helpers: bucket/key URI parsing, object hashing, and parallel
+feature downloads.
 
 One home for the URI parsing `scripts/build_region_probe.py` and
 `scripts/evaluate_region_probe.py` each carried their own copy of, now that
@@ -12,6 +13,7 @@ setup.
 """
 
 import concurrent.futures
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -37,6 +39,33 @@ def is_s3_uri(value: Path | str) -> TypeGuard[str]:
     value in `Path`.
     """
     return isinstance(value, str) and value.startswith("s3://")
+
+
+def sha256_of_uri(uri: str, chunk_size: int = 1 << 20) -> str:
+    """Hex sha256 of the object at an s3://bucket/key URI or filesystem path.
+
+    Routed through pyspacer's storage layer so the same call works over s3,
+    filesystem and memory locations — the same property that lets the serving
+    lane run without AWS.
+    """
+    # Deferred, as with _download below: parse_s3_uri/is_s3_uri callers stay
+    # free of spacer's import cost.
+    from spacer.storage import storage_factory
+
+    if is_s3_uri(uri):
+        bucket, key = parse_s3_uri(uri)
+        storage = storage_factory("s3", bucket)
+    else:
+        key = uri
+        storage = storage_factory("filesystem")
+    # storage_factory and RemoteStorage._load_remote carry no return
+    # annotations upstream, so both of these type as optional.
+    stream = storage.load(key)  # pyright: ignore[reportOptionalMemberAccess]
+
+    digest = hashlib.sha256()
+    while chunk := stream.read(chunk_size):  # pyright: ignore[reportOptionalMemberAccess]
+        digest.update(chunk)
+    return digest.hexdigest()
 
 
 def download_features_parallel(

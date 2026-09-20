@@ -9,6 +9,7 @@ from unittest import mock
 
 import numpy as np
 from support.calibrated_model import make_calibrated_model
+from support.extractor import make_extractor_spec
 
 
 class ResolveFilesystemDirectoryTest(unittest.TestCase):
@@ -43,7 +44,9 @@ class ResolveMlflowModelIdTest(unittest.TestCase):
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            model_pt, _manifest, _ = export_artifact(model, str(d), X)
+            model_pt, _manifest, _ = export_artifact(
+                model, str(d), X, extractor=make_extractor_spec(X.shape[1])
+            )
             model_json = d / "model.json"
 
             artifacts_root = d / "artifacts"

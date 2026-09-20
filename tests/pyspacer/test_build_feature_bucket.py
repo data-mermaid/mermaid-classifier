@@ -567,3 +567,68 @@ class ParseWeightsLocationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReconcileBucketExtractorSpecTest(unittest.TestCase):
+    """--skip-existing only asks whether an object exists, so nothing else
+    stops a re-run under different weights from interleaving a second feature
+    space into one bucket. This is what does."""
+
+    def _spec(self, **overrides):
+        from support.extractor import make_extractor_spec
+
+        return make_extractor_spec(1280, **overrides)
+
+    def _client_with(self, body: bytes | None):
+        from botocore.exceptions import ClientError
+
+        client = mock.Mock()
+        if body is None:
+            client.head_object.side_effect = ClientError(
+                {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
+            )
+        else:
+            client.head_object.return_value = {}
+            client.get_object.return_value = {"Body": io.BytesIO(body)}
+        s3 = mock.Mock()
+        s3.meta.client = client
+        return s3, client
+
+    def test_writes_the_sidecar_when_the_bucket_has_none(self):
+        spec = self._spec()
+        s3, client = self._client_with(None)
+        bfb.reconcile_bucket_extractor_spec(s3, "tgt-bucket", spec, dry_run=False)
+        client.put_object.assert_called_once()
+        kwargs = client.put_object.call_args.kwargs
+        self.assertEqual(kwargs["Bucket"], "tgt-bucket")
+        self.assertEqual(kwargs["Key"], "_extractor_spec.json")
+        self.assertEqual(json.loads(kwargs["Body"]), spec.to_dict())
+
+    def test_dry_run_writes_nothing(self):
+        s3, client = self._client_with(None)
+        bfb.reconcile_bucket_extractor_spec(s3, "tgt-bucket", self._spec(), dry_run=True)
+        client.put_object.assert_not_called()
+
+    def test_a_matching_sidecar_is_left_alone(self):
+        spec = self._spec()
+        s3, client = self._client_with(json.dumps(spec.to_dict()).encode())
+        bfb.reconcile_bucket_extractor_spec(s3, "tgt-bucket", spec, dry_run=False)
+        client.put_object.assert_not_called()
+
+    def test_a_different_extractor_refuses_before_any_extraction(self):
+        existing = self._spec()
+        requested = self._spec(weights_sha256="f" * 64)
+        s3, client = self._client_with(json.dumps(existing.to_dict()).encode())
+        with self.assertRaises(RuntimeError) as ctx:
+            bfb.reconcile_bucket_extractor_spec(s3, "tgt-bucket", requested, dry_run=False)
+        message = str(ctx.exception)
+        self.assertIn(existing.weights_sha256[:12], message)
+        self.assertIn(requested.weights_sha256[:12], message)
+        client.put_object.assert_not_called()
+
+    def test_the_same_bytes_at_a_different_uri_is_not_a_conflict(self):
+        existing = self._spec(weights_uri="s3://a/efficientnet.pt")
+        requested = self._spec(weights_uri="s3://b/efficientnet_weights.pt")
+        s3, client = self._client_with(json.dumps(existing.to_dict()).encode())
+        bfb.reconcile_bucket_extractor_spec(s3, "tgt-bucket", requested, dry_run=False)
+        client.put_object.assert_not_called()

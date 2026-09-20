@@ -9,6 +9,7 @@ from unittest import mock
 
 import numpy as np
 from support.calibrated_model import make_calibrated_model
+from support.extractor import make_extractor_spec
 
 from mermaid_classifier.pyspacer.inference import (
     ManifestError,
@@ -23,7 +24,9 @@ class ExportTest(unittest.TestCase):
     def test_export_writes_pt_and_manifest_and_passes_parity(self):
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
-            model_pt, manifest, max_diff = export_artifact(model, d, X)
+            model_pt, manifest, max_diff = export_artifact(
+                model, d, X, extractor=make_extractor_spec(X.shape[1])
+            )
             self.assertTrue(Path(model_pt).is_file())
             self.assertTrue((Path(d) / "model.json").is_file())
             self.assertLess(max_diff, 1e-6)
@@ -32,7 +35,11 @@ class ExportTest(unittest.TestCase):
             self.assertEqual(manifest["task"], "pyspacer_mlp_classifier")
             self.assertEqual(manifest["classes"], model.classes_.tolist())
             self.assertEqual(manifest["input_dim"], X.shape[1])
-            self.assertEqual(manifest["config"], {"patch_size": 224})
+            # patch_size is the extractor's crop, not a literal: asserting it
+            # against the spec is what would catch the two drifting apart.
+            spec = make_extractor_spec(X.shape[1])
+            self.assertEqual(manifest["config"], {"patch_size": spec.crop_size})
+            self.assertEqual(manifest["feature_extraction"], spec.to_dict())
             self.assertIn("torch", manifest["trained_with"])
             self.assertIn("sklearn", manifest["trained_with"])
             # trained_with must record pyspacer so the serving runtime can verify
@@ -48,7 +55,7 @@ class ExportTest(unittest.TestCase):
         model, X = make_calibrated_model()
         # Force the gate to fire with an impossible tolerance: any non-negative max diff > -1.0 always raises.
         with tempfile.TemporaryDirectory() as d, self.assertRaises(ParityError):
-            export_artifact(model, d, X, tol=-1.0)
+            export_artifact(model, d, X, extractor=make_extractor_spec(X.shape[1]), tol=-1.0)
 
     def test_export_raises_when_sklearn_unpinned(self):
         model, X = make_calibrated_model()
@@ -62,13 +69,15 @@ class ExportTest(unittest.TestCase):
         ):
             # Patch the proven version to something the runner can't have, so
             # the installed sklearn is guaranteed to differ.
-            export_artifact(model, d, X)
+            export_artifact(model, d, X, extractor=make_extractor_spec(X.shape[1]))
 
 
 class LoadValidationTest(unittest.TestCase):
     def _export(self, d):
         model, X = make_calibrated_model()
-        model_pt, manifest, _ = export_artifact(model, d, X)
+        model_pt, manifest, _ = export_artifact(
+            model, d, X, extractor=make_extractor_spec(X.shape[1])
+        )
         return model_pt, Path(d) / "model.json", model, X
 
     def test_load_predictor_round_trip_matches_source(self):
@@ -158,7 +167,9 @@ class LiveModelParityTest(unittest.TestCase):
             )
 
         with tempfile.TemporaryDirectory() as d:
-            model_pt, manifest, max_diff = export_artifact(model, d, X)
+            model_pt, manifest, max_diff = export_artifact(
+                model, d, X, extractor=make_extractor_spec(X.shape[1])
+            )
             self.assertLess(max_diff, 1e-6)
             self.assertEqual(manifest["input_dim"], input_dim)
             self.assertEqual(manifest["classes"], model.classes_.tolist())

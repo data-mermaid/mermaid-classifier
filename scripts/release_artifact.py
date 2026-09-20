@@ -5,6 +5,11 @@ model ID, re-validates it (load + manifest checks), assembles the per-version
 S3 layout (model.pt, model.json, efficientnet.pt), and prints the resulting
 S3 URIs. The GitHub workflow wraps this with OIDC auth and `gh release create`.
 
+The extractor shipped alongside the head is the one the manifest names, and
+its bytes are hashed against the manifest before anything is published. A head
+is fitted to feature vectors, so shipping it with a backbone that did not
+produce those vectors mis-scores every image without failing anywhere.
+
 Run: uv run python scripts/release_artifact.py --mlflow-model-id m-... --version vN
 """
 
@@ -22,17 +27,17 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from mermaid_classifier.common.s3_utils import parse_s3_uri
+from mermaid_classifier.common.s3_utils import parse_s3_uri, sha256_of_uri
 from mermaid_classifier.pyspacer.annotation import resolve_classifier_artifact
 from mermaid_classifier.pyspacer.inference import (
     SCHEMA_VERSION,
     TASK_NAME,
+    ExtractorSpec,
     load_predictor,
 )
 
 DEFAULT_DEST_BUCKET = "mermaid-config"
 DEFAULT_DEST_PREFIX = "classifier"
-DEFAULT_WEIGHTS_URI = "s3://mermaid-config/classifier/efficientnet.pt"
 
 _VERSION_RE = re.compile(r"^v\d+$")
 
@@ -53,8 +58,9 @@ def validate_artifact(model_pt: Path, model_json: Path) -> dict[str, Any]:
     """Re-validate the artifact at release time (the release "parity gate").
 
     load_predictor raises ManifestError on schema_version / input_dim /
-    class-count mismatch. We then add the release-only checks load_predictor
-    does not make: task identity, non-empty classes, and provenance presence.
+    class-count mismatch, and on a manifest with no feature_extraction block.
+    We then add the release-only checks load_predictor does not make: task
+    identity, non-empty classes, and provenance presence.
     Returns the parsed manifest.
     """
     load_predictor(model_pt, model_json)  # ManifestError on graph/manifest skew
@@ -78,6 +84,10 @@ def validate_artifact(model_pt: Path, model_json: Path) -> dict[str, Any]:
         raise ValueError(
             f"manifest schema_version={manifest.get('schema_version')!r} != {SCHEMA_VERSION}"
         )
+    # ManifestError when absent or malformed. An artifact that cannot say which
+    # extractor produced its training features cannot be released, because the
+    # release is what pairs a head with a backbone.
+    ExtractorSpec.from_manifest(manifest)
     return manifest
 
 
@@ -145,7 +155,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Release a trained classifier as vN.")
     p.add_argument("--mlflow-model-id", required=True)
     p.add_argument("--version", required=True)
-    p.add_argument("--extractor-weights-uri", default=DEFAULT_WEIGHTS_URI)
+    p.add_argument(
+        "--extractor-weights-uri",
+        default=None,
+        help="Override where the extractor weights are fetched from. The bytes "
+        "must still hash to what model.json records. Default: the URI in the "
+        "manifest.",
+    )
     p.add_argument("--dest-bucket", default=DEFAULT_DEST_BUCKET)
     p.add_argument("--dest-prefix", default=DEFAULT_DEST_PREFIX)
     return p.parse_args(argv)
@@ -158,10 +174,6 @@ def main(argv: list[str] | None = None) -> int:
     s3 = boto3.client("s3")
 
     # Prechecks — all before any write, so a version folder is never partial.
-    weights_bucket, weights_key = parse_s3_uri(args.extractor_weights_uri)
-    if not s3_object_exists(s3, weights_bucket, weights_key):
-        sys.exit(f"extractor weights not found: {args.extractor_weights_uri}")
-
     dest_model_pt_key = f"{args.dest_prefix}/{args.version}/model.pt"
     if s3_object_exists(s3, args.dest_bucket, dest_model_pt_key):
         sys.exit(
@@ -174,7 +186,21 @@ def main(argv: list[str] | None = None) -> int:
     model_pt, model_json = resolve_classifier_artifact(args.mlflow_model_id)
 
     # Release gate: load + manifest validation (no source-model re-parity).
-    validate_artifact(model_pt, model_json)
+    manifest = validate_artifact(model_pt, model_json)
+    spec = ExtractorSpec.from_manifest(manifest)
+
+    weights_uri = args.extractor_weights_uri or spec.weights_uri
+    weights_bucket, weights_key = parse_s3_uri(weights_uri)
+    if not s3_object_exists(s3, weights_bucket, weights_key):
+        sys.exit(f"extractor weights not found: {weights_uri}")
+    weights_sha256 = sha256_of_uri(weights_uri)
+    if weights_sha256 != spec.weights_sha256:
+        sys.exit(
+            f"extractor weights at {weights_uri} hash to {weights_sha256}, but "
+            f"{args.mlflow_model_id} was trained on features from "
+            f"{spec.weights_sha256}. These are not the same weights; shipping "
+            f"them together would mis-score every image."
+        )
 
     uris = assemble_s3_layout(
         s3,
@@ -183,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         version=args.version,
         model_pt=model_pt,
         model_json=model_json,
-        weights_uri=args.extractor_weights_uri,
+        weights_uri=weights_uri,
     )
 
     # Copy artifacts into CWD (fixed names) for the workflow to attach to the
@@ -195,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Released {args.version} from MLflow model {args.mlflow_model_id}")
     for name, uri in uris.items():
         print(f"  {name}: {uri}")
+    print(f"  extractor: {spec.describe()}")
+    print(f"  extractor_sha256={weights_sha256}")
     return 0
 
 
