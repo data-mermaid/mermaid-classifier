@@ -99,10 +99,11 @@ If you bump sklearn, you must re-prove parity and update the pin + constant toge
 (`runner.py`). Flow: resolve one `ExtractorSpec` across every feature source
 (`resolve_extractor_spec`; sources that disagree stop the run, because a head
 fitted across two feature spaces is wrong in a way no later gate detects) →
-load CoralNet per-source CSVs from S3 + MERMAID Parquet via
-DuckDB → map CoralNet label IDs to MERMAID BA+GF (`CoralNetMermaidMapping`) →
-filter/rollup (`LabelFilter`, `LabelRollupSpec`, `CNSourceFilter`, all `CsvSpec`
-subclasses in `label_specs.py`) → validate `.fv` feature vectors exist on S3 →
+load the CoralNet manifest parquet (built by `scripts/build_coralnet_manifest.py`)
++ MERMAID Parquet via DuckDB from S3 → map CoralNet label IDs to MERMAID BA+GF
+(`CoralNetMermaidMapping`) → filter/rollup (`LabelFilter`, `LabelRollupSpec`,
+`ImageExclusionFilter`, all `CsvSpec` subclasses in `label_specs.py`) →
+validate `.fv` feature vectors exist on S3 →
 train/ref/val split via PySpacer's `preprocess_labels` → train via
 `MermaidTrainer` (`trainer.py`, a PySpacer `ClassifierTrainer` subclass doing
 batched calibration + per-epoch MLflow callbacks; ref and train data are never
@@ -235,9 +236,13 @@ break the resulting cycle — more machinery than the separation buys.
   `build_feature_bucket.py` and `annotation.py`.
 - **Config dirs are repo-root-relative**: a committed training config is a
   `sagemaker/configs/<name>/` dir (`training_config.yaml` plus whichever of
-  `sources.csv` / `rollups.csv` / `included_labels.csv` that run needs — the
-  siblings are optional; `coralnet_all_plus_mermaid/` carries no `sources.csv`).
-  Scripts run from the
+  `rollups.csv` / `included_labels.csv` that run needs — the siblings are
+  optional). Some dirs also keep the `sources.csv` fed to
+  `scripts/build_coralnet_manifest.py --sources-csv` when the run's
+  `dataset.coralnet_manifest_uri` was built — provenance for the manifest, not
+  something training reads; `coralnet_all_plus_mermaid/` carries no
+  `sources.csv` because its manifest was built with no `--sources-csv` /
+  `--source-ids` (all available CoralNet sources). Scripts run from the
   repo root; both `classifier_train.py` (local) and the SageMaker launcher load
   a config by repo-root-relative `--config-dir` and share that one
   `training_config.yaml` (single source of truth — no recipe duplication).
