@@ -15,9 +15,11 @@ from mermaid_classifier.pyspacer.inference import (
     PARITY_PROVEN_SKLEARN,
     SCHEMA_VERSION,
     TASK_NAME,
+    ExtractorMismatchError,
     ParityError,
     SklearnPinError,
 )
+from mermaid_classifier.pyspacer.inference.extractor_spec import MANIFEST_KEY, ExtractorSpec
 from mermaid_classifier.pyspacer.inference.head import build_calibrated_head
 
 
@@ -26,17 +28,24 @@ def export_artifact(
     output_dir: str | Path,
     reference_features: Any,
     *,
-    config: dict[str, Any] | None = None,
+    extractor: ExtractorSpec,
     task: str = TASK_NAME,
     tol: float = 1e-6,
     enforce_sklearn_pin: bool = True,
 ) -> tuple[Path, dict[str, Any], float]:
     """Build, freeze, parity-gate, and persist the portable artifact.
 
+    ``extractor`` identifies the image -> feature-vector transform the head was
+    fitted through, and is the caller's only say over the manifest's
+    conditioning record: ``config`` is derived from it rather than passed, so
+    a patch size that contradicts the extractor cannot be written.
+
     Returns (model_pt_path, manifest_dict, max_abs_diff). Raises ParityError
     if the frozen graph diverges from ``model.predict_proba`` beyond ``tol``.
     Raises SklearnPinError if the installed scikit-learn differs from
-    PARITY_PROVEN_SKLEARN and enforce_sklearn_pin is True.
+    PARITY_PROVEN_SKLEARN and enforce_sklearn_pin is True. Raises
+    ExtractorMismatchError if the extractor's output width is not the width
+    the head takes.
     """
     sklearn_version = _pkg_version("scikit-learn")
     if enforce_sklearn_pin and sklearn_version != PARITY_PROVEN_SKLEARN:
@@ -69,12 +78,24 @@ def export_artifact(
         )
 
     estimator = model.calibrated_classifiers_[0].estimator
+    input_dim = int(estimator.n_features_in_)
+    # The head takes whatever the extractor emits. Checking it here is what
+    # makes the recorded extractor the one the graph can actually be fed by;
+    # load_predictor's probe only checks the graph against the manifest.
+    if extractor.feature_dim != input_dim:
+        raise ExtractorMismatchError(
+            f"extractor emits {extractor.feature_dim}-d features but the head"
+            f" takes {input_dim}-d. Refusing to record {extractor.describe()}"
+            " as this model's feature source."
+        )
+
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "task": task,
         "classes": model.classes_.tolist(),
-        "input_dim": int(estimator.n_features_in_),
-        "config": config if config is not None else {"patch_size": 224},
+        "input_dim": input_dim,
+        "config": {"patch_size": extractor.crop_size},
+        MANIFEST_KEY: extractor.to_dict(),
         "trained_with": {
             "torch": torch.__version__,
             # Read via importlib.metadata so importing this module (and thus

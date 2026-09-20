@@ -14,6 +14,8 @@ dataset:
   # Manifest parquet built by scripts/build_coralnet_manifest.py; this is a
   # verbatim S3 URI, not a sibling file. Replace for real runs.
   coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/example/coralnet_classifier_manifest_example.parquet
+  # The EfficientNet that produced this run's feature vectors.
+  feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
   label_rollup_spec_csv: rollups.csv
   included_labels_csv: included_labels.csv
@@ -48,7 +50,6 @@ mlflow:
 # flag, so the value here is just a placeholder for local smoke runs.
 env:
   MLFLOW_TRACKING_SERVER: file:./mlruns
-  WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
   MERMAID_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

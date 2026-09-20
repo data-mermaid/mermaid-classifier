@@ -24,7 +24,8 @@ class ParityError(Exception):
 
 class ManifestError(Exception):
     """Raised at load time when model.json is incompatible with the graph
-    (schema version, class count, or input_dim mismatch)."""
+    (schema version, class count, or input_dim mismatch), or when it omits a
+    block this loader requires."""
 
 
 class SklearnPinError(Exception):
@@ -32,16 +33,29 @@ class SklearnPinError(Exception):
     PARITY_PROVEN_SKLEARN — the version the parity gate was proven against."""
 
 
+class ExtractorMismatchError(Exception):
+    """Raised when the extractor in use is not the one recorded as having
+    produced the features the model was trained on. A head fitted to one
+    feature space scores another silently, so this fails rather than warns."""
+
+
 from mermaid_classifier.pyspacer.inference.export import export_artifact  # noqa: E402
+from mermaid_classifier.pyspacer.inference.extractor_spec import (  # noqa: E402
+    MANIFEST_KEY,
+    ExtractorSpec,
+)
 from mermaid_classifier.pyspacer.inference.loader import (  # noqa: E402
     Predictor,
     load_predictor,
 )
 
 __all__ = [
+    "MANIFEST_KEY",
     "SCHEMA_VERSION",
     "TASK_NAME",
     "PARITY_PROVEN_SKLEARN",
+    "ExtractorMismatchError",
+    "ExtractorSpec",
     "ParityError",
     "ManifestError",
     "SklearnPinError",

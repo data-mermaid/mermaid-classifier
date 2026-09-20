@@ -78,7 +78,13 @@ pydantic-settings, etc.
 
 Trained models ship as a TorchScript head + `model.json` manifest, **not** a
 pickle (`inference/export.py` → `export_artifact`, `inference/loader.py` →
-`load_predictor`). `scikit-learn` is pinned in lockstep across both extras
+`load_predictor`). The manifest's top-level `feature_extraction` block records
+the `ExtractorSpec` (`inference/extractor_spec.py`) the features were produced
+by — class path, crop size, feature dim, weights URI + sha256 — all derived
+from the live extractor, never passed in. `config.patch_size` is derived from
+it too, so the two cannot disagree. The block is additive: `schema_version`
+stays 1 and mermaid-api's `Classifier.register()` ignores keys it does not
+read. `scikit-learn` is pinned in lockstep across both extras
 because `CalibratedClassifierCV` calibration semantics can shift between
 releases. `PARITY_PROVEN_SKLEARN` (`pyspacer/inference/__init__.py`) records the
 version the TorchScript-vs-sklearn parity was proven against; a mismatch raises
@@ -90,7 +96,10 @@ If you bump sklearn, you must re-prove parity and update the pin + constant toge
 ### Training pipeline (`pyspacer/dataset.py`, `pyspacer/runner.py`)
 
 `TrainingDataset` (`dataset.py`) → `TrainingRunner` / `MLflowTrainingRunner`
-(`runner.py`). Flow: load CoralNet per-source CSVs from S3 + MERMAID Parquet via
+(`runner.py`). Flow: resolve one `ExtractorSpec` across every feature source
+(`resolve_extractor_spec`; sources that disagree stop the run, because a head
+fitted across two feature spaces is wrong in a way no later gate detects) →
+load CoralNet per-source CSVs from S3 + MERMAID Parquet via
 DuckDB → map CoralNet label IDs to MERMAID BA+GF (`CoralNetMermaidMapping`) →
 filter/rollup (`LabelFilter`, `LabelRollupSpec`, `CNSourceFilter`, all `CsvSpec`
 subclasses in `label_specs.py`) → validate `.fv` feature vectors exist on S3 →
@@ -161,6 +170,10 @@ break the resulting cycle — more machinery than the separation buys.
   layer behind `scripts/launch_training.py` / `launch_processing.py`. It shares the one
   `training_config.yaml` with local runs, so there is no recipe duplication between
   lanes. Cross-repo conventions live in `../mermaid-api/iac/sagemaker-launcher-convention.md`.
+- `scripts/build_feature_bucket.py` writes `_extractor_spec.json` at the root of
+  the bucket it fills, and refuses a re-run whose extractor differs from it —
+  `--skip-existing` is the default and only asks whether an object exists, so
+  nothing else would stop two feature spaces landing under one prefix.
 - `mermaid_classifier/coralnet/manifest.py` (+ `scripts/build_coralnet_manifest.py`)
   builds the raw-image CoralNet manifest Parquet that dataset loading reads from S3.
 - `pyspacer/swap_monitor.py`, `pyspacer/mlflow_model.py`, `pyspacer/annotation.py` and
@@ -215,6 +228,11 @@ break the resulting cycle — more machinery than the separation buys.
   fallback (`dataset.py`'s `duck_conn`, `build_coralnet_manifest.py`'s
   `_configure_duckdb_s3`) when the extension isn't already installed locally —
   anything new that would must be stubbed.
+- **A training config must name its extractor.** `dataset.feature_extractor_weights`
+  is required by `DatasetConfig`, so a typo or omission fails at config load rather
+  than mid-run. It replaced an inert `env: WEIGHTS_LOCATION` line that nothing on
+  the training path ever read. `settings.weights_location` remains, read only by
+  `build_feature_bucket.py` and `annotation.py`.
 - **Config dirs are repo-root-relative**: a committed training config is a
   `sagemaker/configs/<name>/` dir (`training_config.yaml` plus whichever of
   `sources.csv` / `rollups.csv` / `included_labels.csv` that run needs — the
@@ -240,6 +258,10 @@ the release path:
   `CLASSIFIER_VERSION=vN`.
 - **`model.json`'s `trained_with`** records the torch/sklearn/pyspacer the model was
   built with, and the inference function fails loudly at load if its runtime differs.
+- **The extractor ships from the manifest, not a default.** `release_artifact.py`
+  copies the object `feature_extraction.weights_uri` names and refuses to publish
+  unless its bytes hash to `feature_extraction.weights_sha256`. An artifact with no
+  such block cannot be released, and `classify.py` refuses to serve one.
 
 ## Pointers
 

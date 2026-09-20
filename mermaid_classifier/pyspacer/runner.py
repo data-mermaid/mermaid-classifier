@@ -377,6 +377,14 @@ class MLflowTrainingRunner(TrainingRunner):
                 ba_library = get_benthic_attribute_library()
                 gf_library = get_growth_form_library()
 
+                extractor_spec = self.dataset.extractor_spec
+                if extractor_spec is None:
+                    raise RuntimeError(
+                        "Feature-extractor provenance was never resolved, so the"
+                        " artifact cannot record what produced its training"
+                        " features. Refusing to export."
+                    )
+
                 with tempfile.TemporaryDirectory() as artifact_dir:
                     artifact_dir = Path(artifact_dir)
                     # Parity-gated export (ParityError if max|Δ| > 1e-6).
@@ -384,7 +392,7 @@ class MLflowTrainingRunner(TrainingRunner):
                         clf_calibrated,
                         artifact_dir,
                         reference_features=ref_features,
-                        config={"patch_size": 224},
+                        extractor=extractor_spec,
                     )
                     model_json = artifact_dir / "model.json"
                     # ManifestError on schema/class-count/input_dim mismatch.

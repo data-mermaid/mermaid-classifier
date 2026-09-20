@@ -50,6 +50,7 @@ import numpy as np
 import pandas as pd
 from botocore.exceptions import ClientError
 from support.calibrated_model import make_calibrated_model
+from support.extractor import make_extractor_spec
 
 # Allow importing scripts/evaluate_region_probe.py (mirrors test_release_artifact).
 from support.paths import add_scripts_to_path
@@ -322,7 +323,9 @@ def _export_model(model_dir: Path, seed: int = 0) -> tuple[Path, Path]:
     """A real TorchScript artifact, exported the way a release is."""
     model, batch = make_calibrated_model(seed=seed)
     model_dir.mkdir(parents=True, exist_ok=True)
-    model_pt, _manifest, _diff = export_artifact(model, model_dir, batch)
+    model_pt, _manifest, _diff = export_artifact(
+        model, model_dir, batch, extractor=make_extractor_spec(batch.shape[1])
+    )
     return Path(model_pt), model_dir / "model.json"
 
 
@@ -839,7 +842,9 @@ class ProbeIntegrityTest(WrittenProbeTestCase):
         model, batch = make_calibrated_model(n_features=FEATURE_DIM, seed=0)
         model_dir = self.root / "model_download_failure"
         model_dir.mkdir()
-        model_pt, _manifest, _diff = export_artifact(model, model_dir, batch)
+        model_pt, _manifest, _diff = export_artifact(
+            model, model_dir, batch, extractor=make_extractor_spec(batch.shape[1])
+        )
         model_json = model_dir / "model.json"
         score = score_model(
             "v1",

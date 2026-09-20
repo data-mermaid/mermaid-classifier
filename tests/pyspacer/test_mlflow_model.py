@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from support.calibrated_model import make_calibrated_model
+from support.extractor import make_extractor_spec
 
 
 class ArtifactPredictorModelTest(unittest.TestCase):
@@ -18,7 +19,9 @@ class ArtifactPredictorModelTest(unittest.TestCase):
 
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
-            model_pt, _manifest, _ = export_artifact(model, d, X)
+            model_pt, _manifest, _ = export_artifact(
+                model, d, X, extractor=make_extractor_spec(X.shape[1])
+            )
             model_json = Path(d) / "model.json"
 
             # A minimal stand-in for mlflow's PythonModelContext: only the
@@ -47,7 +50,9 @@ class LogArtifactModelTest(unittest.TestCase):
         model, X = make_calibrated_model()
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            model_pt, _manifest, _ = export_artifact(model, str(d), X)
+            model_pt, _manifest, _ = export_artifact(
+                model, str(d), X, extractor=make_extractor_spec(X.shape[1])
+            )
             model_json = d / "model.json"
 
             # sqlite tracking + an explicit local artifact dir: no server

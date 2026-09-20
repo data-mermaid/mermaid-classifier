@@ -17,6 +17,8 @@ dataset:
   include_mermaid: false
   # Verbatim S3 URI of the manifest parquet (scripts/build_coralnet_manifest.py).
   coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/top108_full/coralnet_classifier_manifest_top108_full.parquet
+  # The EfficientNet that produced this run's feature vectors.
+  feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
   label_rollup_spec_csv: rollups.csv
   included_labels_csv: included_labels.csv
@@ -42,7 +44,6 @@ mlflow:
 env:
   # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
   # do not override here.
-  WEIGHTS_LOCATION: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
   MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
   TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "5"

@@ -456,15 +456,20 @@ def verify_device_numerics(
     n_patches: int = 8,
     threshold: float = 0.999,
 ) -> None:
-    """Sanity check: feature vectors on the chosen device match CPU output
-    on a fixed random batch. Raises RuntimeError if min cosine similarity
-    drops below ``threshold``."""
-    if device == "cpu":
-        return
+    """Sanity check: this extractor's features match stock pyspacer's on a
+    fixed random batch. Raises RuntimeError if min cosine similarity drops
+    below ``threshold``.
 
+    The reference is a plain ``EfficientNetExtractor`` on CPU at pyspacer's
+    own batch size, because that is what serving runs. Both axes this script
+    can move -- device and batch size -- are then covered by one comparison;
+    a CPU run at ``--batch-size 128`` changes BLAS reduction order just as a
+    device switch does, so this runs even when the device is already cpu.
+    """
     import numpy as np
     import torch  # noqa: F401  # pyright: ignore[reportUnusedImport]  # forces same import order as production path
     from PIL import Image
+    from spacer.extractors import EfficientNetExtractor
 
     rng = np.random.default_rng(seed=42)
     patches = [
@@ -472,23 +477,20 @@ def verify_device_numerics(
         for _ in range(n_patches)
     ]
 
-    cls = _build_device_caching_extractor_class()
-    cpu_extractor = cls(
-        data_locations={"weights": weights_loc},
-        device="cpu",
-        batch_size=batch_size,
-    )
+    reference = EfficientNetExtractor(data_locations={"weights": weights_loc})
 
     device_feats, _ = extractor.patches_to_features(patches)
-    cpu_feats, _ = cpu_extractor.patches_to_features(patches)
+    reference_feats, _ = reference.patches_to_features(patches)  # pyright: ignore[reportArgumentType]  # same PIL stub issue
 
     A = np.asarray(device_feats)
-    B = np.asarray(cpu_feats)
+    B = np.asarray(reference_feats)
     sims = (A * B).sum(axis=1) / (np.linalg.norm(A, axis=1) * np.linalg.norm(B, axis=1) + 1e-12)
     logger.info(
-        "Device numerics check (%s vs cpu, %d random patches): "
-        "min_cos=%.6f median=%.6f max_abs_diff=%.4g",
+        "Numerics check (%s @ batch %d vs stock pyspacer @ batch %d on cpu, "
+        "%d random patches): min_cos=%.6f median=%.6f max_abs_diff=%.4g",
         device,
+        batch_size,
+        EfficientNetExtractor.BATCH_SIZE,
         n_patches,
         float(sims.min()),
         float(np.median(sims)),
@@ -496,23 +498,61 @@ def verify_device_numerics(
     )
     if sims.min() < threshold:
         raise RuntimeError(
-            f"Device numerics check FAILED on {device}: min cosine "
-            f"similarity {sims.min():.6f} < {threshold}. The features "
-            f"would not be safe to mix with previously CPU-extracted ones."
+            f"Numerics check FAILED for {device} @ batch {batch_size}: min "
+            f"cosine similarity {sims.min():.6f} < {threshold} against stock "
+            f"pyspacer. Features extracted this way would not be comparable "
+            f"with the ones inference produces."
         )
 
 
 def parse_weights_location(uri: str):
     """Parse an s3://bucket/key or filesystem path into a DataLocation."""
-    from spacer.data_classes import DataLocation
+    # Deferred like every mermaid_classifier import in this script: Settings
+    # is built at import time and must see the bootstrapped SPACER_AWS_* vars.
+    from mermaid_classifier.pyspacer.extraction import weights_data_location
 
-    if uri.startswith("s3://"):
-        rest = uri[len("s3://") :]
-        bucket, _, key = rest.partition("/")
-        if not bucket or not key:
-            raise ValueError(f"Bad S3 URI for weights: {uri!r}")
-        return DataLocation(storage_type="s3", key=key, bucket_name=bucket)
-    return DataLocation(storage_type="filesystem", key=uri)
+    return weights_data_location(uri)
+
+
+def reconcile_bucket_extractor_spec(
+    s3: Any,  # boto3 S3 resource (untyped)
+    target_bucket: str,
+    spec: Any,  # ExtractorSpec
+    dry_run: bool,
+) -> None:
+    """Record this extractor against the target bucket, or refuse the run.
+
+    The bucket is the unit: every ``.featurevector`` under it has to have come
+    from one extractor, or a head fitted on the union is fitted across two
+    feature spaces. Since ``--skip-existing`` is the default and only asks
+    whether an object exists, this is what stops a re-run under different
+    weights from quietly interleaving a second one.
+    """
+    from mermaid_classifier.pyspacer.extraction import SIDECAR_FILENAME
+    from mermaid_classifier.pyspacer.inference import ExtractorSpec
+
+    if head_ok(s3, target_bucket, SIDECAR_FILENAME):
+        body = s3.meta.client.get_object(Bucket=target_bucket, Key=SIDECAR_FILENAME)["Body"].read()
+        existing = ExtractorSpec.from_dict(json.loads(body))
+        if existing.identity() != spec.identity():
+            raise RuntimeError(
+                f"s3://{target_bucket}/ already holds feature vectors from a "
+                f"different extractor.\n  existing: {existing.describe()}\n  "
+                f"requested: {spec.describe()}\nWrite to a new bucket, or "
+                f"re-extract the whole prefix with --force."
+            )
+        logger.info("Target bucket extractor matches: %s", existing.describe())
+        return
+
+    logger.info("Recording extractor for s3://%s/: %s", target_bucket, spec.describe())
+    if dry_run:
+        return
+    s3.meta.client.put_object(
+        Bucket=target_bucket,
+        Key=SIDECAR_FILENAME,
+        Body=json.dumps(spec.to_dict(), indent=2).encode(),
+        ContentType="application/json",
+    )
 
 
 def build_extract_msg(
@@ -861,6 +901,12 @@ def main(argv: list[str] | None = None) -> int:
         verify_device_numerics(extractor, weights_loc, args.batch_size, device)
 
     s3 = get_s3_resource()
+
+    from mermaid_classifier.pyspacer.extraction import extractor_spec_from_weights
+
+    reconcile_bucket_extractor_spec(
+        s3, args.target_bucket, extractor_spec_from_weights(weights_uri), args.dry_run
+    )
 
     source_ids = load_source_ids_from_args(args)
     logger.info("Requested %d source(s).", len(source_ids))

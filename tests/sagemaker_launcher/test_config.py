@@ -22,6 +22,7 @@ MINIMAL_YAML = textwrap.dedent("""
     dataset:
       include_mermaid: true
       coralnet_manifest_uri: s3://bucket/coralnet_manifest.parquet
+      feature_extractor_weights: s3://bucket/efficientnet.pt
       label_rollup_spec_csv: rollups.csv
       included_labels_csv: included_labels.csv
       subsample:
