@@ -37,6 +37,8 @@ def _project_bagf_column(
     """
     Add a bagf_id column to the given DuckDB table, concatenating the BA
     and GF id columns so a filter or rollup can operate on a single column.
+    Table and column name arguments are interpolated directly into SQL and
+    must be trusted identifiers (code constants), never config or user values.
     """
     # https://duckdb.org/docs/stable/sql/functions/text#concat_wsseparator-string-
     # If there's no GF, then the result is the BA plus separator.
@@ -55,7 +57,10 @@ def _drop_bagf_column(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
 ) -> None:
-    """Drop the bagf_id column added by `_project_bagf_column`."""
+    """Drop the bagf_id column added by `_project_bagf_column`.
+    Table name argument is interpolated directly into SQL and must be a
+    trusted identifier (code constant), never config or user values.
+    """
     duck_conn.execute(f"ALTER TABLE {duck_table_name} DROP bagf_id")
 
 

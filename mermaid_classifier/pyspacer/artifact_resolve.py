@@ -56,7 +56,13 @@ def _download_pair_to_tempdir(
 
 
 def parse_location_str(location: str | None) -> DataLocation | None:
+    """Turn a location string into a DataLocation.
 
+    Accepts s3://bucket/key URIs, mlflow-artifacts:/ URIs (un-proxied to a
+    local mlartifacts/ path — only the local-filesystem artifact store is
+    handled), and otherwise treats the string as a filesystem path. Returns
+    None for empty or None input.
+    """
     if not location:
         return None
 
