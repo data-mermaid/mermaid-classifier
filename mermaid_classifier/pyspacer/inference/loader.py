@@ -3,7 +3,10 @@ load-time validation of the graph against its manifest."""
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +14,8 @@ import numpy as np
 import torch
 
 from mermaid_classifier.pyspacer.inference import SCHEMA_VERSION, ManifestError
+
+logger = logging.getLogger(__name__)
 
 
 class Predictor:
@@ -38,9 +43,13 @@ class Predictor:
 def load_predictor(model_pt_path: str | Path, model_json_path: str | Path) -> Predictor:
     """Load model.pt + model.json, validating compatibility loudly.
 
-    Raises ManifestError on schema-version, class-count, or input_dim
-    mismatch rather than returning a silently-mispredicting predictor.
+    Raises ManifestError on schema-version, class-count, input_dim, or
+    model.pt/manifest digest mismatch, rather than returning a
+    silently-mispredicting predictor. A manifest with no ``model_pt_sha256``
+    key — an artifact cut before the field existed — is served with a logged
+    warning instead of a refusal.
     """
+    model_pt_path = Path(model_pt_path)
     manifest = json.loads(Path(model_json_path).read_text())
 
     schema_version = manifest.get("schema_version")
@@ -53,7 +62,26 @@ def load_predictor(model_pt_path: str | Path, model_json_path: str | Path) -> Pr
     classes = manifest["classes"]
     input_dim = int(manifest["input_dim"])
 
-    graph = torch.jit.load(str(model_pt_path), map_location="cpu")
+    data = model_pt_path.read_bytes()
+
+    recorded_sha256 = manifest.get("model_pt_sha256")
+    if recorded_sha256 is None:
+        # Stable marker (mirrors classify.py's [classify.unverified_extractor]):
+        # a metric filter can count artifacts still serving unverified.
+        logger.warning(
+            "[loader.unverified_graph] model.json has no 'model_pt_sha256' key;"
+            " serving without verifying model.pt against the manifest that names it"
+        )
+    else:
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        if actual_sha256 != recorded_sha256:
+            raise ManifestError(
+                f"model.pt sha256={actual_sha256} does not match model.json's"
+                f" recorded model_pt_sha256={recorded_sha256}: this model.json"
+                " does not describe this model.pt."
+            )
+
+    graph = torch.jit.load(io.BytesIO(data), map_location="cpu")
     graph.eval()
 
     # Probe with a (1, input_dim) batch: catches input_dim mismatch (matmul

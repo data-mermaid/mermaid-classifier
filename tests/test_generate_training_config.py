@@ -540,6 +540,13 @@ class ValidationTests(_GenerateConfigTestCase):
         with self.assertRaises(ValueError):
             gtc.validate_outputs(self.output_dir)
 
+    def test_sources_csv_missing_id_column_rejected(self):
+        self.run_main(extra_args=["--skip-validation"])
+        sources_path = self.output_dir / "sources.csv"
+        sources_path.write_text("not_id\n1\n2\n")
+        with self.assertRaises(ValueError):
+            gtc.validate_outputs(self.output_dir)
+
 
 class UnresolvedTop108Tests(_GenerateConfigTestCase):
     def test_skipped_top108_is_named_in_the_output_not_silently_dropped(self):

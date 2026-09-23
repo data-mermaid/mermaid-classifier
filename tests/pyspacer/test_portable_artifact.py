@@ -1,5 +1,6 @@
 """Tests for the portable classifier artifact (model.pt + model.json)."""
 
+import hashlib
 import json
 import os
 import tempfile
@@ -56,6 +57,15 @@ class ExportTest(unittest.TestCase):
         # Force the gate to fire with an impossible tolerance: any non-negative max diff > -1.0 always raises.
         with tempfile.TemporaryDirectory() as d, self.assertRaises(ParityError):
             export_artifact(model, d, X, extractor=make_extractor_spec(X.shape[1]), tol=-1.0)
+
+    def test_manifest_records_model_pt_sha256(self):
+        model, X = make_calibrated_model()
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, manifest, _ = export_artifact(
+                model, d, X, extractor=make_extractor_spec(X.shape[1])
+            )
+            expected = hashlib.sha256(Path(model_pt).read_bytes()).hexdigest()
+            self.assertEqual(manifest["model_pt_sha256"], expected)
 
     def test_export_raises_when_sklearn_unpinned(self):
         model, X = make_calibrated_model()
@@ -115,6 +125,31 @@ class LoadValidationTest(unittest.TestCase):
             Path(model_json).write_text(json.dumps(manifest))
             with self.assertRaises(ManifestError):
                 load_predictor(model_pt, model_json)
+
+    def test_model_pt_rewritten_after_export_raises(self):
+        # Digest check runs before torch.jit.load, so corrupt bytes never
+        # reach the graph loader -- this exercises the digest compare, not a
+        # jit failure.
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, model_json, _, _ = self._export(d)
+            Path(model_pt).write_bytes(b"not the exported graph")
+            with self.assertRaises(ManifestError):
+                load_predictor(model_pt, model_json)
+
+    def test_missing_model_pt_sha256_warns_and_still_loads(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_pt, model_json, model, X = self._export(d)
+            manifest = json.loads(Path(model_json).read_text())
+            del manifest["model_pt_sha256"]
+            Path(model_json).write_text(json.dumps(manifest))
+
+            with self.assertLogs(
+                "mermaid_classifier.pyspacer.inference.loader", level="WARNING"
+            ) as ctx:
+                predictor = load_predictor(model_pt, model_json)
+
+            self.assertTrue(any("[loader.unverified_graph]" in msg for msg in ctx.output))
+            self.assertEqual(predictor.classes, model.classes_.tolist())
 
 
 class LiveModelParityTest(unittest.TestCase):

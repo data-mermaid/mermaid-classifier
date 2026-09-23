@@ -4,8 +4,8 @@ from typing import Literal
 import psutil
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# EfficientNet feature vector dimensionality (4096 floats).
-_FEATURE_DIM = 4096
+# EfficientNet feature vector dimensionality (1280 floats).
+_FEATURE_DIM = 1280
 # Bytes per float64 element (numpy / sklearn default).
 _BYTES_PER_FLOAT = 8
 _FEATURE_BYTES = _FEATURE_DIM * _BYTES_PER_FLOAT
@@ -33,10 +33,8 @@ def training_batch_size(
     available_bytes = psutil.virtual_memory().available
     available_gb = available_bytes / 1e9
 
-    # Per-point peak memory during partial_fit:
-    #   1. Feature vector loaded from disk:  4096 × 8 bytes
-    #   2. sklearn copies to C-contiguous float64: 4096 × 8 bytes
-    #   3. MLP forward/backward activation buffers per layer
+    # Per-point peak memory: a 1280×8-byte feature vector loaded from disk,
+    # its sklearn float64 copy, and per-layer MLP activation buffers.
     sklearn_copy_bytes = _FEATURE_BYTES  # worst-case full copy
 
     # MLP hidden_layer_sizes is fixed at the production (500, 300, 100)
