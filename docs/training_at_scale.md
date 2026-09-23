@@ -179,10 +179,11 @@ Edit:
 - `sagemaker/runs/my-run.yaml` to adjust the SageMaker shape
   (`job.image`, `job.instance_type`, `job.max_runtime_hours`, etc.).
 - `sagemaker/configs/my-run/training_config.yaml` to point at your
-  sources / rollups / included-labels CSVs (paths are resolved as
-  siblings of the YAML, so just `sources.csv`, not
-  `/abs/path/sources.csv`). Replace the placeholder CSVs with the
-  real ones for your experiment.
+  CoralNet manifest (`dataset.coralnet_manifest_uri`, built ahead of time by
+  `scripts/build_coralnet_manifest.py`) and your rollups / included-labels
+  CSVs (the CSV paths are resolved as siblings of the YAML, so just
+  `rollups.csv`, not `/abs/path/rollups.csv`). Replace the placeholder CSVs
+  with the real ones for your experiment.
 
 ## 5. Dry-run the launcher
 

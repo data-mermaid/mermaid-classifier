@@ -95,6 +95,15 @@ class ValidateArtifactTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ra.validate_artifact(model_pt, model_json)
 
+    def test_rejects_missing_model_pt_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_pt, model_json = self._export(tmp)
+            m = json.loads(model_json.read_text())
+            del m["model_pt_sha256"]
+            model_json.write_text(json.dumps(m))
+            with self.assertRaises(ValueError):
+                ra.validate_artifact(model_pt, model_json)
+
     def test_rejects_bad_class_count(self):
         # load_predictor probes the graph: a manifest claiming the wrong class
         # count must raise (ManifestError is a subclass-agnostic failure here).

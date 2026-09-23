@@ -3,6 +3,7 @@ against the source model, and write the generated manifest."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -110,6 +111,9 @@ def export_artifact(
 
     model_pt = output_dir / "model.pt"
     torch.jit.save(frozen, str(model_pt))
+    # Hashed after the file lands, so the digest is exactly what
+    # load_predictor will recompute from the same bytes.
+    manifest["model_pt_sha256"] = hashlib.sha256(model_pt.read_bytes()).hexdigest()
     (output_dir / "model.json").write_text(json.dumps(manifest, indent=2))
 
     return model_pt, manifest, max_diff

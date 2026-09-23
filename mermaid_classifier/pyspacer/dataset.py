@@ -1,7 +1,7 @@
 """
 TrainingDataset: loads, transforms, and prepares annotation data for training.
 
-Reads CoralNet per-source CSVs from S3 and MERMAID Parquet via DuckDB,
+Reads CoralNet manifest parquet and MERMAID Parquet via DuckDB,
 maps CoralNet label IDs to MERMAID BA+GF, applies rollup/filter specs,
 validates feature vector availability, and produces pyspacer-ready
 train/ref/val splits.
@@ -77,7 +77,6 @@ def _load_csv_spec[T: CsvSpec](path: str | None, factory: Callable[[TextIO], T])
 
 class TrainingDataset:
     def __init__(self, options: DatasetOptions):
-
         self.options = options
         self.artifacts = Artifacts()
         self.profiled_sections = []
@@ -223,10 +222,6 @@ class TrainingDataset:
                 100.0 * img_after_exclusion / max(img_before, 1),
             )
 
-        if options.subsample is not None:
-            with self.section_profiling("Per-class subsampling"):
-                self._apply_subsample(options.subsample)
-
         if options.include_mermaid or options.coralnet_manifest_uri:
             feature_prefixes = self.feature_source_prefixes()
 
@@ -249,6 +244,12 @@ class TrainingDataset:
                     present |= set(self.s3.find(path=prefix))
                 # Check against annotation data.
                 self.handle_missing_feature_vectors(present)
+
+        if options.subsample is not None:
+            # Runs after the missing-feature-vector drop above, so per-class
+            # targets are computed from rows that can actually reach training.
+            with self.section_profiling("Per-class subsampling"):
+                self._apply_subsample(options.subsample)
 
         self.labels = self.prep_annotations_for_pyspacer()
 
@@ -395,7 +396,6 @@ class TrainingDataset:
             yield
 
     def read_mermaid_data(self):
-
         parquet_path = settings.mermaid_annotations_parquet_pattern.format(
             mermaid_train_data_bucket=settings.mermaid_train_data_bucket,
         )
@@ -722,7 +722,6 @@ class TrainingDataset:
             )
 
     def prep_annotations_for_pyspacer(self):
-
         with self.section_profiling("Collecting feature paths"):
             annotations_by_image = duckdb_grouped_rows(
                 duck_conn=self.duck_conn,
@@ -969,7 +968,6 @@ class TrainingDataset:
                 yield feature_loc, row, col
 
     def set_train_summary_stats(self):
-
         # Counts per BA.
         self.duck_conn.execute(
             "CREATE TABLE ba_counts AS"
@@ -1121,7 +1119,6 @@ class TrainingDataset:
         )
 
     def get_annotations(self, log_spec: str):
-
         if log_spec == "all":
             query = "SELECT * FROM annotations"
         elif match := re.fullmatch(r"s(\d+)", log_spec):

@@ -1,7 +1,7 @@
-"""Characterization tests for LabelFilter, LabelRollupSpec, CNSourceFilter, and
+"""Characterization tests for LabelFilter, LabelRollupSpec, and
 ImageExclusionFilter.
 
-All four classes live in mermaid_classifier.pyspacer.label_specs and subclass CsvSpec.
+All three classes live in mermaid_classifier.pyspacer.label_specs and subclass CsvSpec.
 Tests cover both the pure-Python methods and the in-DuckDB pipeline methods.
 
 Empty growth form is the empty string '' (never NULL) per the BA+GF convention.
@@ -16,7 +16,6 @@ import duckdb
 import pandas as pd
 
 from mermaid_classifier.pyspacer.label_specs import (
-    CNSourceFilter,
     ImageExclusionFilter,
     LabelFilter,
     LabelRollupSpec,
@@ -208,28 +207,6 @@ class LabelRollupSpecInDuckDBTest(unittest.TestCase):
 
         count = conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
         self.assertEqual(count, 2)
-
-
-# ---------------------------------------------------------------------------
-# CNSourceFilter
-# ---------------------------------------------------------------------------
-
-
-class CNSourceFilterTest(unittest.TestCase):
-    """Tests for CNSourceFilter."""
-
-    def test_source_id_list_values(self):
-        """Actual characterization: pandas reads integer IDs as numpy int64."""
-        f = CNSourceFilter(StringIO("id\n123\n456\n"))
-        # The ids are numeric (pandas infers int64 from all-numeric column)
-        # and compare equal to plain Python ints.
-        self.assertEqual(int(f.source_id_list[0]), 123)
-        self.assertEqual(int(f.source_id_list[1]), 456)
-
-    def test_is_empty_true_when_empty_csv(self):
-        """A completely empty CSV yields is_empty() == True."""
-        f = CNSourceFilter(StringIO(""))
-        self.assertTrue(f.is_empty())
 
 
 # ---------------------------------------------------------------------------

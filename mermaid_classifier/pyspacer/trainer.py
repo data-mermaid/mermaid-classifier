@@ -260,7 +260,7 @@ class MermaidTrainer(ClassifierTrainer):
 
         # Calibration: stream ref data in batches — avoids loading full feature
         # vectors into memory. Only scalar prediction scores accumulate
-        # (O(N * K) instead of O(N * 4096)).
+        # (O(N * K) instead of O(N * 1280)).
         with _log_entry_and_exit("calibration"):
             clf_calibrated = self._calibrate_in_batches(clf, labels.ref)
 
@@ -350,7 +350,7 @@ class MermaidTrainer(ClassifierTrainer):
         Platt calibration without loading full feature vectors into memory.
 
         Streams ref data in batches, collecting only scalar prediction scores
-        (N x K) rather than feature vectors (N x 4096). Fits sigmoid
+        (N x K) rather than feature vectors (N x 1280). Fits sigmoid
         calibrators identically to CalibratedClassifierCV(cv='prefit').fit().
 
         Returns a valid CalibratedClassifierCV instance compatible with

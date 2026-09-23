@@ -31,7 +31,7 @@ copy):
 ```yaml
 dataset:
   include_mermaid: false          # false = train on CoralNet sources only
-  coralnet_sources_csv: sources.csv
+  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/example/coralnet_classifier_manifest_example.parquet
   feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
   label_rollup_spec_csv: rollups.csv
@@ -77,9 +77,14 @@ the shipped `efficientnet.pt` against.
 
 ## Choosing data sources
 
-Set `dataset.include_mermaid` to include/exclude the MERMAID annotation set, and
-point `dataset.coralnet_sources_csv` at a CSV listing the public CoralNet source
-IDs to pull training data from:
+Set `dataset.include_mermaid` to include/exclude the MERMAID annotation set.
+CoralNet data comes from a manifest parquet built ahead of time by
+`scripts/build_coralnet_manifest.py`; point `dataset.coralnet_manifest_uri` at
+its `--output-uri` (an S3 URI or local path), or leave it unset to exclude
+CoralNet entirely.
+
+To scope the manifest to specific CoralNet sources, pass the script a CSV
+with an `id` column, one source ID per row:
 
 ```
 id
@@ -88,8 +93,18 @@ id
 3064
 ```
 
-With `include_mermaid: true` and that `sources.csv`, training runs on all MERMAID
-data **plus** those three CoralNet sources.
+```bash
+uv run python scripts/build_coralnet_manifest.py \
+    --annotations-uri <etl-outputs annotations parquet> \
+    --images-uri <etl-outputs images parquet> \
+    --sources-csv sources.csv \
+    --output-uri s3://.../coralnet_classifier_manifest.parquet
+```
+
+(`--source-ids 23,1579,3064` works the same way without a CSV file; the two
+flags are mutually exclusive.) With `include_mermaid: true` and that output
+URI in `coralnet_manifest_uri`, training runs on all MERMAID data **plus**
+those three CoralNet sources.
 
 
 ## Rolling up annotations of certain labels
@@ -174,7 +189,7 @@ from mermaid_classifier.training.subsample import SubsampleOptions
 runner = MLflowTrainingRunner(
     dataset_options=DatasetOptions(
         include_mermaid=False,            # CoralNet sources only
-        coralnet_sources_csv="sources/sample.csv",
+        coralnet_manifest_uri="manifests/sample.parquet",
         drop_growthforms=True,
         label_rollup_spec_csv="labels/rollups.csv",
         included_labels_csv="labels/inclusions.csv",

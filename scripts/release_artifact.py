@@ -28,7 +28,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from mermaid_classifier.common.s3_utils import parse_s3_uri, sha256_of_uri
-from mermaid_classifier.pyspacer.annotation import resolve_classifier_artifact
+from mermaid_classifier.pyspacer.artifact_resolve import resolve_classifier_artifact
 from mermaid_classifier.pyspacer.inference import (
     SCHEMA_VERSION,
     TASK_NAME,
@@ -58,9 +58,10 @@ def validate_artifact(model_pt: Path, model_json: Path) -> dict[str, Any]:
     """Re-validate the artifact at release time (the release "parity gate").
 
     load_predictor raises ManifestError on schema_version / input_dim /
-    class-count mismatch, and on a manifest with no feature_extraction block.
-    We then add the release-only checks load_predictor does not make: task
-    identity, non-empty classes, and provenance presence.
+    class-count / model.pt-digest mismatch. We then add the release-only checks
+    load_predictor does not make: task identity, non-empty classes, provenance
+    presence, model_pt_sha256 presence, and feature_extraction block validation
+    via ExtractorSpec.from_manifest.
     Returns the parsed manifest.
     """
     load_predictor(model_pt, model_json)  # ManifestError on graph/manifest skew
@@ -77,6 +78,14 @@ def validate_artifact(model_pt: Path, model_json: Path) -> dict[str, Any]:
             "manifest 'trained_with' provenance missing key(s): "
             f"{', '.join(missing)} — the serving runtime requires "
             f"{'/'.join(_REQUIRED_PROVENANCE)}"
+        )
+    # The loader stays lenient for artifacts cut before this field existed
+    # (warns and serves); the release gate does not, so new releases cannot
+    # ship without binding model.json to their model.pt.
+    if not manifest.get("model_pt_sha256"):
+        raise ValueError(
+            "manifest has no 'model_pt_sha256'; a released artifact must"
+            " bind model.json to the model.pt it ships with"
         )
     # SCHEMA_VERSION is enforced by load_predictor; assert it stays referenced
     # so a future loader change that drops the check is caught here too.

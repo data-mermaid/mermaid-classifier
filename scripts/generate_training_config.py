@@ -548,15 +548,21 @@ Porites is the only exception (see above).
 
 
 def validate_outputs(out_dir: Path) -> None:
-    """Round-trip the produced CSVs through the pipeline's CsvSpec subclasses."""
+    """Round-trip included_labels.csv and rollups.csv through the pipeline's
+    CsvSpec subclasses; check sources.csv has an 'id' column."""
     from mermaid_classifier.pyspacer.label_specs import (
-        CNSourceFilter,
         LabelFilter,
         LabelRollupSpec,
     )
 
-    with (out_dir / "sources.csv").open() as f:
-        CNSourceFilter(f)
+    sources_path = out_dir / "sources.csv"
+    with sources_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or "id" not in reader.fieldnames:
+            raise ValueError(
+                f"{sources_path} must contain an 'id' column"
+                f" (got columns: {list(reader.fieldnames or [])})"
+            )
     with (out_dir / "included_labels.csv").open() as f:
         included = LabelFilter(f, inclusion=True)
     with (out_dir / "rollups.csv").open() as f:
