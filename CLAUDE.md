@@ -90,7 +90,7 @@ releases. `PARITY_PROVEN_SKLEARN` (`pyspacer/inference/__init__.py`) records the
 version the TorchScript-vs-sklearn parity was proven against; a mismatch raises
 `SklearnPinError` at export, which fails every test that exports an artifact —
 45 of them across `test_portable_artifact.py`, `test_release_artifact.py`,
-`test_mlflow_model.py`, `test_annotation_resolver.py` and `region_eval/test_score.py`.
+`test_mlflow_model.py`, `test_artifact_resolve.py` and `region_eval/test_score.py`.
 If you bump sklearn, you must re-prove parity and update the pin + constant together.
 
 ### Training pipeline (`pyspacer/dataset.py`, `pyspacer/runner.py`)

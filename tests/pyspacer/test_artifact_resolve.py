@@ -1,4 +1,4 @@
-"""Tests for annotation.py's classifier-artifact resolver: turning an MLflow
+"""Tests for artifact_resolve.py's classifier-artifact resolver: turning an MLflow
 model ID, S3 directory, or local directory into local (model.pt, model.json)
 paths for load_predictor."""
 
