@@ -61,6 +61,8 @@ def sha256_of_uri(uri: str, chunk_size: int = 1 << 20) -> str:
     # storage_factory and RemoteStorage._load_remote carry no return
     # annotations upstream, so both of these type as optional.
     stream = storage.load(key)  # pyright: ignore[reportOptionalMemberAccess]
+    # S3Storage._load_remote returns its BytesIO positioned at EOF.
+    stream.seek(0)  # pyright: ignore[reportOptionalMemberAccess]
 
     digest = hashlib.sha256()
     while chunk := stream.read(chunk_size):  # pyright: ignore[reportOptionalMemberAccess]
