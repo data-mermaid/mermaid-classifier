@@ -22,6 +22,10 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+# sha256 of zero bytes. `sha256_of_uri` returned it for every S3 object before
+# the stream was rewound, so a recorded weights hash equal to it is unrecorded.
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
     """Split an s3://bucket/key URI into (bucket, key)."""

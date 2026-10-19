@@ -16,6 +16,7 @@ from support.dataset import make_dataset
 from support.extractor import make_extractor_spec
 from support.settings import override_settings
 
+from mermaid_classifier.common.s3_utils import EMPTY_SHA256
 from mermaid_classifier.pyspacer.extraction import SIDECAR_FILENAME
 
 MERMAID_PREFIX = "s3://mermaid-bucket/mermaid/"
@@ -78,6 +79,28 @@ class ResolveExtractorSpecTest(unittest.TestCase):
         # Both sources named, so the operator can see which to re-extract.
         self.assertIn(MERMAID_PREFIX, str(ctx.exception))
         self.assertIn(CORALNET_PREFIX, str(ctx.exception))
+
+    def test_a_sidecar_recording_the_empty_hash_names_the_unrecorded_hash(self):
+        # A sidecar written before #112 was fixed hashed an empty stream. The
+        # vectors are fine; only the recorded hash is unusable.
+        stale = make_extractor_spec(1280, weights_sha256=EMPTY_SHA256)
+        dataset = self._dataset(dict([_sidecar(MERMAID_PREFIX, stale)]))
+        with self.assertRaises(ValueError) as ctx:
+            dataset.resolve_extractor_spec([MERMAID_PREFIX])
+        message = str(ctx.exception)
+        self.assertIn("predates the #112 fix", message)
+        self.assertIn(MERMAID_PREFIX, message)
+        self.assertNotIn("disagree", message)
+
+    def test_a_sidecar_with_a_different_real_hash_still_reports_disagreement(self):
+        mermaid = make_extractor_spec(1280, weights_sha256="a" * 64)
+        coralnet = make_extractor_spec(1280, weights_sha256="f" * 64)
+        objects = dict([_sidecar(MERMAID_PREFIX, mermaid), _sidecar(CORALNET_PREFIX, coralnet)])
+        dataset = self._dataset(objects)
+        with self.assertRaises(ValueError) as ctx:
+            dataset.resolve_extractor_spec([MERMAID_PREFIX, CORALNET_PREFIX])
+        self.assertIn("disagree", str(ctx.exception))
+        self.assertNotIn("#112", str(ctx.exception))
 
     def test_a_prefix_without_a_sidecar_falls_back_to_the_declaration(self):
         # CoralNet's public bucket: we read it, we cannot write a sidecar to
