@@ -15,6 +15,7 @@ from support.dataset import make_dataset
 from support.settings import override_settings
 
 from mermaid_classifier.pyspacer.options import DatasetOptions
+from mermaid_classifier.pyspacer.splitting import split_by_image
 
 _CLASSES = ("ba_a", "ba_b", "ba_c")
 _IMAGES_PER_CLASS = 20
@@ -22,7 +23,10 @@ _POINTS_PER_IMAGE = 3
 _HOLDOUT_IMAGES = ("hold_0", "hold_1")
 
 
-def _rows(include_holdout: bool) -> list[dict[str, object]]:
+def _rows(
+    include_holdout: bool, extra: tuple[tuple[str, str, bool], ...] = ()
+) -> list[dict[str, object]]:
+    """`extra` adds (image, ba, is_holdout) images to the base dataset."""
     rows = []
 
     def add(image: str, ba: str, project: str, is_holdout: bool) -> None:
@@ -50,6 +54,8 @@ def _rows(include_holdout: bool) -> list[dict[str, object]]:
     if include_holdout:
         for image in _HOLDOUT_IMAGES:
             add(image, "ba_a", "p2", True)
+    for image, ba, is_holdout in extra:
+        add(image, ba, "p3", is_holdout)
     return rows
 
 
@@ -58,14 +64,19 @@ class _FakeLibrary:
         return value
 
 
-class ImageSplitDatasetTest(unittest.TestCase):
-    def _prepare(self, split_mode: str, include_holdout: bool = True):
+class _SplitCase(unittest.TestCase):
+    def _prepare(
+        self,
+        split_mode: str,
+        include_holdout: bool = True,
+        extra: tuple[tuple[str, str, bool], ...] = (),
+    ):
         override = override_settings(aws_anonymous="True", download_max_workers=1)
         override.__enter__()
         self.addCleanup(override.__exit__, None, None, None)
         dataset = make_dataset(self)
         dataset.options = DatasetOptions(ref_val_ratios=(0.1, 0.1), split_mode=split_mode)  # pyright: ignore[reportArgumentType]
-        df = pd.DataFrame(_rows(include_holdout))  # noqa: F841 -- DuckDB scans by name
+        df = pd.DataFrame(_rows(include_holdout, extra))  # noqa: F841 -- DuckDB scans by name
         dataset.duck_conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
         with (
             mock.patch(
@@ -87,6 +98,8 @@ class ImageSplitDatasetTest(unittest.TestCase):
         self.downloaded = set(download.call_args.args[0])
         return dataset
 
+
+class ImageSplitDatasetTest(_SplitCase):
     def _sets_per_image(self, dataset) -> dict[str, set[str | None]]:
         result: dict[str, set[str | None]] = {}
         for image, training_set in dataset.duck_conn.execute(
@@ -156,6 +169,47 @@ class ImageSplitDatasetTest(unittest.TestCase):
             (projects.loc["p2", "holdout"], projects.loc["p2", "dropped"]), (holdout_points, 0)
         )
         self.assertEqual(projects.loc["p1", "holdout"], 0)
+
+
+class SplitDropStatsTest(_SplitCase):
+    # Two training images: too few for the split, which drops the class.
+    # Its holdout image must not hide that drop.
+    RARE = (("rare_0", "ba_rare", False), ("rare_1", "ba_rare", False), ("rare_h", "ba_rare", True))
+
+    def test_class_dropped_from_split_counts_as_dropped_despite_holdout_rows(self):
+        dataset = self._prepare("images", extra=self.RARE)
+        stats = dataset.artifacts.train_summary_stats
+        self.assertEqual(
+            (stats["bas_dropped"], stats["bagfs_dropped"], stats["bagfs_dropped_by_split"]),
+            (1, 1, 1),
+        )
+        self.assertEqual(stats["annotations_dropped"], 2 * _POINTS_PER_IMAGE)
+
+    def test_split_drop_of_a_class_in_three_images_is_a_warning(self):
+        real_split = split_by_image
+
+        def split_without_ba_c_in_ref(*args, **kwargs):
+            split = real_split(*args, **kwargs)
+            split.ref = split.ref.filter_classes(split.ref.classes_set - {"ba_c::"})
+            return split
+
+        with (
+            mock.patch(
+                "mermaid_classifier.pyspacer.dataset.split_by_image",
+                side_effect=split_without_ba_c_in_ref,
+            ),
+            self.assertLogs("train", level="WARNING") as logs,
+        ):
+            dataset = self._prepare("images")
+        self.assertIn("ba_c", "\n".join(logs.output))
+        self.assertEqual(dataset.artifacts.train_summary_stats["bagfs_dropped_by_split"], 1)
+
+    def test_split_drop_of_a_class_in_two_images_is_logged_by_name(self):
+        with self.assertLogs("train", level="INFO") as logs:
+            self._prepare("images", extra=self.RARE)
+        drop_logs = [line for line in logs.output if "ba_rare" in line]
+        self.assertTrue(drop_logs)
+        self.assertTrue(all(line.startswith("INFO") for line in drop_logs), drop_logs)
 
 
 if __name__ == "__main__":

@@ -141,7 +141,7 @@ class DatasetOptions:
     holdout_max_per_class
 
     Caps each class's holdout rows (keeping whole images first, in seeded
-    hash order) to bound the feature downloads for evaluation. None keeps
+    md5 order) to bound the feature downloads for evaluation. None keeps
     every holdout row. Has no effect when nothing is held out.
 
     ref_val_ratios

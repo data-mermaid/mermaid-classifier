@@ -367,6 +367,7 @@ class HoldoutGroups(CsvSpec):
         duck_conn: duckdb.DuckDBPyConnection,
         duck_table_name: str,
         holdout_fold: str,
+        groups_read: set[tuple[str, str]] | None = None,
     ) -> None:
         """
         Add boolean columns to the given table, joining on (site, project_id):
@@ -375,6 +376,13 @@ class HoldoutGroups(CsvSpec):
           `holdout_fold` is a CV fold, so the row is neither trained on
           nor evaluated.
         Every row is kept. Rows in no listed group are tagged FALSE for both.
+
+        A listed group with no rows in the table would otherwise train
+        silently. `groups_read` is the (site, project_id) set before label
+        filtering: a group in it lost its rows to filtering, which is
+        logged as a warning. Any other unmatched group in the test fold or
+        in `holdout_fold` raises ValueError; one in another CV fold is
+        training data in this run, and is logged as a warning.
         """
         self.validate_holdout_fold(holdout_fold)
 
@@ -406,17 +414,65 @@ class HoldoutGroups(CsvSpec):
                 f"   ON a.site = g.site AND a.project_id = g.group_id"
             )
 
-            matched = duck_conn.execute(
-                f"SELECT count(DISTINCT (a.site, a.project_id))"
-                f" FROM {duck_table_name} a"
-                f"  JOIN {groups_table_name} g"
-                f"   ON a.site = g.site AND a.project_id = g.group_id"
-            ).fetchall()[0][0]
+            matched_groups = {
+                (str(site), str(group_id))
+                for site, group_id in duck_conn.execute(
+                    f"SELECT DISTINCT g.site, g.group_id"
+                    f" FROM {duck_table_name} a"
+                    f"  JOIN {groups_table_name} g"
+                    f"   ON a.site = g.site AND a.project_id = g.group_id"
+                ).fetchall()
+            }
 
-        if not self.is_empty():
-            logger.log(
-                logging.WARNING if matched == 0 else logging.INFO,
-                "Holdout groups matched %s of %s listed group(s) in this dataset.",
-                matched,
-                len(self.group_folds),
+        if self.is_empty():
+            return
+        logger.log(
+            logging.WARNING if not matched_groups else logging.INFO,
+            "Holdout groups matched %s of %s listed group(s) in this dataset.",
+            len(matched_groups),
+            len(self.group_folds),
+        )
+        self._check_unmatched_groups(matched_groups, holdout_fold, groups_read or set())
+
+    def _check_unmatched_groups(
+        self,
+        matched_groups: set[tuple[str, str]],
+        holdout_fold: str,
+        groups_read: set[tuple[str, str]],
+    ) -> None:
+        unmatched = sorted(set(self.group_folds) - matched_groups)
+        filtered_out = [g for g in unmatched if g in groups_read]
+        absent = [g for g in unmatched if g not in groups_read]
+        evaluated_folds = {HOLDOUT_TEST_FOLD, holdout_fold}
+        required = [g for g in absent if self.group_folds[g] in evaluated_folds]
+        other = [g for g in absent if self.group_folds[g] not in evaluated_folds]
+
+        def describe(groups: list[tuple[str, str]]) -> str:
+            return ", ".join(
+                f"({site}, {gid}): {self.group_folds[(site, gid)]}" for site, gid in groups
+            )
+
+        if required:
+            raise ValueError(
+                f"{len(required)} holdout group(s) in the test fold or holdout_fold"
+                f" {holdout_fold!r} match no rows even before label filtering"
+                f" (site, group_id): fold: {describe(required)}. Rows meant for them"
+                f" would train. Check the group ids, and that MERMAID groups have a"
+                f" mermaid_project_lookup_uri. Of the other unmatched groups,"
+                f" {len(filtered_out)} lost every row to filtering, and {len(other)}"
+                f" in other folds match nothing."
+            )
+        if other:
+            logger.warning(
+                "%d holdout group(s) in other folds match no rows in the data read"
+                " (site, group_id): fold: %s",
+                len(other),
+                describe(other),
+            )
+        if filtered_out:
+            logger.warning(
+                "%d holdout group(s) lost every row to rollup, label filtering, image"
+                " exclusion or dedupe (site, group_id): fold: %s",
+                len(filtered_out),
+                describe(filtered_out),
             )

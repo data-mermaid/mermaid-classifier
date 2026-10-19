@@ -69,14 +69,14 @@ class SubsampleOptions:
                               water-fills the target across the groups
                               (site, project_id) holding the class, then
                               takes whole images within each group in
-                              seeded-hash order.
-        seed               -- salt for the ``source_spread`` image hash.
+                              seeded-md5 order.
+        seed               -- salt for the ``source_spread`` image md5.
                               Unused by ``'ordered'``.
 
     Determinism: the built-in allocators carry no random state.
     Determinism is a property of the SQL applied in
     TrainingDataset._apply_subsample (deterministic ORDER BY on a
-    primary-key tuple or a seeded hash, not RANDOM()).
+    primary-key tuple or a seeded md5, not RANDOM()).
     """
 
     strategy: str = "stratified"

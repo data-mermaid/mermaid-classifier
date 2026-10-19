@@ -233,7 +233,14 @@ class HoldoutTaggingInitTest(unittest.TestCase):
     # Four projects, two images each, five points per image.
     IMAGES = {f"img_p{p}{n}": f"p{p}" for p in "ABCD" for n in (1, 2)}
 
-    def _build(self, holdout_csv_text: str | None, holdout_fold: str = "test") -> TrainingDataset:
+    def _build(
+        self,
+        holdout_csv_text: str | None,
+        holdout_fold: str = "test",
+        *,
+        with_lookup: bool = True,
+        excluded_images: tuple[str, ...] = (),
+    ) -> TrainingDataset:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
 
@@ -255,6 +262,10 @@ class HoldoutTaggingInitTest(unittest.TestCase):
         if holdout_csv_text is not None:
             holdout_csv = str(Path(tmp.name) / "holdout.csv")
             Path(holdout_csv).write_text(holdout_csv_text)
+        excluded_csv = None
+        if excluded_images:
+            excluded_csv = str(Path(tmp.name) / "excluded.csv")
+            Path(excluded_csv).write_text("image_id\n" + "".join(f"{i}\n" for i in excluded_images))
 
         present = {f"{TEST_BUCKET}/mermaid/{i}_featurevector" for i in self.IMAGES}
         sidecar = {
@@ -262,8 +273,9 @@ class HoldoutTaggingInitTest(unittest.TestCase):
         }
         options = DatasetOptions(
             include_mermaid=True,
-            mermaid_project_lookup_uri=lookup_path,
+            mermaid_project_lookup_uri=lookup_path if with_lookup else None,
             holdout_groups_csv=holdout_csv,
+            excluded_images_csv=excluded_csv,
             holdout_fold=holdout_fold,
             ref_val_ratios=(0.1, 0.1),
         )
@@ -329,6 +341,21 @@ class HoldoutTaggingInitTest(unittest.TestCase):
         self.assertFalse({"img_pA1", "img_pA2"} & remaining)
         self.assertEqual(self._images(dataset, "is_holdout"), {"img_pC1", "img_pC2"})
         self.assertEqual(self._images(dataset, "is_excluded"), set())
+
+    def test_mermaid_groups_without_a_project_lookup_are_rejected(self):
+        # Without the lookup every MERMAID row is project 'all', so no
+        # listed MERMAID project could match, even one in an inactive fold.
+        with self.assertRaisesRegex(ValueError, "mermaid_project_lookup_uri is unset"):
+            self._build("site,group_id,fold\nmermaid,pA,1\n", with_lookup=False)
+
+    def test_test_group_emptied_by_image_exclusion_warns_instead_of_raising(self):
+        with self.assertLogs("mermaid_classifier.pyspacer.label_specs", level="WARNING") as logs:
+            dataset = self._build(
+                "site,group_id,fold\nmermaid,pA,test\nmermaid,pB,0\n",
+                excluded_images=("img_pA1", "img_pA2"),
+            )
+        self.assertIn("(mermaid, pA)", "\n".join(logs.output))
+        self.assertEqual(self._images(dataset, "is_holdout"), set())
 
     def test_val_artifact_schema_is_unchanged_by_tag_columns(self):
         dataset = self._build(None)

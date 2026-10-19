@@ -9,7 +9,7 @@ given.
 
 import hashlib
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 
 from spacer.data_classes import Annotation, DataLocation, ImageLabels, LabelId
@@ -48,7 +48,9 @@ def split_by_image(
     tie-break. In that order, each image goes to the set whose share of
     its rarest class is furthest below target, i.e. the set minimizing
     assigned / ratio for that class. A class's first images therefore seed
-    val, ref and train before any set gets a second one.
+    val, ref and train before any set gets a second one. A repair pass then
+    moves or swaps images so a class that is never its images' rarest class
+    still reaches all three sets.
 
     Pass a `stable_key` when locations embed a per-run path (such as a
     temp download dir), so the split does not depend on it.
@@ -112,8 +114,105 @@ def split_by_image(
         sets[target][loc] = annotations
         assigned[target].update(label for _, _, label in annotations)
 
+    _repair_missing_classes(sets, {loc: digest for _, digest, _, _, loc, _ in ranked})
+
     return TrainingTaskLabels(
         train=ImageLabels(sets["train"]),
         ref=ImageLabels(sets["ref"]),
         val=ImageLabels(sets["val"]),
     )
+
+
+def _repair_missing_classes(
+    sets: dict[str, dict[DataLocation, list[Annotation]]],
+    digests: dict[DataLocation, bytes],
+) -> None:
+    """
+    Move images, in place, until every class is in every set it can reach.
+
+    The greedy pass places an image by its rarest class alone, so a class
+    that is never the rarest in any of its images can miss a set, and
+    PySpacer then drops it from all three. For each missing (set, class)
+    pair, an image holding the class moves in from the set with the most
+    images of it, lowest seeded digest first. A move never takes the last
+    image of any class out of its set. When every candidate would, the
+    candidate is swapped with an image of the missing set that restores
+    what it takes away.
+
+    Each move or swap adds one (set, class) pair and removes none, so the
+    loop ends. Pairs still missing at the end are logged as a warning.
+    """
+    labels_of = {
+        loc: frozenset(label for _, _, label in annotations)
+        for members in sets.values()
+        for loc, annotations in members.items()
+    }
+    home = {loc: name for name, members in sets.items() for loc in members}
+    carriers: dict[str, Counter[LabelId]] = {name: Counter() for name in _SET_NAMES}
+    for loc, name in home.items():
+        carriers[name].update(labels_of[loc])
+    holders: dict[LabelId, list[DataLocation]] = defaultdict(list)
+    for loc in sorted(labels_of, key=lambda loc: (digests[loc], loc.key)):
+        for label in labels_of[loc]:
+            holders[label].append(loc)
+    classes = sorted(holders, key=str)
+
+    def lost_on_leaving(loc: DataLocation, arriving: frozenset[LabelId]) -> set[LabelId]:
+        name = home[loc]
+        return {
+            label
+            for label in labels_of[loc]
+            if carriers[name][label] == 1 and label not in arriving
+        }
+
+    def move(loc: DataLocation, target: str) -> None:
+        source = home[loc]
+        sets[target][loc] = sets[source].pop(loc)
+        carriers[source].subtract(labels_of[loc])
+        carriers[target].update(labels_of[loc])
+        home[loc] = target
+
+    def fill(label: LabelId, target: str) -> bool:
+        donors = sorted(
+            (name for name in _SET_NAMES if name != target and carriers[name][label]),
+            key=lambda name: -carriers[name][label],
+        )
+        candidates = [loc for donor in donors for loc in holders[label] if home[loc] == donor]
+        for loc in candidates:
+            if not lost_on_leaving(loc, frozenset()):
+                move(loc, target)
+                return True
+        for loc in candidates:
+            lost = lost_on_leaving(loc, frozenset())
+            if label in lost:
+                continue
+            donor = home[loc]
+            for partner in holders[min(lost, key=str)]:
+                if (
+                    home[partner] == target
+                    and lost <= labels_of[partner]
+                    and not lost_on_leaving(partner, labels_of[loc])
+                ):
+                    move(loc, target)
+                    move(partner, donor)
+                    return True
+        return False
+
+    progress = True
+    while progress:
+        progress = False
+        for label in classes:
+            for target in _SET_NAMES:
+                if not carriers[target][label] and fill(label, target):
+                    progress = True
+
+    missing = [
+        f"{label}: {name}" for label in classes for name in _SET_NAMES if not carriers[name][label]
+    ]
+    if missing:
+        logger.warning(
+            "Image split could not place %d class(es) in every set, so PySpacer"
+            " drops them (class: missing set): %s",
+            len(missing),
+            ", ".join(missing),
+        )

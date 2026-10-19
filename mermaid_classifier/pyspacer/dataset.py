@@ -12,6 +12,7 @@ import json
 import os
 import re
 import tempfile
+from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
 from io import StringIO
@@ -20,7 +21,7 @@ from typing import TextIO
 import duckdb
 import pandas as pd
 from s3fs.core import S3FileSystem
-from spacer.data_classes import Annotation, DataLocation, ImageLabels
+from spacer.data_classes import Annotation, DataLocation, ImageLabels, LabelId
 from spacer.messages import TrainingTaskLabels
 from spacer.task_utils import SplitMode, preprocess_labels
 
@@ -56,7 +57,7 @@ from mermaid_classifier.pyspacer.options import (
     Sites,
 )
 from mermaid_classifier.pyspacer.settings import settings
-from mermaid_classifier.pyspacer.splitting import split_by_image
+from mermaid_classifier.pyspacer.splitting import MIN_IMAGES_PER_CLASS, split_by_image
 from mermaid_classifier.pyspacer.utils import logging_config_for_script
 from mermaid_classifier.training.subsample import (
     SubsampleOptions,
@@ -82,6 +83,8 @@ def _load_csv_spec[T: CsvSpec](path: str | None, factory: Callable[[TextIO], T])
 class TrainingDataset:
     # Set by _dedupe_points; merged into train_summary_stats.
     _dedupe_stats: dict[str, int] | None = None
+    # Set by _log_split_drops; classes the train/ref/val split removed.
+    _split_dropped_bagfs: int = 0
 
     def __init__(self, options: DatasetOptions):
         self.options = options
@@ -131,6 +134,18 @@ class TrainingDataset:
         self.holdout_groups = _load_csv_spec(options.holdout_groups_csv, HoldoutGroups)
         # Fail on a bad fold before any data is read.
         self.holdout_groups.validate_holdout_fold(options.holdout_fold)
+        # Without the lookup every MERMAID row is project 'all', so no
+        # listed MERMAID project can match.
+        mermaid_groups = sorted(
+            group_id
+            for site, group_id in self.holdout_groups.group_folds
+            if site == Sites.MERMAID.value
+        )
+        if options.include_mermaid and mermaid_groups and not options.mermaid_project_lookup_uri:
+            raise ValueError(
+                f"holdout_groups_csv lists MERMAID group(s) {mermaid_groups}, but"
+                f" mermaid_project_lookup_uri is unset, so no MERMAID row has a project."
+            )
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
@@ -231,6 +246,16 @@ class TrainingDataset:
                 "SELECT COUNT(*), COUNT(DISTINCT feature_vector) FROM annotations"
             ).fetchone()
 
+        # Lets holdout tagging tell a mistyped group from one filtering emptied.
+        groups_read: set[tuple[str, str]] = set()
+        if not self.holdout_groups.is_empty():
+            groups_read = {
+                (str(site), str(project_id))
+                for site, project_id in self.duck_conn.execute(
+                    "SELECT DISTINCT site, project_id FROM annotations"
+                ).fetchall()
+            }
+
         with self.section_profiling("Rollups and filtering"):
             ann_before, img_before = _annotations_stats()
             logger.info(
@@ -304,6 +329,7 @@ class TrainingDataset:
                 duck_conn=self.duck_conn,
                 duck_table_name="annotations",
                 holdout_fold=self.options.holdout_fold,
+                groups_read=groups_read,
             )
 
     def _dedupe_points(self) -> None:
@@ -390,7 +416,7 @@ class TrainingDataset:
              * ``'source_spread'``: split each class's target across its
                groups ``(site, project_id)`` with ``water_fill``, then
                keep ``_rn <= quota`` of a ROW_NUMBER() partitioned by
-               class and group and ordered by a seeded image hash, so
+               class and group and ordered by a seeded image md5, so
                whole images are taken first.
              Both orderings are total, so the subsample is identical
              across processes and DuckDB thread counts.
@@ -463,9 +489,10 @@ class TrainingDataset:
                 ]
             )
             partition_by = "benthic_attribute_id, growth_form_id, site, project_id"
-            # hash() of the seed-salted feature vector clusters a group's
-            # rows by image; feature_vector breaks hash ties.
-            order_by = f"hash('{int(opts.seed)}' || feature_vector), feature_vector, row, col"
+            # md5 of the seed-salted feature vector clusters a group's rows
+            # by image, and is the same in every DuckDB version, which
+            # hash() is not; feature_vector breaks digest ties.
+            order_by = f"md5('{int(opts.seed)}' || feature_vector), feature_vector, row, col"
             join_using = "benthic_attribute_id, growth_form_id, site, project_id"
         else:
             allocation_df = pd.DataFrame(
@@ -572,7 +599,7 @@ class TrainingDataset:
         """Cap each class's holdout rows at ``max_per_class``.
 
         Keeps whole images first: within a class (not per group), rows are
-        ordered by a seeded hash of the feature vector, so the survivors
+        ordered by a seeded md5 of the feature vector, so the survivors
         cluster by image. Non-holdout rows are untouched. A no-op, leaving
         ``_holdout_audit_df`` None, when there are no holdout rows.
         """
@@ -595,7 +622,7 @@ class TrainingDataset:
             "   SELECT *,"
             "          ROW_NUMBER() OVER ("
             "              PARTITION BY benthic_attribute_id, growth_form_id"
-            f"              ORDER BY hash('{int(seed)}' || feature_vector),"
+            f"              ORDER BY md5('{int(seed)}' || feature_vector),"
             "                       feature_vector, site, project_id, image_id, row, col"
             "          ) AS _rn"
             "   FROM annotations WHERE is_holdout"
@@ -1139,7 +1166,7 @@ class TrainingDataset:
         with self.section_profiling(f"Splitting train/ref/val ({self.options.split_mode})"):
             if self.options.split_mode == "images":
                 subsample = self.options.subsample
-                return preprocess_labels(
+                split = preprocess_labels(
                     split_by_image(
                         labels_data,
                         self.options.ref_val_ratios,
@@ -1148,10 +1175,53 @@ class TrainingDataset:
                         stable_key=lambda loc: "/".join(self._feature_path_to_s3_location[loc.key]),
                     )
                 )
-            return preprocess_labels(
-                labels_data,
-                split_ratios=self.options.ref_val_ratios,
-                split_mode=SplitMode.POINTS_STRATIFIED,
+            else:
+                split = preprocess_labels(
+                    labels_data,
+                    split_ratios=self.options.ref_val_ratios,
+                    split_mode=SplitMode.POINTS_STRATIFIED,
+                )
+        self._log_split_drops(labels_data, split)
+        return split
+
+    def _log_split_drops(self, before: ImageLabels, after: TrainingTaskLabels) -> None:
+        """
+        Log by name each class the split removed, and count them.
+
+        PySpacer drops a class missing from train or ref from all three sets.
+        A class in MIN_IMAGES_PER_CLASS or more images could have reached
+        every set, so its drop is a warning; a rarer class's drop is info.
+        """
+        kept = after.train.classes_set | after.ref.classes_set | after.val.classes_set
+        images_per_class: Counter[LabelId] = Counter()
+        for loc in before.keys():  # noqa: SIM118 -- ImageLabels is not a dict
+            images_per_class.update({label for _, _, label in before[loc]})
+        dropped = sorted(set(images_per_class) - kept, key=str)
+        self._split_dropped_bagfs = len(dropped)
+
+        def describe(labels: list[LabelId]) -> str:
+            return ", ".join(
+                f"{label}: {images_per_class[label]}, {before.label_count_per_class[label]}"
+                for label in labels
+            )
+
+        common = [label for label in dropped if images_per_class[label] >= MIN_IMAGES_PER_CLASS]
+        rare = [label for label in dropped if images_per_class[label] < MIN_IMAGES_PER_CLASS]
+        if common:
+            logger.warning(
+                "Split drops %d class(es) in %d or more images from train, ref and val"
+                " (class: images, points): %s",
+                len(common),
+                MIN_IMAGES_PER_CLASS,
+                describe(common),
+            )
+        if rare:
+            logger.info(
+                "Split drops %d class(es) in fewer than %d images from train, ref and val"
+                " (class: images, points): %s",
+                len(rare),
+                MIN_IMAGES_PER_CLASS,
+                describe(rare),
             )
 
     @property
@@ -1435,23 +1505,23 @@ class TrainingDataset:
         num_of_bas = self.artifacts.ba_counts.shape[0]
         num_of_bagfs = self.artifacts.bagf_counts.shape[0]
 
-        # Stratified splitting will drop annotations of BAGFs which are rare
-        # enough to not reach the 1 annotation threshold for ref/val.
-        # Here we count what has been dropped.
-        counts = self.duck_conn.execute(
-            "SELECT"
-            " count(*),"
-            " count(DISTINCT benthic_attribute_id),"
-            " count(DISTINCT (benthic_attribute_id, growth_form_id))"
-            " FROM annotations"
-            " WHERE training_set IS NOT NULL"
-        ).fetchall()[0]
-        non_dropped_annotations = counts[0]
-        non_dropped_bas = counts[1]
-        non_dropped_bagfs = counts[2]
-        annotations_dropped = total_annotations - non_dropped_annotations
-        bas_dropped = num_of_bas - non_dropped_bas
-        bagfs_dropped = num_of_bagfs - non_dropped_bagfs
+        # The split drops BAGFs too rare to reach train, ref and val. Holdout
+        # rows take no part in the split, so they count on neither side:
+        # a dropped class keeping holdout rows is still dropped.
+        split_candidates = "WHERE NOT is_holdout" if self._has_holdout_column() else ""
+        split_counts, kept_counts = (
+            self.duck_conn.execute(
+                "SELECT"
+                " count(*),"
+                " count(DISTINCT benthic_attribute_id),"
+                " count(DISTINCT (benthic_attribute_id, growth_form_id))"
+                f" FROM annotations {where}"
+            ).fetchall()[0]
+            for where in (split_candidates, "WHERE training_set IN ('train', 'ref', 'val')")
+        )
+        annotations_dropped = split_counts[0] - kept_counts[0]
+        bas_dropped = split_counts[1] - kept_counts[1]
+        bagfs_dropped = split_counts[2] - kept_counts[2]
 
         self.artifacts.train_summary_stats = {
             "annotations": total_annotations,
@@ -1465,6 +1535,7 @@ class TrainingDataset:
             "bas_dropped": bas_dropped,
             "bagfs": num_of_bagfs,
             "bagfs_dropped": bagfs_dropped,
+            "bagfs_dropped_by_split": self._split_dropped_bagfs,
             **(self._dedupe_stats or {}),
         }
 

@@ -12,6 +12,7 @@ import pandas as pd
 
 from mermaid_classifier.pyspacer.label_specs import HoldoutGroups
 
+_LOGGER = "mermaid_classifier.pyspacer.label_specs"
 _CSV = "site,group_id,fold\ncoralnet,10,test\ncoralnet,11,0\nmermaid,pA,1\nmermaid,pB,0\n"
 
 
@@ -130,11 +131,11 @@ class HoldoutTaggingTest(unittest.TestCase):
     def test_same_group_id_on_another_site_is_not_tagged(self):
         conn = duckdb.connect()
         df = pd.DataFrame(  # noqa: F841 -- DuckDB scans by name
-            {"site": ["mermaid"], "project_id": ["10"], "image_id": ["x"]}
+            {"site": ["mermaid", "coralnet"], "project_id": ["10", "10"], "image_id": ["x", "y"]}
         )
         conn.execute("CREATE TABLE annotations AS SELECT * FROM df")
         self.spec.tag_in_duckdb(conn, "annotations", "test")
-        self.assertEqual(_tags(conn), {"x": (False, False)})
+        self.assertEqual(_tags(conn), {"x": (False, False), "y": (True, False)})
 
     def test_empty_spec_tags_everything_false_and_keeps_every_row(self):
         HoldoutGroups(StringIO("")).tag_in_duckdb(self.conn, "annotations", "test")
@@ -147,6 +148,43 @@ class HoldoutTaggingTest(unittest.TestCase):
         types = {r[0]: r[1] for r in self.conn.execute("DESCRIBE annotations").fetchall()}
         self.assertEqual(types["is_holdout"], "BOOLEAN")
         self.assertEqual(types["is_excluded"], "BOOLEAN")
+
+
+class UnmatchedHoldoutGroupTest(unittest.TestCase):
+    """A listed group with no rows: a typo, or a MERMAID project never looked up."""
+
+    def setUp(self):
+        self.conn = duckdb.connect()
+        _seed(self.conn)
+
+    def _spec(self, extra_row: str) -> HoldoutGroups:
+        return HoldoutGroups(StringIO(_CSV + extra_row))
+
+    def test_unmatched_test_fold_group_is_rejected_by_name(self):
+        with self.assertRaisesRegex(ValueError, r"coralnet, 99"):
+            self._spec("coralnet,99,test\n").tag_in_duckdb(self.conn, "annotations", "test")
+
+    def test_unmatched_test_fold_group_is_rejected_in_a_cv_run(self):
+        with self.assertRaisesRegex(ValueError, r"coralnet, 99"):
+            self._spec("coralnet,99,test\n").tag_in_duckdb(self.conn, "annotations", "0")
+
+    def test_unmatched_active_fold_group_is_rejected_by_name(self):
+        with self.assertRaisesRegex(ValueError, r"coralnet, 98"):
+            self._spec("coralnet,98,0\n").tag_in_duckdb(self.conn, "annotations", "0")
+
+    def test_unmatched_group_in_another_fold_is_a_warning_by_name(self):
+        with self.assertLogs(_LOGGER, level="WARNING") as logs:
+            self._spec("coralnet,97,1\n").tag_in_duckdb(self.conn, "annotations", "test")
+        self.assertIn("coralnet, 97", "\n".join(logs.output))
+
+    def test_test_group_emptied_by_filtering_is_a_warning_not_an_error(self):
+        groups_read = {("coralnet", "10"), ("coralnet", "11"), ("coralnet", "12")}
+        groups_read |= {("mermaid", "pA"), ("mermaid", "pB"), ("coralnet", "96")}
+        with self.assertLogs(_LOGGER, level="WARNING") as logs:
+            self._spec("coralnet,96,test\n").tag_in_duckdb(
+                self.conn, "annotations", "test", groups_read=groups_read
+            )
+        self.assertIn("coralnet, 96", "\n".join(logs.output))
 
 
 if __name__ == "__main__":

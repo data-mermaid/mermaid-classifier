@@ -67,6 +67,35 @@ class SplitByImageTest(unittest.TestCase):
         self.assertEqual(after, before)
 
 
+class NeverRarestClassTest(unittest.TestCase):
+    """A class that is never its images' rarest class still reaches every set."""
+
+    def setUp(self):
+        # C: 39 points over 3 images, each also holding one point of a
+        # rarer class, so the greedy pass never places an image by C.
+        points: list[list[str]] = [["C"] * 13 + [rare] for rare in ("R1", "R2", "R3")]
+        points += [[rare, "Common"] for rare in ("R1", "R2", "R3") for _ in range(2)]
+        points += [["Common"] * 5 for _ in range(60)]
+        # These keys and seed 0 make the greedy pass leave C out of ref.
+        images = {f"img{i:03d}": p for i, p in enumerate(points)}
+        self.images = images
+        self.split = split_by_image(_labels(images), (0.1, 0.1), seed=0)
+
+    def test_every_kept_class_is_in_train_ref_and_val(self):
+        for name in ("train", "ref", "val"):
+            with self.subTest(set=name):
+                self.assertEqual(self.split[name].classes_set, {"C", "R1", "R2", "R3", "Common"})
+
+    def test_class_survives_pyspacer_preprocessing(self):
+        processed = preprocess_labels(self.split)
+        self.assertIn("C", processed.train.classes_set)
+
+    def test_no_image_is_lost_or_duplicated(self):
+        keys = _set_keys(self.split)
+        self.assertEqual(len(keys["train"] | keys["ref"] | keys["val"]), len(self.images))
+        self.assertEqual(len(keys["train"]) + len(keys["ref"]) + len(keys["val"]), len(self.images))
+
+
 class RareClassDropTest(unittest.TestCase):
     def test_classes_in_fewer_than_three_images_are_dropped_and_logged(self):
         images = _background_dataset({"c2": 2, "c3": 3, "c50": 50})

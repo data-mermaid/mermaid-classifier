@@ -7,6 +7,7 @@ Uses a real in-memory DuckDB over a seeded annotations table.
 from __future__ import annotations
 
 import collections
+import hashlib
 import unittest
 
 import pandas as pd
@@ -50,6 +51,18 @@ def _seed(dataset: NoInitDataset) -> None:
     dataset.duck_conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
 
 
+def _md5_ranked_images(project: str, ba: str, n_images: int, seed: int = 0) -> list[str]:
+    """The project's images in md5(seed || feature_vector) order: a digest
+    every DuckDB version computes the same way."""
+    images = [f"{project}_{ba}_img{i}" for i in range(n_images)]
+    return sorted(
+        images,
+        key=lambda image: hashlib.md5(
+            f"{seed}{project}/{image.removeprefix(project + '_')}.fv".encode()
+        ).hexdigest(),
+    )
+
+
 class _Base(unittest.TestCase):
     def setUp(self):
         override = override_settings(aws_anonymous="True")
@@ -90,6 +103,12 @@ class SourceSpreadTest(_Base):
         # s2/s3: quota 12 over 10-point images = one whole image + 2 points.
         for project in ("s2", "s3"):
             self.assertEqual(sorted(per_project[project].values(), reverse=True), [10, 2])
+
+    def test_images_are_taken_in_md5_order(self):
+        self.dataset._apply_subsample(self.opts)
+
+        whole, partial = _md5_ranked_images("s2", "ba_a", 5)[:2]
+        self.assertEqual(self._per_image("project_id = 's2'")["s2"], {whole: 10, partial: 2})
 
     def test_the_seed_changes_which_images_are_taken(self):
         self.dataset._apply_subsample(self.opts)
@@ -195,6 +214,15 @@ class HoldoutCapTest(_Base):
             image for _, image in self._rows("is_holdout AND benthic_attribute_id = 'ba_a'")
         )
         self.assertEqual(sorted(per_image.values(), reverse=True), [10, 5])
+
+    def test_images_are_taken_in_md5_order(self):
+        self.dataset._cap_holdout_rows(15)
+
+        whole, partial = _md5_ranked_images("h1", "ba_a", 4)[:2]
+        per_image = collections.Counter(
+            image for _, image in self._rows("is_holdout AND benthic_attribute_id = 'ba_a'")
+        )
+        self.assertEqual(per_image, {whole: 10, partial: 5})
 
     def test_never_touches_non_holdout_rows(self):
         self.dataset._cap_holdout_rows(1)
