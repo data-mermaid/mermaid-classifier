@@ -528,12 +528,21 @@ def reconcile_bucket_extractor_spec(
     whether an object exists, this is what stops a re-run under different
     weights from quietly interleaving a second one.
     """
+    from mermaid_classifier.common.s3_utils import EMPTY_SHA256
     from mermaid_classifier.pyspacer.extraction import SIDECAR_FILENAME
     from mermaid_classifier.pyspacer.inference import ExtractorSpec
 
     if head_ok(s3, target_bucket, SIDECAR_FILENAME):
         body = s3.meta.client.get_object(Bucket=target_bucket, Key=SIDECAR_FILENAME)["Body"].read()
         existing = ExtractorSpec.from_dict(json.loads(body))
+        if existing.weights_sha256 == EMPTY_SHA256:
+            raise RuntimeError(
+                f"s3://{target_bucket}/{SIDECAR_FILENAME} predates the #112 fix: its "
+                f"weights_sha256 is the hash of an empty file, so the hash is "
+                f"unrecorded. The feature vectors are not necessarily wrong. Confirm "
+                f"which weights produced them, then rewrite the sidecar with the "
+                f"correct weights_sha256."
+            )
         if existing.identity() != spec.identity():
             raise RuntimeError(
                 f"s3://{target_bucket}/ already holds feature vectors from a "

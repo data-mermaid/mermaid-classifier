@@ -36,7 +36,7 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
-from mermaid_classifier.common.s3_utils import download_features_parallel
+from mermaid_classifier.common.s3_utils import EMPTY_SHA256, download_features_parallel
 from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
 from mermaid_classifier.pyspacer.extraction import (
     SIDECAR_FILENAME,
@@ -607,6 +607,14 @@ class TrainingDataset:
         for prefix in prefixes:
             sidecar = self.read_extractor_sidecar(prefix)
             if sidecar is not None:
+                if sidecar.weights_sha256 == EMPTY_SHA256:
+                    raise ValueError(
+                        f"{prefix}{SIDECAR_FILENAME} predates the #112 fix: its"
+                        " weights_sha256 is the hash of an empty file, so the hash is"
+                        " unrecorded. The feature vectors are not necessarily wrong."
+                        " Confirm which weights produced them, then rewrite the sidecar"
+                        " with the correct weights_sha256."
+                    )
                 found[prefix] = sidecar
             elif declared is not None:
                 found[prefix] = declared
