@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
-from support.paths import add_scripts_to_path
+from support.paths import SCRIPTS_DIR, add_scripts_to_path
 
 add_scripts_to_path()
 
@@ -126,3 +129,34 @@ class ResolveOutPathTest(unittest.TestCase):
     def test_unset_parent_field_with_fold_configs_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "holdout_groups_csv"):
             self._resolve(parent=None)
+
+
+class ConfigEnvReachesSettingsTest(unittest.TestCase):
+    """The config `env` block must be applied before pyspacer's import-time Settings() is built."""
+
+    def test_env_block_value_reaches_settings_in_a_fresh_interpreter(self):
+        yaml_text = PARENT_YAML + "env:\n  CORALNET_TRAIN_DATA_BUCKET: sentinel-bucket\n"
+        snippet = textwrap.dedent("""
+            import sys
+            from pathlib import Path
+            import select_holdout_groups as shg
+
+            shg.load_config_then_pyspacer(Path(sys.argv[1]))
+            from mermaid_classifier.pyspacer.settings import settings
+
+            print(settings.coralnet_train_data_bucket)
+        """)
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / shg.CONFIG_FILENAME).write_text(yaml_text)
+            env = {k: v for k, v in os.environ.items() if k != "CORALNET_TRAIN_DATA_BUCKET"}
+            env["PYTHONPATH"] = os.pathsep.join([str(SCRIPTS_DIR), env.get("PYTHONPATH", "")])
+            result = subprocess.run(
+                [sys.executable, "-c", snippet, td],
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=td,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "sentinel-bucket")

@@ -143,6 +143,22 @@ def resolve_out_path(
     return path
 
 
+def load_config_then_pyspacer(config_dir: Path):
+    """
+    Load the config, apply its `env` block, then import pyspacer; return both.
+
+    pyspacer builds its `Settings()` singleton at import time, so the `env`
+    block must be in `os.environ` first or it never reaches the settings.
+    """
+    from mermaid_classifier.sagemaker.config import TrainingRunConfig
+
+    config = TrainingRunConfig.from_yaml_path(config_dir / CONFIG_FILENAME)
+    config.apply_env()
+    from mermaid_classifier.pyspacer.dataset import TrainingDataset
+
+    return config, TrainingDataset
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument(
@@ -176,8 +192,6 @@ def main(argv: list[str] | None = None) -> None:
 
     _resolve_local_aws_credentials()
 
-    from mermaid_classifier.pyspacer.dataset import TrainingDataset
-    from mermaid_classifier.sagemaker.config import TrainingRunConfig
     from mermaid_classifier.training.holdout_selection import (
         SelectionParams,
         build_coverage_report,
@@ -185,7 +199,7 @@ def main(argv: list[str] | None = None) -> None:
         select_holdout,
     )
 
-    config = TrainingRunConfig.from_yaml_path(config_dir / CONFIG_FILENAME)
+    config, training_dataset_cls = load_config_then_pyspacer(config_dir)
     try:
         out_path = resolve_out_path(
             args.out,
@@ -195,14 +209,13 @@ def main(argv: list[str] | None = None) -> None:
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    config.apply_env()
     dataset_options, _, _ = config.build_options(config_dir=config_dir)
     # Selection runs on all data: an existing holdout CSV must not tag or drop rows.
     dataset_options = dataclasses.replace(
         dataset_options, holdout_groups_csv=None, holdout_fold="test"
     )
 
-    dataset = TrainingDataset.filtered_annotations_only(dataset_options)
+    dataset = training_dataset_cls.filtered_annotations_only(dataset_options)
     try:
         rows = dataset.duck_conn.execute(
             "SELECT benthic_attribute_id || '::' || growth_form_id AS class_key,"
