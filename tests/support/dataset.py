@@ -3,6 +3,8 @@
 import tempfile
 import unittest
 
+from spacer.data_classes import ImageLabels
+
 from mermaid_classifier.pyspacer.dataset import TrainingDataset
 from mermaid_classifier.pyspacer.options import Artifacts, DatasetOptions
 
@@ -24,6 +26,7 @@ class NoInitDataset(TrainingDataset):
             prefix="mermaid_features_test_", ignore_cleanup_errors=True
         )
         self._feature_dir = self._feature_temp_dir.name
+        self.holdout_labels = ImageLabels()
 
 
 def make_dataset(test_case: unittest.TestCase) -> NoInitDataset:

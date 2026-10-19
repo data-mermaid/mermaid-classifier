@@ -96,6 +96,7 @@ class DatasetConfig(BaseModel):
     holdout_fold: str = "test"
     holdout_max_per_class: int | None = Field(default=3000, gt=0)
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
+    split_mode: Literal["points", "images"] = "points"
     subsample: SubsampleConfig | None = None
     weighting: WeightingConfig | None = None
 
@@ -246,6 +247,7 @@ class TrainingRunConfig(BaseModel):
             holdout_fold=d.holdout_fold,
             holdout_max_per_class=d.holdout_max_per_class,
             ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions
+            split_mode=d.split_mode,
             subsample=subsample,
             weighting=weighting,
         )

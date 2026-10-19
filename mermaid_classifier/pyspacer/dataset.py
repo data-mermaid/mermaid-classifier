@@ -20,7 +20,8 @@ from typing import TextIO
 import duckdb
 import pandas as pd
 from s3fs.core import S3FileSystem
-from spacer.data_classes import DataLocation, ImageLabels
+from spacer.data_classes import Annotation, DataLocation, ImageLabels
+from spacer.messages import TrainingTaskLabels
 from spacer.task_utils import SplitMode, preprocess_labels
 
 from mermaid_classifier.common.benthic_attributes import (
@@ -55,6 +56,7 @@ from mermaid_classifier.pyspacer.options import (
     Sites,
 )
 from mermaid_classifier.pyspacer.settings import settings
+from mermaid_classifier.pyspacer.splitting import split_by_image
 from mermaid_classifier.pyspacer.utils import logging_config_for_script
 from mermaid_classifier.training.subsample import (
     SubsampleOptions,
@@ -144,6 +146,9 @@ class TrainingDataset:
         self.extractor_spec: ExtractorSpec | None = None
 
         self.feature_loc_to_source: dict[DataLocation, tuple[str, str]] = {}
+
+        # Evaluation-only rows; filled by prep_annotations_for_pyspacer.
+        self.holdout_labels = ImageLabels()
 
         self.load_filtered_annotations()
 
@@ -1017,19 +1022,28 @@ class TrainingDataset:
                 f"\n{examples_str}"
             )
 
-    def prep_annotations_for_pyspacer(self):
+    def prep_annotations_for_pyspacer(self) -> TrainingTaskLabels:
+        """
+        Download the feature vectors and split the annotations into
+        train/ref/val by `options.split_mode`.
+
+        Holdout rows (is_holdout) take no part in the split: they become
+        `self.holdout_labels`, which is empty when there are none.
+        """
+        has_holdout = self._has_holdout_column()
         with self.section_profiling("Collecting feature paths"):
             annotations_by_image = duckdb_grouped_rows(
                 duck_conn=self.duck_conn,
                 duck_table_name="annotations",
                 grouping_column_names=["bucket", "feature_vector"],
+                extra_order_column_names=["row", "col"],
             )
 
             # First pass: collect annotations and unique S3 keys.
             s3_keys: dict[tuple[str, str], str] = {}
             tmp_root = self._feature_dir
-            # image_data: list of (bucket, key, annotations)
-            image_data = []
+            # (bucket, key, site, project_id, split annotations, holdout annotations)
+            image_data: list[tuple[str, str, str, str, list[Annotation], list[Annotation]]] = []
 
             for rows in annotations_by_image:
                 # Here, in one loop iteration, we're given all the
@@ -1040,7 +1054,8 @@ class TrainingDataset:
                 site = str(first_row["site"])
                 project_id = str(first_row["project_id"])
 
-                image_annotations = []
+                image_annotations: list[Annotation] = []
+                holdout_annotations: list[Annotation] = []
 
                 # One annotation per row.
                 for row in rows:
@@ -1053,7 +1068,10 @@ class TrainingDataset:
                         int(row["col"]),
                         bagf,
                     )
-                    image_annotations.append(annotation)
+                    if has_holdout and bool(row["is_holdout"]):
+                        holdout_annotations.append(annotation)
+                    else:
+                        image_annotations.append(annotation)
 
                 s3_key = (bucket, feature_bucket_path)
                 if s3_key not in s3_keys:
@@ -1064,7 +1082,14 @@ class TrainingDataset:
                     self._feature_path_to_s3_location[local_path] = s3_key
 
                 image_data.append(
-                    (bucket, feature_bucket_path, site, project_id, image_annotations)
+                    (
+                        bucket,
+                        feature_bucket_path,
+                        site,
+                        project_id,
+                        image_annotations,
+                        holdout_annotations,
+                    )
                 )
 
         # Parallel download of all feature vectors from S3.
@@ -1083,8 +1108,16 @@ class TrainingDataset:
         with self.section_profiling("Building PySpacer labels"):
             # Build ImageLabels with filesystem DataLocations.
             labels_data = ImageLabels()
+            holdout_data = ImageLabels()
 
-            for bucket, feature_bucket_path, site, project_id, image_annotations in image_data:
+            for (
+                bucket,
+                feature_bucket_path,
+                site,
+                project_id,
+                image_annotations,
+                holdout_annotations,
+            ) in image_data:
                 # Skip images whose feature file failed to download.
                 if (bucket, feature_bucket_path) in failed_keys:
                     continue
@@ -1095,9 +1128,26 @@ class TrainingDataset:
                     storage_type="filesystem",
                     key=local_path,
                 )
-                labels_data.add_image(feature_loc, image_annotations)
+                if image_annotations:
+                    labels_data.add_image(feature_loc, image_annotations)
+                if holdout_annotations:
+                    holdout_data.add_image(feature_loc, holdout_annotations)
                 self.feature_loc_to_source[feature_loc] = (site, project_id)
 
+            self.holdout_labels = holdout_data
+
+        with self.section_profiling(f"Splitting train/ref/val ({self.options.split_mode})"):
+            if self.options.split_mode == "images":
+                subsample = self.options.subsample
+                return preprocess_labels(
+                    split_by_image(
+                        labels_data,
+                        self.options.ref_val_ratios,
+                        seed=subsample.seed if subsample is not None else 0,
+                        # The download dir differs per run; the S3 location does not.
+                        stable_key=lambda loc: "/".join(self._feature_path_to_s3_location[loc.key]),
+                    )
+                )
             return preprocess_labels(
                 labels_data,
                 split_ratios=self.options.ref_val_ratios,
@@ -1170,6 +1220,7 @@ class TrainingDataset:
                 " countif(training_set = 'train') AS train,"
                 " countif(training_set = 'ref') AS ref,"
                 " countif(training_set = 'val') AS val,"
+                " countif(training_set = 'holdout') AS holdout,"
                 " countif(training_set IS NULL) AS dropped"
             )
 
@@ -1205,6 +1256,7 @@ class TrainingDataset:
             ("train", self.labels.train),
             ("ref", self.labels.ref),
             ("val", self.labels.val),
+            ("holdout", self.holdout_labels),
         ]
         # Higher means fewer DuckDB operations; lower might reduce
         # memory usage.
@@ -1285,6 +1337,7 @@ class TrainingDataset:
             " countif(training_set = 'train') AS train,"
             " countif(training_set = 'ref') AS ref,"
             " countif(training_set = 'val') AS val,"
+            " countif(training_set = 'holdout') AS holdout,"
             " countif(training_set IS NULL) AS dropped"
             " FROM annotations GROUP BY benthic_attribute_id"
         )
@@ -1315,6 +1368,7 @@ class TrainingDataset:
             " train,"
             " ref,"
             " val,"
+            " holdout,"
             " dropped,"
             " benthic_attribute_id"
             " FROM ba_counts"
@@ -1332,6 +1386,7 @@ class TrainingDataset:
             " countif(training_set = 'train') AS train,"
             " countif(training_set = 'ref') AS ref,"
             " countif(training_set = 'val') AS val,"
+            " countif(training_set = 'holdout') AS holdout,"
             " countif(training_set IS NULL) AS dropped"
             " FROM annotations"
             " GROUP BY benthic_attribute_id, growth_form_id"
@@ -1363,6 +1418,7 @@ class TrainingDataset:
             " train,"
             " ref,"
             " val,"
+            " holdout,"
             " dropped,"
             " benthic_attribute_id,"
             " growth_form_id"
@@ -1402,6 +1458,7 @@ class TrainingDataset:
             "annotations_train": self.labels.train.label_count,
             "annotations_ref": self.labels.ref.label_count,
             "annotations_val": self.labels.val.label_count,
+            "annotations_holdout": self.holdout_labels.label_count,
             "annotations_dropped": annotations_dropped,
             "images": num_of_images,
             "bas": num_of_bas,
@@ -1417,6 +1474,7 @@ class TrainingDataset:
             " ({annotations_train} train,"
             " {annotations_ref} ref,"
             " {annotations_val} val,"
+            " {annotations_holdout} holdout,"
             " {annotations_dropped} dropped during stratification) from"
             " {images} images."
             " Representation: {bas} BAs and"

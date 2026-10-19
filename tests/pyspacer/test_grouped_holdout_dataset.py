@@ -322,12 +322,12 @@ class HoldoutTaggingInitTest(unittest.TestCase):
 
     def test_fold_k_removes_test_groups_and_tags_fold_k(self):
         dataset = self._build(
-            "site,group_id,fold\nmermaid,pA,test\nmermaid,pB,0\nmermaid,pC,1\n",
+            "site,group_id,fold\nmermaid,pA,test\nmermaid,pC,0\nmermaid,pB,1\n",
             holdout_fold="0",
         )
         remaining = self._images(dataset, "TRUE")
         self.assertFalse({"img_pA1", "img_pA2"} & remaining)
-        self.assertEqual(self._images(dataset, "is_holdout"), {"img_pB1", "img_pB2"})
+        self.assertEqual(self._images(dataset, "is_holdout"), {"img_pC1", "img_pC2"})
         self.assertEqual(self._images(dataset, "is_excluded"), set())
 
     def test_val_artifact_schema_is_unchanged_by_tag_columns(self):

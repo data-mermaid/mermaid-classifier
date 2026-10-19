@@ -149,11 +149,3 @@ def set_env_vars_for_packages():
             # Ensure the value's set in the OS environment
             # so that spacer or MLflow sees it.
             os.environ[env_var_name] = var_value
-
-    # Effectively disable PySpacer's ref set size cap.
-    # PySpacer's split_labels() caps the ref set via
-    # config.TRAINING_BATCH_LABEL_COUNT. With batch calibration in
-    # trainer.py, the ref set no longer needs to fit in memory at once,
-    # so we set this to a very large value to let ref_val_ratios alone
-    # determine the ref set size.
-    os.environ["SPACER_TRAINING_BATCH_LABEL_COUNT"] = str(2**31 - 1)

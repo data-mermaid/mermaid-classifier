@@ -235,6 +235,17 @@ class HoldoutOptionsTest(unittest.TestCase):
         self.assertEqual(dataset.holdout_groups_csv, str(tmp / "holdout_groups.csv"))
         self.assertEqual(dataset.holdout_fold, "2")
 
+    def test_split_mode_defaults_to_points_and_reaches_dataset_options(self):
+        config, dataset, _ = self._build()
+        self.assertEqual(config.dataset.split_mode, "points")
+        self.assertEqual(dataset.split_mode, "points")
+        _, dataset, _ = self._build("split_mode: images")
+        self.assertEqual(dataset.split_mode, "images")
+
+    def test_unknown_split_mode_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._build("split_mode: vectors")
+
     def test_integer_fold_in_yaml_is_accepted_as_a_string(self):
         config, _, _ = self._build("holdout_fold: 3")
         self.assertEqual(config.dataset.holdout_fold, "3")

@@ -323,6 +323,7 @@ class MLflowTrainingRunner(TrainingRunner):
                 "holdout_fold": self.dataset_options.holdout_fold,
                 "holdout_max_per_class": self.dataset_options.holdout_max_per_class or "",
                 "ref_val_ratios": str(self.dataset_options.ref_val_ratios),
+                "split_mode": self.dataset_options.split_mode,
             }
             mlflow.log_params(dataset_options_to_log)
 

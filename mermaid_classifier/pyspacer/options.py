@@ -10,6 +10,7 @@ Dataclass option containers and the Sites enum for the training pipeline.
 
 import dataclasses
 import enum
+from typing import Literal
 
 import pandas as pd
 
@@ -152,6 +153,19 @@ class DatasetOptions:
     PySpacer has an explanation of the three sets here:
     https://github.com/coralnet/pyspacer?tab=readme-ov-file#train_classifier
 
+    split_mode
+
+    How the non-holdout annotations are split into train/ref/val.
+    - 'points' (the default): PySpacer's point-level stratified split, so
+      one image's points can land in different sets. PySpacer reads its
+      5,000-point ref cap (TRAINING_BATCH_LABEL_COUNT) at import, so ref
+      is the smaller of ref_val_ratios[0] x N and 5,000 points.
+    - 'images': each image goes whole to one set, stratified by class
+      (see mermaid_classifier.pyspacer.splitting). Classes in fewer than
+      3 images are dropped first. ref_val_ratios apply with no ref cap.
+      Seeded by subsample.seed, or 0 without a subsample.
+    Holdout rows never enter train/ref/val in either mode.
+
     subsample
 
     Optional per-class subsampling applied after rollup + included-labels
@@ -197,6 +211,7 @@ class DatasetOptions:
     holdout_fold: str = "test"
     holdout_max_per_class: int | None = 3000
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
+    split_mode: Literal["points", "images"] = "points"
     # Optional per-class subsampling. None means use all annotations.
     # See mermaid_classifier.training.subsample for available strategies
     # and how to add new ones (e.g. effective-number, log-balanced).
