@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -39,6 +40,8 @@ class SubsampleConfig(BaseModel):
     strategy: str = "stratified"
     total_annotations: int | None = None
     min_per_class: int = 0
+    within_class: Literal["ordered", "source_spread"] = "ordered"
+    seed: int = 0
 
     @model_validator(mode="after")
     def _validate_via_options(self) -> SubsampleConfig:
@@ -50,6 +53,8 @@ class SubsampleConfig(BaseModel):
             strategy=self.strategy,
             total_annotations=self.total_annotations,
             min_per_class=self.min_per_class,
+            within_class=self.within_class,
+            seed=self.seed,
         )
         return self
 
@@ -85,9 +90,24 @@ class DatasetConfig(BaseModel):
     included_labels_csv: str | None = None
     excluded_labels_csv: str | None = None
     excluded_images_csv: str | None = None
+    mermaid_project_lookup_uri: str | None = None
+    holdout_groups_csv: str | None = None
+    # 'test' or a CV fold number; YAML's bare `holdout_fold: 2` is coerced.
+    holdout_fold: str = "test"
+    holdout_max_per_class: int | None = Field(default=3000, gt=0)
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
+    split_mode: Literal["points", "images"] = "points"
     subsample: SubsampleConfig | None = None
     weighting: WeightingConfig | None = None
+
+    @field_validator("holdout_fold", mode="before")
+    @classmethod
+    def _holdout_fold_is_test_or_integer(cls, v: object) -> object:
+        if isinstance(v, int) and not isinstance(v, bool):
+            v = str(v)
+        if not isinstance(v, str) or not (v == "test" or (v.isascii() and v.isdigit())):
+            raise ValueError(f"holdout_fold must be 'test' or a non-negative integer, got {v!r}")
+        return v
 
     def label_rollup_spec_csv_path(self, base: Path) -> Path | None:
         return None if self.label_rollup_spec_csv is None else base / self.label_rollup_spec_csv
@@ -100,6 +120,9 @@ class DatasetConfig(BaseModel):
 
     def excluded_images_csv_path(self, base: Path) -> Path | None:
         return None if self.excluded_images_csv is None else base / self.excluded_images_csv
+
+    def holdout_groups_csv_path(self, base: Path) -> Path | None:
+        return None if self.holdout_groups_csv is None else base / self.holdout_groups_csv
 
 
 class TrainingConfig(BaseModel):
@@ -196,6 +219,8 @@ class TrainingRunConfig(BaseModel):
                 strategy=d.subsample.strategy,
                 total_annotations=d.subsample.total_annotations,
                 min_per_class=d.subsample.min_per_class,
+                within_class=d.subsample.within_class,
+                seed=d.subsample.seed,
             )
 
         weighting = None
@@ -217,7 +242,12 @@ class TrainingRunConfig(BaseModel):
             included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             excluded_labels_csv=_resolve(d.excluded_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             excluded_images_csv=_resolve(d.excluded_images_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            mermaid_project_lookup_uri=d.mermaid_project_lookup_uri,
+            holdout_groups_csv=_resolve(d.holdout_groups_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            holdout_fold=d.holdout_fold,
+            holdout_max_per_class=d.holdout_max_per_class,
             ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions
+            split_mode=d.split_mode,
             subsample=subsample,
             weighting=weighting,
         )

@@ -23,6 +23,7 @@ from mermaid_classifier.common.benthic_attributes import (
 )
 from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
 from mermaid_classifier.pyspacer.dataset import TrainingDataset
+from mermaid_classifier.pyspacer.holdout_eval import log_holdout_evaluation
 from mermaid_classifier.pyspacer.inference import (
     export_artifact,
     load_predictor,
@@ -316,7 +317,14 @@ class MLflowTrainingRunner(TrainingRunner):
                 "included_labels_csv": os.path.basename(
                     self.dataset_options.included_labels_csv or ""
                 ),
+                "mermaid_project_lookup_uri": self.dataset_options.mermaid_project_lookup_uri or "",
+                "holdout_groups_csv": os.path.basename(
+                    self.dataset_options.holdout_groups_csv or ""
+                ),
+                "holdout_fold": self.dataset_options.holdout_fold,
+                "holdout_max_per_class": self.dataset_options.holdout_max_per_class or "",
                 "ref_val_ratios": str(self.dataset_options.ref_val_ratios),
+                "split_mode": self.dataset_options.split_mode,
             }
             mlflow.log_params(dataset_options_to_log)
 
@@ -352,6 +360,7 @@ class MLflowTrainingRunner(TrainingRunner):
                 # via _compute_class_weights. Log them now.
                 self._log_weighting_artifacts()
                 self._log_subsample_audit()
+                self._log_holdout_audit()
 
                 profiles_df = pd.DataFrame(self.profiled_sections)
                 self.log_dataframe(profiles_df, "profiled_sections")
@@ -428,6 +437,17 @@ class MLflowTrainingRunner(TrainingRunner):
                         model_json,
                         registered_model_name=model_name,
                         signature=signature,
+                    )
+
+                    # After the model is registered: a holdout-evaluation
+                    # failure still fails the run, but not before the model is kept.
+                    log_holdout_evaluation(
+                        dataset=self.dataset,
+                        clf_calibrated=clf_calibrated,
+                        predictor=predictor,
+                        ba_library=ba_library,
+                        gf_library=gf_library,
+                        format_func=self.format_metric,
                     )
             finally:
                 if getattr(self, "dataset", None) is not None:
@@ -600,26 +620,8 @@ class MLflowTrainingRunner(TrainingRunner):
         changes here.
         """
         df = getattr(self.dataset, "_subsample_audit_df", None)
-        if df is None:
-            return
-        # Decorate with human-readable names so the CSV is self-contained.
-        ba_library = get_benthic_attribute_library()
-        gf_library = get_growth_form_library()
-
-        def _decorate(row: pd.Series) -> pd.Series:  # type: ignore[type-arg]
-            try:
-                _ba_id = str(row["benthic_attribute_id"])
-                _gf_id = str(row["growth_form_id"])
-                ba_name = ba_library.id_to_name(_ba_id) if _ba_id else ""
-                gf_name = gf_library.id_to_name(_gf_id) if _gf_id else ""
-            except Exception:
-                ba_name, gf_name = "", ""
-            return pd.Series({"ba_name": ba_name, "gf_name": gf_name})
-
-        if not df.empty:
-            decorated = df.apply(_decorate, axis=1)
-            out = pd.concat([df, decorated], axis=1)
-            out = out[  # type: ignore[index]
+        if df is not None and not df.empty:
+            out = self._with_class_names(df)[
                 [
                     "benthic_attribute_id",
                     "ba_name",
@@ -632,9 +634,44 @@ class MLflowTrainingRunner(TrainingRunner):
             ].sort_values("realized_n", ascending=False)  # pyright: ignore[reportCallIssue]  # pandas DataFrame.sort_values overload issue with column-subscript result
             self.log_dataframe(out, "subsample/per_class_counts")
 
+        # Only source_spread produces the per-(class, group) audit.
+        group_df = getattr(self.dataset, "_subsample_group_audit_df", None)
+        if group_df is not None and not group_df.empty:
+            self.log_dataframe(
+                self._with_class_names(group_df),
+                "subsample/per_class_group_counts",
+            )
+
         realized = getattr(self.dataset, "_subsample_realized_total", None)
         if realized is not None:
             mlflow.log_metric("subsample/realized_total", float(realized), step=0)
+
+    def _log_holdout_audit(self) -> None:
+        """Log the per-class holdout cap audit; nothing if no cap applied."""
+        df = getattr(self.dataset, "_holdout_audit_df", None)
+        if df is None or df.empty:
+            return
+        self.log_dataframe(self._with_class_names(df), "holdout/per_class_counts")
+
+    @staticmethod
+    def _with_class_names(df: pd.DataFrame) -> pd.DataFrame:
+        """Append ba_name / gf_name columns to a table keyed by BA and GF ids,
+        so audit CSVs are self-contained. Names fall back to '' if the
+        libraries cannot resolve an id."""
+        ba_library = get_benthic_attribute_library()
+        gf_library = get_growth_form_library()
+
+        def _names(row: pd.Series) -> pd.Series:  # type: ignore[type-arg]
+            try:
+                _ba_id = str(row["benthic_attribute_id"])
+                _gf_id = str(row["growth_form_id"])
+                ba_name = ba_library.id_to_name(_ba_id) if _ba_id else ""
+                gf_name = gf_library.id_to_name(_gf_id) if _gf_id else ""
+            except Exception:
+                ba_name, gf_name = "", ""
+            return pd.Series({"ba_name": ba_name, "gf_name": gf_name})
+
+        return pd.concat([df, df.apply(_names, axis=1)], axis=1)
 
     @staticmethod
     def _existing_ancestor(path: str) -> str:
@@ -680,6 +717,10 @@ class MLflowTrainingRunner(TrainingRunner):
 
         mlflow.log_text(self.dataset.rollup_spec.csv_text, "rollup_spec.csv")
 
+        if not self.dataset.holdout_groups.is_empty():
+            mlflow.log_text(self.dataset.holdout_groups.csv_text, "holdout_groups.csv")
+            mlflow.log_param("holdout_groups_count", len(self.dataset.holdout_groups.group_folds))
+
         # Number of images and annotations from each CN source and from
         # MERMAID.
         # First, before filtering (this is what's present in S3).
@@ -718,7 +759,7 @@ class MLflowTrainingRunner(TrainingRunner):
         # Always log the validation split annotations so others can
         # independently re-evaluate the model.
         val_annotations_df = self.dataset.duck_conn.execute(
-            "SELECT * FROM annotations WHERE training_set = 'val'"
+            "SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations WHERE training_set = 'val'"
         ).fetch_df()
         self.log_dataframe(val_annotations_df, "annotations_val")
 

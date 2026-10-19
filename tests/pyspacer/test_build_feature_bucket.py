@@ -626,6 +626,28 @@ class ReconcileBucketExtractorSpecTest(unittest.TestCase):
         self.assertIn(requested.weights_sha256[:12], message)
         client.put_object.assert_not_called()
 
+    def test_a_sidecar_recording_the_empty_hash_is_not_called_a_different_extractor(self):
+        from mermaid_classifier.common.s3_utils import EMPTY_SHA256
+
+        stale = self._spec(weights_sha256=EMPTY_SHA256)
+        s3, client = self._client_with(json.dumps(stale.to_dict()).encode())
+        with self.assertRaises(RuntimeError) as ctx:
+            bfb.reconcile_bucket_extractor_spec(s3, "tgt-bucket", self._spec(), dry_run=False)
+        message = str(ctx.exception)
+        self.assertIn("predates the #112 fix", message)
+        self.assertNotIn("--force", message)
+        client.put_object.assert_not_called()
+
+    def test_a_different_real_hash_still_says_different_extractor(self):
+        existing = self._spec(weights_sha256="a" * 64)
+        s3, _client = self._client_with(json.dumps(existing.to_dict()).encode())
+        with self.assertRaises(RuntimeError) as ctx:
+            bfb.reconcile_bucket_extractor_spec(
+                s3, "tgt-bucket", self._spec(weights_sha256="f" * 64), dry_run=False
+            )
+        self.assertIn("different extractor", str(ctx.exception))
+        self.assertNotIn("#112", str(ctx.exception))
+
     def test_the_same_bytes_at_a_different_uri_is_not_a_conflict(self):
         existing = self._spec(weights_uri="s3://a/efficientnet.pt")
         requested = self._spec(weights_uri="s3://b/efficientnet_weights.pt")

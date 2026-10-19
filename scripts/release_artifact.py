@@ -27,7 +27,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from mermaid_classifier.common.s3_utils import parse_s3_uri, sha256_of_uri
+from mermaid_classifier.common.s3_utils import EMPTY_SHA256, parse_s3_uri, sha256_of_uri
 from mermaid_classifier.pyspacer.artifact_resolve import resolve_classifier_artifact
 from mermaid_classifier.pyspacer.inference import (
     SCHEMA_VERSION,
@@ -202,6 +202,11 @@ def main(argv: list[str] | None = None) -> int:
     weights_bucket, weights_key = parse_s3_uri(weights_uri)
     if not s3_object_exists(s3, weights_bucket, weights_key):
         sys.exit(f"extractor weights not found: {weights_uri}")
+    if spec.weights_sha256 == EMPTY_SHA256:
+        sys.exit(
+            f"{args.mlflow_model_id} was logged before #112 was fixed; its extractor "
+            f"hash is unrecorded and cannot be verified -- retrain."
+        )
     weights_sha256 = sha256_of_uri(weights_uri)
     if weights_sha256 != spec.weights_sha256:
         sys.exit(

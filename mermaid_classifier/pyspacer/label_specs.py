@@ -4,6 +4,7 @@ CSV-defined label specifications for the training pipeline.
 - LabelFilter: include/exclude specific BA+GF combos from training data.
 - LabelRollupSpec: roll up fine-grained BA+GF combos to coarser categories.
 - ImageExclusionFilter: withhold specific images from training data.
+- HoldoutGroups: assign (site, project) groups to the test set or a CV fold.
 """
 
 import logging
@@ -299,3 +300,179 @@ class ImageExclusionFilter(CsvSpec):
             matched_count,
             len(self.excluded_image_ids),
         )
+
+
+HOLDOUT_TEST_FOLD = "test"
+
+
+class HoldoutGroups(CsvSpec):
+    """
+    A CSV-defined spec assigning groups to the held-out test set or a
+    cross-validation fold. A group is a (site, project_id) pair: a
+    CoralNet source, or a MERMAID project.
+
+    Columns: site, group_id, fold. `fold` is "test" or a non-negative
+    integer. Every group appears in at most one fold.
+    """
+
+    column_specs = [
+        ColumnSpec(name="site", allow_blank=False),
+        ColumnSpec(name="group_id", allow_blank=False),
+        ColumnSpec(name="fold", allow_blank=False),
+    ]
+    # Fold 0 and numeric group ids must not read as blank.
+    read_dtype = str
+
+    def __init__(self, csv_file: typing.TextIO):
+        self.group_folds: dict[tuple[str, str], str] = {}
+
+        super().__init__(csv_file=csv_file)
+
+    def per_row_init_action(self, row: dict[str, str | None]) -> None:
+        site = str(row["site"])
+        group_id = str(row["group_id"])
+        fold = str(row["fold"])
+        if not (fold == HOLDOUT_TEST_FOLD or (fold.isascii() and fold.isdigit())):
+            raise ValueError(
+                f"Holdout fold must be '{HOLDOUT_TEST_FOLD}' or a non-negative"
+                f" integer; got {fold!r} for group ({site}, {group_id})."
+            )
+        existing = self.group_folds.get((site, group_id))
+        if existing is not None and existing != fold:
+            raise ValueError(
+                f"Group ({site}, {group_id}) is assigned to two folds: {existing!r} and {fold!r}."
+            )
+        self.group_folds[(site, group_id)] = fold
+
+    def is_empty(self) -> bool:
+        return len(self.group_folds) == 0
+
+    def folds(self) -> set[str]:
+        return set(self.group_folds.values())
+
+    def validate_holdout_fold(self, holdout_fold: str) -> None:
+        """
+        Raise unless `holdout_fold` is "test" or a fold present in this spec.
+        """
+        if holdout_fold == HOLDOUT_TEST_FOLD:
+            return
+        if holdout_fold not in self.folds():
+            raise ValueError(
+                f"holdout_fold {holdout_fold!r} must be '{HOLDOUT_TEST_FOLD}' or one of"
+                f" the folds in the holdout groups CSV: {sorted(self.folds())}."
+            )
+
+    def tag_in_duckdb(
+        self,
+        duck_conn: duckdb.DuckDBPyConnection,
+        duck_table_name: str,
+        holdout_fold: str,
+        groups_read: set[tuple[str, str]] | None = None,
+    ) -> None:
+        """
+        Add boolean columns to the given table, joining on (site, project_id):
+        - is_holdout: the row's group is in the `holdout_fold` fold.
+        - is_excluded: the row's group is in the test fold while
+          `holdout_fold` is a CV fold, so the row is neither trained on
+          nor evaluated.
+        Every row is kept. Rows in no listed group are tagged FALSE for both.
+
+        A listed group with no rows in the table would otherwise train
+        silently. `groups_read` is the (site, project_id) set before label
+        filtering: a group in it lost its rows to filtering, which is
+        logged as a warning. Any other unmatched group in the test fold or
+        in `holdout_fold` raises ValueError; one in another CV fold is
+        training data in this run, and is logged as a warning.
+        """
+        self.validate_holdout_fold(holdout_fold)
+
+        ordered_groups = sorted(self.group_folds.items())
+        groups_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning  # pyright: ignore[reportUnusedVariable]
+            {
+                "site": [site for (site, _), _ in ordered_groups],
+                "group_id": [group_id for (_, group_id), _ in ordered_groups],
+                "fold": [fold for _, fold in ordered_groups],
+            }
+        )
+
+        with duckdb_temp_table_name(duck_conn, base_name="holdout_groups") as groups_table_name:
+            duck_conn.execute(
+                f"CREATE TABLE {groups_table_name} (site VARCHAR, group_id VARCHAR, fold VARCHAR)"
+            )
+            duck_conn.execute(f"INSERT INTO {groups_table_name} SELECT * FROM groups_df")
+
+            # holdout_fold is validated above to be 'test' or a listed
+            # integer string, so interpolating it is safe.
+            duck_conn.execute(
+                f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+                f" SELECT a.*,"
+                f"  COALESCE(g.fold = '{holdout_fold}', FALSE) AS is_holdout,"
+                f"  COALESCE(g.fold = '{HOLDOUT_TEST_FOLD}'"
+                f"   AND '{holdout_fold}' <> '{HOLDOUT_TEST_FOLD}', FALSE) AS is_excluded"
+                f" FROM {duck_table_name} a"
+                f"  LEFT JOIN {groups_table_name} g"
+                f"   ON a.site = g.site AND a.project_id = g.group_id"
+            )
+
+            matched_groups = {
+                (str(site), str(group_id))
+                for site, group_id in duck_conn.execute(
+                    f"SELECT DISTINCT g.site, g.group_id"
+                    f" FROM {duck_table_name} a"
+                    f"  JOIN {groups_table_name} g"
+                    f"   ON a.site = g.site AND a.project_id = g.group_id"
+                ).fetchall()
+            }
+
+        if self.is_empty():
+            return
+        logger.log(
+            logging.WARNING if not matched_groups else logging.INFO,
+            "Holdout groups matched %s of %s listed group(s) in this dataset.",
+            len(matched_groups),
+            len(self.group_folds),
+        )
+        self._check_unmatched_groups(matched_groups, holdout_fold, groups_read or set())
+
+    def _check_unmatched_groups(
+        self,
+        matched_groups: set[tuple[str, str]],
+        holdout_fold: str,
+        groups_read: set[tuple[str, str]],
+    ) -> None:
+        unmatched = sorted(set(self.group_folds) - matched_groups)
+        filtered_out = [g for g in unmatched if g in groups_read]
+        absent = [g for g in unmatched if g not in groups_read]
+        evaluated_folds = {HOLDOUT_TEST_FOLD, holdout_fold}
+        required = [g for g in absent if self.group_folds[g] in evaluated_folds]
+        other = [g for g in absent if self.group_folds[g] not in evaluated_folds]
+
+        def describe(groups: list[tuple[str, str]]) -> str:
+            return ", ".join(
+                f"({site}, {gid}): {self.group_folds[(site, gid)]}" for site, gid in groups
+            )
+
+        if required:
+            raise ValueError(
+                f"{len(required)} holdout group(s) in the test fold or holdout_fold"
+                f" {holdout_fold!r} match no rows even before label filtering"
+                f" (site, group_id): fold: {describe(required)}. Rows meant for them"
+                f" would train. Check the group ids, and that MERMAID groups have a"
+                f" mermaid_project_lookup_uri. Of the other unmatched groups,"
+                f" {len(filtered_out)} lost every row to filtering, and {len(other)}"
+                f" in other folds match nothing."
+            )
+        if other:
+            logger.warning(
+                "%d holdout group(s) in other folds match no rows in the data read"
+                " (site, group_id): fold: %s",
+                len(other),
+                describe(other),
+            )
+        if filtered_out:
+            logger.warning(
+                "%d holdout group(s) lost every row to rollup, label filtering, image"
+                " exclusion or dedupe (site, group_id): fold: %s",
+                len(filtered_out),
+                describe(filtered_out),
+            )

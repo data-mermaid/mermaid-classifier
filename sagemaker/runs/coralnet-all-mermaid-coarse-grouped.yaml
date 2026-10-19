@@ -1,0 +1,37 @@
+# Launcher config for the all-sources + MERMAID coarse grouped-holdout training run.
+#
+# The dataset/training/mlflow blocks live in
+# sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped/training_config.yaml
+# (mounted into the container as /opt/ml/input/data/config/training_config.yaml).
+# This file describes ONLY the launcher's job: block.
+#
+# The image is built from this branch with docker/jobs/training.Dockerfile and
+# tagged training-grouped-holdout-20261019 (a branch build, not training-latest).
+#
+# Submit with:
+#   uv run python scripts/launch_training.py \
+#       --run-config sagemaker/runs/coralnet-all-mermaid-coarse-grouped.yaml \
+#       --config-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped/ \
+#       --mlflow-tracking-uri <arn>
+#
+# The CV fold runs reuse this file with
+# --config-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_fold{k}/
+#
+# Compute mirrors coralnet-top108-full.yaml: the balanced subsample caps the
+# training set at ~7.4M annotations, so size is comparable despite the larger
+# (all-sources + MERMAID) input.
+#
+# max_runtime_hours is a ceiling, not a target: the job stops when training
+# finishes (early_stopping_patience=3), and you pay only for actual runtime.
+# Set to 72h (2x coralnet-top108-full's 36h) for headroom on the larger input.
+
+job:
+  name_prefix: mermaid-classifier-coarse-grouped
+  image: mermaid-classifier-jobs:training-grouped-holdout-20261019
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.c5.9xlarge
+  volume_gb: 400
+  max_runtime_hours: 72
+  env:
+    FEATURE_CACHE_DIR: /tmp/feature_cache
+    SPACER_EXTRACTORS_CACHE_DIR: /tmp/spacer_extractors
