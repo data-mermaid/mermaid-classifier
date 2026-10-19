@@ -85,9 +85,22 @@ class DatasetConfig(BaseModel):
     included_labels_csv: str | None = None
     excluded_labels_csv: str | None = None
     excluded_images_csv: str | None = None
+    mermaid_project_lookup_uri: str | None = None
+    holdout_groups_csv: str | None = None
+    # 'test' or a CV fold number; YAML's bare `holdout_fold: 2` is coerced.
+    holdout_fold: str = "test"
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     subsample: SubsampleConfig | None = None
     weighting: WeightingConfig | None = None
+
+    @field_validator("holdout_fold", mode="before")
+    @classmethod
+    def _holdout_fold_is_test_or_integer(cls, v: object) -> object:
+        if isinstance(v, int) and not isinstance(v, bool):
+            v = str(v)
+        if not isinstance(v, str) or not (v == "test" or (v.isascii() and v.isdigit())):
+            raise ValueError(f"holdout_fold must be 'test' or a non-negative integer, got {v!r}")
+        return v
 
     def label_rollup_spec_csv_path(self, base: Path) -> Path | None:
         return None if self.label_rollup_spec_csv is None else base / self.label_rollup_spec_csv
@@ -100,6 +113,9 @@ class DatasetConfig(BaseModel):
 
     def excluded_images_csv_path(self, base: Path) -> Path | None:
         return None if self.excluded_images_csv is None else base / self.excluded_images_csv
+
+    def holdout_groups_csv_path(self, base: Path) -> Path | None:
+        return None if self.holdout_groups_csv is None else base / self.holdout_groups_csv
 
 
 class TrainingConfig(BaseModel):
@@ -217,6 +233,9 @@ class TrainingRunConfig(BaseModel):
             included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             excluded_labels_csv=_resolve(d.excluded_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             excluded_images_csv=_resolve(d.excluded_images_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            mermaid_project_lookup_uri=d.mermaid_project_lookup_uri,
+            holdout_groups_csv=_resolve(d.holdout_groups_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            holdout_fold=d.holdout_fold,
             ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions
             subsample=subsample,
             weighting=weighting,

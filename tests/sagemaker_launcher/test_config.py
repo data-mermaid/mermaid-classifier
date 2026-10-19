@@ -200,6 +200,50 @@ class StrictSchemaTest(unittest.TestCase):
                 TrainingRunConfig.from_yaml_path(path)
 
 
+class HoldoutOptionsTest(unittest.TestCase):
+    """The grouped-holdout fields parse, resolve, and default to today's behaviour."""
+
+    def _build(self, extra_dataset_yaml: str = ""):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"].update(_yaml.safe_load(extra_dataset_yaml) or {})
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            path = _write(tmp, _yaml.dump(base))
+            config = TrainingRunConfig.from_yaml_path(path)
+            return config, config.build_options(config_dir=tmp)[0], tmp
+
+    def test_defaults_reproduce_the_ungrouped_run(self):
+        config, dataset, _ = self._build()
+        self.assertIsNone(config.dataset.mermaid_project_lookup_uri)
+        self.assertIsNone(config.dataset.holdout_groups_csv)
+        self.assertEqual(config.dataset.holdout_fold, "test")
+        self.assertIsNone(dataset.mermaid_project_lookup_uri)
+        self.assertIsNone(dataset.holdout_groups_csv)
+        self.assertEqual(dataset.holdout_fold, "test")
+
+    def test_fields_reach_dataset_options(self):
+        _, dataset, tmp = self._build(
+            textwrap.dedent("""\
+                mermaid_project_lookup_uri: s3://private/lookup.parquet
+                holdout_groups_csv: holdout_groups.csv
+                holdout_fold: "2"
+            """)
+        )
+        self.assertEqual(dataset.mermaid_project_lookup_uri, "s3://private/lookup.parquet")
+        self.assertEqual(dataset.holdout_groups_csv, str(tmp / "holdout_groups.csv"))
+        self.assertEqual(dataset.holdout_fold, "2")
+
+    def test_integer_fold_in_yaml_is_accepted_as_a_string(self):
+        config, _, _ = self._build("holdout_fold: 3")
+        self.assertEqual(config.dataset.holdout_fold, "3")
+
+    def test_invalid_fold_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._build("holdout_fold: fold-a")
+
+
 class ExampleYamlTest(unittest.TestCase):
     def test_committed_example_loads(self):
         # Resolve relative to the repo root (the tests/ dir is one

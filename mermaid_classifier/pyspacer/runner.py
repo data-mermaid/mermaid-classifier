@@ -316,6 +316,11 @@ class MLflowTrainingRunner(TrainingRunner):
                 "included_labels_csv": os.path.basename(
                     self.dataset_options.included_labels_csv or ""
                 ),
+                "mermaid_project_lookup_uri": self.dataset_options.mermaid_project_lookup_uri or "",
+                "holdout_groups_csv": os.path.basename(
+                    self.dataset_options.holdout_groups_csv or ""
+                ),
+                "holdout_fold": self.dataset_options.holdout_fold,
                 "ref_val_ratios": str(self.dataset_options.ref_val_ratios),
             }
             mlflow.log_params(dataset_options_to_log)
@@ -718,7 +723,7 @@ class MLflowTrainingRunner(TrainingRunner):
         # Always log the validation split annotations so others can
         # independently re-evaluate the model.
         val_annotations_df = self.dataset.duck_conn.execute(
-            "SELECT * FROM annotations WHERE training_set = 'val'"
+            "SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations WHERE training_set = 'val'"
         ).fetch_df()
         self.log_dataframe(val_annotations_df, "annotations_val")
 

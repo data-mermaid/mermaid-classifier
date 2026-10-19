@@ -44,6 +44,7 @@ from mermaid_classifier.pyspacer.extraction import (
 )
 from mermaid_classifier.pyspacer.inference import ExtractorSpec
 from mermaid_classifier.pyspacer.label_specs import (
+    HoldoutGroups,
     ImageExclusionFilter,
     LabelFilter,
     LabelRollupSpec,
@@ -76,6 +77,9 @@ def _load_csv_spec[T: CsvSpec](path: str | None, factory: Callable[[TextIO], T])
 
 
 class TrainingDataset:
+    # Set by _dedupe_points; merged into train_summary_stats.
+    _dedupe_stats: dict[str, int] | None = None
+
     def __init__(self, options: DatasetOptions):
         self.options = options
         self.artifacts = Artifacts()
@@ -117,6 +121,10 @@ class TrainingDataset:
             options.excluded_images_csv, ImageExclusionFilter
         )
 
+        self.holdout_groups = _load_csv_spec(options.holdout_groups_csv, HoldoutGroups)
+        # Fail on a bad fold before any data is read.
+        self.holdout_groups.validate_holdout_fold(options.holdout_fold)
+
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
         self.s3 = S3FileSystem(
             anon=settings.aws_anonymous == "True",
@@ -132,6 +140,57 @@ class TrainingDataset:
 
         self.feature_loc_to_source: dict[DataLocation, tuple[str, str]] = {}
 
+        self.load_filtered_annotations()
+
+        if self.options.holdout_groups_csv:
+            # Test groups leave a CV run entirely: neither trained on nor
+            # evaluated. Holdout rows stay, tagged, for later steps.
+            self.duck_conn.execute("DELETE FROM annotations WHERE is_excluded")
+
+        if options.include_mermaid or options.coralnet_manifest_uri:
+            feature_prefixes = self.feature_source_prefixes()
+
+            # Before the listing below, which is the slow part: a run whose
+            # feature sources disagree about their extractor is not worth
+            # enumerating.
+            with self.section_profiling("Resolving feature-extractor provenance"):
+                self.extractor_spec = self.resolve_extractor_spec(feature_prefixes)
+
+            # We'll check the annotation data's feature paths against the
+            # feature vectors that are actually present in S3, for every
+            # site that has annotations.
+
+            with self.section_profiling("Detecting missing feature vectors"):
+                # First, list the feature paths present in S3 for each site
+                # (this can take a while). The listings return `bucket/key`
+                # strings, which match the `feature_full` we build per row.
+                present: set[str] = set()
+                for prefix in feature_prefixes:
+                    present |= set(self.s3.find(path=prefix))
+                # Check against annotation data.
+                self.handle_missing_feature_vectors(present)
+
+        if options.subsample is not None:
+            # Runs after the missing-feature-vector drop above, so per-class
+            # targets are computed from rows that can actually reach training.
+            with self.section_profiling("Per-class subsampling"):
+                self._apply_subsample(options.subsample)
+
+        self.labels = self.prep_annotations_for_pyspacer()
+
+        with self.section_profiling("Tag DuckDB rows with training set"):
+            self.add_training_set_names()
+
+        self.set_train_summary_stats()
+
+    def load_filtered_annotations(self) -> None:
+        """
+        Populate the `annotations` table: read the CoralNet and MERMAID
+        annotations, roll up and filter labels, drop excluded images,
+        dedupe points, and tag holdout groups (is_holdout / is_excluded).
+
+        Needs no feature-vector listing or download.
+        """
         if self.options.coralnet_manifest_uri:
             with self.section_profiling("Reading CoralNet annotations"):
                 self.read_coralnet_manifest()
@@ -139,7 +198,7 @@ class TrainingDataset:
             # An empty dataframe
             self.artifacts.coralnet_project_stats = pd.DataFrame()
 
-        if options.include_mermaid:
+        if self.options.include_mermaid:
             with self.section_profiling("Reading MERMAID annotations"):
                 self.read_mermaid_data()
         else:
@@ -165,7 +224,7 @@ class TrainingDataset:
                 f"{img_before:,}",
             )
 
-            if options.drop_growthforms:
+            if self.options.drop_growthforms:
                 # Clear all annotations' growth forms.
                 duckdb_transform_column(
                     duck_conn=self.duck_conn,
@@ -222,41 +281,70 @@ class TrainingDataset:
                 100.0 * img_after_exclusion / max(img_before, 1),
             )
 
-        if options.include_mermaid or options.coralnet_manifest_uri:
-            feature_prefixes = self.feature_source_prefixes()
+        with self.section_profiling("Deduplicating points"):
+            self._dedupe_points()
 
-            # Before the listing below, which is the slow part: a run whose
-            # feature sources disagree about their extractor is not worth
-            # enumerating.
-            with self.section_profiling("Resolving feature-extractor provenance"):
-                self.extractor_spec = self.resolve_extractor_spec(feature_prefixes)
+        with self.section_profiling("Tagging holdout groups"):
+            self.holdout_groups.tag_in_duckdb(
+                duck_conn=self.duck_conn,
+                duck_table_name="annotations",
+                holdout_fold=self.options.holdout_fold,
+            )
 
-            # We'll check the annotation data's feature paths against the
-            # feature vectors that are actually present in S3, for every
-            # site that has annotations.
+    def _dedupe_points(self) -> None:
+        """
+        Make `annotations` hold at most one row per point, keyed by
+        (bucket, feature_vector, row, col).
 
-            with self.section_profiling("Detecting missing feature vectors"):
-                # First, list the feature paths present in S3 for each site
-                # (this can take a while). The listings return `bucket/key`
-                # strings, which match the `feature_full` we build per row.
-                present: set[str] = set()
-                for prefix in feature_prefixes:
-                    present |= set(self.s3.find(path=prefix))
-                # Check against annotation data.
-                self.handle_missing_feature_vectors(present)
+        Runs after rollup and filtering, so conflicts are judged on the
+        final BA+GF. A point whose rows carry more than one distinct
+        (benthic_attribute_id, growth_form_id) is dropped entirely. Any
+        other point keeps one row: the first when ordered by every column,
+        so the choice does not depend on scan order.
+        """
+        point_key = "bucket, feature_vector, row, col"
+        order_by = ", ".join(
+            f'"{name}"'
+            for (name,) in self.duck_conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'annotations' ORDER BY ordinal_position"
+            ).fetchall()
+        )
 
-        if options.subsample is not None:
-            # Runs after the missing-feature-vector drop above, so per-class
-            # targets are computed from rows that can actually reach training.
-            with self.section_profiling("Per-class subsampling"):
-                self._apply_subsample(options.subsample)
+        rows_before = self.duck_conn.execute("SELECT count(*) FROM annotations").fetchall()[0][0]
+        conflict_points, conflict_rows = self.duck_conn.execute(
+            f"SELECT count(*), COALESCE(sum(n), 0) FROM ("
+            f" SELECT count(*) AS n FROM annotations GROUP BY {point_key}"
+            f" HAVING count(DISTINCT (benthic_attribute_id, growth_form_id)) > 1)"
+        ).fetchall()[0]
 
-        self.labels = self.prep_annotations_for_pyspacer()
+        self.duck_conn.execute(
+            f"CREATE OR REPLACE TABLE annotations AS"
+            f" WITH conflicts AS ("
+            f"  SELECT {point_key} FROM annotations GROUP BY {point_key}"
+            f"  HAVING count(DISTINCT (benthic_attribute_id, growth_form_id)) > 1),"
+            f" numbered AS ("
+            f"  SELECT *, ROW_NUMBER() OVER ("
+            f"   PARTITION BY {point_key} ORDER BY {order_by}) AS _rn"
+            f"  FROM annotations)"
+            f" SELECT n.* EXCLUDE (_rn) FROM numbered n"
+            f" ANTI JOIN conflicts c USING ({point_key})"
+            f" WHERE n._rn = 1"
+        )
 
-        with self.section_profiling("Tag DuckDB rows with training set"):
-            self.add_training_set_names()
-
-        self.set_train_summary_stats()
+        rows_after = self.duck_conn.execute("SELECT count(*) FROM annotations").fetchall()[0][0]
+        self._dedupe_stats = {
+            "annotations_duplicate_rows_removed": int(rows_before - rows_after - conflict_rows),
+            "points_label_conflicts_dropped": int(conflict_points),
+        }
+        logger.info(
+            "Point dedupe: %s annotations -> %s; %s duplicate row(s) removed,"
+            " %s point(s) dropped for conflicting labels",
+            f"{rows_before:,}",
+            f"{rows_after:,}",
+            f"{self._dedupe_stats['annotations_duplicate_rows_removed']:,}",
+            f"{conflict_points:,}",
+        )
 
     def _apply_subsample(self, opts: SubsampleOptions) -> None:
         """Deterministic per-class subsampling of the annotations table.
@@ -409,18 +497,40 @@ class TrainingDataset:
             # Didn't read any CoralNet data, so we have to create
             # the annotations table.
             query_start = "CREATE TABLE annotations AS"
+        lookup_uri = self.options.mermaid_project_lookup_uri
+        if lookup_uri:
+            self._check_project_lookup_is_one_to_one(lookup_uri)
+            # One project per image (checked above), so the join cannot
+            # fan out rows; a lookup repeating an image/project pair is fine.
+            project_sql = "COALESCE(l.project_id, 'unknown')"
+            from_sql = (
+                f"read_parquet('{parquet_path}') m"
+                f" LEFT JOIN ("
+                f"  SELECT CAST(image_id AS VARCHAR) AS image_id,"
+                f"   min(CAST(project_id AS VARCHAR)) AS project_id"
+                f"  FROM read_parquet(?) GROUP BY 1) l"
+                f" ON CAST(m.image_id AS VARCHAR) = l.image_id"
+            )
+            params = [lookup_uri]
+        else:
+            project_sql = "'all'"
+            from_sql = f"read_parquet('{parquet_path}') m"
+            params = []
         self.duck_conn.execute(
             query_start + f" SELECT"
-            f"  CAST(image_id AS VARCHAR) AS image_id, row, col,"
-            f"  benthic_attribute_id,"
-            f"  COALESCE(growth_form_id, '') AS growth_form_id,"
+            f"  CAST(m.image_id AS VARCHAR) AS image_id, m.row, m.col,"
+            f"  m.benthic_attribute_id,"
+            f"  COALESCE(m.growth_form_id, '') AS growth_form_id,"
             f" '{Sites.MERMAID.value}' AS site,"
             f" '{settings.mermaid_train_data_bucket}' AS bucket,"
-            f" 'all' AS project_id,"
-            f"  concat('mermaid/', image_id, '_featurevector')"
+            f" {project_sql} AS project_id,"
+            f"  concat('mermaid/', m.image_id, '_featurevector')"
             f"   AS feature_vector"
-            f" FROM read_parquet('{parquet_path}')"
+            f" FROM {from_sql}",
+            params,
         )
+        if lookup_uri:
+            self._check_unmatched_mermaid_images()
 
         # Get project-level stats before applying any further filters.
         self.artifacts.mermaid_project_stats = self.compute_project_stats(
@@ -440,6 +550,39 @@ class TrainingDataset:
             column_name="growth_form_id",
             transform_func=transform_func,
         )
+
+    def _check_project_lookup_is_one_to_one(self, lookup_uri: str) -> None:
+        """Raise if the lookup maps any image to more than one project."""
+        ambiguous = self.duck_conn.execute(
+            "SELECT CAST(image_id AS VARCHAR) FROM read_parquet(?)"
+            " GROUP BY 1 HAVING count(DISTINCT project_id) > 1"
+            " ORDER BY 1 LIMIT 3",
+            [lookup_uri],
+        ).fetchall()
+        if ambiguous:
+            raise ValueError(
+                f"MERMAID project lookup {lookup_uri} maps an image to more than one project,"
+                f" such as: {[r[0] for r in ambiguous]}"
+            )
+
+    def _check_unmatched_mermaid_images(self) -> None:
+        """Log MERMAID images the lookup left as 'unknown'; raise if too many."""
+        unmatched, total = self.duck_conn.execute(
+            "SELECT count(DISTINCT image_id) FILTER (WHERE project_id = 'unknown'),"
+            " count(DISTINCT image_id)"
+            f" FROM annotations WHERE site = '{Sites.MERMAID.value}'"
+        ).fetchall()[0]
+        logger.info(
+            "MERMAID project lookup left %s of %s image(s) unmatched (project_id 'unknown').",
+            f"{unmatched:,}",
+            f"{total:,}",
+        )
+        if unmatched > total * settings.training_inputs_percent_missing_allowed / 100:
+            raise RuntimeError(
+                f"Too many MERMAID images are missing from the project lookup"
+                f" ({unmatched} of {total}). You can configure the tolerance with the"
+                f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
+            )
 
     def read_coralnet_manifest(self):
         if self.duckdb_annotations_table_exists():
@@ -894,6 +1037,17 @@ class TrainingDataset:
         Match up DuckDB annotations with train/ref/val.
         This will add a training_set column to the annotations table.
         """
+        # A duplicated key would fan each label row out in the join below.
+        duplicate_keys = self.duck_conn.execute(
+            "SELECT count(*) FROM (SELECT 1 FROM annotations"
+            " GROUP BY bucket, feature_vector, row, col HAVING count(*) > 1)"
+        ).fetchall()[0][0]
+        if duplicate_keys:
+            raise ValueError(
+                f"annotations has {duplicate_keys} (bucket, feature_vector, row, col) key(s)"
+                f" that are not unique, so training sets cannot be matched to rows."
+            )
+
         training_sets = [
             ("train", self.labels.train),
             ("ref", self.labels.ref),
@@ -1101,6 +1255,7 @@ class TrainingDataset:
             "bas_dropped": bas_dropped,
             "bagfs": num_of_bagfs,
             "bagfs_dropped": bagfs_dropped,
+            **(self._dedupe_stats or {}),
         }
 
     def describe_train_summary_stats(self):
@@ -1120,18 +1275,18 @@ class TrainingDataset:
 
     def get_annotations(self, log_spec: str):
         if log_spec == "all":
-            query = "SELECT * FROM annotations"
+            query = "SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations"
         elif match := re.fullmatch(r"s(\d+)", log_spec):
             cn_source_id = match.groups()[0]
             query = (
-                f"SELECT * FROM annotations"
+                f"SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations"
                 f" WHERE site = '{Sites.CORALNET.value}'"
                 f" AND project_id = '{cn_source_id}'"
             )
         elif match := re.fullmatch(r"i(\d+)", log_spec):
             cn_image_id = match.groups()[0]
             query = (
-                f"SELECT * FROM annotations"
+                f"SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations"
                 f" WHERE site = '{Sites.CORALNET.value}'"
                 f" AND image_id = '{cn_image_id}'"
             )

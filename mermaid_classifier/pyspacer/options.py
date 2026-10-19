@@ -111,6 +111,32 @@ class DatasetOptions:
     - Applied independently of the label rollups and inclusion/exclusion
       filters above: a listed image is removed regardless of its BA+GF.
 
+    mermaid_project_lookup_uri
+
+    S3 URI (or local path) of a parquet mapping MERMAID image IDs to
+    projects, with columns image_id, project_id, project_name, site_id.
+    When set, MERMAID rows take that project_id (so a MERMAID project is
+    a group, like a CoralNet source); an image absent from the lookup gets
+    project_id 'unknown'. When unset, every MERMAID row has project_id 'all'.
+    - Too many unmatched images (more than
+      TRAINING_INPUTS_PERCENT_MISSING_ALLOWED percent) aborts the run, as
+      does an image that maps to more than one project.
+
+    holdout_groups_csv
+    holdout_fold
+
+    Local filepath of a CSV assigning groups to the held-out test set or
+    to cross-validation folds. A group is a (site, project_id) pair.
+    - If this file isn't specified, nothing is held out.
+    - Recognized columns:
+      site -- 'coralnet' or 'mermaid'.
+      group_id -- The CoralNet source ID, or the MERMAID project ID.
+      fold -- 'test', or a non-negative integer fold number.
+    - holdout_fold is 'test' (the default) or one of the fold numbers in
+      the CSV. Rows of groups in that fold are tagged is_holdout. When it
+      is a fold number, rows of the 'test' groups are tagged is_excluded
+      and dropped, so a CV run neither trains nor evaluates on them.
+
     ref_val_ratios
 
     Determines the ratios of training annotations that will go into
@@ -160,6 +186,9 @@ class DatasetOptions:
     included_labels_csv: str | None = None
     excluded_labels_csv: str | None = None
     excluded_images_csv: str | None = None
+    mermaid_project_lookup_uri: str | None = None
+    holdout_groups_csv: str | None = None
+    holdout_fold: str = "test"
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     # Optional per-class subsampling. None means use all annotations.
     # See mermaid_classifier.training.subsample for available strategies

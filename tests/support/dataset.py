@@ -16,6 +16,7 @@ class NoInitDataset(TrainingDataset):
 
     def __init__(self):
         self._duck_conn = None
+        self.options = DatasetOptions()
         self.artifacts = Artifacts()
         # Matches TrainingDataset's own temp-dir shape: unpredictable path,
         # self-cleaning on garbage collection.
