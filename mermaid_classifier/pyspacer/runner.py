@@ -419,15 +419,6 @@ class MLflowTrainingRunner(TrainingRunner):
                     coordinator = MetricsCoordinator(ctx, duck_conn=self.dataset.duck_conn)
                     coordinator.compute_and_log_all()
 
-                    log_holdout_evaluation(
-                        dataset=self.dataset,
-                        clf_calibrated=clf_calibrated,
-                        predictor=predictor,
-                        ba_library=ba_library,
-                        gf_library=gf_library,
-                        format_func=self.format_metric,
-                    )
-
                     # Accuracy and ref_accs come from pyspacer's return_msg, not
                     # our metrics module (training-progress, not artifact-based).
                     mlflow.log_metric("accuracy", self.format_metric(return_msg.acc))
@@ -446,6 +437,17 @@ class MLflowTrainingRunner(TrainingRunner):
                         model_json,
                         registered_model_name=model_name,
                         signature=signature,
+                    )
+
+                    # After the model is registered: a holdout-evaluation
+                    # failure still fails the run, but not before the model is kept.
+                    log_holdout_evaluation(
+                        dataset=self.dataset,
+                        clf_calibrated=clf_calibrated,
+                        predictor=predictor,
+                        ba_library=ba_library,
+                        gf_library=gf_library,
+                        format_func=self.format_metric,
                     )
             finally:
                 if getattr(self, "dataset", None) is not None:

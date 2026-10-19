@@ -11,6 +11,7 @@ import pandas as pd
 from mermaid_classifier.training.cv_aggregate import (
     cluster_bootstrap_intervals,
     cluster_counts,
+    combine_cv_runs,
     concat_folds,
     point_estimates,
     summarize,
@@ -58,6 +59,51 @@ class ConcatFoldsTest(unittest.TestCase):
         out = concat_folds({"run_a": a, "run_b": b})
         self.assertEqual(sorted(out["run_id"]), ["run_a", "run_b"])
         self.assertEqual(len(out), 2)
+
+
+class CombineCvRunsTest(unittest.TestCase):
+    GROUPS = b"site,group_id,fold\ncoralnet,1,0\ncoralnet,2,1\ncoralnet,3,test\n"
+
+    def _runs(self, folds=("0", "1"), groups=None, projects=("1", "2")):
+        groups = groups or [self.GROUPS] * len(folds)
+        return {
+            f"run{i}": (fold, groups[i], _rows(["x"], ["x"], project=projects[i]))
+            for i, fold in enumerate(folds)
+        }
+
+    def test_complete_distinct_folds_are_combined(self):
+        out = combine_cv_runs(self._runs(), folds=2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(sorted(out["run_id"]), ["run0", "run1"])
+
+    def test_test_run_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "holdout_fold"):
+            combine_cv_runs(self._runs(folds=("0", "test")), folds=2)
+
+    def test_missing_or_non_integer_fold_param_is_rejected(self):
+        for bad in (None, "abc", ""):
+            with (
+                self.subTest(bad=bad),
+                self.assertRaisesRegex(ValueError, "holdout_fold"),
+            ):
+                combine_cv_runs(self._runs(folds=("0", bad)), folds=2)
+
+    def test_incomplete_fold_set_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly folds 0..2"):
+            combine_cv_runs(self._runs(), folds=3)
+
+    def test_duplicate_fold_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "more than one run"):
+            combine_cv_runs(self._runs(folds=("0", "0")), folds=2)
+
+    def test_differing_holdout_groups_are_rejected(self):
+        other = self.GROUPS.replace(b"coralnet,2,1", b"coralnet,2,0")
+        with self.assertRaisesRegex(ValueError, "holdout_groups.csv"):
+            combine_cv_runs(self._runs(groups=[self.GROUPS, other]), folds=2)
+
+    def test_group_in_two_runs_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "coralnet:1"):
+            combine_cv_runs(self._runs(projects=("1", "1")), folds=2)
 
 
 class HandComputedMetricsTest(unittest.TestCase):

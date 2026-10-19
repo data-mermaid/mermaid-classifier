@@ -115,6 +115,13 @@ class SelectionTest(unittest.TestCase):
         )
         self.assertNotEqual(result.assignments[(CORALNET, "0")], "test")
 
+    def test_mermaid_coverage_is_judged_without_coralnet_test_points(self):
+        rows = [("x", CORALNET, str(i), 100) for i in range(10)]
+        rows += [("x", MERMAID, "p0", 50), ("y", MERMAID, "p0", 5)]
+        rows += [("y", MERMAID, f"p{i}", 50) for i in range(1, 10)]
+        selection = select_holdout(_counts(rows), LOOSE, set())
+        self.assertEqual(selection.assignments[(MERMAID, "p0")], "test")
+
     def test_every_non_test_group_lands_in_exactly_one_fold(self):
         df = _synthetic_counts()
         result = select_holdout(df, LOOSE, beta_sources=set())
@@ -170,6 +177,29 @@ class CoverageReportTest(unittest.TestCase):
         self.assertTrue(any("'b'" in w and "test" in w for w in warnings))
         self.assertTrue(any("'b'" in w and "fold 0" in w for w in warnings))
         self.assertFalse(any("'a'" in w for w in warnings))
+
+    def test_warnings_apply_min_test_points_per_site(self):
+        df = _counts(
+            [
+                ("a", CORALNET, "1", 40),
+                ("a", MERMAID, "m1", 5),
+                ("a", MERMAID, "m2", 10),
+                ("c", CORALNET, "1", 40),
+            ]
+        )
+        assignments = {(CORALNET, "1"): "test", (MERMAID, "m1"): "test", (MERMAID, "m2"): "0"}
+        report = build_coverage_report(df, assignments, folds=1).set_index("class_key")
+        self.assertEqual(
+            (report.loc["a"].test_points_coralnet, report.loc["a"].test_points_mermaid), (40, 5)
+        )
+        warnings = [
+            w
+            for w in coverage_warnings(report.reset_index(), min_test_points=30, folds=1)
+            if "test points" in w
+        ]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("'a'", warnings[0])
+        self.assertIn("mermaid", warnings[0])
 
 
 if __name__ == "__main__":

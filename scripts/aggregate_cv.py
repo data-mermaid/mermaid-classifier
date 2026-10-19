@@ -1,7 +1,8 @@
 """Aggregate the K cross-validation fold runs into one set of held-out metrics.
 
-Downloads ``annotations_holdout.csv`` from each fold run, checks the folds are
-disjoint, and writes per-class and overall metrics with source-clustered
+Downloads ``annotations_holdout.csv`` and ``holdout_groups.csv`` from each fold
+run, checks the runs are exactly folds 0..K-1 of one group selection (not the
+``test`` run), and writes per-class and overall metrics with source-clustered
 bootstrap 95% CIs, for all points and for CoralNet and MERMAID separately.
 The MLflow tracking URI comes from the MLFLOW_TRACKING_SERVER env var / .env
 value unless ``--mlflow-tracking-uri`` is given.
@@ -9,8 +10,8 @@ value unless ``--mlflow-tracking-uri`` is given.
 Usage (from the repo root)::
 
     uv run python scripts/aggregate_cv.py --run-ids RUN0 RUN1 RUN2 RUN3 RUN4 --out-dir cv_report
-    uv run python scripts/aggregate_cv.py --experiment my-experiment \\
-        --run-name-contains grouped_fold --out-dir cv_report
+    uv run python scripts/aggregate_cv.py \\
+        --experiment coralnet-all-mermaid-coarse-grouped-cv --out-dir cv_report
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from mlflow.tracking import MlflowClient
 from mermaid_classifier.pyspacer.utils import mlflow_connect
 from mermaid_classifier.training.cv_aggregate import (
     DEFAULT_REPS,
-    concat_folds,
+    combine_cv_runs,
     summarize,
     to_markdown,
     unknown_class_counts,
@@ -37,6 +38,8 @@ from mermaid_classifier.training.cv_aggregate import (
 logger = logging.getLogger(__name__)
 
 ARTIFACT_NAME = "annotations_holdout.csv"
+GROUPS_ARTIFACT_NAME = "holdout_groups.csv"
+FOLD_PARAM = "holdout_fold"
 
 
 def find_run_ids(client: MlflowClient, experiment: str, name_contains: str | None) -> list[str]:
@@ -57,19 +60,30 @@ def find_run_ids(client: MlflowClient, experiment: str, name_contains: str | Non
     ]
 
 
-def fetch_holdout(run_id: str, dst_dir: Path) -> pd.DataFrame:
-    path = mlflow.artifacts.download_artifacts(
-        run_id=run_id, artifact_path=ARTIFACT_NAME, dst_path=str(dst_dir / run_id)
-    )
-    return pd.read_csv(path, dtype=str, keep_default_na=False)
+def fetch_run(
+    client: MlflowClient, run_id: str, dst_dir: Path
+) -> tuple[str | None, bytes, pd.DataFrame]:
+    """A run's holdout_fold param, holdout_groups.csv bytes and holdout table."""
+    fold = client.get_run(run_id).data.params.get(FOLD_PARAM)
+    paths = {
+        name: mlflow.artifacts.download_artifacts(
+            run_id=run_id, artifact_path=name, dst_path=str(dst_dir / run_id)
+        )
+        for name in (ARTIFACT_NAME, GROUPS_ARTIFACT_NAME)
+    }
+    groups = Path(paths[GROUPS_ARTIFACT_NAME]).read_bytes()
+    return fold, groups, pd.read_csv(paths[ARTIFACT_NAME], dtype=str, keep_default_na=False)
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--run-ids", nargs="+", help="The K fold run ids.")
-    source.add_argument("--experiment", help="Experiment name; use with --run-name-contains.")
+    source.add_argument(
+        "--experiment", help="Experiment name; every finished run in it must be a CV fold."
+    )
     parser.add_argument("--run-name-contains", default=None, help="Run-name substring filter.")
+    parser.add_argument("--folds", type=int, default=5, help="K: runs must be folds 0..K-1.")
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--reps", type=int, default=DEFAULT_REPS, help="Bootstrap resamples.")
     parser.add_argument("--seed", type=int, default=0)
@@ -88,8 +102,11 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Aggregating %d run(s): %s", len(run_ids), ", ".join(run_ids))
 
     with tempfile.TemporaryDirectory() as tmp:
-        frames = {run_id: fetch_holdout(run_id, Path(tmp)) for run_id in run_ids}
-    combined = concat_folds(frames)
+        runs = {run_id: fetch_run(client, run_id, Path(tmp)) for run_id in run_ids}
+    try:
+        combined = combine_cv_runs(runs, args.folds)
+    except ValueError as exc:
+        raise SystemExit(f"Not a valid CV fold set: {exc}") from exc
 
     summary = summarize(combined, reps=args.reps, seed=args.seed)
     unknowns = unknown_class_counts(combined)

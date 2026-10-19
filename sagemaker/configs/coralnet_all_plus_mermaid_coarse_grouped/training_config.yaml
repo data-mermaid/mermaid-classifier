@@ -6,9 +6,11 @@
 # Label CSVs (rollups.csv, included_labels.csv) are copies from
 # coralnet_all_plus_mermaid_coarse. The holdout groups are not committed yet.
 #
-# Everything except the label CSVs, total_annotations and the mlflow block
-# matches coralnet_all_plus_mermaid/training_config.yaml, whose run is MLflow
-# 4886658aa7cf44f1935af4f0b0fca6b5. That is not the deployed v1 (run
+# Everything else matches coralnet_all_plus_mermaid_coarse/training_config.yaml
+# except: split_mode (images), subsample within_class/seed (source_spread, 0),
+# mermaid_project_lookup_uri, the holdout block (groups CSV, fold, per-class cap)
+# and the mlflow names. The comparison run is MLflow
+# 4886658aa7cf44f1935af4f0b0fca6b5 (coralnet_all_plus_mermaid). It is not the deployed v1 (run
 # 8ab6b87e86974841935aa9ad482bc317, an older pipeline at 7.4M), so compare
 # against 4886658a for the effect of the label set alone. Regenerate the label CSVs with:
 #   uv run python scripts/generate_training_config.py \

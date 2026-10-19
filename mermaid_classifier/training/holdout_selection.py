@@ -83,7 +83,8 @@ def select_holdout(
 
     warnings: list[str] = []
     test_groups: set[Group] = set()
-    test_points: dict[str, int] = {}
+    # Per (site, class): CoralNet test points must not make MERMAID look covered.
+    test_points: dict[tuple[str, str], int] = {}
     test_group_count: dict[str, int] = {}
 
     sites = sorted({site for site, _ in class_points})
@@ -103,9 +104,9 @@ def select_holdout(
                 if any(test_group_count.get(c, 0) + 1 > max_test_groups[c] for c in by_class):
                     continue
                 gain = sum(
-                    min(n, params.min_test_points - test_points.get(c, 0))
+                    min(n, params.min_test_points - test_points.get((site, c), 0))
                     for c, n in by_class.items()
-                    if test_points.get(c, 0) < params.min_test_points
+                    if test_points.get((site, c), 0) < params.min_test_points
                 )
                 key = (-gain / max(params.min_test_points, 1), _tiebreak(params.seed, group), group)
                 if best is None or key < best:
@@ -120,7 +121,7 @@ def select_holdout(
             test_groups.add(group)
             chosen += 1
             for c, n in class_points[group].items():
-                test_points[c] = test_points.get(c, 0) + n
+                test_points[(site, c)] = test_points.get((site, c), 0) + n
                 test_group_count[c] = test_group_count.get(c, 0) + 1
 
     assignments: dict[Group, str] = dict.fromkeys(test_groups, TEST_FOLD)
@@ -171,8 +172,10 @@ def build_coverage_report(
 ) -> pd.DataFrame:
     """
     One row per class. 'unknown' groups count toward total_groups and
-    train_groups (they train) but have no fold.
+    train_groups (they train) but have no fold. `total_points_{site}` and
+    `test_points_{site}` split the point counts by site.
     """
+    sites = sorted({str(s) for s in counts["site"]})
     rows: list[dict[str, object]] = []
     for class_key, sub in counts.groupby("class_key"):
         entry: dict[str, object] = {"class_key": class_key}
@@ -187,6 +190,16 @@ def build_coverage_report(
         entry["test_points"] = sum(
             n for n, f in zip(points, folds_of, strict=True) if f == TEST_FOLD
         )
+        for site in sites:
+            at_site = [str(s) == site for s in sub["site"]]
+            entry[f"total_points_{site}"] = sum(
+                n for n, here in zip(points, at_site, strict=True) if here
+            )
+            entry[f"test_points_{site}"] = sum(
+                n
+                for n, f, here in zip(points, folds_of, at_site, strict=True)
+                if here and f == TEST_FOLD
+            )
         entry["train_groups"] = entry["total_groups"] - entry["test_groups"]  # pyright: ignore[reportOperatorIssue]
         for fold in range(folds):
             entry[f"points_fold_{fold}"] = sum(
@@ -197,14 +210,17 @@ def build_coverage_report(
 
 
 def coverage_warnings(report: pd.DataFrame, min_test_points: int, folds: int) -> list[str]:
-    """Classes thin in test or absent from a fold."""
+    """Classes thin in a site's test set (only sites with points for the class) or absent from a fold."""
     out: list[str] = []
+    sites = [c.removeprefix("test_points_") for c in report.columns if c.startswith("test_points_")]
     for row in report.to_dict("records"):
         name = row["class_key"]
-        if row["test_points"] < min_test_points:
-            out.append(
-                f"class {name!r} has {row['test_points']} test points (< {min_test_points})."
-            )
+        for site in sites:
+            if row[f"total_points_{site}"] > 0 and row[f"test_points_{site}"] < min_test_points:
+                out.append(
+                    f"class {name!r} has {row[f'test_points_{site}']} {site} test points"
+                    f" (< {min_test_points})."
+                )
         for fold in range(folds):
             if row[f"points_fold_{fold}"] == 0:
                 out.append(f"class {name!r} has no points in fold {fold}.")
