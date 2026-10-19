@@ -466,6 +466,18 @@ class HandleMissingFeatureVectorsTest(BaseTrainTest):
         message = str(error_cm.exception)
         self.assertIn("Too many feature vectors are missing (2), such as:", message)
 
+        # The lookup tolerance does not loosen the missing-feature check.
+        dataset3 = NoInitDataset()
+        dataset3.duck_conn.execute("CREATE TABLE annotations AS SELECT * FROM annotations_df")
+        with (
+            self.assertRaises(RuntimeError),
+            override_settings(
+                training_inputs_percent_missing_allowed=49,
+                mermaid_project_lookup_percent_unmatched_allowed=100,
+            ),
+        ):
+            dataset3.handle_missing_feature_vectors(s3_paths)
+
 
 class LazyLibraryTest(BaseTrainTest):
     """

@@ -120,7 +120,8 @@ class DatasetOptions:
     a group, like a CoralNet source); an image absent from the lookup gets
     project_id 'unknown'. When unset, every MERMAID row has project_id 'all'.
     - Too many unmatched images (more than
-      TRAINING_INPUTS_PERCENT_MISSING_ALLOWED percent) aborts the run, as
+      MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED percent, default 0,
+      independent of TRAINING_INPUTS_PERCENT_MISSING_ALLOWED) aborts the run, as
       does an image that maps to more than one project.
 
     holdout_groups_csv

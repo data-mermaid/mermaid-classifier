@@ -63,7 +63,13 @@ def _lookup_df(mapping: dict[str, str]) -> pd.DataFrame:
 
 
 class MermaidProjectLookupTest(unittest.TestCase):
-    def _read(self, mermaid_df: pd.DataFrame, lookup_df: pd.DataFrame | None, allowed: int = 0):
+    def _read(
+        self,
+        mermaid_df: pd.DataFrame,
+        lookup_df: pd.DataFrame | None,
+        lookup_allowed: int = 0,
+        missing_allowed: int = 0,
+    ):
         dataset = make_dataset(self)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -75,7 +81,8 @@ class MermaidProjectLookupTest(unittest.TestCase):
         with override_settings(
             aws_anonymous="True",
             mermaid_annotations_parquet_pattern=mermaid_path,
-            training_inputs_percent_missing_allowed=allowed,
+            mermaid_project_lookup_percent_unmatched_allowed=lookup_allowed,
+            training_inputs_percent_missing_allowed=missing_allowed,
         ):
             dataset.read_mermaid_data()
         return dataset
@@ -90,12 +97,32 @@ class MermaidProjectLookupTest(unittest.TestCase):
         self.assertEqual(self._projects(dataset), {"i1": "pA", "i2": "pB"})
 
     def test_unmatched_images_are_unknown_within_tolerance(self):
-        dataset = self._read(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), allowed=60)
+        dataset = self._read(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), lookup_allowed=60)
         self.assertEqual(self._projects(dataset), {"i1": "pA", "i2": "unknown"})
 
     def test_unmatched_over_tolerance_raises(self):
         with self.assertRaisesRegex(RuntimeError, "project lookup"):
-            self._read(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), allowed=10)
+            self._read(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), lookup_allowed=10)
+
+    def test_single_unmatched_image_raises_despite_generous_missing_fv_tolerance(self):
+        images = [f"i{n}" for n in range(10)]
+        with self.assertRaisesRegex(
+            RuntimeError, "Regenerate the lookup.*MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED"
+        ):
+            self._read(
+                _mermaid_df(images),
+                _lookup_df(dict.fromkeys(images[:-1], "pA")),
+                missing_allowed=10,
+            )
+
+    def test_raising_lookup_tolerance_allows_single_unmatched_image(self):
+        images = [f"i{n}" for n in range(10)]
+        dataset = self._read(
+            _mermaid_df(images),
+            _lookup_df(dict.fromkeys(images[:-1], "pA")),
+            lookup_allowed=10,
+        )
+        self.assertEqual(self._projects(dataset)["i9"], "unknown")
 
     def test_image_in_two_projects_raises(self):
         lookup = pd.concat([_lookup_df({"i1": "pA"}), _lookup_df({"i1": "pB"})])

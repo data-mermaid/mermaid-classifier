@@ -97,6 +97,9 @@ class Settings(BaseSettings):
 
     mlflow_tracking_server: str | None = None
     training_inputs_percent_missing_allowed: int = 0
+    # Separate from the missing-feature tolerance: an unmatched MERMAID image
+    # trains as project_id 'unknown' and can leak a held-out group's data.
+    mermaid_project_lookup_percent_unmatched_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
     # Override for training batch size. If None (default),
     # training_batch_size() auto-calculates at runtime. Typed as int so

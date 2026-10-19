@@ -780,11 +780,13 @@ class TrainingDataset:
             f"{unmatched:,}",
             f"{total:,}",
         )
-        if unmatched > total * settings.training_inputs_percent_missing_allowed / 100:
+        allowed = settings.mermaid_project_lookup_percent_unmatched_allowed
+        if unmatched > total * allowed / 100:
             raise RuntimeError(
                 f"Too many MERMAID images are missing from the project lookup"
-                f" ({unmatched} of {total}). You can configure the tolerance with the"
-                f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
+                f" ({unmatched} of {total}). Regenerate the lookup so it covers"
+                f" these images, or raise the tolerance with the"
+                f" MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED setting."
             )
 
     def read_coralnet_manifest(self):
