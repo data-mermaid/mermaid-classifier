@@ -159,7 +159,7 @@ def load_config_then_pyspacer(config_dir: Path):
     return config, TrainingDataset
 
 
-def main(argv: list[str] | None = None) -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument(
         "--config-dir", required=True, help="Config dir, repo-root-relative or absolute."
@@ -173,6 +173,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--min-test-points", type=int, default=30)
     parser.add_argument("--max-class-group-loss", type=float, default=0.25)
+    parser.add_argument(
+        "--max-test-point-frac",
+        type=float,
+        default=0.10,
+        help="Per site, test groups hold at most this fraction of the site's points (0 disables).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--write-fold-configs",
@@ -185,7 +191,24 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Output CSV. Default: the config's dataset.holdout_groups_csv file.",
     )
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def selection_params(args: argparse.Namespace):
+    from mermaid_classifier.training.holdout_selection import SelectionParams
+
+    return SelectionParams(
+        test_frac=args.test_frac,
+        folds=args.folds,
+        min_test_points=args.min_test_points,
+        max_class_group_loss=args.max_class_group_loss,
+        seed=args.seed,
+        max_test_point_frac=args.max_test_point_frac,
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
 
     config_dir = _resolve(args.config_dir, REPO_ROOT)
     beta_sources = read_beta_sources(_resolve(args.beta_sources, REPO_ROOT))
@@ -193,10 +216,10 @@ def main(argv: list[str] | None = None) -> None:
     _resolve_local_aws_credentials()
 
     from mermaid_classifier.training.holdout_selection import (
-        SelectionParams,
         build_coverage_report,
         coverage_warnings,
         select_holdout,
+        site_test_shares,
     )
 
     config, training_dataset_cls = load_config_then_pyspacer(config_dir)
@@ -241,13 +264,7 @@ def main(argv: list[str] | None = None) -> None:
         }
     )
 
-    params = SelectionParams(
-        test_frac=args.test_frac,
-        folds=args.folds,
-        min_test_points=args.min_test_points,
-        max_class_group_loss=args.max_class_group_loss,
-        seed=args.seed,
-    )
+    params = selection_params(args)
     coralnet_ids = {
         str(p)
         for site, p in zip(counts["site"], counts["project_id"], strict=True)
@@ -272,6 +289,14 @@ def main(argv: list[str] | None = None) -> None:
     by_fold = pd.Series(selection.assignments).value_counts().sort_index()
     print("Groups per fold:")
     print(by_fold.to_string())
+    print("Test share per site:")
+    for site, share in site_test_shares(counts, selection.assignments).items():
+        print(
+            f"  {site}: {share.test_groups}/{share.groups} groups"
+            f" ({share.test_groups / max(share.groups, 1):.1%}),"
+            f" {share.test_points}/{share.total_points} points"
+            f" ({share.test_points / max(share.total_points, 1):.1%})"
+        )
     for warning in [
         *selection.warnings,
         *coverage_warnings(report, params.min_test_points, params.folds),

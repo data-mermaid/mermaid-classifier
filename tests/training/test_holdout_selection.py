@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import random
 import unittest
@@ -10,9 +11,11 @@ import pandas as pd
 
 from mermaid_classifier.training.holdout_selection import (
     SelectionParams,
+    SiteShare,
     build_coverage_report,
     coverage_warnings,
     select_holdout,
+    site_test_shares,
 )
 
 CORALNET = "coralnet"
@@ -137,6 +140,85 @@ class SelectionTest(unittest.TestCase):
         )
         per_fold = pd.Series(result.assignments).value_counts()
         self.assertEqual(per_fold.to_dict(), {"0": 4, "1": 4})
+
+
+def _one_huge_many_small() -> pd.DataFrame:
+    """MERMAID: p0 holds 1000 points, p1..p19 hold 10 each (site total 1190, 10% = 119)."""
+    rows = [("a", MERMAID, "p0", 1000)]
+    rows += [("a", MERMAID, f"p{i}", 10) for i in range(1, 20)]
+    return _counts(rows)
+
+
+def _test_points(df: pd.DataFrame, assignments: dict[tuple[str, str], str], site: str) -> int:
+    sub = df[df["site"] == site]
+    return sum(
+        int(n)
+        for p, n in zip(sub["project_id"], sub["n"], strict=True)
+        if assignments.get((site, p)) == "test"
+    )
+
+
+class PointCapTest(unittest.TestCase):
+    CAPPED = SelectionParams(0.10, 3, 30, 1.0, 0, max_test_point_frac=0.10)
+
+    def test_huge_group_stays_out_of_test_when_it_would_exceed_the_cap(self):
+        result = select_holdout(_one_huge_many_small(), self.CAPPED, beta_sources=set())
+        self.assertNotEqual(result.assignments[(MERMAID, "p0")], "test")
+        tests = [g for g, f in result.assignments.items() if f == "test"]
+        self.assertEqual(len(tests), 2)
+
+    def test_without_the_cap_the_huge_group_is_picked_for_its_gain(self):
+        for cap in (None, 0.0):
+            params = dataclasses.replace(self.CAPPED, max_test_point_frac=cap)
+            result = select_holdout(_one_huge_many_small(), params, beta_sources=set())
+            self.assertEqual(result.assignments[(MERMAID, "p0")], "test", cap)
+
+    def test_realised_point_share_is_within_the_cap_for_every_site(self):
+        df = _synthetic_counts()
+        params = dataclasses.replace(LOOSE, test_frac=0.30, max_test_point_frac=0.10)
+        result = select_holdout(df, params, beta_sources=set())
+        for site in (CORALNET, MERMAID):
+            total = int(df[df["site"] == site]["n"].sum())
+            self.assertLessEqual(_test_points(df, result.assignments, site), 0.10 * total, site)
+
+    def test_cap_counts_the_unknown_group_in_the_site_total(self):
+        rows = [("a", MERMAID, f"p{i}", 100) for i in range(10)]
+        rows.append(("a", MERMAID, "unknown", 9000))
+        # Site total 10000, cap 10% = 1000: all ten known groups (100 each) may be test.
+        params = SelectionParams(0.50, 2, 30, 1.0, 0, max_test_point_frac=0.10)
+        result = select_holdout(_counts(rows), params, beta_sources=set())
+        tests = [g for g, f in result.assignments.items() if f == "test"]
+        self.assertEqual(len(tests), 5)
+
+    def test_group_target_still_limits_when_the_cap_is_loose(self):
+        rows = [("a", MERMAID, f"p{i}", 10) for i in range(20)]
+        params = SelectionParams(0.10, 2, 30, 1.0, 0, max_test_point_frac=0.90)
+        result = select_holdout(_counts(rows), params, beta_sources=set())
+        tests = [g for g, f in result.assignments.items() if f == "test"]
+        self.assertEqual(len(tests), 2)
+
+    def test_cap_that_leaves_no_test_group_warns(self):
+        rows = [("a", MERMAID, "p0", 100), ("a", MERMAID, "p1", 100)]
+        params = SelectionParams(0.50, 2, 30, 1.0, 0, max_test_point_frac=0.10)
+        result = select_holdout(_counts(rows), params, beta_sources=set())
+        self.assertFalse(any(f == "test" for f in result.assignments.values()))
+        self.assertTrue(any("max_test_point_frac" in w and "mermaid" in w for w in result.warnings))
+
+    def test_capped_selection_is_deterministic_and_row_order_independent(self):
+        df = _synthetic_counts()
+        params = dataclasses.replace(LOOSE, max_test_point_frac=0.10)
+        shuffled = df.sample(frac=1.0, random_state=5).reset_index(drop=True)
+        a = select_holdout(df, params, beta_sources=set())
+        b = select_holdout(shuffled, params, beta_sources=set())
+        self.assertEqual(a.assignments, b.assignments)
+        self.assertEqual(a.warnings, b.warnings)
+
+    def test_site_test_shares_reports_groups_and_points(self):
+        df = _one_huge_many_small()
+        assignments = {(MERMAID, "p1"): "test", (MERMAID, "p2"): "test"}
+        assignments.update({(MERMAID, f"p{i}"): "0" for i in [0, *range(3, 20)]})
+        shares = site_test_shares(df, assignments)
+        self.assertEqual(shares[MERMAID], SiteShare(2, 20, 20, 1190))
 
 
 class CoverageReportTest(unittest.TestCase):

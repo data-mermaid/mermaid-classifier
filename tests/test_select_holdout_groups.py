@@ -54,6 +54,18 @@ class ReadBetaSourcesTest(unittest.TestCase):
             self._read("id,name\n")
 
 
+class SelectionParamsFromArgsTest(unittest.TestCase):
+    def _params(self, *extra: str):
+        args = shg.parse_args(["--config-dir", "cfg", *extra])
+        return shg.selection_params(args)
+
+    def test_flag_reaches_selection_params(self):
+        self.assertEqual(self._params("--max-test-point-frac", "0.2").max_test_point_frac, 0.2)
+
+    def test_cap_defaults_to_ten_percent(self):
+        self.assertEqual(self._params().max_test_point_frac, 0.10)
+
+
 class WriteFoldConfigsTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

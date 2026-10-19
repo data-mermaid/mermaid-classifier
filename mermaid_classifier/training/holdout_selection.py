@@ -29,6 +29,16 @@ class SelectionParams:
     min_test_points: int
     max_class_group_loss: float
     seed: int
+    # Per site, test groups hold at most this fraction of the site's points; None or 0 disables.
+    max_test_point_frac: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class SiteShare:
+    test_groups: int
+    groups: int
+    test_points: int
+    total_points: int
 
 
 @dataclasses.dataclass
@@ -94,6 +104,11 @@ def select_holdout(
         candidates = [
             g for g in site_groups if not (site == CORALNET_SITE and g[1] in beta_sources)
         ]
+        # The site total includes 'unknown' and Beta groups, as `total_points_{site}` does.
+        site_total = sum(sum(class_points[g].values()) for g in class_points if g[0] == site)
+        point_cap = params.max_test_point_frac * site_total if params.max_test_point_frac else None
+        site_test_points = 0
+        cap_blocked = False
         chosen = 0
         while chosen < target:
             best: tuple[float, float, Group] | None = None
@@ -102,6 +117,12 @@ def select_holdout(
                     continue
                 by_class = class_points[group]
                 if any(test_group_count.get(c, 0) + 1 > max_test_groups[c] for c in by_class):
+                    continue
+                if (
+                    point_cap is not None
+                    and site_test_points + sum(by_class.values()) > point_cap + 1e-9
+                ):
+                    cap_blocked = True
                     continue
                 gain = sum(
                     min(n, params.min_test_points - test_points.get((site, c), 0))
@@ -112,14 +133,22 @@ def select_holdout(
                 if best is None or key < best:
                     best = key
             if best is None:
-                warnings.append(
-                    f"site {site!r}: selected {chosen} of {target} test groups; no remaining"
-                    f" eligible group satisfies max_class_group_loss."
-                )
+                if chosen == 0 and cap_blocked and len(candidates) >= 2:
+                    warnings.append(
+                        f"site {site!r}: max_test_point_frac={params.max_test_point_frac} leaves"
+                        f" 0 of {target} test groups; every eligible group exceeds the cap."
+                    )
+                else:
+                    warnings.append(
+                        f"site {site!r}: selected {chosen} of {target} test groups; no remaining"
+                        f" eligible group satisfies max_class_group_loss"
+                        f"{' and max_test_point_frac' if cap_blocked else ''}."
+                    )
                 break
             group = best[2]
             test_groups.add(group)
             chosen += 1
+            site_test_points += sum(class_points[group].values())
             for c, n in class_points[group].items():
                 test_points[(site, c)] = test_points.get((site, c), 0) + n
                 test_group_count[c] = test_group_count.get(c, 0) + 1
@@ -165,6 +194,30 @@ def _assign_folds(
         for c, n in by_class.items():
             fold_points[fold][c] = fold_points[fold].get(c, 0) + n
     return result
+
+
+def site_test_shares(counts: pd.DataFrame, assignments: dict[Group, str]) -> dict[str, SiteShare]:
+    """
+    Per site, the test share in groups and in points.
+
+    Points are the site's total (as `total_points_{site}`); groups exclude 'unknown'.
+    """
+    points: dict[Group, int] = {}
+    for site, project_id, n in zip(counts["site"], counts["project_id"], counts["n"], strict=True):
+        group = (str(site), str(project_id))
+        points[group] = points.get(group, 0) + int(n)
+    shares: dict[str, SiteShare] = {}
+    for site in sorted({g[0] for g in points}):
+        here = [g for g in points if g[0] == site]
+        known = [g for g in here if g[1] != UNKNOWN_GROUP]
+        tests = [g for g in here if assignments.get(g) == TEST_FOLD]
+        shares[site] = SiteShare(
+            test_groups=len(tests),
+            groups=len(known),
+            test_points=sum(points[g] for g in tests),
+            total_points=sum(points[g] for g in here),
+        )
+    return shares
 
 
 def build_coverage_report(
