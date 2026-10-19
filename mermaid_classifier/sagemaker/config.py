@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -39,6 +40,8 @@ class SubsampleConfig(BaseModel):
     strategy: str = "stratified"
     total_annotations: int | None = None
     min_per_class: int = 0
+    within_class: Literal["ordered", "source_spread"] = "ordered"
+    seed: int = 0
 
     @model_validator(mode="after")
     def _validate_via_options(self) -> SubsampleConfig:
@@ -50,6 +53,8 @@ class SubsampleConfig(BaseModel):
             strategy=self.strategy,
             total_annotations=self.total_annotations,
             min_per_class=self.min_per_class,
+            within_class=self.within_class,
+            seed=self.seed,
         )
         return self
 
@@ -89,6 +94,7 @@ class DatasetConfig(BaseModel):
     holdout_groups_csv: str | None = None
     # 'test' or a CV fold number; YAML's bare `holdout_fold: 2` is coerced.
     holdout_fold: str = "test"
+    holdout_max_per_class: int | None = Field(default=3000, gt=0)
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     subsample: SubsampleConfig | None = None
     weighting: WeightingConfig | None = None
@@ -212,6 +218,8 @@ class TrainingRunConfig(BaseModel):
                 strategy=d.subsample.strategy,
                 total_annotations=d.subsample.total_annotations,
                 min_per_class=d.subsample.min_per_class,
+                within_class=d.subsample.within_class,
+                seed=d.subsample.seed,
             )
 
         weighting = None
@@ -236,6 +244,7 @@ class TrainingRunConfig(BaseModel):
             mermaid_project_lookup_uri=d.mermaid_project_lookup_uri,
             holdout_groups_csv=_resolve(d.holdout_groups_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             holdout_fold=d.holdout_fold,
+            holdout_max_per_class=d.holdout_max_per_class,
             ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions
             subsample=subsample,
             weighting=weighting,

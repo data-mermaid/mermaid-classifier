@@ -137,6 +137,12 @@ class DatasetOptions:
       is a fold number, rows of the 'test' groups are tagged is_excluded
       and dropped, so a CV run neither trains nor evaluates on them.
 
+    holdout_max_per_class
+
+    Caps each class's holdout rows (keeping whole images first, in seeded
+    hash order) to bound the feature downloads for evaluation. None keeps
+    every holdout row. Has no effect when nothing is held out.
+
     ref_val_ratios
 
     Determines the ratios of training annotations that will go into
@@ -189,6 +195,7 @@ class DatasetOptions:
     mermaid_project_lookup_uri: str | None = None
     holdout_groups_csv: str | None = None
     holdout_fold: str = "test"
+    holdout_max_per_class: int | None = 3000
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     # Optional per-class subsampling. None means use all annotations.
     # See mermaid_classifier.training.subsample for available strategies

@@ -244,6 +244,70 @@ class HoldoutOptionsTest(unittest.TestCase):
             self._build("holdout_fold: fold-a")
 
 
+class SourceSpreadOptionsTest(unittest.TestCase):
+    """within_class, seed and holdout_max_per_class parse and default to today's behaviour."""
+
+    def _build(self, dataset_patch: dict):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"].update(dataset_patch)
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            path = _write(tmp, _yaml.dump(base))
+            config = TrainingRunConfig.from_yaml_path(path)
+            return config, config.build_options(config_dir=tmp)[0]
+
+    def test_defaults_reproduce_the_ordered_subsample_and_default_holdout_cap(self):
+        config, dataset = self._build({})
+        assert config.dataset.subsample is not None
+        assert dataset.subsample is not None
+        self.assertEqual(config.dataset.subsample.within_class, "ordered")
+        self.assertEqual(config.dataset.subsample.seed, 0)
+        self.assertEqual(dataset.subsample.within_class, "ordered")
+        self.assertEqual(dataset.subsample.seed, 0)
+        self.assertEqual(config.dataset.holdout_max_per_class, 3000)
+        self.assertEqual(dataset.holdout_max_per_class, 3000)
+
+    def test_fields_reach_the_option_dataclasses(self):
+        _, dataset = self._build(
+            {
+                "subsample": {
+                    "strategy": "balanced",
+                    "total_annotations": 1000,
+                    "within_class": "source_spread",
+                    "seed": 5,
+                },
+                "holdout_max_per_class": 500,
+            }
+        )
+        assert dataset.subsample is not None
+        self.assertEqual(dataset.subsample.within_class, "source_spread")
+        self.assertEqual(dataset.subsample.seed, 5)
+        self.assertEqual(dataset.holdout_max_per_class, 500)
+
+    def test_null_holdout_cap_disables_the_cap(self):
+        config, dataset = self._build({"holdout_max_per_class": None})
+        self.assertIsNone(config.dataset.holdout_max_per_class)
+        self.assertIsNone(dataset.holdout_max_per_class)
+
+    def test_unknown_within_class_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._build(
+                {
+                    "subsample": {
+                        "strategy": "balanced",
+                        "total_annotations": 1000,
+                        "within_class": "random",
+                    }
+                }
+            )
+
+    def test_non_positive_holdout_cap_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._build({"holdout_max_per_class": 0})
+
+
 class ExampleYamlTest(unittest.TestCase):
     def test_committed_example_loads(self):
         # Resolve relative to the repo root (the tests/ dir is one

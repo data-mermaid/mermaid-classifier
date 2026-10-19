@@ -321,6 +321,7 @@ class MLflowTrainingRunner(TrainingRunner):
                     self.dataset_options.holdout_groups_csv or ""
                 ),
                 "holdout_fold": self.dataset_options.holdout_fold,
+                "holdout_max_per_class": self.dataset_options.holdout_max_per_class or "",
                 "ref_val_ratios": str(self.dataset_options.ref_val_ratios),
             }
             mlflow.log_params(dataset_options_to_log)
@@ -357,6 +358,7 @@ class MLflowTrainingRunner(TrainingRunner):
                 # via _compute_class_weights. Log them now.
                 self._log_weighting_artifacts()
                 self._log_subsample_audit()
+                self._log_holdout_audit()
 
                 profiles_df = pd.DataFrame(self.profiled_sections)
                 self.log_dataframe(profiles_df, "profiled_sections")
@@ -605,26 +607,8 @@ class MLflowTrainingRunner(TrainingRunner):
         changes here.
         """
         df = getattr(self.dataset, "_subsample_audit_df", None)
-        if df is None:
-            return
-        # Decorate with human-readable names so the CSV is self-contained.
-        ba_library = get_benthic_attribute_library()
-        gf_library = get_growth_form_library()
-
-        def _decorate(row: pd.Series) -> pd.Series:  # type: ignore[type-arg]
-            try:
-                _ba_id = str(row["benthic_attribute_id"])
-                _gf_id = str(row["growth_form_id"])
-                ba_name = ba_library.id_to_name(_ba_id) if _ba_id else ""
-                gf_name = gf_library.id_to_name(_gf_id) if _gf_id else ""
-            except Exception:
-                ba_name, gf_name = "", ""
-            return pd.Series({"ba_name": ba_name, "gf_name": gf_name})
-
-        if not df.empty:
-            decorated = df.apply(_decorate, axis=1)
-            out = pd.concat([df, decorated], axis=1)
-            out = out[  # type: ignore[index]
+        if df is not None and not df.empty:
+            out = self._with_class_names(df)[
                 [
                     "benthic_attribute_id",
                     "ba_name",
@@ -637,9 +621,44 @@ class MLflowTrainingRunner(TrainingRunner):
             ].sort_values("realized_n", ascending=False)  # pyright: ignore[reportCallIssue]  # pandas DataFrame.sort_values overload issue with column-subscript result
             self.log_dataframe(out, "subsample/per_class_counts")
 
+        # Only source_spread produces the per-(class, group) audit.
+        group_df = getattr(self.dataset, "_subsample_group_audit_df", None)
+        if group_df is not None and not group_df.empty:
+            self.log_dataframe(
+                self._with_class_names(group_df),
+                "subsample/per_class_group_counts",
+            )
+
         realized = getattr(self.dataset, "_subsample_realized_total", None)
         if realized is not None:
             mlflow.log_metric("subsample/realized_total", float(realized), step=0)
+
+    def _log_holdout_audit(self) -> None:
+        """Log the per-class holdout cap audit; nothing if no cap applied."""
+        df = getattr(self.dataset, "_holdout_audit_df", None)
+        if df is None or df.empty:
+            return
+        self.log_dataframe(self._with_class_names(df), "holdout/per_class_counts")
+
+    @staticmethod
+    def _with_class_names(df: pd.DataFrame) -> pd.DataFrame:
+        """Append ba_name / gf_name columns to a table keyed by BA and GF ids,
+        so audit CSVs are self-contained. Names fall back to '' if the
+        libraries cannot resolve an id."""
+        ba_library = get_benthic_attribute_library()
+        gf_library = get_growth_form_library()
+
+        def _names(row: pd.Series) -> pd.Series:  # type: ignore[type-arg]
+            try:
+                _ba_id = str(row["benthic_attribute_id"])
+                _gf_id = str(row["growth_form_id"])
+                ba_name = ba_library.id_to_name(_ba_id) if _ba_id else ""
+                gf_name = gf_library.id_to_name(_gf_id) if _gf_id else ""
+            except Exception:
+                ba_name, gf_name = "", ""
+            return pd.Series({"ba_name": ba_name, "gf_name": gf_name})
+
+        return pd.concat([df, df.apply(_names, axis=1)], axis=1)
 
     @staticmethod
     def _existing_ancestor(path: str) -> str:

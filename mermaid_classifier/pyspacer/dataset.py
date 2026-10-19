@@ -59,6 +59,7 @@ from mermaid_classifier.pyspacer.utils import logging_config_for_script
 from mermaid_classifier.training.subsample import (
     SubsampleOptions,
     compute_per_class_targets,
+    water_fill,
 )
 
 logger = logging_config_for_script("train")
@@ -89,6 +90,10 @@ class TrainingDataset:
         # None so the no-subsample path stays artifact-free.
         self._subsample_audit_df: pd.DataFrame | None = None
         self._subsample_realized_total: int | None = None
+        # Set only by source_spread (per class x group) and by an applied
+        # holdout cap; None otherwise.
+        self._subsample_group_audit_df: pd.DataFrame | None = None
+        self._holdout_audit_df: pd.DataFrame | None = None
         if settings.feature_cache_dir:
             os.makedirs(settings.feature_cache_dir, exist_ok=True)
             self._feature_dir = settings.feature_cache_dir
@@ -175,6 +180,11 @@ class TrainingDataset:
             # targets are computed from rows that can actually reach training.
             with self.section_profiling("Per-class subsampling"):
                 self._apply_subsample(options.subsample)
+
+        if options.holdout_max_per_class is not None:
+            seed = options.subsample.seed if options.subsample is not None else 0
+            with self.section_profiling("Capping holdout rows per class"):
+                self._cap_holdout_rows(options.holdout_max_per_class, seed)
 
         self.labels = self.prep_annotations_for_pyspacer()
 
@@ -346,31 +356,41 @@ class TrainingDataset:
             f"{conflict_points:,}",
         )
 
+    def _has_holdout_column(self) -> bool:
+        columns = self.duck_conn.execute("DESCRIBE annotations").fetchall()
+        return any(c[0] == "is_holdout" for c in columns)
+
     def _apply_subsample(self, opts: SubsampleOptions) -> None:
         """Deterministic per-class subsampling of the annotations table.
 
         Replaces the old non-deterministic ``annotation_limit`` block.
         Runs after rollup + included-labels filter, before the
-        train/ref/val split.
+        train/ref/val split. Only rows with ``is_holdout = FALSE`` take
+        part: per-class targets come from their counts, and holdout rows
+        pass through untouched (``_cap_holdout_rows`` bounds those).
 
         Pipeline (all in DuckDB, in-process):
 
-          1. Read per-class counts of the current annotations table,
+          1. Read per-class counts of the non-holdout annotations,
              keyed by ``(benthic_attribute_id, growth_form_id)``. Both
              columns are post-rollup at this point.
           2. Call ``compute_per_class_targets(opts, counts)`` to get
              per-class target row counts. Strategy is dispatched by
              ``opts.strategy`` (today: 'stratified' or 'balanced'; new
              strategies plug in via ``training/subsample/registry.py``).
-          3. Materialize the target dict as a temp table and JOIN it
-             against a deterministic ROW_NUMBER() partitioned by class
-             and ordered by ``(site, project_id, image_id, row, col)``
-             -- the per-annotation primary key in this schema. That
-             ordering makes the subsample identical across processes
-             and across DuckDB thread counts.
+          3. Select rows per class, by ``opts.within_class``:
+             * ``'ordered'``: a deterministic ROW_NUMBER() partitioned
+               by class and ordered by ``(site, project_id, image_id,
+               row, col)``, keeping ``_rn <= target``.
+             * ``'source_spread'``: split each class's target across its
+               groups ``(site, project_id)`` with ``water_fill``, then
+               keep ``_rn <= quota`` of a ROW_NUMBER() partitioned by
+               class and group and ordered by a seeded image hash, so
+               whole images are taken first.
+             Both orderings are total, so the subsample is identical
+             across processes and DuckDB thread counts.
           4. Replace the ``annotations`` table with the surviving rows
-             and log realized per-class counts to MLflow as a CSV
-             artifact for after-the-fact auditing.
+             and stash realized per-class counts for the MLflow audit.
 
         Extension hooks:
           * Stratify at a coarser level by changing the PARTITION BY
@@ -380,11 +400,18 @@ class TrainingDataset:
             UNION-ALL pass over the surviving rows; gate on a new
             ``opts.oversample`` field.
         """
+        self._subsample_group_audit_df = None
+        has_holdout = self._has_holdout_column()
+        # Holdout rows are set aside from the subsample, not counted in it.
+        candidates = (
+            "(SELECT * FROM annotations WHERE NOT is_holdout)" if has_holdout else ("annotations")
+        )
+
         # Step 1: per-class counts (deterministic ORDER BY for stable
         # iteration order downstream).
         rows = self.duck_conn.execute(
             "SELECT benthic_attribute_id, growth_form_id, COUNT(*)"
-            " FROM annotations"
+            f" FROM {candidates}"
             " GROUP BY benthic_attribute_id, growth_form_id"
             " ORDER BY benthic_attribute_id, growth_form_id"
         ).fetchall()
@@ -397,43 +424,80 @@ class TrainingDataset:
         # Step 2: dispatch to the strategy registry.
         targets = compute_per_class_targets(opts, class_counts)
 
-        # Step 3: register targets as a DuckDB DataFrame and JOIN it
+        # Step 3: register the allocation as a DuckDB DataFrame and JOIN it
         # against a deterministic ROW_NUMBER. We pass the dataframe via
         # the connection's variable namespace (``df`` -> SQL view).
-        targets_df = pd.DataFrame(
-            [
-                {
-                    "benthic_attribute_id": ba,
-                    "growth_form_id": gf,
-                    "target_n": int(n),
-                }
-                for (ba, gf), n in targets.items()
-            ]
-        )
-        self.duck_conn.register("_subsample_targets", targets_df)
+        group_available: dict[tuple[str, str, str, str], int] = {}
+        group_quotas: dict[tuple[str, str, str, str], int] = {}
+        if opts.within_class == "source_spread":
+            group_rows = self.duck_conn.execute(
+                "SELECT benthic_attribute_id, growth_form_id, site, project_id, COUNT(*)"
+                f" FROM {candidates}"
+                " GROUP BY ALL"
+                " ORDER BY ALL"
+            ).fetchall()
+            per_class_groups: dict[tuple[str, str], dict[tuple[str, str], int]] = {}
+            for ba, gf, site, project_id, n in group_rows:
+                group_available[(ba, gf, site, project_id)] = n
+                per_class_groups.setdefault((ba, gf), {})[(site, project_id)] = n
+            for (ba, gf), groups in per_class_groups.items():
+                for (site, project_id), quota in water_fill(
+                    groups, targets.get((ba, gf), 0)
+                ).items():
+                    group_quotas[(ba, gf, site, project_id)] = quota
+            allocation_df = pd.DataFrame(
+                [
+                    {
+                        "benthic_attribute_id": ba,
+                        "growth_form_id": gf,
+                        "site": site,
+                        "project_id": project_id,
+                        "target_n": int(quota),
+                    }
+                    for (ba, gf, site, project_id), quota in group_quotas.items()
+                ]
+            )
+            partition_by = "benthic_attribute_id, growth_form_id, site, project_id"
+            # hash() of the seed-salted feature vector clusters a group's
+            # rows by image; feature_vector breaks hash ties.
+            order_by = f"hash('{int(opts.seed)}' || feature_vector), feature_vector, row, col"
+            join_using = "benthic_attribute_id, growth_form_id, site, project_id"
+        else:
+            allocation_df = pd.DataFrame(
+                [
+                    {
+                        "benthic_attribute_id": ba,
+                        "growth_form_id": gf,
+                        "target_n": int(n),
+                    }
+                    for (ba, gf), n in targets.items()
+                ]
+            )
+            partition_by = "benthic_attribute_id, growth_form_id"
+            # The (site, project_id, image_id, row, col) tuple is unique
+            # per annotation in this schema (CoralNet and MERMAID both
+            # produce point-level rows keyed this way), giving a fully
+            # deterministic row order across processes.
+            order_by = "site, project_id, image_id, row, col"
+            join_using = "benthic_attribute_id, growth_form_id"
+
+        self.duck_conn.register("_subsample_targets", allocation_df)
         try:
-            # The (site, project_id, image_id, row, col) tuple is
-            # unique per annotation in this schema (CoralNet and
-            # MERMAID both produce point-level rows keyed this way),
-            # giving a fully deterministic row order across processes.
+            holdout_union = " UNION ALL BY NAME SELECT * FROM annotations WHERE is_holdout"
             self.duck_conn.execute(
                 "CREATE OR REPLACE TABLE annotations AS"
                 " WITH numbered AS ("
                 "   SELECT *,"
-                "          ROW_NUMBER() OVER ("
-                "              PARTITION BY benthic_attribute_id,"
-                "                           growth_form_id"
-                "              ORDER BY site, project_id, image_id,"
-                "                       row, col"
+                f"          ROW_NUMBER() OVER ("
+                f"              PARTITION BY {partition_by}"
+                f"              ORDER BY {order_by}"
                 "          ) AS _rn"
-                "   FROM annotations"
+                f"   FROM {candidates}"
                 " )"
                 " SELECT n.* EXCLUDE (_rn)"
                 " FROM numbered n"
-                " JOIN _subsample_targets t USING ("
-                "     benthic_attribute_id, growth_form_id"
-                " )"
-                " WHERE n._rn <= t.target_n"
+                f" JOIN _subsample_targets t USING ({join_using})"
+                " WHERE n._rn <= t.target_n" + (holdout_union if has_holdout else "")
             )
         finally:
             self.duck_conn.unregister("_subsample_targets")
@@ -443,7 +507,7 @@ class TrainingDataset:
         # runs really did see the same data.
         realized_rows = self.duck_conn.execute(
             "SELECT benthic_attribute_id, growth_form_id, COUNT(*) AS n"
-            " FROM annotations"
+            f" FROM {candidates}"
             " GROUP BY benthic_attribute_id, growth_form_id"
             " ORDER BY benthic_attribute_id, growth_form_id"
         ).fetchall()
@@ -464,13 +528,102 @@ class TrainingDataset:
         # Stash on self; logged to MLflow by the runner alongside the
         # other dataset artifacts.
         self._subsample_audit_df = per_class_audit
+
+        if opts.within_class == "source_spread":
+            realized_group_rows = self.duck_conn.execute(
+                "SELECT benthic_attribute_id, growth_form_id, site, project_id, COUNT(*)"
+                f" FROM {candidates}"
+                " GROUP BY ALL"
+            ).fetchall()
+            realized_by_group = {
+                (ba, gf, site, pid): n for ba, gf, site, pid, n in realized_group_rows
+            }
+            self._subsample_group_audit_df = pd.DataFrame(
+                [
+                    {
+                        "benthic_attribute_id": ba,
+                        "growth_form_id": gf,
+                        "site": site,
+                        "project_id": project_id,
+                        "available": group_available[(ba, gf, site, project_id)],
+                        "quota": group_quotas[(ba, gf, site, project_id)],
+                        "realized": realized_by_group.get((ba, gf, site, project_id), 0),
+                    }
+                    for (ba, gf, site, project_id) in sorted(group_available)
+                ]
+            )
+
         realized_total = int(per_class_audit["realized_n"].sum())
         self._subsample_realized_total = realized_total
         logger.info(
             f"Subsample applied: strategy={opts.strategy!r},"
+            f" within_class={opts.within_class!r},"
             f" classes={len(class_counts)},"
             f" target_total={opts.total_annotations},"
             f" realized_total={realized_total}"
+        )
+
+    def _cap_holdout_rows(self, max_per_class: int, seed: int = 0) -> None:
+        """Cap each class's holdout rows at ``max_per_class``.
+
+        Keeps whole images first: within a class (not per group), rows are
+        ordered by a seeded hash of the feature vector, so the survivors
+        cluster by image. Non-holdout rows are untouched. A no-op, leaving
+        ``_holdout_audit_df`` None, when there are no holdout rows.
+        """
+        self._holdout_audit_df = None
+        if not self._has_holdout_column():
+            return
+
+        available_rows = self.duck_conn.execute(
+            "SELECT benthic_attribute_id, growth_form_id, COUNT(*)"
+            " FROM annotations WHERE is_holdout"
+            " GROUP BY benthic_attribute_id, growth_form_id"
+            " ORDER BY benthic_attribute_id, growth_form_id"
+        ).fetchall()
+        if not available_rows:
+            return
+
+        self.duck_conn.execute(
+            "CREATE OR REPLACE TABLE annotations AS"
+            " WITH numbered AS ("
+            "   SELECT *,"
+            "          ROW_NUMBER() OVER ("
+            "              PARTITION BY benthic_attribute_id, growth_form_id"
+            f"              ORDER BY hash('{int(seed)}' || feature_vector),"
+            "                       feature_vector, site, project_id, image_id, row, col"
+            "          ) AS _rn"
+            "   FROM annotations WHERE is_holdout"
+            " )"
+            " SELECT * EXCLUDE (_rn) FROM numbered"
+            f" WHERE _rn <= {int(max_per_class)}"
+            " UNION ALL BY NAME SELECT * FROM annotations WHERE NOT is_holdout"
+        )
+
+        realized_by_cls = {
+            (ba, gf): n
+            for ba, gf, n in self.duck_conn.execute(
+                "SELECT benthic_attribute_id, growth_form_id, COUNT(*)"
+                " FROM annotations WHERE is_holdout"
+                " GROUP BY benthic_attribute_id, growth_form_id"
+            ).fetchall()
+        }
+        self._holdout_audit_df = pd.DataFrame(
+            [
+                {
+                    "benthic_attribute_id": ba,
+                    "growth_form_id": gf,
+                    "available": n,
+                    "realized": realized_by_cls.get((ba, gf), 0),
+                }
+                for ba, gf, n in available_rows
+            ]
+        )
+        logger.info(
+            "Holdout cap applied: max_per_class=%s, holdout rows %s -> %s",
+            max_per_class,
+            f"{sum(n for _, _, n in available_rows):,}",
+            f"{sum(realized_by_cls.values()):,}",
         )
 
     def cleanup(self):
