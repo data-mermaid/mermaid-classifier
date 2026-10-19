@@ -23,6 +23,7 @@ from mermaid_classifier.common.benthic_attributes import (
 )
 from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
 from mermaid_classifier.pyspacer.dataset import TrainingDataset
+from mermaid_classifier.pyspacer.holdout_eval import log_holdout_evaluation
 from mermaid_classifier.pyspacer.inference import (
     export_artifact,
     load_predictor,
@@ -418,6 +419,15 @@ class MLflowTrainingRunner(TrainingRunner):
                     coordinator = MetricsCoordinator(ctx, duck_conn=self.dataset.duck_conn)
                     coordinator.compute_and_log_all()
 
+                    log_holdout_evaluation(
+                        dataset=self.dataset,
+                        clf_calibrated=clf_calibrated,
+                        predictor=predictor,
+                        ba_library=ba_library,
+                        gf_library=gf_library,
+                        format_func=self.format_metric,
+                    )
+
                     # Accuracy and ref_accs come from pyspacer's return_msg, not
                     # our metrics module (training-progress, not artifact-based).
                     mlflow.log_metric("accuracy", self.format_metric(return_msg.acc))
@@ -704,6 +714,10 @@ class MLflowTrainingRunner(TrainingRunner):
         mlflow.log_text(self.dataset.label_filter.csv_text, csv_filename)
 
         mlflow.log_text(self.dataset.rollup_spec.csv_text, "rollup_spec.csv")
+
+        if not self.dataset.holdout_groups.is_empty():
+            mlflow.log_text(self.dataset.holdout_groups.csv_text, "holdout_groups.csv")
+            mlflow.log_param("holdout_groups_count", len(self.dataset.holdout_groups.group_folds))
 
         # Number of images and annotations from each CN source and from
         # MERMAID.

@@ -29,9 +29,12 @@ class MetricsCoordinator:
         self,
         ctx: MetricsContext,
         duck_conn: duckdb.DuckDBPyConnection,
+        prefix: str = "",
     ):
         self.ctx = ctx
         self.duck_conn = duck_conn
+        # Prepended to every metric name and artifact path, e.g. "holdout/".
+        self.prefix = prefix
 
     def compute_and_log_all(self):
         """Run all applicable metric groups and log to MLflow."""
@@ -69,7 +72,7 @@ class MetricsCoordinator:
             )  # guarded by caller: only called when dataset is not None
             all_proba = []
             all_gt = []
-            for batch_x, batch_y in self.ctx.dataset.labels.val.load_data_in_batches():
+            for batch_x, batch_y in self.ctx.evaluated_labels().load_data_in_batches():
                 all_proba.append(self.ctx.clf.predict_proba(batch_x))
                 all_gt.extend(batch_y)
             self.ctx.val_proba = np.vstack(all_proba)
@@ -93,16 +96,16 @@ class MetricsCoordinator:
                     "Skipping metric %r with non-finite value %r", scalar.name, scalar.value
                 )
                 continue
-            mlflow.log_metric(scalar.name, scalar.value)
+            mlflow.log_metric(self.prefix + scalar.name, scalar.value)
 
         for df_result in result.dataframes:
-            log_dataframe(self.duck_conn, df_result.df, df_result.artifact_path)
+            log_dataframe(self.duck_conn, df_result.df, self.prefix + df_result.artifact_path)
 
         for dict_result in result.dicts:
-            mlflow.log_dict(dict_result.data, dict_result.artifact_path)
+            mlflow.log_dict(dict_result.data, self.prefix + dict_result.artifact_path)
 
         for fig_result in result.figures:
             try:
-                mlflow.log_figure(fig_result.fig, fig_result.artifact_path)
+                mlflow.log_figure(fig_result.fig, self.prefix + fig_result.artifact_path)
             finally:
                 plt.close(fig_result.fig)

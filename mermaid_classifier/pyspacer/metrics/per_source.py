@@ -60,10 +60,11 @@ def compute_per_source(ctx: MetricsContext) -> MetricGroupResult:
     source_per_index: list[str] = []
     images_per_source: Counter[str] = Counter()
     assert dataset is not None  # compute_per_source only called when dataset is not None
-    for feature_loc in dataset.labels.val.keys():  # noqa: SIM118 — ImageLabels.keys() is not a plain dict; __iter__ differs
+    eval_labels = ctx.evaluated_labels()
+    for feature_loc in eval_labels.keys():  # noqa: SIM118 — ImageLabels.keys() is not a plain dict; __iter__ differs
         site, project_id = feature_loc_to_source[feature_loc]
         source_key = f"{site}:{project_id}"
-        n_points = len(dataset.labels.val[feature_loc])
+        n_points = len(eval_labels[feature_loc])
         source_per_index.extend([source_key] * n_points)
         images_per_source[source_key] += 1
 
