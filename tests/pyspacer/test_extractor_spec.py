@@ -12,7 +12,9 @@ import hashlib
 import json
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from unittest import mock
 
 from spacer.data_classes import DataLocation
 from spacer.extractors import EfficientNetExtractor
@@ -147,6 +149,22 @@ class Sha256OfUriTest(unittest.TestCase):
             path = Path(d) / "weights.pt"
             path.write_bytes(payload)
             self.assertEqual(sha256_of_uri(str(path)), hashlib.sha256(payload).hexdigest())
+
+    def test_hashes_an_s3_stream_that_arrives_at_end_of_file(self):
+        payload = b"efficientnet weights stand-in" * 1000
+
+        # S3Storage._load_remote fills a BytesIO via download_fileobj and
+        # returns it without rewinding, so the stream sits at EOF.
+        def load_remote(self, key):
+            stream = BytesIO()
+            stream.write(payload)
+            return stream
+
+        with mock.patch("spacer.storage.S3Storage._load_remote", load_remote):
+            digest = sha256_of_uri("s3://bucket/weights.pt")
+
+        self.assertNotEqual(digest, hashlib.sha256(b"").hexdigest())
+        self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
 
 
 class ExtractorSpecFromWeightsTest(unittest.TestCase):

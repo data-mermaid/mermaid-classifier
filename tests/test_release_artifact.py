@@ -199,13 +199,17 @@ class MainTest(unittest.TestCase):
         tmp = Path(self._tmp.name)
         from support.calibrated_model import make_calibrated_model
 
+        self._model, self._X = make_calibrated_model()
+        self._spec = make_extractor_spec(self._X.shape[1])
+        self._export_dir = tmp
+        self._pair = self._export_with(self._spec)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _export_with(self, spec):
         from mermaid_classifier.pyspacer.inference import export_artifact
 
-        model, X = make_calibrated_model()
-        self._spec = make_extractor_spec(X.shape[1])
-        model_pt, _m, _ = export_artifact(model, tmp, X, extractor=self._spec)
-        self._pair = (Path(model_pt), tmp / "model.json")
-        self.addCleanup(self._tmp.cleanup)
+        model_pt, _m, _ = export_artifact(self._model, self._export_dir, self._X, extractor=spec)
+        return (Path(model_pt), self._export_dir / "model.json")
 
     def _run(self, client, cwd, weights_sha256=None):
         """Run main() with the MLflow fetch and the weights hash stubbed.
@@ -271,6 +275,25 @@ class MainTest(unittest.TestCase):
             self._run(client, Path(cwd), weights_sha256="b" * 64)
         self.assertIn("b" * 64, str(ctx.exception))
         self.assertIn(self._spec.weights_sha256, str(ctx.exception))
+        self.assertNotIn("#112", str(ctx.exception))
+        client.upload_file.assert_not_called()
+        client.copy_object.assert_not_called()
+
+    def test_manifest_recording_the_empty_hash_says_retrain(self):
+        # Logged before #112 was fixed: the recorded hash is of an empty
+        # stream, so the weights are not "different", just unverifiable.
+        from mermaid_classifier.common.s3_utils import EMPTY_SHA256
+
+        self._spec = make_extractor_spec(self._spec.feature_dim, weights_sha256=EMPTY_SHA256)
+        self._pair = self._export_with(self._spec)
+        client = mock.Mock()
+        client.head_object.side_effect = [_not_found_error(), {}]
+        with tempfile.TemporaryDirectory() as cwd, self.assertRaises(SystemExit) as ctx:
+            self._run(client, Path(cwd), weights_sha256="b" * 64)
+        message = str(ctx.exception)
+        self.assertIn("before #112 was fixed", message)
+        self.assertIn("retrain", message)
+        self.assertNotIn("not the same weights", message)
         client.upload_file.assert_not_called()
         client.copy_object.assert_not_called()
 
