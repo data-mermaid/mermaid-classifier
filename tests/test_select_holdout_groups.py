@@ -96,3 +96,33 @@ class WriteFoldConfigsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolveOutPathTest(unittest.TestCase):
+    CONFIG_DIR = Path("/repo/cfg")
+    PARENT = CONFIG_DIR / "groups_v2.csv"
+
+    def _resolve(self, out=None, parent=PARENT, write_fold_configs=True):
+        return shg.resolve_out_path(out, self.CONFIG_DIR, parent, write_fold_configs)
+
+    def test_default_is_the_parents_referenced_csv(self):
+        self.assertEqual(self._resolve(), self.PARENT)
+
+    def test_out_matching_the_parent_csv_is_accepted(self):
+        self.assertEqual(self._resolve(out=str(self.PARENT)), self.PARENT)
+
+    def test_out_elsewhere_with_fold_configs_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "holdout_groups_csv"):
+            self._resolve(out="/tmp/other.csv")
+
+    def test_out_elsewhere_without_fold_configs_is_used(self):
+        got = self._resolve(out="/tmp/other.csv", write_fold_configs=False)
+        self.assertEqual(got, Path("/tmp/other.csv").resolve())
+
+    def test_unset_parent_field_defaults_beside_the_config_without_fold_configs(self):
+        got = self._resolve(parent=None, write_fold_configs=False)
+        self.assertEqual(got, self.CONFIG_DIR / "holdout_groups.csv")
+
+    def test_unset_parent_field_with_fold_configs_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "holdout_groups_csv"):
+            self._resolve(parent=None)

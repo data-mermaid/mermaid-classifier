@@ -72,13 +72,13 @@ class CombineCvRunsTest(unittest.TestCase):
         }
 
     def test_complete_distinct_folds_are_combined(self):
-        out = combine_cv_runs(self._runs(), folds=2)
+        out = combine_cv_runs(self._runs())
         self.assertEqual(len(out), 2)
         self.assertEqual(sorted(out["run_id"]), ["run0", "run1"])
 
     def test_test_run_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "holdout_fold"):
-            combine_cv_runs(self._runs(folds=("0", "test")), folds=2)
+            combine_cv_runs(self._runs(folds=("0", "test")))
 
     def test_missing_or_non_integer_fold_param_is_rejected(self):
         for bad in (None, "abc", ""):
@@ -86,24 +86,34 @@ class CombineCvRunsTest(unittest.TestCase):
                 self.subTest(bad=bad),
                 self.assertRaisesRegex(ValueError, "holdout_fold"),
             ):
-                combine_cv_runs(self._runs(folds=("0", bad)), folds=2)
+                combine_cv_runs(self._runs(folds=("0", bad)))
 
-    def test_incomplete_fold_set_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "exactly folds 0..2"):
-            combine_cv_runs(self._runs(), folds=3)
+    def test_runs_covering_part_of_the_selections_folds_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly folds 0..1"):
+            combine_cv_runs(self._runs(folds=("0",), projects=("1",)))
+
+    def test_selection_with_a_fold_gap_is_rejected(self):
+        gapped = b"site,group_id,fold\ncoralnet,1,0\ncoralnet,2,2\ncoralnet,3,test\n"
+        with self.assertRaisesRegex(ValueError, "0..K-1"):
+            combine_cv_runs(self._runs(groups=[gapped, gapped]))
+
+    def test_selection_with_no_cv_folds_is_rejected(self):
+        only_test = b"site,group_id,fold\ncoralnet,3,test\n"
+        with self.assertRaisesRegex(ValueError, "0..K-1"):
+            combine_cv_runs(self._runs(groups=[only_test, only_test]))
 
     def test_duplicate_fold_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "more than one run"):
-            combine_cv_runs(self._runs(folds=("0", "0")), folds=2)
+            combine_cv_runs(self._runs(folds=("0", "0")))
 
     def test_differing_holdout_groups_are_rejected(self):
         other = self.GROUPS.replace(b"coralnet,2,1", b"coralnet,2,0")
         with self.assertRaisesRegex(ValueError, "holdout_groups.csv"):
-            combine_cv_runs(self._runs(groups=[self.GROUPS, other]), folds=2)
+            combine_cv_runs(self._runs(groups=[self.GROUPS, other]))
 
     def test_group_in_two_runs_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "coralnet:1"):
-            combine_cv_runs(self._runs(projects=("1", "1")), folds=2)
+            combine_cv_runs(self._runs(projects=("1", "1")))
 
 
 class HandComputedMetricsTest(unittest.TestCase):

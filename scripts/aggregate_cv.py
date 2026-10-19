@@ -1,7 +1,8 @@
 """Aggregate the K cross-validation fold runs into one set of held-out metrics.
 
 Downloads ``annotations_holdout.csv`` and ``holdout_groups.csv`` from each fold
-run, checks the runs are exactly folds 0..K-1 of one group selection (not the
+run, derives K from the shared ``holdout_groups.csv``, checks the runs are exactly
+folds 0..K-1 of that selection (not the
 ``test`` run), and writes per-class and overall metrics with source-clustered
 bootstrap 95% CIs, for all points and for CoralNet and MERMAID separately.
 The MLflow tracking URI comes from the MLFLOW_TRACKING_SERVER env var / .env
@@ -83,7 +84,6 @@ def main(argv: list[str] | None = None) -> None:
         "--experiment", help="Experiment name; every finished run in it must be a CV fold."
     )
     parser.add_argument("--run-name-contains", default=None, help="Run-name substring filter.")
-    parser.add_argument("--folds", type=int, default=5, help="K: runs must be folds 0..K-1.")
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--reps", type=int, default=DEFAULT_REPS, help="Bootstrap resamples.")
     parser.add_argument("--seed", type=int, default=0)
@@ -104,10 +104,11 @@ def main(argv: list[str] | None = None) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         runs = {run_id: fetch_run(client, run_id, Path(tmp)) for run_id in run_ids}
     try:
-        combined = combine_cv_runs(runs, args.folds)
+        combined = combine_cv_runs(runs)
     except ValueError as exc:
         raise SystemExit(f"Not a valid CV fold set: {exc}") from exc
 
+    print(f"Aggregated {len(runs)} fold runs (K={len(runs)}).")
     summary = summarize(combined, reps=args.reps, seed=args.seed)
     unknowns = unknown_class_counts(combined)
 

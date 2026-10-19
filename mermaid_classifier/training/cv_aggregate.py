@@ -16,7 +16,9 @@ recall and accuracy.
 from __future__ import annotations
 
 import collections
+import csv
 import dataclasses
+import io
 import warnings
 from collections.abc import Mapping, Sequence
 from typing import cast
@@ -68,28 +70,43 @@ def _fold_number(run_id: str, value: str | None) -> int:
     return int(value)
 
 
-def combine_cv_runs(
-    runs: Mapping[str, tuple[str | None, bytes, pd.DataFrame]], folds: int
-) -> pd.DataFrame:
+def selection_folds(groups: bytes) -> int:
+    """K of a `holdout_groups.csv`: its distinct non-`test` folds must be exactly 0..K-1."""
+    reader = csv.DictReader(io.StringIO(groups.decode()))
+    values = {row["fold"] for row in reader} - {"test"}
+    if not all(v.isascii() and v.isdigit() for v in values):
+        raise ValueError(f"holdout_groups.csv has non-integer fold values {sorted(values)}.")
+    found = {int(v) for v in values}
+    if not found or found != set(range(len(found))):
+        raise ValueError(
+            f"holdout_groups.csv has CV folds {sorted(found)}, expected exactly 0..K-1."
+        )
+    return len(found)
+
+
+def combine_cv_runs(runs: Mapping[str, tuple[str | None, bytes, pd.DataFrame]]) -> pd.DataFrame:
     """
     Validate that `runs` are exactly the K folds of one grouped selection, then concatenate.
 
     `runs` maps run id to (its `holdout_fold` param, its `holdout_groups.csv`
-    bytes, its holdout table). Raises ValueError unless the fold params are
-    exactly 0..folds-1 once each, every run used identical group bytes, and no
-    group (`site:project_id`) is held out by two runs.
+    bytes, its holdout table). K is the number of CV folds in the shared
+    `holdout_groups.csv`. Raises ValueError unless every run used identical
+    group bytes, the fold params are exactly 0..K-1 once each, and no group
+    (`site:project_id`) is held out by two runs.
     """
     fold_of = {run_id: _fold_number(run_id, fold) for run_id, (fold, _, _) in runs.items()}
     counts = collections.Counter(fold_of.values())
     duplicated = sorted(f for f, n in counts.items() if n > 1)
     if duplicated:
         raise ValueError(f"holdout_fold {duplicated} appears in more than one run.")
+    shared_groups = {groups for _, groups, _ in runs.values()}
+    if len(shared_groups) > 1:
+        raise ValueError("The runs' holdout_groups.csv artifacts differ.")
+    folds = selection_folds(next(iter(shared_groups)))
     if set(counts) != set(range(folds)):
         raise ValueError(
             f"Runs cover folds {sorted(counts)}, expected exactly folds 0..{folds - 1}."
         )
-    if len({groups for _, groups, _ in runs.values()}) > 1:
-        raise ValueError("The runs' holdout_groups.csv artifacts differ.")
     owner: dict[str, str] = {}
     for run_id, (_, _, df) in runs.items():
         for cluster in (df["site"] + ":" + df["project_id"].astype(str)).unique():

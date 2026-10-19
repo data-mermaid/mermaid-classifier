@@ -117,6 +117,32 @@ def _resolve(path: str, base: Path) -> Path:
     return (p if p.is_absolute() else base / p).resolve()
 
 
+def resolve_out_path(
+    out: str | None, config_dir: Path, parent_csv: Path | None, write_fold_configs: bool
+) -> Path:
+    """
+    The selection CSV path: the parent's `dataset.holdout_groups_csv` file by default.
+
+    Fold configs copy the selection under the parent's referenced name, so with
+    them on `out` must resolve to that file or the parent's `test` run and the
+    CV folds would read different selections. `parent_csv` is None when the
+    parent sets no `holdout_groups_csv`.
+    """
+    parent = parent_csv.resolve() if parent_csv is not None else None
+    if write_fold_configs and parent is None:
+        raise ValueError("The parent config sets no dataset.holdout_groups_csv.")
+    if out is None:
+        return parent or config_dir / "holdout_groups.csv"
+    path = _resolve(out, REPO_ROOT)
+    if write_fold_configs and path != parent:
+        raise ValueError(
+            f"--out {path} is not the parent's dataset.holdout_groups_csv ({parent}); fold"
+            " configs would use a different selection than the parent. Omit --out, or pass"
+            " --no-write-fold-configs."
+        )
+    return path
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument(
@@ -139,12 +165,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Write <config-dir>_fold{k}/ CV configs beside the config dir (default: on).",
     )
     parser.add_argument(
-        "--out", default=None, help="Output CSV. Default: <config-dir>/holdout_groups.csv."
+        "--out",
+        default=None,
+        help="Output CSV. Default: the config's dataset.holdout_groups_csv file.",
     )
     args = parser.parse_args(argv)
 
     config_dir = _resolve(args.config_dir, REPO_ROOT)
-    out_path = _resolve(args.out, REPO_ROOT) if args.out else config_dir / "holdout_groups.csv"
     beta_sources = read_beta_sources(_resolve(args.beta_sources, REPO_ROOT))
 
     _resolve_local_aws_credentials()
@@ -159,6 +186,15 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     config = TrainingRunConfig.from_yaml_path(config_dir / CONFIG_FILENAME)
+    try:
+        out_path = resolve_out_path(
+            args.out,
+            config_dir,
+            config.dataset.holdout_groups_csv_path(config_dir),
+            args.write_fold_configs,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     config.apply_env()
     dataset_options, _, _ = config.build_options(config_dir=config_dir)
     # Selection runs on all data: an existing holdout CSV must not tag or drop rows.
