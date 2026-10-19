@@ -16,7 +16,7 @@ from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
 from io import StringIO
-from typing import TextIO
+from typing import Self, TextIO
 
 import duckdb
 import pandas as pd
@@ -85,11 +85,11 @@ class TrainingDataset:
     _dedupe_stats: dict[str, int] | None = None
     # Set by _log_split_drops; classes the train/ref/val split removed.
     _split_dropped_bagfs: int = 0
+    # Only __init__ creates a temp feature dir; cleanup() tolerates its absence.
+    _feature_temp_dir: tempfile.TemporaryDirectory[str] | None = None
 
     def __init__(self, options: DatasetOptions):
-        self.options = options
-        self.artifacts = Artifacts()
-        self.profiled_sections = []
+        self._setup_annotation_reading(options)
         # Populated by _apply_subsample if subsampling is enabled; stays
         # None otherwise. The runner's MLflow logging path checks for
         # None so the no-subsample path stays artifact-free.
@@ -111,50 +111,6 @@ class TrainingDataset:
         # (bucket, feature_vector) S3 location. add_training_set_names() needs
         # this to match the labels to the annotations table.
         self._feature_path_to_s3_location: dict[str, tuple[str, str]] = {}
-
-        # CoralNet data is defined by a manifest parquet (None disables it).
-        self.coralnet_source_ids: list[str] = []
-
-        self.rollup_spec = _load_csv_spec(options.label_rollup_spec_csv, LabelRollupSpec)
-
-        if options.included_labels_csv and options.excluded_labels_csv:
-            raise ValueError("Specify one of included labels or excluded labels, but not both.")
-
-        # An empty exclusion set when neither is given, so every label
-        # is accepted.
-        self.label_filter = _load_csv_spec(
-            options.included_labels_csv or options.excluded_labels_csv,
-            functools.partial(LabelFilter, inclusion=bool(options.included_labels_csv)),
-        )
-
-        self.image_exclusion_filter = _load_csv_spec(
-            options.excluded_images_csv, ImageExclusionFilter
-        )
-
-        self.holdout_groups = _load_csv_spec(options.holdout_groups_csv, HoldoutGroups)
-        # Fail on a bad fold before any data is read.
-        self.holdout_groups.validate_holdout_fold(options.holdout_fold)
-        # Without the lookup every MERMAID row is project 'all', so no
-        # listed MERMAID project can match.
-        mermaid_groups = sorted(
-            group_id
-            for site, group_id in self.holdout_groups.group_folds
-            if site == Sites.MERMAID.value
-        )
-        if options.include_mermaid and mermaid_groups and not options.mermaid_project_lookup_uri:
-            raise ValueError(
-                f"holdout_groups_csv lists MERMAID group(s) {mermaid_groups}, but"
-                f" mermaid_project_lookup_uri is unset, so no MERMAID row has a project."
-            )
-
-        # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
-        self.s3 = S3FileSystem(
-            anon=settings.aws_anonymous == "True",
-            key=settings.aws_key_id,
-            secret=settings.aws_secret,
-            token=settings.aws_session_token,
-        )
-        self._duck_conn = None
 
         # Set once the feature sources are resolved; runner.py seals it
         # into the exported manifest.
@@ -212,6 +168,68 @@ class TrainingDataset:
             self.add_training_set_names()
 
         self.set_train_summary_stats()
+
+    @classmethod
+    def filtered_annotations_only(cls, options: DatasetOptions) -> Self:
+        """
+        Build only the filtered `annotations` table (read, rollup, filter,
+        dedupe, holdout-tag), with no feature-vector listing, download or
+        extractor resolution. The returned dataset is not trainable.
+        """
+        dataset = cls.__new__(cls)
+        dataset._setup_annotation_reading(options)  # pyright: ignore[reportPrivateUsage]  # classmethod initialising its own instance
+        dataset.load_filtered_annotations()
+        return dataset
+
+    def _setup_annotation_reading(self, options: DatasetOptions) -> None:
+        """Set the state `load_filtered_annotations` needs: specs, S3, DuckDB."""
+        self.options = options
+        self.artifacts = Artifacts()
+        self.profiled_sections = []
+
+        # CoralNet data is defined by a manifest parquet (None disables it).
+        self.coralnet_source_ids: list[str] = []
+
+        self.rollup_spec = _load_csv_spec(options.label_rollup_spec_csv, LabelRollupSpec)
+
+        if options.included_labels_csv and options.excluded_labels_csv:
+            raise ValueError("Specify one of included labels or excluded labels, but not both.")
+
+        # An empty exclusion set when neither is given, so every label
+        # is accepted.
+        self.label_filter = _load_csv_spec(
+            options.included_labels_csv or options.excluded_labels_csv,
+            functools.partial(LabelFilter, inclusion=bool(options.included_labels_csv)),
+        )
+
+        self.image_exclusion_filter = _load_csv_spec(
+            options.excluded_images_csv, ImageExclusionFilter
+        )
+
+        self.holdout_groups = _load_csv_spec(options.holdout_groups_csv, HoldoutGroups)
+        # Fail on a bad fold before any data is read.
+        self.holdout_groups.validate_holdout_fold(options.holdout_fold)
+        # Without the lookup every MERMAID row is project 'all', so no
+        # listed MERMAID project can match.
+        mermaid_groups = sorted(
+            group_id
+            for site, group_id in self.holdout_groups.group_folds
+            if site == Sites.MERMAID.value
+        )
+        if options.include_mermaid and mermaid_groups and not options.mermaid_project_lookup_uri:
+            raise ValueError(
+                f"holdout_groups_csv lists MERMAID group(s) {mermaid_groups}, but"
+                f" mermaid_project_lookup_uri is unset, so no MERMAID row has a project."
+            )
+
+        # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
+        self.s3 = S3FileSystem(
+            anon=settings.aws_anonymous == "True",
+            key=settings.aws_key_id,
+            secret=settings.aws_secret,
+            token=settings.aws_session_token,
+        )
+        self._duck_conn = None
 
     def load_filtered_annotations(self) -> None:
         """
