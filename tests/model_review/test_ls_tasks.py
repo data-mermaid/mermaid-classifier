@@ -80,9 +80,9 @@ class LsTasksTest(unittest.TestCase):
         )
         text = next(r for r in comp["result"] if r["id"] == "pt-0" and r["type"] == "textarea")[
             "value"
-        ]["text"][0]
+        ]["text"]
         self.assertEqual(
-            text.splitlines(),
+            text,
             ["ground-truth: gtA2::", "v1: v1A2::  — differs", "Beta: btA2::  — differs"],
         )
 

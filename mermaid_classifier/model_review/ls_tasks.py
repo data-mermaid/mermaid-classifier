@@ -59,6 +59,7 @@ def _compare_results(
 
     No ``taxonomy`` entry: the text block is the fine label here, and an empty
     taxonomy control keeps this tab from reading as another single-set reference.
+    One ``text`` entry per set: the region panel collapses newlines within an entry.
     """
     region_id = f"pt-{idx}"
     return [
@@ -76,7 +77,7 @@ def _compare_results(
             "type": "textarea",
             "from_name": "compare",
             "to_name": "image",
-            "value": {"text": [text]},
+            "value": {"text": text.splitlines()},
         },
     ]
 
