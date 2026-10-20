@@ -17,6 +17,10 @@ that is a species, or that MERMAID lists in exactly one region, is
 replaced in the top-108 set by its nearest ancestor that is neither, so
 its annotations roll up to that ancestor.
 
+With --min-support-counts, each class then below --min-points points or
+--min-groups (site, project) groups rolls up to its parent, thinnest
+first, until every class meets both floors.
+
 Porites is the one BA that retains growth-form distinctions: three
 buckets (Branching, Massive, other/none) appear as separate classes in
 included_labels.csv. Porites species and Porites genus annotations are
@@ -40,9 +44,10 @@ import logging
 import re
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 import pandas as pd
 
@@ -352,6 +357,115 @@ def coarsen_top108(
     return coarsened
 
 
+ClassKey = tuple[str, str]
+"""A class of included_labels.csv: (ba_id, gf_id), gf_id '' outside the Porites buckets."""
+
+
+@dataclass
+class ClassSupport:
+    points: int = 0
+    groups: set[tuple[str, str]] = field(default_factory=lambda: set[tuple[str, str]]())
+
+
+class MinSupportRollup(NamedTuple):
+    class_key: ClassKey
+    points: int
+    n_groups: int
+    target: ClassKey | None
+
+
+def read_support_counts(path: Path) -> dict[ClassKey, ClassSupport]:
+    """Per-class points and (site, project_id) group set from a
+    `class_key, site, project_id, n` counts CSV."""
+    support: dict[ClassKey, ClassSupport] = {}
+    with path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        missing = {"class_key", "site", "project_id", "n"} - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"support counts CSV {path} missing columns: {sorted(missing)}")
+        for row in reader:
+            ba_id, _, gf_id = row["class_key"].partition("::")
+            entry = support.setdefault((ba_id, gf_id), ClassSupport())
+            entry.points += int(row["n"])
+            entry.groups.add((row["site"], row["project_id"]))
+    return support
+
+
+def apply_min_support(
+    classes: set[ClassKey],
+    counts: dict[ClassKey, ClassSupport],
+    ba_lib: BenthicAttributeLibrary,
+    excluded_uuids: set[str],
+    porites_uuid: str | None,
+    min_points: int,
+    min_groups: int,
+) -> tuple[set[ClassKey], list[MinSupportRollup]]:
+    """Roll the thinnest class below either floor into its parent until
+    every class meets both, returning the final classes and each roll-up
+    with its final target (None when dropped).
+
+    A Porites GF bucket merges into `(Porites, '')`, and `(Porites, '')`
+    carries any surviving buckets with it. A class whose parent is missing
+    or excluded drops. Each step moves a class strictly up the tree, so the
+    loop terminates.
+    """
+    support = {
+        key: ClassSupport(counts[key].points, set(counts[key].groups))
+        if key in counts
+        else ClassSupport()
+        for key in classes
+    }
+    unknown = sorted(set(counts) - classes)
+    if unknown:
+        logger.warning(
+            "%d support-count class key(s) are not classes of this config; ignoring: %s",
+            len(unknown),
+            unknown,
+        )
+    # A rolled-up class forwards to its target, so a later roll-up into it
+    # follows the chain and never re-creates it.
+    moved: dict[ClassKey, ClassKey | None] = {}
+
+    def resolve(key: ClassKey | None) -> ClassKey | None:
+        while key is not None and key in moved:
+            key = moved[key]
+        return key
+
+    rolled: list[MinSupportRollup] = []
+    while True:
+        thin = [
+            (entry.points, key)
+            for key, entry in support.items()
+            if entry.points < min_points or len(entry.groups) < min_groups
+        ]
+        if not thin:
+            break
+        _, key = min(thin)
+        ba_id, gf_id = key
+        leaving = [key]
+        if gf_id:
+            target: ClassKey | None = (ba_id, "")
+        else:
+            ancestors = ba_lib.get_ancestor_ids(ba_id)
+            parent = ancestors[-1] if ancestors else None
+            target = None if parent is None or parent in excluded_uuids else (parent, "")
+            if ba_id == porites_uuid:
+                leaving += sorted(k for k in support if k[0] == ba_id and k[1])
+        target = resolve(target)
+        merged = ClassSupport()
+        for k in leaving:
+            entry = support.pop(k)
+            rolled.append(MinSupportRollup(k, entry.points, len(entry.groups), target))
+            moved[k] = target
+            merged.points += entry.points
+            merged.groups |= entry.groups
+        if target is not None:
+            dest = support.setdefault(target, ClassSupport())
+            dest.points += merged.points
+            dest.groups |= merged.groups
+    return set(support), [r._replace(target=resolve(r.target)) for r in rolled]
+
+
 def _nearest_included(
     ba_id: str, ba_lib: BenthicAttributeLibrary, included: set[str]
 ) -> str | None:
@@ -494,11 +608,12 @@ def _categorize_porites_rollups(
     for (src_ba, _src_gf), (to_ba, to_gf) in rollups.items():
         if to_ba != porites_uuid:
             continue
+        # A bucket merged into (Porites, '') maps to '' and counts as other.
         if src_ba == porites_uuid:
             out["porites_genus_gf_collapse"] += 1
-        elif to_gf == branching_uuid:
+        elif branching_uuid and to_gf == branching_uuid:
             out["porites_species_to_branching"] += 1
-        elif to_gf == massive_uuid:
+        elif massive_uuid and to_gf == massive_uuid:
             out["porites_species_to_massive"] += 1
         else:
             out["porites_species_to_other"] += 1
@@ -571,12 +686,24 @@ def write_readme(
     coarsening_rules: list[str] | None = None,
     added_classes: list[str] | None = None,
     class_change_rows: list[tuple[str, str, str]] | None = None,
+    min_support_rows: list[tuple[str, int, int, str]] | None = None,
 ) -> None:
     cli = " ".join(sys.argv)
     coarsening_block = ""
     if coarsening_rules:
         added = added_classes or []
         changes = class_change_rows or []
+        min_support_block = ""
+        if min_support_rows is not None:
+            min_support_block = (
+                f"\nClasses rolled up by min support ({len(min_support_rows)}),"
+                " in roll-up order:\n\n"
+                "| Class | Points | Groups | Target |\n| --- | --- | --- | --- |\n"
+                + "".join(
+                    f"| {cls} | {points} | {groups} | {target or '(dropped)'} |\n"
+                    for cls, points, groups, target in min_support_rows
+                )
+            )
         coarsening_block = (
             "\n## Coarsened labels\n\n"
             f"Rules: {', '.join(coarsening_rules)}.\n\n"
@@ -589,6 +716,7 @@ def write_readme(
                 f"| {ba} | {old or '(dropped)'} | {new or '(dropped)'} |\n"
                 for ba, old, new in changes
             )
+            + min_support_block
         )
     unresolved_block = ""
     if unresolved_top108:
@@ -762,6 +890,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--min-support-counts",
+        type=Path,
+        default=None,
+        help=(
+            "Counts CSV (class_key, site, project_id, n) for the coarsened classes."
+            " Rolls each class below --min-points or --min-groups up to its parent."
+        ),
+    )
+    p.add_argument(
+        "--min-points",
+        type=int,
+        default=500,
+        help="Points a class needs to stay (only with --min-support-counts).",
+    )
+    p.add_argument(
+        "--min-groups",
+        type=int,
+        default=10,
+        help="Distinct (site, project) groups a class needs to stay (only with --min-support-counts).",
+    )
+    p.add_argument(
         "--skip-validation",
         action="store_true",
         help="Skip round-tripping outputs through pipeline schemas (useful for tests).",
@@ -820,14 +969,6 @@ def main(argv: list[str] | None = None) -> int:
         coarsening_rules.append("region-specific (exactly one MERMAID region)")
     uncoarsened_uuids = top108_uuids
     top108_uuids = coarsen_top108(uncoarsened_uuids, ba_lib, excluded_uuids, predicates)
-    changes = class_changes(
-        {e.benthic_attribute_id for e in cn_mapping.mapping.values() if e.benthic_attribute_id}
-        | uncoarsened_uuids,
-        ba_lib,
-        excluded_uuids,
-        uncoarsened_uuids,
-        top108_uuids,
-    )
     try:
         porites_uuid: str | None = ba_lib.name_to_id(PORITES_NAME)
     except KeyError:
@@ -835,6 +976,46 @@ def main(argv: list[str] | None = None) -> int:
         porites_uuid = None
     bucket_gf_uuid_lookup = (
         _build_bucket_gf_uuid_lookup(gf_library) if porites_uuid is not None else {"": ""}
+    )
+    min_support_rows: list[tuple[str, int, int, str]] | None = None
+    if args.min_support_counts is not None:
+        final_classes, rolled = apply_min_support(
+            set(build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)),
+            read_support_counts(args.min_support_counts),
+            ba_lib,
+            excluded_uuids,
+            porites_uuid,
+            args.min_points,
+            args.min_groups,
+        )
+        top108_uuids = {ba for ba, _ in final_classes}
+        # A merged bucket maps to '', so its annotations land in (Porites, '').
+        bucket_gf_uuid_lookup = {
+            name: gf if (porites_uuid, gf) in final_classes else ""
+            for name, gf in bucket_gf_uuid_lookup.items()
+        }
+        coarsening_rules.append(
+            f"min support (>= {args.min_points} points and >= {args.min_groups} groups,"
+            f" counts from {args.min_support_counts.name})"
+        )
+
+        def class_name(key: ClassKey | None) -> str:
+            if key is None:
+                return ""
+            ba_id, gf_id = key
+            name = ba_lib.id_to_name(ba_id)
+            return f"{name}::{gf_library.id_to_name(gf_id)}" if gf_id else name
+
+        min_support_rows = [
+            (class_name(r.class_key), r.points, r.n_groups, class_name(r.target)) for r in rolled
+        ]
+    changes = class_changes(
+        {e.benthic_attribute_id for e in cn_mapping.mapping.values() if e.benthic_attribute_id}
+        | uncoarsened_uuids,
+        ba_lib,
+        excluded_uuids,
+        uncoarsened_uuids,
+        top108_uuids,
     )
     species_gf_lookup = _load_species_gf_lookup(labels_df)
 
@@ -881,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
             (ba_lib.id_to_name(ba), ba_lib.id_to_name(old or ""), ba_lib.id_to_name(new or ""))
             for ba, old, new in changes
         ),
+        min_support_rows=min_support_rows,
     )
 
     if not args.skip_validation:
