@@ -124,4 +124,20 @@ COARSE_IMAGE_SET = ImageSet(
     sites=(CORALNET_ALL_SITE, MERMAID_SITE),
 )
 
-IMAGE_SET = COARSE_IMAGE_SET
+# The min-support model (mermaid-classifier PR #115): MLflow run
+# 31c89e1bdc8b4c699161be40ba701632, 80 classes, classes below 500 points or 10 sources
+# rolled up. The held-out CSV is that run's source-grouped `annotations_holdout.csv`;
+# neither this model nor Beta trained on those sources. The "v1" tab shows this model.
+MINSUPPORT_IMAGE_SET = ImageSet(
+    name="Model Review minsup (20 img) + Beta + Comparison",
+    classifier="m-3201af06083c47519f5dd2a1653e96c9",
+    beta_classifier="../models/beta_model/classifier.pkl",
+    heldout_csv="../reports/model_benchmark/data/minsupport_annotations_holdout.csv",
+    v1_rollup_csv="sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_minsupport/rollups.csv",
+    n_images=20,
+    min_points=15,
+    seed=3,
+    sites=(CORALNET_ALL_SITE, MERMAID_SITE),
+)
+
+IMAGE_SET = MINSUPPORT_IMAGE_SET

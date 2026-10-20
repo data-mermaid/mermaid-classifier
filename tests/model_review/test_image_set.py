@@ -4,6 +4,7 @@ import unittest
 from mermaid_classifier.model_review.image_set import (
     COARSE_IMAGE_SET,
     IMAGE_SET,
+    MINSUPPORT_IMAGE_SET,
     V1_IMAGE_SET,
     ImageSet,
     SiteSpec,
@@ -21,15 +22,24 @@ class ImageSetTest(unittest.TestCase):
         self.assertEqual(IMAGE_SET.min_points, 15)
         self.assertEqual(IMAGE_SET.beta_classifier, "../models/beta_model/classifier.pkl")
 
-    def test_active_set_is_the_coarse_model(self):
-        self.assertIs(IMAGE_SET, COARSE_IMAGE_SET)
-        self.assertEqual(IMAGE_SET.seed, 2)
-        self.assertEqual(IMAGE_SET.classifier, "m-2e523eb2d73242d79cfcbe9f6634de33")
+    def test_active_set_is_the_minsupport_model(self):
+        self.assertIs(IMAGE_SET, MINSUPPORT_IMAGE_SET)
+        self.assertEqual(IMAGE_SET.seed, 3)
+        self.assertEqual(IMAGE_SET.classifier, "m-3201af06083c47519f5dd2a1653e96c9")
         self.assertEqual(
             IMAGE_SET.v1_rollup_csv,
+            "sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_minsupport/rollups.csv",
+        )
+        self.assertTrue(IMAGE_SET.heldout_csv.endswith("minsupport_annotations_holdout.csv"))
+        self.assertIn("/coralnet/all/", self._spec("coralnet").manifest_uri)
+
+    def test_coarse_set_is_kept_unchanged(self):
+        self.assertEqual(COARSE_IMAGE_SET.seed, 2)
+        self.assertEqual(COARSE_IMAGE_SET.classifier, "m-2e523eb2d73242d79cfcbe9f6634de33")
+        self.assertEqual(
+            COARSE_IMAGE_SET.v1_rollup_csv,
             "sagemaker/configs/coralnet_all_plus_mermaid_coarse/rollups.csv",
         )
-        self.assertIn("/coralnet/all/", self._spec("coralnet").manifest_uri)
 
     def test_v1_set_is_kept_unchanged(self):
         self.assertEqual(V1_IMAGE_SET.seed, 1)
@@ -37,7 +47,10 @@ class ImageSetTest(unittest.TestCase):
         self.assertEqual(
             V1_IMAGE_SET.v1_rollup_csv, "sagemaker/configs/coralnet_top108_full/rollups.csv"
         )
-        self.assertNotEqual(V1_IMAGE_SET.name, COARSE_IMAGE_SET.name)
+
+    def test_set_names_are_distinct(self):
+        names = {s.name for s in (V1_IMAGE_SET, COARSE_IMAGE_SET, MINSUPPORT_IMAGE_SET)}
+        self.assertEqual(len(names), 3)
 
     def test_two_sites_weighted_two_to_one(self):
         self.assertEqual([s.site for s in IMAGE_SET.sites], ["coralnet", "mermaid"])
