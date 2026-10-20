@@ -9,6 +9,7 @@ where build_options constructs the option dataclasses.
 
 from __future__ import annotations
 
+import filecmp
 import textwrap
 import unittest
 from pathlib import Path
@@ -405,6 +406,49 @@ class ExampleYamlTest(unittest.TestCase):
         )
         config = TrainingRunConfig.from_yaml_path(example)
         self.assertIsNotNone(config.dataset.subsample)
+
+
+class GvalTurfCcaConfigTest(unittest.TestCase):
+    """The committed gval_turfcca config stays paired with the min-support holdout."""
+
+    REPO = Path(__file__).resolve().parent.parent.parent
+    CONFIGS = REPO / "sagemaker" / "configs"
+    NEW = CONFIGS / "coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_turfcca"
+    BASE = CONFIGS / "coralnet_all_plus_mermaid_coarse_grouped_minsupport"
+    MULTIPLIER_KEYS = (
+        "20090bf4-868e-431b-974c-ab9be5bbdb5f",
+        "f4df7abd-3d51-42fb-8cab-5102b95fad8e",
+    )
+
+    def test_config_loads_and_builds_options(self):
+        config = TrainingRunConfig.from_yaml_path(self.NEW / "training_config.yaml")
+        config.build_options(config_dir=self.NEW)
+
+    def test_holdout_groups_identical_to_min_support(self):
+        self.assertTrue(
+            filecmp.cmp(
+                self.NEW / "holdout_groups.csv",
+                self.BASE / "holdout_groups.csv",
+                shallow=False,
+            )
+        )
+
+    def test_val_groups_disjoint_from_holdout(self):
+        from mermaid_classifier.pyspacer.label_specs import HoldoutGroups, ValGroups
+
+        with (
+            open(self.NEW / "val_groups.csv") as val_file,
+            open(self.NEW / "holdout_groups.csv") as holdout_file,
+        ):
+            val = ValGroups(val_file)
+            holdout = HoldoutGroups(holdout_file)
+        val.check_disjoint(holdout, "test")
+
+    def test_multiplier_keys_in_included_labels(self):
+        included = (self.NEW / "included_labels.csv").read_text().lower()
+        for key in self.MULTIPLIER_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(key, included)
 
 
 if __name__ == "__main__":
