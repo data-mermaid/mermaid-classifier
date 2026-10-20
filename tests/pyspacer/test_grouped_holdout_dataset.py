@@ -1,5 +1,5 @@
-"""TrainingDataset steps for source-grouped holdout: the MERMAID
-image->project lookup, point dedupe, holdout tagging, and the
+"""TrainingDataset steps for source-grouped holdout and val: the MERMAID
+image->project lookup, point dedupe, holdout and val tagging, and the
 add_training_set_names key-uniqueness guard.
 
 Uses a real in-memory DuckDB; S3 and the BA/GF libraries are stubbed.
@@ -330,13 +330,15 @@ class _FakeGFLibrary:
         return None if gf_id is None else gf_id
 
 
-class HoldoutTaggingInitTest(unittest.TestCase):
-    """Real TrainingDataset.__init__: tagging happens after dedupe, test
-    groups leave the table when a CV fold is held out, and default runs
-    keep their artifact schemas."""
+class _InitCase(unittest.TestCase):
+    """Builds a real TrainingDataset over local MERMAID parquet: two images
+    per project, five points per image, one class per project."""
 
-    # Four projects, two images each, five points per image.
-    IMAGES = {f"img_p{p}{n}": f"p{p}" for p in "ABCD" for n in (1, 2)}
+    CLASS_BY_PROJECT = {"A": "ba_a", "B": "ba_a", "C": "ba_b", "D": "ba_b"}
+
+    @property
+    def IMAGES(self) -> dict[str, str]:  # noqa: N802 -- reads as the constant it is per class
+        return {f"img_p{p}{n}": f"p{p}" for p in self.CLASS_BY_PROJECT for n in (1, 2)}
 
     def _build(
         self,
@@ -345,6 +347,8 @@ class HoldoutTaggingInitTest(unittest.TestCase):
         *,
         with_lookup: bool = True,
         excluded_images: tuple[str, ...] = (),
+        val_csv_text: str | None = None,
+        val_max_per_class: int | None = 3000,
     ) -> TrainingDataset:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -353,8 +357,10 @@ class HoldoutTaggingInitTest(unittest.TestCase):
         # labeled both ba_a and ba_b.
         mermaid = pd.concat(
             [
-                _mermaid_df([i for i in self.IMAGES if i[-2] in "AB"], points=5),
-                _mermaid_df([i for i in self.IMAGES if i[-2] in "CD"], ba_id="ba_b", points=5),
+                *(
+                    _mermaid_df([i for i, p in self.IMAGES.items() if p == f"p{project}"], ba, 5)
+                    for project, ba in self.CLASS_BY_PROJECT.items()
+                ),
                 _mermaid_df(["img_pA1"]),
                 _mermaid_df(["img_pA2"], ba_id="ba_b"),
             ],
@@ -371,6 +377,10 @@ class HoldoutTaggingInitTest(unittest.TestCase):
         if excluded_images:
             excluded_csv = str(Path(tmp.name) / "excluded.csv")
             Path(excluded_csv).write_text("image_id\n" + "".join(f"{i}\n" for i in excluded_images))
+        val_csv = None
+        if val_csv_text is not None:
+            val_csv = str(Path(tmp.name) / "val_groups.csv")
+            Path(val_csv).write_text(val_csv_text)
 
         present = {f"{TEST_BUCKET}/mermaid/{i}_featurevector" for i in self.IMAGES}
         sidecar = {
@@ -382,7 +392,10 @@ class HoldoutTaggingInitTest(unittest.TestCase):
             holdout_groups_csv=holdout_csv,
             excluded_images_csv=excluded_csv,
             holdout_fold=holdout_fold,
-            ref_val_ratios=(0.1, 0.1),
+            val_groups_csv=val_csv,
+            val_max_per_class=val_max_per_class,
+            split_mode="images" if val_csv else "points",
+            ref_val_ratios=(0.1, 0.0) if val_csv else (0.1, 0.1),
         )
         with (
             override_settings(
@@ -419,6 +432,12 @@ class HoldoutTaggingInitTest(unittest.TestCase):
                 f"SELECT DISTINCT image_id FROM annotations WHERE {where}"
             ).fetchall()
         }
+
+
+class HoldoutTaggingInitTest(_InitCase):
+    """Real TrainingDataset.__init__: tagging happens after dedupe, test
+    groups leave the table when a CV fold is held out, and default runs
+    keep their artifact schemas."""
 
     def test_default_run_dedupes_and_has_no_holdout(self):
         dataset = self._build(None)
@@ -466,8 +485,119 @@ class HoldoutTaggingInitTest(unittest.TestCase):
         dataset = self._build(None)
         columns = [r[0] for r in dataset.duck_conn.execute("DESCRIBE annotations").fetchall()]
         self.assertIn("is_holdout", columns)
-        self.assertNotIn("is_holdout", dataset.get_annotations("all").columns)
-        self.assertNotIn("is_excluded", dataset.get_annotations("all").columns)
+        self.assertIn("is_val", columns)
+        for log_spec in ("all", "s1", "i1"):
+            artifact_columns = dataset.get_annotations(log_spec).columns
+            for tag in ("is_holdout", "is_excluded", "is_val"):
+                self.assertNotIn(tag, artifact_columns, log_spec)
+
+
+class ValGroupsInitTest(_InitCase):
+    """Real TrainingDataset.__init__ with val_groups_csv: val groups become
+    the val set, and the val file is checked before any data is read."""
+
+    # pA is the test holdout, pB and pD the val groups; pC, pE, pF train.
+    CLASS_BY_PROJECT = {
+        "A": "ba_a",
+        "B": "ba_a",
+        "C": "ba_b",
+        "D": "ba_b",
+        "E": "ba_a",
+        "F": "ba_b",
+    }
+    HOLDOUT = "site,group_id,fold\nmermaid,pA,test\nmermaid,pC,0\nmermaid,pE,1\n"
+    VAL = "site,group_id\nmermaid,pB\nmermaid,pD\n"
+
+    def _label_images(self, dataset: TrainingDataset, labels) -> set[str]:
+        return {
+            dataset._feature_path_to_s3_location[loc.key][1]
+            .removeprefix("mermaid/")
+            .removesuffix("_featurevector")
+            for loc in labels.keys()  # noqa: SIM118 -- ImageLabels is not a dict
+        }
+
+    def test_val_groups_images_are_only_in_val(self):
+        dataset = self._build(self.HOLDOUT, val_csv_text=self.VAL)
+        val_images = {"img_pB1", "img_pB2", "img_pD1", "img_pD2"}
+        self.assertEqual(self._label_images(dataset, dataset.labels.val), val_images)
+        split_images = self._label_images(dataset, dataset.labels.train) | self._label_images(
+            dataset, dataset.labels.ref
+        )
+        self.assertEqual(
+            split_images, {"img_pC1", "img_pC2", "img_pE1", "img_pE2", "img_pF1", "img_pF2"}
+        )
+
+    def test_val_cap_bounds_each_val_class(self):
+        dataset = self._build(self.HOLDOUT, val_csv_text=self.VAL, val_max_per_class=3)
+        self.assertEqual(dict(dataset.labels.val.label_count_per_class), {"ba_a::": 3, "ba_b::": 3})
+
+    def test_val_group_in_the_holdout_rejected_before_any_read(self):
+        cases = {
+            "test fold": ("test", "site,group_id\nmermaid,pA\n"),
+            "held-out cv fold": ("1", "site,group_id\nmermaid,pE\n"),
+        }
+        for name, (holdout_fold, val_text) in cases.items():
+            with (
+                self.subTest(name),
+                mock.patch.object(TrainingDataset, "read_mermaid_data") as read,
+                self.assertRaisesRegex(ValueError, r"\(mermaid, p[AE]\)"),
+            ):
+                self._build(self.HOLDOUT, holdout_fold, val_csv_text=val_text)
+            read.assert_not_called()
+
+    def test_misspelled_val_group_raises(self):
+        with self.assertRaisesRegex(ValueError, r"\(mermaid, pZ\)"):
+            self._build(self.HOLDOUT, val_csv_text=self.VAL + "mermaid,pZ\n")
+
+    def test_val_file_with_no_groups_is_rejected_before_any_read(self):
+        with (
+            mock.patch.object(TrainingDataset, "read_mermaid_data") as read,
+            self.assertRaisesRegex(ValueError, "lists no groups"),
+        ):
+            self._build(self.HOLDOUT, val_csv_text="site,group_id\n")
+        read.assert_not_called()
+
+    def _assert_raises_before_feature_listing(self, regex: str, **build_kwargs) -> None:
+        with (
+            mock.patch.object(_FakeS3, "find") as listing,
+            mock.patch.object(TrainingDataset, "prep_annotations_for_pyspacer") as prep,
+            self.assertRaisesRegex(ValueError, regex),
+        ):
+            self._build(self.HOLDOUT, **build_kwargs)
+        listing.assert_not_called()
+        prep.assert_not_called()
+
+    def test_class_only_in_val_groups_raises_before_feature_listing(self):
+        self._assert_raises_before_feature_listing(
+            r"no training rows.*ba_a::",
+            val_csv_text="site,group_id\nmermaid,pB\nmermaid,pE\n",
+        )
+
+    def test_val_groups_emptied_by_filtering_raise_before_feature_listing(self):
+        self._assert_raises_before_feature_listing(
+            "no annotation is in a val group",
+            val_csv_text="site,group_id\nmermaid,pB\n",
+            excluded_images=("img_pB1", "img_pB2"),
+        )
+
+    def test_val_group_rows_labelled_train_fail_the_disjointness_guard(self):
+        real = TrainingDataset.add_training_set_names
+
+        def mislabel_one_val_image(dataset):
+            real(dataset)
+            dataset.duck_conn.execute(
+                "UPDATE annotations SET training_set = 'train' WHERE image_id = 'img_pB1'"
+            )
+
+        with (
+            mock.patch.object(TrainingDataset, "add_training_set_names", mislabel_one_val_image),
+            self.assertRaisesRegex(RuntimeError, r"\(mermaid, pB\)"),
+        ):
+            self._build(self.HOLDOUT, val_csv_text=self.VAL)
+
+    def test_mermaid_val_groups_without_a_project_lookup_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "mermaid_project_lookup_uri is unset"):
+            self._build(None, with_lookup=False, val_csv_text=self.VAL)
 
 
 if __name__ == "__main__":

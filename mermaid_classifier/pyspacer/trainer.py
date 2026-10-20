@@ -154,8 +154,9 @@ class MermaidTrainer(ClassifierTrainer):
                 # same pattern as ref_accuracy. These give the canonical
                 # overfitting signal -- if training_loss continues to
                 # drop while val_loss rises, the model is starting to
-                # memorize. val and ref are independent held-out splits,
-                # so both are needed for a robust signal.
+                # memorize. Ref and val are both kept out of train; with
+                # val_groups_csv, val is whole held-out sources, which ref
+                # never is, so val_loss also tracks unseen-source error.
                 #
                 # Note: clf here is the uncalibrated MLP head (Platt
                 # calibration runs after all epochs). predict_proba on

@@ -24,12 +24,15 @@ _HOLDOUT_IMAGES = ("hold_0", "hold_1")
 
 
 def _rows(
-    include_holdout: bool, extra: tuple[tuple[str, str, bool], ...] = ()
+    include_holdout: bool,
+    extra: tuple[tuple[str, str, bool], ...] = (),
+    val: tuple[tuple[str, str, str], ...] = (),
 ) -> list[dict[str, object]]:
-    """`extra` adds (image, ba, is_holdout) images to the base dataset."""
+    """`extra` adds (image, ba, is_holdout) images to the base dataset;
+    `val` adds (image, ba, project) images tagged is_val."""
     rows = []
 
-    def add(image: str, ba: str, project: str, is_holdout: bool) -> None:
+    def add(image: str, ba: str, project: str, is_holdout: bool, is_val: bool = False) -> None:
         for n in range(_POINTS_PER_IMAGE):
             rows.append(
                 {
@@ -45,6 +48,7 @@ def _rows(
                     "feature_vector": f"fv/{image}",
                     "is_holdout": is_holdout,
                     "is_excluded": False,
+                    "is_val": is_val,
                 }
             )
 
@@ -56,6 +60,8 @@ def _rows(
             add(image, "ba_a", "p2", True)
     for image, ba, is_holdout in extra:
         add(image, ba, "p3", is_holdout)
+    for image, ba, project in val:
+        add(image, ba, project, False, is_val=True)
     return rows
 
 
@@ -70,13 +76,18 @@ class _SplitCase(unittest.TestCase):
         split_mode: str,
         include_holdout: bool = True,
         extra: tuple[tuple[str, str, bool], ...] = (),
+        val: tuple[tuple[str, str, str], ...] = (),
+        options: DatasetOptions | None = None,
     ):
         override = override_settings(aws_anonymous="True", download_max_workers=1)
         override.__enter__()
         self.addCleanup(override.__exit__, None, None, None)
         dataset = make_dataset(self)
-        dataset.options = DatasetOptions(ref_val_ratios=(0.1, 0.1), split_mode=split_mode)  # pyright: ignore[reportArgumentType]
-        df = pd.DataFrame(_rows(include_holdout, extra))  # noqa: F841 -- DuckDB scans by name
+        dataset.options = options or DatasetOptions(
+            ref_val_ratios=(0.1, 0.1),
+            split_mode=split_mode,  # pyright: ignore[reportArgumentType]
+        )
+        df = pd.DataFrame(_rows(include_holdout, extra, val))  # noqa: F841 -- DuckDB scans by name
         dataset.duck_conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
         with (
             mock.patch(
@@ -210,6 +221,138 @@ class SplitDropStatsTest(_SplitCase):
         drop_logs = [line for line in logs.output if "ba_rare" in line]
         self.assertTrue(drop_logs)
         self.assertTrue(all(line.startswith("INFO") for line in drop_logs), drop_logs)
+
+
+# One val group per class, two images each, in their own project.
+_VAL_IMAGES = tuple((f"val_{ba}_{i}", ba, "pv") for ba in _CLASSES for i in range(2))
+
+
+def _grouped_val_options() -> DatasetOptions:
+    return DatasetOptions(
+        val_groups_csv="val_groups.csv", split_mode="images", ref_val_ratios=(0.1, 0.0)
+    )
+
+
+class GroupedValSplitTest(_SplitCase):
+    def _prepare_grouped(self, val=_VAL_IMAGES, extra=()):
+        return self._prepare("images", val=val, extra=extra, options=_grouped_val_options())
+
+    def _images_by_set(self, dataset) -> dict[str | None, set[str]]:
+        result: dict[str | None, set[str]] = {}
+        for image, training_set in dataset.duck_conn.execute(
+            "SELECT DISTINCT image_id, training_set FROM annotations"
+        ).fetchall():
+            result.setdefault(training_set, set()).add(image)
+        return result
+
+    def test_holdout_val_and_split_rows_are_disjoint(self):
+        dataset = self._prepare_grouped()
+        by_set = self._images_by_set(dataset)
+        val_images = {image for image, _, _ in _VAL_IMAGES}
+        self.assertEqual(by_set["val"], val_images)
+        self.assertEqual(by_set["holdout"], set(_HOLDOUT_IMAGES))
+        split_images = by_set["train"] | by_set["ref"]
+        self.assertEqual(len(split_images), len(_CLASSES) * _IMAGES_PER_CLASS)
+        self.assertFalse(split_images & (val_images | set(_HOLDOUT_IMAGES)))
+        self.assertNotIn(None, by_set)
+        self.assertEqual(dataset.labels.val.label_count, len(val_images) * _POINTS_PER_IMAGE)
+        self.assertIn(("b", "fv/val_ba_a_0"), self.downloaded)
+
+    def test_val_source_is_recorded_in_the_summary_stats(self):
+        grouped = self._prepare_grouped().artifacts.train_summary_stats
+        self.assertEqual(grouped["annotations_val_source"], "groups")
+        split = self._prepare("images").artifacts.train_summary_stats
+        self.assertEqual(split["annotations_val_source"], "split")
+
+    def test_no_val_rows_raises(self):
+        with self.assertRaisesRegex(ValueError, "no annotation is in a val group"):
+            self._prepare_grouped(val=())
+
+    def test_model_class_without_val_points_is_a_warning(self):
+        val = tuple(v for v in _VAL_IMAGES if v[1] != "ba_c")
+        with self.assertLogs("train", level="WARNING") as logs:
+            self._prepare_grouped(val=val)
+        self.assertTrue([line for line in logs.output if "ba_c" in line], logs.output)
+
+    def test_split_drop_threshold_is_two_images(self):
+        # With no val share a class in two images can reach train and ref,
+        # so its drop is a warning, not the info a rarer class gets.
+        real_split = split_by_image
+
+        def split_without_ba_two_in_ref(*args, **kwargs):
+            split = real_split(*args, **kwargs)
+            split.ref = split.ref.filter_classes(split.ref.classes_set - {"ba_two::"})
+            return split
+
+        two = (("two_0", "ba_two", False), ("two_1", "ba_two", False))
+        with (
+            mock.patch(
+                "mermaid_classifier.pyspacer.dataset.split_by_image",
+                side_effect=split_without_ba_two_in_ref,
+            ),
+            self.assertLogs("train", level="INFO") as logs,
+        ):
+            self._prepare_grouped(extra=two)
+        drop_logs = [line for line in logs.output if "ba_two" in line and "Split drops" in line]
+        self.assertTrue(drop_logs, logs.output)
+        self.assertTrue(all(line.startswith("WARNING") for line in drop_logs), drop_logs)
+
+    def test_options_reject_inconsistent_val_settings(self):
+        cases = {
+            "points split with val groups": {
+                "val_groups_csv": "v.csv",
+                "split_mode": "points",
+                "ref_val_ratios": (0.1, 0.0),
+            },
+            "val share with val groups": {
+                "val_groups_csv": "v.csv",
+                "split_mode": "images",
+                "ref_val_ratios": (0.1, 0.1),
+            },
+            "no val share without val groups": {"ref_val_ratios": (0.1, 0.0)},
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                DatasetOptions(**kwargs)  # pyright: ignore[reportArgumentType]
+
+
+class EvalGroupsDisjointTest(unittest.TestCase):
+    """The post-split guard: no group may feed two of train+ref, val and holdout."""
+
+    def _check(self, sets_by_group: dict[str, tuple[str, ...]], options: DatasetOptions) -> None:
+        override = override_settings(aws_anonymous="True")
+        override.__enter__()
+        self.addCleanup(override.__exit__, None, None, None)
+        dataset = make_dataset(self)
+        dataset.options = options
+        df = pd.DataFrame(  # noqa: F841 -- DuckDB scans by name
+            [
+                {"site": "coralnet", "project_id": group, "training_set": training_set}
+                for group, sets in sets_by_group.items()
+                for training_set in sets
+            ]
+        )
+        dataset.duck_conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
+        dataset._assert_eval_groups_disjoint()
+
+    def test_group_in_train_and_val_is_rejected_only_with_val_groups(self):
+        groups = {"p1": ("train", "ref", "val"), "p2": ("train",)}
+        self._check(groups, DatasetOptions(split_mode="images"))
+        with self.assertRaisesRegex(RuntimeError, r"\(coralnet, p1\)"):
+            self._check(groups, _grouped_val_options())
+
+    def test_group_in_holdout_and_another_set_is_rejected_in_every_mode(self):
+        for options in (DatasetOptions(), _grouped_val_options()):
+            for other in ("train", "val"):
+                with (
+                    self.subTest(val_groups=options.val_groups_csv, other=other),
+                    self.assertRaisesRegex(RuntimeError, r"\(coralnet, p1\)"),
+                ):
+                    self._check({"p1": ("holdout", other), "p2": ("train",)}, options)
+
+    def test_dropped_rows_and_disjoint_groups_pass(self):
+        groups = {"p1": ("train", "ref", None), "p2": ("val", None), "p3": ("holdout",)}
+        self._check(groups, _grouped_val_options())
 
 
 if __name__ == "__main__":

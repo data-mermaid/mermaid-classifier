@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import dataclasses
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -29,6 +28,7 @@ from classifier_train import (
 from select_holdout_groups import (
     REPO_ROOT,
     _resolve,  # pyright: ignore[reportPrivateUsage]  # shared path resolution
+    all_data_options,
     load_config_then_pyspacer,
 )
 
@@ -118,10 +118,8 @@ def main(argv: list[str] | None = None) -> None:
             " MERMAID row would count as one project 'all'. Set the lookup, or set"
             " include_mermaid: false."
         )
-    # Counts cover all data: an existing holdout CSV must not tag or drop rows.
-    dataset_options = dataclasses.replace(
-        dataset_options, holdout_groups_csv=None, holdout_fold="test"
-    )
+    # Counts cover all data: existing holdout or val CSVs must not tag or drop rows.
+    dataset_options = all_data_options(dataset_options)
     dataset = training_dataset_cls.filtered_annotations_only(dataset_options)
     try:
         counts = class_group_counts(dataset)

@@ -145,12 +145,34 @@ class DatasetOptions:
     md5 order) to bound the feature downloads for evaluation. None keeps
     every holdout row. Has no effect when nothing is held out.
 
+    val_groups_csv
+    val_max_per_class
+
+    Local filepath of a CSV naming the groups whose rows form the val
+    (early-stopping) set, so model selection scores sources the model
+    never trains on. A group is a (site, project_id) pair.
+    - If this file isn't specified, val comes from the train/ref/val split.
+    - Recognized columns:
+      site -- 'coralnet' or 'mermaid'.
+      group_id -- The CoralNet source ID, or the MERMAID project ID; never
+        'unknown'.
+    - Requires split_mode 'images' and ref_val_ratios[1] == 0: train and
+      ref still come from the image split of the remaining rows, which has
+      no val share.
+    - No val group may be in the holdout test fold, nor in holdout_fold.
+    - Every class with val rows needs training rows too.
+    val_max_per_class caps each class's val rows the way
+    holdout_max_per_class caps holdout rows. None keeps every val row. Has
+    no effect unless val_groups_csv is set.
+
     ref_val_ratios
 
     Determines the ratios of training annotations that will go into
     the train, ref (reference), and val (validation) sets.
     This is a tuple of two floats. For example, specifying (0.05, 0.1)
     means 5% into ref, 10% into val, and the rest (85%) into train.
+    The val share must be positive, unless val_groups_csv is set, in which
+    case it must be 0.
     PySpacer has an explanation of the three sets here:
     https://github.com/coralnet/pyspacer?tab=readme-ov-file#train_classifier
 
@@ -165,7 +187,8 @@ class DatasetOptions:
       (see mermaid_classifier.pyspacer.splitting). Classes in fewer than
       3 images are dropped first. ref_val_ratios apply with no ref cap.
       Seeded by subsample.seed, or 0 without a subsample.
-    Holdout rows never enter train/ref/val in either mode.
+    Holdout rows never enter train/ref/val in either mode, nor do val-group
+    rows.
 
     subsample
 
@@ -211,6 +234,8 @@ class DatasetOptions:
     holdout_groups_csv: str | None = None
     holdout_fold: str = "test"
     holdout_max_per_class: int | None = 3000
+    val_groups_csv: str | None = None
+    val_max_per_class: int | None = 3000
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     split_mode: Literal["points", "images"] = "points"
     # Optional per-class subsampling. None means use all annotations.
@@ -222,6 +247,26 @@ class DatasetOptions:
     # mermaid_classifier.training.sample_weighting for available
     # strategies.
     weighting: SampleWeightingOptions | None = None
+
+    def __post_init__(self) -> None:
+        val_ratio = self.ref_val_ratios[1]
+        if self.val_groups_csv:
+            if self.split_mode != "images":
+                raise ValueError(
+                    f"val_groups_csv needs split_mode 'images', got {self.split_mode!r}."
+                )
+            # An explicit 0 keeps a configured val share from silently
+            # adding a second, image-split val set.
+            if val_ratio != 0:
+                raise ValueError(
+                    f"val_groups_csv supplies the val set, so ref_val_ratios[1] must be 0,"
+                    f" got {val_ratio}."
+                )
+        elif val_ratio <= 0:
+            raise ValueError(
+                f"ref_val_ratios[1] must be positive unless val_groups_csv supplies the"
+                f" val set, got {val_ratio}."
+            )
 
 
 @dataclasses.dataclass

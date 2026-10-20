@@ -1,5 +1,5 @@
 """TrainingDataset._apply_subsample in source_spread mode, its bypass of
-holdout rows, and the per-class holdout cap.
+holdout and val rows, and the per-class holdout and val caps.
 
 Uses a real in-memory DuckDB over a seeded annotations table.
 """
@@ -343,6 +343,102 @@ class HoldoutCapTest(_Base):
         self.dataset._cap_holdout_rows(15)
 
         self.assertIsNone(self.dataset._holdout_audit_df)
+
+
+def _add_val_rows(dataset: NoInitDataset, groups: list[tuple[str, str, int, int]]) -> None:
+    """Add an is_val column (FALSE for the seeded rows) and val rows:
+    (project, class, images, points per image)."""
+    dataset.duck_conn.execute("ALTER TABLE annotations ADD COLUMN is_val BOOLEAN DEFAULT FALSE")
+    rows = [
+        {
+            "site": "coralnet",
+            "project_id": project,
+            "image_id": f"{project}_{ba}_img{i}",
+            "row": p,
+            "col": p,
+            "label_id": "100",
+            "benthic_attribute_id": ba,
+            "growth_form_id": "",
+            "bucket": "my-bucket",
+            "feature_vector": f"{project}/{ba}_img{i}.fv",
+            "is_holdout": False,
+            "is_excluded": False,
+            "is_val": True,
+        }
+        for project, ba, n_images, points in groups
+        for i in range(n_images)
+        for p in range(points)
+    ]
+    extra = pd.DataFrame(rows)  # noqa: F841 -- DuckDB scans by name
+    dataset.duck_conn.execute("INSERT INTO annotations BY NAME SELECT * FROM extra")
+
+
+class ValBypassTest(_Base):
+    def test_subsample_leaves_val_rows_untouched_and_val_classes_do_not_count(self):
+        for within_class in ("ordered", "source_spread"):
+            with self.subTest(within_class=within_class):
+                _seed(self.dataset)
+                # 20 val rows of ba_a, and 5 of ba_v, a class only val has.
+                _add_val_rows(self.dataset, [("v1", "ba_a", 2, 10), ("v1", "ba_v", 1, 5)])
+                self.dataset._apply_subsample(
+                    SubsampleOptions(
+                        strategy="balanced", total_annotations=30, within_class=within_class
+                    )
+                )
+                counts = dict(
+                    self.dataset.duck_conn.execute(
+                        "SELECT CASE WHEN is_val THEN 'val' WHEN is_holdout THEN 'holdout'"
+                        " ELSE 'train' END, count(*) FROM annotations GROUP BY 1"
+                    ).fetchall()
+                )
+                # ba_v counting toward K would halve ba_a's target to 15.
+                self.assertEqual(counts, {"val": 25, "holdout": 45, "train": 30})
+
+
+class ValCapTest(_Base):
+    def setUp(self):
+        super().setUp()
+        _add_val_rows(self.dataset, [("v1", "ba_a", 4, 10), ("v1", "ba_b", 1, 5)])
+
+    def _val_per_image(self, ba: str) -> collections.Counter:
+        return collections.Counter(
+            image for _, image in self._rows(f"is_val AND benthic_attribute_id = '{ba}'")
+        )
+
+    def test_caps_each_class_taking_whole_images_first(self):
+        self.dataset._cap_val_rows(15)
+
+        self.assertEqual(sorted(self._val_per_image("ba_a").values(), reverse=True), [10, 5])
+        self.assertEqual(sum(self._val_per_image("ba_b").values()), 5)
+        audit = self.dataset._val_audit_df
+        assert audit is not None
+        by_class = audit.set_index("benthic_attribute_id")
+        self.assertEqual(by_class["available"].to_dict(), {"ba_a": 40, "ba_b": 5})
+        self.assertEqual(by_class["realized"].to_dict(), {"ba_a": 15, "ba_b": 5})
+
+    def test_never_touches_holdout_or_train_rows(self):
+        self.dataset._cap_val_rows(1)
+
+        self.assertEqual(len(self._rows("is_holdout")), 45)
+        self.assertEqual(len(self._rows("NOT is_holdout AND NOT is_val")), 106)
+
+    def test_holdout_rows_are_unchanged_when_the_val_cap_follows(self):
+        def holdout_rows() -> list[tuple]:
+            return sorted(
+                self.dataset.duck_conn.execute(
+                    "SELECT image_id, row, col FROM annotations WHERE is_holdout"
+                ).fetchall()
+            )
+
+        self.dataset._cap_holdout_rows(15)
+        holdout_only = holdout_rows()
+        _seed(self.dataset)
+        _add_val_rows(self.dataset, [("v1", "ba_a", 4, 10)])
+        self.dataset._cap_holdout_rows(15)
+        self.dataset._cap_val_rows(15)
+
+        self.assertEqual(holdout_rows(), holdout_only)
+        self.assertEqual(len(self._rows("is_holdout")), 20)
 
 
 if __name__ == "__main__":

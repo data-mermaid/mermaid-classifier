@@ -28,6 +28,7 @@ from mermaid_classifier.pyspacer.inference import (
     export_artifact,
     load_predictor,
 )
+from mermaid_classifier.pyspacer.label_specs import tag_exclude_clause
 from mermaid_classifier.pyspacer.metrics import (
     MetricsContext,
     MetricsCoordinator,
@@ -323,6 +324,8 @@ class MLflowTrainingRunner(TrainingRunner):
                 ),
                 "holdout_fold": self.dataset_options.holdout_fold,
                 "holdout_max_per_class": self.dataset_options.holdout_max_per_class or "",
+                "val_groups_csv": os.path.basename(self.dataset_options.val_groups_csv or ""),
+                "val_max_per_class": self.dataset_options.val_max_per_class or "",
                 "ref_val_ratios": str(self.dataset_options.ref_val_ratios),
                 "split_mode": self.dataset_options.split_mode,
             }
@@ -653,6 +656,13 @@ class MLflowTrainingRunner(TrainingRunner):
             return
         self.log_dataframe(self._with_class_names(df), "holdout/per_class_counts")
 
+    def _log_val_audit(self) -> None:
+        """Log the per-class val cap audit; nothing if no cap applied."""
+        df = getattr(self.dataset, "_val_audit_df", None)
+        if df is None or df.empty:
+            return
+        self.log_dataframe(self._with_class_names(df), "val/per_class_counts")
+
     @staticmethod
     def _with_class_names(df: pd.DataFrame) -> pd.DataFrame:
         """Append ba_name / gf_name columns to a table keyed by BA and GF ids,
@@ -721,6 +731,11 @@ class MLflowTrainingRunner(TrainingRunner):
             mlflow.log_text(self.dataset.holdout_groups.csv_text, "holdout_groups.csv")
             mlflow.log_param("holdout_groups_count", len(self.dataset.holdout_groups.group_folds))
 
+        if not self.dataset.val_groups.is_empty():
+            mlflow.log_text(self.dataset.val_groups.csv_text, "val_groups.csv")
+            mlflow.log_param("val_groups_count", len(self.dataset.val_groups.groups))
+        self._log_val_audit()
+
         # Number of images and annotations from each CN source and from
         # MERMAID.
         # First, before filtering (this is what's present in S3).
@@ -758,8 +773,9 @@ class MLflowTrainingRunner(TrainingRunner):
 
         # Always log the validation split annotations so others can
         # independently re-evaluate the model.
+        exclude = tag_exclude_clause(self.dataset.duck_conn, "annotations")
         val_annotations_df = self.dataset.duck_conn.execute(
-            "SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations WHERE training_set = 'val'"
+            f"SELECT * {exclude} FROM annotations WHERE training_set = 'val'"
         ).fetch_df()
         self.log_dataframe(val_annotations_df, "annotations_val")
 

@@ -125,6 +125,16 @@ class HoldoutEvaluationTest(unittest.TestCase):
         self.assertFalse(bool(unknown["in_model_classes"].iloc[0]))
         self.assertEqual(int(df["in_model_classes"].sum()), 6)
 
+    def test_annotations_drop_the_val_tag_when_the_table_has_one(self):
+        # The base fixture has no is_val column, as a run without val tagging.
+        self.dataset.duck_conn.execute(
+            "ALTER TABLE annotations ADD COLUMN is_val BOOLEAN DEFAULT FALSE"
+        )
+        ev = holdout_eval.evaluate_holdout(self.clf, self.dataset)
+        df = holdout_eval.holdout_annotations_df(self.dataset.duck_conn, ev.points)
+        self.assertEqual(len(df), 7)
+        self.assertNotIn("is_val", df.columns)
+
     def test_per_site_metrics_split_by_site(self):
         ev = holdout_eval.evaluate_holdout(self.clf, self.dataset)
         m = holdout_eval.per_site_metrics(ev.points, format_metric)

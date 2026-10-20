@@ -347,6 +347,52 @@ class SourceSpreadOptionsTest(unittest.TestCase):
             self._build({"holdout_max_per_class": 0})
 
 
+class ValGroupsOptionsTest(unittest.TestCase):
+    """val_groups_csv and val_max_per_class parse, resolve, and pass their cross-field rules."""
+
+    GROUPED_VAL = {
+        "val_groups_csv": "val_groups.csv",
+        "split_mode": "images",
+        "ref_val_ratios": [0.1, 0.0],
+    }
+
+    def _build(self, dataset_patch: dict):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"].update(dataset_patch)
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            path = _write(tmp, _yaml.dump(base))
+            config = TrainingRunConfig.from_yaml_path(path)
+            return config.build_options(config_dir=tmp)[0], tmp
+
+    def test_fields_reach_dataset_options(self):
+        dataset, tmp = self._build({**self.GROUPED_VAL, "val_max_per_class": 250})
+        self.assertEqual(dataset.val_groups_csv, str(tmp / "val_groups.csv"))
+        self.assertEqual(dataset.val_max_per_class, 250)
+        self.assertEqual(dataset.ref_val_ratios, (0.1, 0.0))
+
+    def test_defaults_leave_val_to_the_split(self):
+        dataset, _ = self._build({})
+        self.assertIsNone(dataset.val_groups_csv)
+        self.assertEqual(dataset.val_max_per_class, 3000)
+
+    def test_inconsistent_val_settings_are_rejected(self):
+        cases = {
+            "points split with val groups": {**self.GROUPED_VAL, "split_mode": "points"},
+            "val share with val groups": {**self.GROUPED_VAL, "ref_val_ratios": [0.1, 0.1]},
+            "no val share without val groups": {
+                "split_mode": "images",
+                "ref_val_ratios": [0.1, 0.0],
+            },
+            "zero val cap": {**self.GROUPED_VAL, "val_max_per_class": 0},
+        }
+        for name, patch in cases.items():
+            with self.subTest(name), self.assertRaises(ValidationError):
+                self._build(patch)
+
+
 class ExampleYamlTest(unittest.TestCase):
     def test_committed_example_loads(self):
         # Resolve relative to the repo root (the tests/ dir is one
