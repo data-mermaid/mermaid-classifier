@@ -57,7 +57,7 @@ from mermaid_classifier.pyspacer.options import (
     Sites,
 )
 from mermaid_classifier.pyspacer.settings import settings
-from mermaid_classifier.pyspacer.splitting import MIN_IMAGES_PER_CLASS, split_by_image
+from mermaid_classifier.pyspacer.splitting import required_images, split_by_image
 from mermaid_classifier.pyspacer.utils import logging_config_for_script
 from mermaid_classifier.training.subsample import (
     SubsampleOptions,
@@ -1238,8 +1238,8 @@ class TrainingDataset:
         Log by name each class the split removed, and count them.
 
         PySpacer drops a class missing from train or ref from all three sets.
-        A class in MIN_IMAGES_PER_CLASS or more images could have reached
-        every set, so its drop is a warning; a rarer class's drop is info.
+        A class in `required_images(ref_val_ratios)` or more images could
+        have reached every set, so its drop is a warning; a rarer class's drop is info.
         """
         kept = after.train.classes_set | after.ref.classes_set | after.val.classes_set
         images_per_class: Counter[LabelId] = Counter()
@@ -1248,20 +1248,22 @@ class TrainingDataset:
         dropped = sorted(set(images_per_class) - kept, key=str)
         self._split_dropped_bagfs = len(dropped)
 
+        min_images = required_images(self.options.ref_val_ratios)
+
         def describe(labels: list[LabelId]) -> str:
             return ", ".join(
                 f"{label}: {images_per_class[label]}, {before.label_count_per_class[label]}"
                 for label in labels
             )
 
-        common = [label for label in dropped if images_per_class[label] >= MIN_IMAGES_PER_CLASS]
-        rare = [label for label in dropped if images_per_class[label] < MIN_IMAGES_PER_CLASS]
+        common = [label for label in dropped if images_per_class[label] >= min_images]
+        rare = [label for label in dropped if images_per_class[label] < min_images]
         if common:
             logger.warning(
                 "Split drops %d class(es) in %d or more images from train, ref and val"
                 " (class: images, points): %s",
                 len(common),
-                MIN_IMAGES_PER_CLASS,
+                min_images,
                 describe(common),
             )
         if rare:
@@ -1269,7 +1271,7 @@ class TrainingDataset:
                 "Split drops %d class(es) in fewer than %d images from train, ref and val"
                 " (class: images, points): %s",
                 len(rare),
-                MIN_IMAGES_PER_CLASS,
+                min_images,
                 describe(rare),
             )
 
