@@ -29,6 +29,8 @@ uv run python scripts/classifier_train.py            # local training run
 uv run python scripts/generate_report.py             # MLflow run -> self-contained HTML report
 uv run python scripts/generate_training_config.py    # writes a sagemaker/configs/<name>/ dir
 uv run python scripts/release_artifact.py            # validate + stage a vN artifact
+uv run python scripts/select_val_groups.py --config-dir sagemaker/configs/<name>  # writes val_groups.csv (site,group_id) + coverage
+uv run python scripts/compare_holdout_runs.py --run-a A --run-b B --out-dir out  # paired source-clustered B-A on one holdout
 
 # SageMaker (host side) and its in-container counterpart:
 uv run python scripts/launch_training.py             # submit a TrainingJob
@@ -104,7 +106,10 @@ load the CoralNet manifest parquet (built by `scripts/build_coralnet_manifest.py
 (`CoralNetMermaidMapping`) → filter/rollup (`LabelFilter`, `LabelRollupSpec`,
 `ImageExclusionFilter`, all `CsvSpec` subclasses in `label_specs.py`) →
 validate `.fv` feature vectors exist on S3 →
-train/ref/val split via PySpacer's `preprocess_labels` → train via
+train/ref/val split via PySpacer's `preprocess_labels` (optional source-grouped val:
+`dataset.val_groups_csv` (site,group_id) makes whole groups the early-stopping val set,
+replacing the in-run val share, so the second `ref_val_ratios` value must be 0;
+`val_max_per_class` caps it) → train via
 `MermaidTrainer` (`trainer.py`, a PySpacer `ClassifierTrainer` subclass doing
 batched calibration + per-epoch MLflow callbacks; ref and train data are never
 both in memory) → log model, metrics, confusion matrices to MLflow. The
@@ -120,7 +125,8 @@ Two strategy families for the long-tailed coral taxonomy:
   (`effective_number.py` + `options.py`); no registry — there is one strategy.
 - `subsample/` — registry-based dataset subsampling: strategies `stratified`
   and `balanced`, listed in `SUBSAMPLE_STRATEGIES` and dispatched via the
-  `_ALLOCATORS` dict in `registry.py` (config in `options.py`).
+  `_ALLOCATORS` dict in `registry.py` (config in `options.py`). `subsample.class_target_multipliers`
+  (`"<ba_id>::<gf_id>"` -> multiplier of the allocated target, clamped to available rows).
 
 ### Metrics (`pyspacer/metrics/`)
 
