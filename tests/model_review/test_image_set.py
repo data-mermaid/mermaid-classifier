@@ -1,7 +1,13 @@
 import dataclasses
 import unittest
 
-from mermaid_classifier.model_review.image_set import IMAGE_SET, ImageSet, SiteSpec
+from mermaid_classifier.model_review.image_set import (
+    COARSE_IMAGE_SET,
+    IMAGE_SET,
+    V1_IMAGE_SET,
+    ImageSet,
+    SiteSpec,
+)
 from mermaid_classifier.model_review.sample import allocate_quota
 
 
@@ -13,9 +19,25 @@ class ImageSetTest(unittest.TestCase):
         self.assertIsInstance(IMAGE_SET, ImageSet)
         self.assertEqual(IMAGE_SET.n_images, 20)
         self.assertEqual(IMAGE_SET.min_points, 15)
-        self.assertEqual(IMAGE_SET.seed, 1)
-        self.assertEqual(IMAGE_SET.classifier, "s3://mermaid-config/classifier/v2/")
         self.assertEqual(IMAGE_SET.beta_classifier, "../models/beta_model/classifier.pkl")
+
+    def test_active_set_is_the_coarse_model(self):
+        self.assertIs(IMAGE_SET, COARSE_IMAGE_SET)
+        self.assertEqual(IMAGE_SET.seed, 2)
+        self.assertEqual(IMAGE_SET.classifier, "m-2e523eb2d73242d79cfcbe9f6634de33")
+        self.assertEqual(
+            IMAGE_SET.v1_rollup_csv,
+            "sagemaker/configs/coralnet_all_plus_mermaid_coarse/rollups.csv",
+        )
+        self.assertIn("/coralnet/all/", self._spec("coralnet").manifest_uri)
+
+    def test_v1_set_is_kept_unchanged(self):
+        self.assertEqual(V1_IMAGE_SET.seed, 1)
+        self.assertEqual(V1_IMAGE_SET.classifier, "s3://mermaid-config/classifier/v2/")
+        self.assertEqual(
+            V1_IMAGE_SET.v1_rollup_csv, "sagemaker/configs/coralnet_top108_full/rollups.csv"
+        )
+        self.assertNotEqual(V1_IMAGE_SET.name, COARSE_IMAGE_SET.name)
 
     def test_two_sites_weighted_two_to_one(self):
         self.assertEqual([s.site for s in IMAGE_SET.sites], ["coralnet", "mermaid"])

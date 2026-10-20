@@ -1,9 +1,10 @@
 """THE place to change which images go into a model-review project.
 
 To make a NEW image set:
-  1. Edit the values in IMAGE_SET below (at minimum change `name` — each distinct
-     name creates its own new Label Studio project and existing projects are left
-     untouched).
+  1. Add an ImageSet below (at minimum with a new `name` — each distinct name
+     creates its own new Label Studio project and existing projects are left
+     untouched) and point IMAGE_SET at it. Keep earlier sets so they stay
+     reproducible.
   2. Rerun:  uv run --extra training --with pillow \\
                 python -m mermaid_classifier.model_review.cli create-project --token <token>
 
@@ -74,8 +75,24 @@ MERMAID_SITE = SiteSpec(
     image_key_extensions=("png", "jpg", "jpeg"),
 )
 
+# The coarse-label-set model trained on every CoralNet source, so its ground-truth
+# grids come from the `all` manifest rather than `top108_full`.
+CORALNET_ALL_SITE = SiteSpec(
+    site="coralnet",
+    weight=2.0,
+    manifest_uri=(
+        "s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/all/"
+        "coralnet_classifier_manifest_all.parquet"
+    ),
+    feature_bucket="2605-coralnet-public-sources",
+    image_bucket="dev-datamermaid-sm-sources",
+    image_prefix="coralnet-public-images/",
+    image_bucket_region="us-east-1",
+    image_key_template="coralnet-public-images/s{source_id}/images/{image_id}.jpg",
+)
+
 # weight 2:1 over 20 images -> 13 CoralNet + 7 MERMAID.
-IMAGE_SET = ImageSet(
+V1_IMAGE_SET = ImageSet(
     name="Model Review (20 images) + Beta + Comparison",
     classifier="s3://mermaid-config/classifier/v2/",
     # The model deployed to the MERMAID API. It shares V1's EfficientNet extractor, so
@@ -90,3 +107,21 @@ IMAGE_SET = ImageSet(
     seed=1,
     sites=(CORALNET_SITE, MERMAID_SITE),
 )
+
+# The coarse-label-set model (mermaid-classifier PR #111): MLflow run
+# 5d0d74a696614c7f87bcc8d173988a60, 94 classes with species and region-specific
+# labels rolled up. Unreleased, so it is loaded by MLflow model id. The held-out CSV
+# is that run's `annotations_val.csv` artifact. The "v1" tab shows this model.
+COARSE_IMAGE_SET = ImageSet(
+    name="Model Review coarse (20 img) + Beta + Comparison",
+    classifier="m-2e523eb2d73242d79cfcbe9f6634de33",
+    beta_classifier="../models/beta_model/classifier.pkl",
+    heldout_csv="../reports/model_benchmark/data/coarse_annotations_val.csv",
+    v1_rollup_csv="sagemaker/configs/coralnet_all_plus_mermaid_coarse/rollups.csv",
+    n_images=20,
+    min_points=15,
+    seed=2,
+    sites=(CORALNET_ALL_SITE, MERMAID_SITE),
+)
+
+IMAGE_SET = COARSE_IMAGE_SET
