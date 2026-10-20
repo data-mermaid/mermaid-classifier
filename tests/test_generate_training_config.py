@@ -785,22 +785,54 @@ class MinSupportTests(_GenerateConfigTestCase):
         self.assertEqual(rollups[(ACROPORA_HUMILIS, "")], (ACROPORIDAE, ""))
         self.assertEqual(rollups[(ACROPORA, "")], (ACROPORIDAE, ""))
 
-    def test_thin_siblings_create_their_parent_as_a_new_class(self):
-        # Equal points: abrotanoides sorts first and creates Acropora, then
-        # humilis (sorting before Acropora) merges in, passing both floors.
-        acropora_abrotanoides = "ba-acrabr-0000-0000-00000000001c"
-        self.add_ba(acropora_abrotanoides, "Acropora abrotanoides", ACROPORA)
+    def test_thin_siblings_create_a_supported_parent(self):
+        # Neither genus passes alone; together in Agariciidae they pass both floors.
         self.run_min_support(
-            ["Hard coral", "Acropora abrotanoides", "Acropora humilis", "Turf algae"],
+            ["Hard coral", "Agaricia", "Helioseris cucullata", "Turf algae"],
             {
-                _key(acropora_abrotanoides): _support(50, *range(6)),
-                _key(ACROPORA_HUMILIS): _support(50, *range(4, 10)),
+                _key(AGARICIA): _support(60, *range(6)),
+                _key(HELIOSERIS_CUCULLATA): _support(40, *range(4, 10)),
             },
         )
-        self.assertEqual(self.included_bas(), {HARD_CORAL, ACROPORA, TURF_ALGAE})
-        self.assertEqual(self.get_rollup_lookup()[(ACROPORA_HUMILIS, "")], (ACROPORA, ""))
+        self.assertEqual(self.included_bas(), {HARD_CORAL, AGARICIIDAE, TURF_ALGAE})
+        rollups = self.get_rollup_lookup()
+        self.assertEqual(rollups[(AGARICIA, "")], (AGARICIIDAE, ""))
+        self.assertEqual(rollups[(HELIOSERIS_CUCULLATA, "")], (AGARICIIDAE, ""))
+
+    def test_thin_siblings_with_a_thin_parent_roll_further_up(self):
+        self.run_min_support(
+            ["Hard coral", "Agaricia", "Helioseris cucullata", "Turf algae"],
+            {
+                _key(AGARICIA): _support(50, 0, 1),
+                _key(HELIOSERIS_CUCULLATA): _support(50, 2, 3),
+            },
+        )
+        self.assertEqual(self.included_bas(), {HARD_CORAL, TURF_ALGAE})
+        rollups = self.get_rollup_lookup()
+        self.assertEqual(rollups[(AGARICIA, "")], (HARD_CORAL, ""))
+        self.assertEqual(rollups[(HELIOSERIS_CUCULLATA, "")], (HARD_CORAL, ""))
         readme = (self.output_dir / "README.md").read_text()
-        self.assertIn("| Acropora abrotanoides | 300 | 6 | Acropora |", readme)
+        self.assertIn("| Agariciidae | 200 | 4 | Hard coral |", readme)
+
+    def test_rolls_within_a_level_follow_class_key_order(self):
+        self.run_min_support(
+            ["Hard coral", "Agaricia", "Helioseris cucullata", "Turf algae"],
+            {
+                _key(HELIOSERIS_CUCULLATA): _support(10, 1),
+                _key(AGARICIA): _support(10, 2),
+            },
+        )
+        readme = (self.output_dir / "README.md").read_text()
+        table = readme.split("Classes rolled up by min support", 1)[1]
+        rows = [line for line in table.splitlines() if line.endswith("| Hard coral |")]
+        self.assertEqual(
+            rows,
+            [
+                "| Agaricia | 10 | 1 | Hard coral |",
+                "| Helioseris cucullata | 10 | 1 | Hard coral |",
+                "| Agariciidae | 20 | 2 | Hard coral |",
+            ],
+        )
 
     def test_excluded_or_missing_ancestor_drops_the_class(self):
         # Dead coral (excluded) sits under Bare substrate, which would
@@ -849,14 +881,14 @@ class MinSupportTests(_GenerateConfigTestCase):
         readme = (self.output_dir / "README.md").read_text()
         self.assertIn("| Porites::Branching | 10 | 1 | Porites |", readme)
 
-    def test_equal_points_resolve_by_class_key(self):
-        # Acropora's key sorts first, so it merges into Acroporidae, which then
-        # passes both floors. The other order sends both to Hard coral.
+    def test_deeper_class_merges_before_its_parent_is_judged(self):
+        # Acroporidae is the thinner class, yet Acropora (one level deeper)
+        # merges into it first, and the merged class passes both floors.
         self.run_min_support(
             TOP108_NAMES + ["Acroporidae"],
             {
                 _key(ACROPORA): _support(60, *range(5)),
-                _key(ACROPORIDAE): _support(60, *range(5, 10)),
+                _key(ACROPORIDAE): _support(40, *range(5, 10)),
             },
         )
         self.assertIn(ACROPORIDAE, self.included_bas())
@@ -881,7 +913,8 @@ class MinSupportTests(_GenerateConfigTestCase):
         )
         readme = (self.output_dir / "README.md").read_text()
         self.assertIn(
-            "min support (>= 500 points and >= 10 groups, counts from support_counts.csv)",
+            "min support (>= 500 points and >= 10 groups, counts from support_counts.csv,"
+            " deepest level first)",
             readme,
         )
         self.assertIn("| Acropora humilis | 90 | 3 | Acroporidae |", readme)

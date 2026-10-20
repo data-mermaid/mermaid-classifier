@@ -18,8 +18,9 @@ replaced in the top-108 set by its nearest ancestor that is neither, so
 its annotations roll up to that ancestor.
 
 With --min-support-counts, each class then below --min-points points or
---min-groups (site, project) groups rolls up to its parent, thinnest
-first, until every class meets both floors.
+--min-groups (site, project) groups rolls up to its parent, deepest
+taxonomy level first, so thin siblings combine in their parent before it
+is judged.
 
 Porites is the one BA that retains growth-form distinctions: three
 buckets (Branching, Massive, other/none) appear as separate classes in
@@ -400,14 +401,15 @@ def apply_min_support(
     min_points: int,
     min_groups: int,
 ) -> tuple[set[ClassKey], list[MinSupportRollup]]:
-    """Roll the thinnest class below either floor into its parent until
-    every class meets both, returning the final classes and each roll-up
-    with its final target (None when dropped).
+    """Roll each class below either floor into its parent, deepest
+    taxonomy level first, returning the final classes and each roll-up with
+    its final target (None when dropped).
 
-    A Porites GF bucket merges into `(Porites, '')`, and `(Porites, '')`
-    carries any surviving buckets with it. A class whose parent is missing
-    or excluded drops. Each step moves a class strictly up the tree, so the
-    loop terminates.
+    Every thin class at a level merges before the next level up is judged,
+    so thin siblings combine in their parent. A Porites GF bucket sits one
+    level below Porites and merges into `(Porites, '')`, which carries any
+    surviving buckets with it. A class whose parent is missing or excluded
+    drops.
     """
     support = {
         key: ClassSupport(counts[key].points, set(counts[key].groups))
@@ -431,38 +433,40 @@ def apply_min_support(
             key = moved[key]
         return key
 
-    rolled: list[MinSupportRollup] = []
-    while True:
-        thin = [
-            (entry.points, key)
-            for key, entry in support.items()
-            if entry.points < min_points or len(entry.groups) < min_groups
-        ]
-        if not thin:
-            break
-        _, key = min(thin)
+    def depth(key: ClassKey) -> int:
         ba_id, gf_id = key
-        leaving = [key]
-        if gf_id:
-            target: ClassKey | None = (ba_id, "")
-        else:
-            ancestors = ba_lib.get_ancestor_ids(ba_id)
-            parent = ancestors[-1] if ancestors else None
-            target = None if parent is None or parent in excluded_uuids else (parent, "")
-            if ba_id == porites_uuid:
-                leaving += sorted(k for k in support if k[0] == ba_id and k[1])
-        target = resolve(target)
-        merged = ClassSupport()
-        for k in leaving:
-            entry = support.pop(k)
-            rolled.append(MinSupportRollup(k, entry.points, len(entry.groups), target))
-            moved[k] = target
-            merged.points += entry.points
-            merged.groups |= entry.groups
-        if target is not None:
-            dest = support.setdefault(target, ClassSupport())
-            dest.points += merged.points
-            dest.groups |= merged.groups
+        return len(ba_lib.get_ancestor_ids(ba_id)) + (1 if gf_id else 0)
+
+    rolled: list[MinSupportRollup] = []
+    # Targets always sit at a shallower level, so each level is final once
+    # reached and a level's merges cannot change any class judged in it.
+    for level in range(max(map(depth, support), default=-1), -1, -1):
+        for key in sorted(k for k in support if depth(k) == level):
+            entry = support[key]
+            if entry.points >= min_points and len(entry.groups) >= min_groups:
+                continue
+            ba_id, gf_id = key
+            leaving = [key]
+            if gf_id:
+                target: ClassKey | None = (ba_id, "")
+            else:
+                ancestors = ba_lib.get_ancestor_ids(ba_id)
+                parent = ancestors[-1] if ancestors else None
+                target = None if parent is None or parent in excluded_uuids else (parent, "")
+                if ba_id == porites_uuid:
+                    leaving += sorted(k for k in support if k[0] == ba_id and k[1])
+            target = resolve(target)
+            merged = ClassSupport()
+            for k in leaving:
+                left = support.pop(k)
+                rolled.append(MinSupportRollup(k, left.points, len(left.groups), target))
+                moved[k] = target
+                merged.points += left.points
+                merged.groups |= left.groups
+            if target is not None:
+                dest = support.setdefault(target, ClassSupport())
+                dest.points += merged.points
+                dest.groups |= merged.groups
     return set(support), [r._replace(target=resolve(r.target)) for r in rolled]
 
 
@@ -996,7 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         coarsening_rules.append(
             f"min support (>= {args.min_points} points and >= {args.min_groups} groups,"
-            f" counts from {args.min_support_counts.name})"
+            f" counts from {args.min_support_counts.name}, deepest level first)"
         )
 
         def class_name(key: ClassKey | None) -> str:
