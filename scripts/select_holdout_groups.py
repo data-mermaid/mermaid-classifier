@@ -215,6 +215,7 @@ def main(argv: list[str] | None = None) -> None:
 
     _resolve_local_aws_credentials()
 
+    from mermaid_classifier.training.class_support import class_group_counts
     from mermaid_classifier.training.holdout_selection import (
         build_coverage_report,
         coverage_warnings,
@@ -240,11 +241,7 @@ def main(argv: list[str] | None = None) -> None:
 
     dataset = training_dataset_cls.filtered_annotations_only(dataset_options)
     try:
-        rows = dataset.duck_conn.execute(
-            "SELECT benthic_attribute_id || '::' || growth_form_id AS class_key,"
-            " site, project_id, COUNT(*) AS n"
-            " FROM annotations GROUP BY 1, 2, 3"
-        ).fetchall()
+        counts = class_group_counts(dataset)
     finally:
         dataset.cleanup()
     if dataset_options.include_mermaid and not dataset_options.mermaid_project_lookup_uri:
@@ -252,17 +249,9 @@ def main(argv: list[str] | None = None) -> None:
             "No mermaid_project_lookup_uri in the config: every MERMAID row is project 'all',"
             " so MERMAID holdout is skipped."
         )
-        rows = [r for r in rows if r[1] != MERMAID_SITE]
-    if not rows:
+        counts = pd.DataFrame(counts.loc[counts["site"] != MERMAID_SITE]).reset_index(drop=True)
+    if counts.empty:
         raise SystemExit("No annotations to select groups from.")
-    counts = pd.DataFrame(
-        {
-            "class_key": [str(r[0]) for r in rows],
-            "site": [str(r[1]) for r in rows],
-            "project_id": [str(r[2]) for r in rows],
-            "n": [int(r[3]) for r in rows],
-        }
-    )
 
     params = selection_params(args)
     coralnet_ids = {
