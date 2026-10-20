@@ -153,10 +153,80 @@ class SourceSpreadTest(_Base):
         assert audit is not None
         self.assertEqual(
             list(audit.columns),
-            ["benthic_attribute_id", "growth_form_id", "pre_count", "target_n", "realized_n"],
+            [
+                "benthic_attribute_id",
+                "growth_form_id",
+                "pre_count",
+                "target_n",
+                "realized_n",
+                "target_multiplier",
+            ],
         )
         self.assertEqual(audit.iloc[0].to_dict()["pre_count"], 106)
         self.assertEqual(audit.iloc[0].to_dict()["realized_n"], 30)
+
+
+class MultiplierTest(_Base):
+    def setUp(self):
+        super().setUp()
+        # A second non-holdout class so the balanced cap is total // 2.
+        rows = [
+            {
+                "site": "coralnet",
+                "project_id": "s4",
+                "image_id": f"s4_img{i}",
+                "row": p,
+                "col": p,
+                "label_id": "101",
+                "benthic_attribute_id": "ba_c",
+                "growth_form_id": "",
+                "bucket": "my-bucket",
+                "feature_vector": f"s4/img{i}.fv",
+                "is_holdout": False,
+                "is_excluded": False,
+            }
+            for i in range(20)
+            for p in range(10)
+        ]
+        extra = pd.DataFrame(rows)  # noqa: F841 -- DuckDB scans by name
+        self.dataset.duck_conn.execute("INSERT INTO annotations BY NAME SELECT * FROM extra")
+
+    def _count(self, ba: str) -> int:
+        return self.dataset.duck_conn.execute(
+            "SELECT COUNT(*) FROM annotations WHERE benthic_attribute_id = ? AND NOT is_holdout",
+            [ba],
+        ).fetchone()[0]
+
+    def _opts(self, multiplier: float, within_class: str) -> SubsampleOptions:
+        return SubsampleOptions(
+            strategy="balanced",
+            total_annotations=60,
+            within_class=within_class,  # pyright: ignore[reportArgumentType]
+            class_target_multipliers={"ba_a::": multiplier},
+        )
+
+    def test_boosted_class_realizes_the_multiple_of_the_cap(self):
+        self.dataset._apply_subsample(self._opts(3.0, "ordered"))
+        # cap = 60 // 2 = 30; ba_a has 106 rows, so 3 * 30 = 90.
+        self.assertEqual(self._count("ba_a"), 90)
+        self.assertEqual(self._count("ba_c"), 30)
+
+    def test_boosted_class_realizes_the_multiple_in_source_spread_mode(self):
+        self.dataset._apply_subsample(self._opts(3.0, "source_spread"))
+        self.assertEqual(self._count("ba_a"), 90)
+
+    def test_boost_is_clamped_to_the_available_rows(self):
+        self.dataset._apply_subsample(self._opts(10.0, "ordered"))
+        self.assertEqual(self._count("ba_a"), 106)
+
+    def test_audit_records_the_multiplier_per_class(self):
+        self.dataset._apply_subsample(self._opts(3.0, "ordered"))
+        audit = self.dataset._subsample_audit_df
+        assert audit is not None
+        self.assertEqual(
+            audit.set_index("benthic_attribute_id")["target_multiplier"].to_dict(),
+            {"ba_a": 3.0, "ba_c": 1.0},
+        )
 
 
 class OrderedModeTest(_Base):

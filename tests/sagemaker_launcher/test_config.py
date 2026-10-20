@@ -82,6 +82,34 @@ class SubsampleStrategiesTest(unittest.TestCase):
             """)
             )
 
+    def test_class_target_multipliers_round_trip_to_options(self):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"]["subsample"] = {
+            "strategy": "balanced",
+            "total_annotations": 1000,
+            "class_target_multipliers": {"20090BF4-868E::": 3.0},
+        }
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            config = TrainingRunConfig.from_yaml_path(_write(tmp, _yaml.dump(base)))
+            dataset = config.build_options(config_dir=tmp)[0]
+        assert dataset.subsample is not None
+        self.assertEqual(dataset.subsample.multipliers_by_class(), {("20090bf4-868e", ""): 3.0})
+
+    def test_bad_multiplier_key_rejected_at_config_load(self):
+        with self.assertRaises(ValidationError):
+            self._load(
+                textwrap.dedent("""\
+                  subsample:
+                    strategy: balanced
+                    total_annotations: 1000
+                    class_target_multipliers:
+                      not-a-key: 3.0
+            """)
+            )
+
 
 class WeightingTest(unittest.TestCase):
     def test_invalid_weight_ratio_cap_rejected(self):

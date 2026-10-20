@@ -109,5 +109,58 @@ class BalancedTest(unittest.TestCase):
         self.assertEqual(targets[("b", "")], 5)
 
 
+class MultiplierTest(unittest.TestCase):
+    def _opts(self, multipliers, strategy="balanced", total=300, **kw):
+        return SubsampleOptions(
+            strategy=strategy,
+            total_annotations=total,
+            class_target_multipliers=multipliers,
+            **kw,
+        )
+
+    def test_balanced_multiplier_raises_target_to_a_multiple_of_the_cap(self):
+        # cap = 300 // 3 = 100; a 3.0 multiplier gives 300.
+        counts = {("a", ""): 1000, ("b", ""): 1000, ("c", ""): 1000}
+        targets = compute_per_class_targets(self._opts({"a::": 3.0}), counts)
+        self.assertEqual(targets, {("a", ""): 300, ("b", ""): 100, ("c", ""): 100})
+
+    def test_target_is_clamped_to_the_available_rows(self):
+        counts = {("a", ""): 150, ("b", ""): 1000, ("c", ""): 1000}
+        targets = compute_per_class_targets(self._opts({"a::": 3.0}), counts)
+        self.assertEqual(targets[("a", "")], 150)
+
+    def test_stratified_boost_is_not_trimmed_back_to_the_budget(self):
+        # Proportional targets are 100 / 100 / 100 (sum 300 = budget); the
+        # boosted class ends at 300 and the realised total exceeds 300.
+        counts = {("a", ""): 1000, ("b", ""): 1000, ("c", ""): 1000}
+        opts = self._opts({"a::": 3.0}, strategy="stratified")
+        targets = compute_per_class_targets(opts, counts)
+        self.assertEqual(targets, {("a", ""): 300, ("b", ""): 100, ("c", ""): 100})
+        self.assertGreater(sum(targets.values()), 300)
+
+    def test_classes_without_a_multiplier_are_unchanged(self):
+        counts = {("a", ""): 1000, ("b", ""): 30, ("c", ""): 500}
+        base = compute_per_class_targets(self._opts({}), counts)
+        boosted = compute_per_class_targets(self._opts({"a::": 2.0}), counts)
+        self.assertEqual(boosted[("b", "")], base[("b", "")])
+        self.assertEqual(boosted[("c", "")], base[("c", "")])
+
+    def test_unknown_key_raises_and_lists_the_key(self):
+        counts = {("a", ""): 1000}
+        with self.assertRaisesRegex(ValueError, "typo::"):
+            compute_per_class_targets(self._opts({"typo::": 3.0}), counts)
+
+    def test_multiplier_below_one_keeps_the_min_per_class_floor(self):
+        # cap = 200 // 2 = 100; 0.01 * 100 rounds to 1, floored at 5.
+        counts = {("a", ""): 1000, ("b", ""): 1000}
+        opts = self._opts({"a::": 0.01}, total=200, min_per_class=5)
+        targets = compute_per_class_targets(opts, counts)
+        self.assertEqual(targets[("a", "")], 5)
+        self.assertEqual(targets[("b", "")], 100)
+
+    def test_empty_counts_return_empty_with_multipliers_set(self):
+        self.assertEqual(compute_per_class_targets(self._opts({"a::": 3.0}), {}), {})
+
+
 if __name__ == "__main__":
     unittest.main()

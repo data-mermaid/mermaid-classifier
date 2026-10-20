@@ -42,6 +42,7 @@ class SubsampleConfig(BaseModel):
     min_per_class: int = 0
     within_class: Literal["ordered", "source_spread"] = "ordered"
     seed: int = 0
+    class_target_multipliers: dict[str, float] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_via_options(self) -> SubsampleConfig:
@@ -55,6 +56,7 @@ class SubsampleConfig(BaseModel):
             min_per_class=self.min_per_class,
             within_class=self.within_class,
             seed=self.seed,
+            class_target_multipliers=self.class_target_multipliers,
         )
         return self
 
@@ -221,6 +223,7 @@ class TrainingRunConfig(BaseModel):
                 min_per_class=d.subsample.min_per_class,
                 within_class=d.subsample.within_class,
                 seed=d.subsample.seed,
+                class_target_multipliers=d.subsample.class_target_multipliers,
             )
 
         weighting = None

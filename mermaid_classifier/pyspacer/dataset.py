@@ -569,6 +569,7 @@ class TrainingDataset:
         ).fetchall()
         realized_by_cls = {(ba, gf): n for ba, gf, n in realized_rows}
 
+        multipliers = opts.multipliers_by_class()
         per_class_audit = pd.DataFrame(
             [
                 {
@@ -577,6 +578,7 @@ class TrainingDataset:
                     "pre_count": class_counts[(ba, gf)],
                     "target_n": targets.get((ba, gf), 0),
                     "realized_n": realized_by_cls.get((ba, gf), 0),
+                    "target_multiplier": multipliers.get((ba, gf), 1.0),
                 }
                 for (ba, gf) in sorted(class_counts)
             ]
