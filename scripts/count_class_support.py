@@ -17,7 +17,10 @@ Usage (from the repo root)::
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
+from collections.abc import Iterable
+from pathlib import Path
 
 import pandas as pd
 from classifier_train import (
@@ -51,10 +54,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def class_summary(counts: pd.DataFrame) -> pd.DataFrame:
-    """Per class: total `points` and the number of distinct `groups` (site, project_id)."""
-    grouped = counts.assign(group=counts["site"] + "/" + counts["project_id"]).groupby("class_key")
-    return pd.DataFrame({"points": grouped["n"].sum(), "groups": grouped["group"].nunique()})
+def class_summary(counts: pd.DataFrame, extra_keys: Iterable[str] = ()) -> pd.DataFrame:
+    """Per class: total `points` and distinct `groups` (site, project_id).
+
+    `extra_keys` adds classes with no rows, at zero support. A key `X::` is
+    judged on the union of its own rows and every `X::<gf>` row, matching
+    the generator's Porites union; the GF rows stay as they are.
+    """
+    points: dict[str, int] = dict.fromkeys(extra_keys, 0)
+    groups: dict[str, set[str]] = {key: set() for key in points}
+    for key, site, project_id, n in zip(
+        counts["class_key"], counts["site"], counts["project_id"], counts["n"], strict=True
+    ):
+        points[key] = points.get(key, 0) + int(n)
+        groups.setdefault(key, set()).add(f"{site}/{project_id}")
+    judged_points, judged_groups = dict(points), {k: set(v) for k, v in groups.items()}
+    for key in points:
+        ba_id, _, gf_id = key.partition("::")
+        if gf_id:
+            continue
+        for other in points:
+            other_ba, _, other_gf = other.partition("::")
+            if other_ba == ba_id and other_gf:
+                judged_points[key] += points[other]
+                judged_groups[key] |= groups[other]
+    index = pd.Index(list(points), name="class_key")
+    return pd.DataFrame(
+        {
+            "points": [judged_points[k] for k in index],
+            "groups": [len(judged_groups[k]) for k in index],
+        },
+        index=index,
+    )
+
+
+def included_class_keys(included_labels_csv: str) -> list[str]:
+    """The `<ba>::<gf>` keys of an included-labels CSV, trailing `::` kept for an empty GF."""
+    with Path(included_labels_csv).open(newline="") as f:
+        return [f"{row['ba_id']}::{row.get('gf_id') or ''}" for row in csv.DictReader(f)]
 
 
 def below_floors(summary: pd.DataFrame, min_points: int, min_groups: int) -> pd.DataFrame:
@@ -94,11 +131,19 @@ def main(argv: list[str] | None = None) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     counts.to_csv(out_path, index=False)
     print(f"Wrote {len(counts)} class-group rows to {out_path}")
-    if counts.empty:
-        return
-    summary = class_summary(counts)
-    print("Per class (points, distinct groups):")
-    print(summary.sort_values("points", ascending=False).to_string())
+    checking = args.check_min_points > 0 or args.check_min_groups > 0
+    keys: list[str] = []
+    if checking and dataset_options.included_labels_csv:
+        keys = included_class_keys(dataset_options.included_labels_csv)
+    elif checking:
+        print(
+            "The config sets no included_labels_csv, so classes with zero annotations"
+            " cannot be checked."
+        )
+    summary = class_summary(counts, keys)
+    if not summary.empty:
+        print("Per class (points, distinct groups):")
+        print(summary.sort_values("points", ascending=False).to_string())
     failing = below_floors(summary, args.check_min_points, args.check_min_groups)
     if not failing.empty:
         print(

@@ -417,6 +417,7 @@ def apply_min_support(
     min_points: int,
     min_groups: int,
     allow_unknown_keys: bool = False,
+    allow_absent_classes: bool = False,
 ) -> MinSupportResult:
     """Roll each class below either floor into its parent, deepest
     taxonomy level first, returning the final classes, each roll-up with
@@ -431,7 +432,8 @@ def apply_min_support(
 
     Raises ValueError when `counts` has keys that are not classes (unless
     `allow_unknown_keys`), or lacks more than MAX_ABSENT_CLASS_SHARE of the
-    classes: either means the counts come from another config.
+    classes (unless `allow_absent_classes`): either suggests the counts come
+    from another config.
     """
     unknown = sorted(set(counts) - classes)
     if unknown:
@@ -453,10 +455,11 @@ def apply_min_support(
             len(classes),
             absent,
         )
-        if len(absent) > MAX_ABSENT_CLASS_SHARE * len(classes):
+        if not allow_absent_classes and len(absent) > MAX_ABSENT_CLASS_SHARE * len(classes):
             raise ValueError(
                 f"{len(absent)} of {len(classes)} classes are absent from the support counts,"
-                f" over {MAX_ABSENT_CLASS_SHARE:.0%} (counts from another config?): {absent}"
+                f" over {MAX_ABSENT_CLASS_SHARE:.0%} (counts from another config?; pass"
+                f" --allow-absent-support-classes if the counts cover a source subset): {absent}"
             )
     support = {
         key: ClassSupport(counts[key].points, set(counts[key].groups))
@@ -995,6 +998,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--allow-absent-support-classes",
+        action="store_true",
+        help=(
+            "Log, instead of refusing, when over 10%% of this config's classes have no"
+            " support counts; they roll up as unsupported (only with --min-support-counts)."
+        ),
+    )
+    p.add_argument(
         "--skip-validation",
         action="store_true",
         help="Skip round-tripping outputs through pipeline schemas (useful for tests).",
@@ -1081,6 +1092,7 @@ def main(argv: list[str] | None = None) -> int:
             args.min_points,
             args.min_groups,
             allow_unknown_keys=args.allow_unknown_support_keys,
+            allow_absent_classes=args.allow_absent_support_classes,
         )
         rolled_classes = pre_min_support_classes - final_classes
         top108_uuids = {ba for ba, _ in final_classes}

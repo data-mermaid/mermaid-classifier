@@ -920,6 +920,24 @@ class MinSupportTests(_GenerateConfigTestCase):
         with self.assertRaisesRegex(ValueError, "absent"):
             self.run_with_counts(counts)
 
+    def test_allow_absent_flag_logs_instead_of_refusing_and_rolls_up(self):
+        counts = _well_supported_counts(ELEVEN_CLASS_NAMES)
+        del counts[_key(ACROPORA)]
+        del counts[_key(AGARICIA)]
+        _write_labels_csv(self.labels_csv, ELEVEN_CLASS_NAMES)
+        with self.assertLogs(gtc.logger, "WARNING"):
+            self.run_with_counts(counts, "--allow-absent-support-classes")
+        self.assertNotIn(ACROPORA, self.included_bas())
+        self.assertEqual(self.get_rollup_lookup()[(ACROPORA_HUMILIS, "")], (ACROPORIDAE, ""))
+
+    def test_absent_refusal_names_the_override_flag(self):
+        counts = _well_supported_counts(ELEVEN_CLASS_NAMES)
+        del counts[_key(ACROPORA)]
+        del counts[_key(AGARICIA)]
+        _write_labels_csv(self.labels_csv, ELEVEN_CLASS_NAMES)
+        with self.assertRaisesRegex(ValueError, "--allow-absent-support-classes"):
+            self.run_with_counts(counts)
+
     def test_count_keys_outside_the_config_are_refused(self):
         _write_labels_csv(self.labels_csv, ["Hard coral", "Acropora"])
         counts = {

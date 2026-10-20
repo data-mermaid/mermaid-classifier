@@ -26,6 +26,7 @@ class _Options:
     holdout_fold: int | str
     include_mermaid: bool = False
     mermaid_project_lookup_uri: str | None = None
+    included_labels_csv: str | None = None
 
 
 def _dataset():
@@ -118,6 +119,49 @@ class MainTest(unittest.TestCase):
         self.assertNotIn(raised.exception.code, (0, None))
         self.assertIn("ba2::gf", stdout.getvalue())
 
+    def _run_checked(self, td: str, labels: str | None, *floors: str):
+        path = None
+        if labels is not None:
+            path = str(Path(td) / "included.csv")
+            Path(path).write_text(labels)
+        options = _Options(holdout_groups_csv=None, holdout_fold="test", included_labels_csv=path)
+        self._run(td, *floors, options=options)
+
+    def test_included_class_with_zero_annotations_fails_the_check(self):
+        labels = "ba_id,gf_id\nba1,\nba3,\n"
+        with tempfile.TemporaryDirectory() as td:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):
+                self._run_checked(td, labels, "--check-min-points", "1")
+        self.assertIn("ba3::", stdout.getvalue())
+
+    def test_included_class_with_a_growth_form_is_keyed_with_it(self):
+        labels = "ba_id,gf_id\nba1,\nba2,gf\n"
+        with tempfile.TemporaryDirectory() as td:
+            self._run_checked(td, labels, "--check-min-points", "1")
+
+    def test_no_included_labels_csv_says_zero_annotation_classes_are_unchecked(self):
+        with tempfile.TemporaryDirectory() as td:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self._run_checked(td, None, "--check-min-points", "1")
+        self.assertIn("cannot be checked", stdout.getvalue())
+
+    def test_empty_counts_fail_the_check_when_classes_are_included(self):
+        import pandas as pd
+
+        empty = pd.DataFrame({"class_key": [], "site": [], "project_id": [], "n": []})
+        labels = "ba_id,gf_id\nba1,\n"
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch(
+                "mermaid_classifier.training.class_support.class_group_counts", return_value=empty
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            self._run_checked(td, labels, "--check-min-points", "1")
+
     def test_check_passing_returns_normally(self):
         with tempfile.TemporaryDirectory() as td:
             self._run(td, "--check-min-points", "1", "--check-min-groups", "1")
@@ -145,6 +189,44 @@ class BelowFloorsTest(unittest.TestCase):
     def test_a_class_exactly_at_both_floors_passes(self):
         failing = ccs.below_floors(self._summary(), min_points=400, min_groups=9)
         self.assertTrue(failing.empty)
+
+
+class PoritesUnionTest(unittest.TestCase):
+    def _counts(self, rows: list[tuple[str, str, int]]):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "class_key": [r[0] for r in rows],
+                "site": ["s"] * len(rows),
+                "project_id": [r[1] for r in rows],
+                "n": [r[2] for r in rows],
+            }
+        )
+
+    def test_thin_empty_gf_class_is_judged_with_its_growth_form_buckets(self):
+        counts = self._counts(
+            [("P::", "1", 10)]
+            + [("P::a", str(i), 200) for i in (2, 3, 4)]
+            + [("P::b", str(i), 200) for i in (5, 6, 7)]
+        )
+        failing = ccs.below_floors(ccs.class_summary(counts), 500, 3)
+        self.assertTrue(failing.empty)
+
+    def test_growth_form_buckets_are_still_judged_individually(self):
+        counts = self._counts([("P::", "1", 10), ("P::a", "2", 300), ("P::b", "3", 300)])
+        failing = ccs.below_floors(ccs.class_summary(counts), 500, 1)
+        self.assertEqual(set(failing.index), {"P::a", "P::b"})
+
+    def test_zero_point_empty_gf_class_passes_on_its_buckets(self):
+        counts = self._counts([("P::a", "2", 300), ("P::b", "3", 300)])
+        summary = ccs.class_summary(counts, extra_keys=["P::"])
+        self.assertEqual(set(ccs.below_floors(summary, 500, 2).index), {"P::a", "P::b"})
+        self.assertNotIn("P::", ccs.below_floors(summary, 500, 2).index)
+
+    def test_extra_key_with_no_rows_has_zero_support(self):
+        summary = ccs.class_summary(self._counts([("a::", "1", 5)]), extra_keys=["z::"])
+        self.assertEqual(summary.loc["z::"].to_dict(), {"points": 0, "groups": 0})
 
 
 class SummaryTest(unittest.TestCase):
