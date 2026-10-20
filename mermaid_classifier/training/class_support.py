@@ -16,8 +16,10 @@ def class_group_counts(dataset: Any) -> pd.DataFrame:
     Count annotation points per class and group.
 
     Columns class_key (`<ba>::<gf>`, gf empty kept as ''), site, project_id, n,
-    sorted by class_key, site, project_id. MERMAID rows are included as read;
-    callers drop them when the config has no project lookup.
+    sorted by class_key, site, project_id. MERMAID rows are included as read.
+    Without a project lookup they all share project 'all', so
+    `select_holdout_groups.py` drops them and `count_class_support.py` refuses
+    the config.
     """
     rows = dataset.duck_conn.execute(
         "SELECT benthic_attribute_id || '::' || growth_form_id AS class_key,"

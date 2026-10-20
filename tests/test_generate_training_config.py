@@ -719,28 +719,49 @@ def _write_counts_csv(path: Path, counts: dict[str, dict[str, int]]) -> None:
                 w.writerow([class_key, site, "proj", n])
 
 
+def _well_supported_counts(names: list[str]) -> dict[str, dict[str, int]]:
+    """WELL_SUPPORTED counts for every class the labels `names` produce."""
+    counts: dict[str, dict[str, int]] = {}
+    for name in names:
+        if name in _NAME_TO_UUID and name not in gtc.EXCLUDED_NAMES:
+            counts[_key(_NAME_TO_UUID[name])] = WELL_SUPPORTED
+    if "Porites" in names:
+        counts[_key(PORITES, GF_BRANCHING)] = WELL_SUPPORTED
+        counts[_key(PORITES, GF_MASSIVE)] = WELL_SUPPORTED
+    return counts
+
+
+# Eleven classes, so one class absent from the counts stays within the 10% allowance.
+ELEVEN_CLASS_NAMES = TOP108_NAMES + ["Acroporidae", "Agaricia", "Helioseris cucullata"]
+CORAL_RUBBLE = "ba-rubble-0000-0000-00000000001d"
+
+
 class MinSupportTests(_GenerateConfigTestCase):
     """Every class of the (uncoarsened) top-108 set is well supported unless
     a test overrides its counts."""
 
-    def run_min_support(self, names: list[str], overrides: dict[str, dict[str, int]]) -> None:
+    def run_min_support(
+        self,
+        names: list[str],
+        overrides: dict[str, dict[str, int]],
+        cn_entries: list[LabelMappingEntry] | None = None,
+    ) -> None:
         _write_labels_csv(self.labels_csv, names)
-        counts: dict[str, dict[str, int]] = {}
-        for name in names:
-            if name in _NAME_TO_UUID and name not in gtc.EXCLUDED_NAMES:
-                counts[_key(_NAME_TO_UUID[name])] = WELL_SUPPORTED
-        if "Porites" in names:
-            counts[_key(PORITES, GF_BRANCHING)] = WELL_SUPPORTED
-            counts[_key(PORITES, GF_MASSIVE)] = WELL_SUPPORTED
+        counts = _well_supported_counts(names)
         counts.update(overrides)
-        self.run_with_counts(counts)
+        self.run_with_counts(counts, cn_entries=cn_entries)
 
-    def run_with_counts(self, counts: dict[str, dict[str, int]], *flags: str) -> None:
+    def run_with_counts(
+        self,
+        counts: dict[str, dict[str, int]],
+        *flags: str,
+        cn_entries: list[LabelMappingEntry] | None = None,
+    ) -> None:
         counts_csv = self.tmp / "support_counts.csv"
         _write_counts_csv(counts_csv, counts)
         self.run_main(
             extra_args=["--min-support-counts", str(counts_csv), *flags],
-            cn_entries=COARSEN_CN_ENTRIES,
+            cn_entries=COARSEN_CN_ENTRIES if cn_entries is None else cn_entries,
         )
 
     def add_ba(self, ba_id: str, name: str, parent: str) -> None:
@@ -837,7 +858,7 @@ class MinSupportTests(_GenerateConfigTestCase):
     def test_excluded_or_missing_ancestor_drops_the_class(self):
         # Dead coral (excluded) sits under Bare substrate, which would
         # otherwise absorb its child; Turf algae is a root.
-        coral_rubble = "ba-rubble-0000-0000-00000000001d"
+        coral_rubble = CORAL_RUBBLE
         self.add_ba(coral_rubble, "Coral rubble", DEAD_CORAL)
         self.run_min_support(
             ["Hard coral", "Bare substrate", "Coral rubble", "Turf algae"],
@@ -853,18 +874,118 @@ class MinSupportTests(_GenerateConfigTestCase):
         self.assertIn("| Turf algae | 10 | 1 | (dropped) |", readme)
 
     def test_thin_porites_carries_its_buckets_to_the_parent(self):
-        self.run_min_support(TOP108_NAMES, {_key(PORITES): _support(10, 1)})
+        # Every bucket is thin, so all collapse into Porites::, and the union
+        # (30 points, 3 groups) is thin too; Poritidae is a supported class.
+        self.run_min_support(
+            TOP108_NAMES + ["Poritidae"],
+            {
+                _key(PORITES): _support(10, 1),
+                _key(PORITES, GF_BRANCHING): _support(10, 2),
+                _key(PORITES, GF_MASSIVE): _support(10, 3),
+            },
+        )
         included = self.get_included_set()
         self.assertEqual({row for row in included if row[0] == PORITES}, set())
         self.assertIn((PORITIDAE, ""), included)
         rollups = self.get_rollup_lookup()
         self.assertEqual(rollups[(PORITES, GF_BRANCHING)], (PORITIDAE, ""))
         self.assertEqual(rollups[(PORITES_LOBATA, "")], (PORITIDAE, ""))
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn("| Porites | 30 | 3 | Poritidae |", readme)
+
+    def test_thin_porites_with_a_supported_bucket_stays(self):
+        # Porites:: alone is thin, but with its Branching bucket it passes.
+        self.run_min_support(TOP108_NAMES, {_key(PORITES): _support(10, 1)})
+        porites_rows = {row for row in self.get_included_set() if row[0] == PORITES}
+        self.assertEqual(
+            porites_rows, {(PORITES, ""), (PORITES, GF_BRANCHING), (PORITES, GF_MASSIVE)}
+        )
+        self.assertNotIn(PORITIDAE, self.included_bas())
 
     def test_class_absent_from_counts_has_no_support(self):
+        counts = _well_supported_counts(ELEVEN_CLASS_NAMES)
+        del counts[_key(ACROPORA)]
+        _write_labels_csv(self.labels_csv, ELEVEN_CLASS_NAMES)
+        with self.assertLogs(gtc.logger, "WARNING") as logs:
+            self.run_with_counts(counts)
+        self.assertIn(ACROPORA, "".join(logs.output))
+        self.assertNotIn(ACROPORA, self.included_bas())
+        self.assertEqual(self.get_rollup_lookup()[(ACROPORA_HUMILIS, "")], (ACROPORIDAE, ""))
+
+    def test_counts_missing_over_a_tenth_of_classes_are_refused(self):
+        counts = _well_supported_counts(ELEVEN_CLASS_NAMES)
+        del counts[_key(ACROPORA)]
+        del counts[_key(AGARICIA)]
+        _write_labels_csv(self.labels_csv, ELEVEN_CLASS_NAMES)
+        with self.assertRaisesRegex(ValueError, "absent"):
+            self.run_with_counts(counts)
+
+    def test_count_keys_outside_the_config_are_refused(self):
         _write_labels_csv(self.labels_csv, ["Hard coral", "Acropora"])
-        self.run_with_counts({_key(HARD_CORAL): WELL_SUPPORTED})
-        self.assertEqual(self.included_bas(), {HARD_CORAL})
+        counts = {
+            _key(HARD_CORAL): WELL_SUPPORTED,
+            _key(ACROPORA): WELL_SUPPORTED,
+            _key(TURF_ALGAE): WELL_SUPPORTED,
+        }
+        with self.assertRaisesRegex(ValueError, TURF_ALGAE):
+            self.run_with_counts(counts)
+
+    def test_count_keys_outside_the_config_are_allowed_by_flag(self):
+        _write_labels_csv(self.labels_csv, ["Hard coral", "Acropora"])
+        counts = {
+            _key(HARD_CORAL): WELL_SUPPORTED,
+            _key(ACROPORA): WELL_SUPPORTED,
+            _key(TURF_ALGAE): WELL_SUPPORTED,
+        }
+        self.run_with_counts(counts, "--allow-unknown-support-keys")
+        self.assertEqual(self.included_bas(), {HARD_CORAL, ACROPORA})
+
+    def test_readme_records_the_counts_file_sha1(self):
+        self.run_min_support(TOP108_NAMES, {})
+        digest = hashlib.sha1((self.tmp / "support_counts.csv").read_bytes()).hexdigest()[:10]
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn(f"| `{self.tmp / 'support_counts.csv'}` | ", readme)
+        self.assertIn(f"`{digest}`", readme)
+
+    def test_class_dropped_below_an_excluded_parent_gets_no_rollup(self):
+        # Coral rubble drops at Dead coral (excluded) and must not reach Bare substrate.
+        self.add_ba(CORAL_RUBBLE, "Coral rubble", DEAD_CORAL)
+        self.run_min_support(
+            ["Hard coral", "Bare substrate", "Coral rubble", "Turf algae"],
+            {_key(CORAL_RUBBLE): _support(10, 1)},
+            cn_entries=COARSEN_CN_ENTRIES + [_entry("rb", CORAL_RUBBLE, "", "Coral rubble")],
+        )
+        self.assertNotIn((CORAL_RUBBLE, ""), self.get_rollup_lookup())
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn("| Coral rubble | Coral rubble | (dropped) |", readme)
+
+    def test_thin_porites_species_class_is_credited_to_its_bucket(self):
+        # Massive (250 points) is thin alone; with Porites astreoides
+        # (inherent massive, 250 points) credited to it, it passes both floors.
+        self.run_min_support(
+            TOP108_NAMES,
+            {
+                _key(PORITES_ASTREOIDES): _support(25, *range(10)),
+                _key(PORITES, GF_MASSIVE): _support(25, *range(10, 20)),
+            },
+        )
+        self.assertIn((PORITES, GF_MASSIVE), self.get_included_set())
+        self.assertEqual(self.get_rollup_lookup()[(PORITES_ASTREOIDES, "")], (PORITES, GF_MASSIVE))
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn("| Porites astreoides | 250 | 10 | Porites::Massive |", readme)
+
+    def test_rolled_class_without_its_own_mapping_entry_gets_a_rollup(self):
+        # MERMAID annotations of (Acropora, '') need a row though no CoralNet entry has it.
+        cn_entries = [
+            e
+            for e in COARSEN_CN_ENTRIES
+            if not (e.benthic_attribute_id == ACROPORA and not e.growth_form_id)
+        ]
+        self.run_min_support(
+            ["Hard coral", "Acropora", "Turf algae"],
+            {_key(ACROPORA): _support(10, 1)},
+            cn_entries=cn_entries,
+        )
         self.assertEqual(self.get_rollup_lookup()[(ACROPORA, "")], (HARD_CORAL, ""))
 
     def test_porites_bucket_collapses_into_porites_first(self):
@@ -914,7 +1035,7 @@ class MinSupportTests(_GenerateConfigTestCase):
         readme = (self.output_dir / "README.md").read_text()
         self.assertIn(
             "min support (>= 500 points and >= 10 groups, counts from support_counts.csv,"
-            " deepest level first)",
+            " deepest level first, Porites judged with its surviving growth-form buckets)",
             readme,
         )
         self.assertIn("| Acropora humilis | 90 | 3 | Acroporidae |", readme)

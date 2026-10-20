@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import dataclasses
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +24,8 @@ import count_class_support as ccs  # noqa: E402
 class _Options:
     holdout_groups_csv: str | None
     holdout_fold: int | str
+    include_mermaid: bool = False
+    mermaid_project_lookup_uri: str | None = None
 
 
 def _dataset():
@@ -55,9 +59,9 @@ class ParseArgsTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def _run(self, td: str):
+    def _run(self, td: str, *extra: str, options: _Options | None = None):
         dataset = _dataset()
-        options = _Options(holdout_groups_csv="old.csv", holdout_fold=0)
+        options = options or _Options(holdout_groups_csv="old.csv", holdout_fold=0)
         config = mock.Mock()
         config.build_options.return_value = (options, None, None)
         dataset_cls = mock.Mock()
@@ -67,7 +71,7 @@ class MainTest(unittest.TestCase):
             mock.patch.object(ccs, "_resolve_local_aws_credentials"),
             mock.patch.object(ccs, "load_config_then_pyspacer", return_value=(config, dataset_cls)),
         ):
-            ccs.main(["--config-dir", td, "--out", str(out)])
+            ccs.main(["--config-dir", td, "--out", str(out), *extra])
         return out, dataset, dataset_cls
 
     def test_writes_counts_csv_with_empty_gf_keys_and_cleans_up(self):
@@ -92,6 +96,55 @@ class MainTest(unittest.TestCase):
         (options,), _ = dataset_cls.filtered_annotations_only.call_args
         self.assertIsNone(options.holdout_groups_csv)
         self.assertEqual(options.holdout_fold, "test")
+
+    def test_mermaid_rows_without_a_project_lookup_stop_the_count(self):
+        options = _Options(holdout_groups_csv=None, holdout_fold="test", include_mermaid=True)
+        with (
+            tempfile.TemporaryDirectory() as td,
+            self.assertRaisesRegex(SystemExit, "mermaid_project_lookup_uri"),
+        ):
+            self._run(td, options=options)
+
+    def test_check_failure_exits_nonzero_after_writing_the_csv(self):
+        # ba1 has 3 points in 2 groups; ba2 has 1 point in 1 group.
+        with tempfile.TemporaryDirectory() as td:
+            stdout = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                self._run(td, "--check-min-points", "2", "--check-min-groups", "1")
+            self.assertTrue((Path(td) / "support.csv").exists())
+        self.assertNotIn(raised.exception.code, (0, None))
+        self.assertIn("ba2::gf", stdout.getvalue())
+
+    def test_check_passing_returns_normally(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._run(td, "--check-min-points", "1", "--check-min-groups", "1")
+
+
+class BelowFloorsTest(unittest.TestCase):
+    def _summary(self):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {"points": [600, 400, 900], "groups": [12, 15, 9]},
+            index=pd.Index(["ok::", "few_points::", "few_groups::"], name="class_key"),
+        )
+
+    def test_lists_classes_below_either_floor_with_their_counts(self):
+        failing = ccs.below_floors(self._summary(), min_points=500, min_groups=10)
+        self.assertEqual(
+            failing.to_dict("index"),
+            {
+                "few_points::": {"points": 400, "groups": 15},
+                "few_groups::": {"points": 900, "groups": 9},
+            },
+        )
+
+    def test_a_class_exactly_at_both_floors_passes(self):
+        failing = ccs.below_floors(self._summary(), min_points=400, min_groups=9)
+        self.assertTrue(failing.empty)
 
 
 class SummaryTest(unittest.TestCase):

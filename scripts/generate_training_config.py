@@ -20,7 +20,8 @@ its annotations roll up to that ancestor.
 With --min-support-counts, each class then below --min-points points or
 --min-groups (site, project) groups rolls up to its parent, deepest
 taxonomy level first, so thin siblings combine in their parent before it
-is judged.
+is judged. Porites is judged together with its surviving growth-form
+buckets.
 
 Porites is the one BA that retains growth-form distinctions: three
 buckets (Branching, Massive, other/none) appear as separate classes in
@@ -48,7 +49,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NamedTuple, TypedDict
+from typing import Any, NamedTuple, NotRequired, TypedDict
 
 import pandas as pd
 
@@ -191,6 +192,7 @@ class _FileAudit(TypedDict):
 class _Audits(TypedDict):
     labels: _FileAudit
     sources: _FileAudit
+    support_counts: NotRequired[_FileAudit]
     ba_api: str
     cn_api: str
 
@@ -392,38 +394,76 @@ def read_support_counts(path: Path) -> dict[ClassKey, ClassSupport]:
     return support
 
 
+# Above this share of config classes absent from the counts, the counts
+# are taken to come from a different config.
+MAX_ABSENT_CLASS_SHARE = 0.1
+
+
+class MinSupportResult(NamedTuple):
+    classes: set[ClassKey]
+    rolled: list[MinSupportRollup]
+    dropped_bas: set[str]
+    """BAs of the classes that dropped: annotations reaching one drop too."""
+
+
 def apply_min_support(
     classes: set[ClassKey],
     counts: dict[ClassKey, ClassSupport],
     ba_lib: BenthicAttributeLibrary,
     excluded_uuids: set[str],
     porites_uuid: str | None,
+    bucket_gf_uuid_lookup: dict[str, str],
+    species_gf_lookup: dict[str, str],
     min_points: int,
     min_groups: int,
-) -> tuple[set[ClassKey], list[MinSupportRollup]]:
+    allow_unknown_keys: bool = False,
+) -> MinSupportResult:
     """Roll each class below either floor into its parent, deepest
-    taxonomy level first, returning the final classes and each roll-up with
-    its final target (None when dropped).
+    taxonomy level first, returning the final classes, each roll-up with
+    its final target (None when dropped), and the dropped BAs.
 
     Every thin class at a level merges before the next level up is judged,
-    so thin siblings combine in their parent. A Porites GF bucket sits one
-    level below Porites and merges into `(Porites, '')`, which carries any
-    surviving buckets with it. A class whose parent is missing or excluded
-    drops.
+    so thin siblings combine in their parent. A Porites GF bucket sits
+    between Porites and its children and merges into `(Porites, '')`, which
+    is judged on its union with the surviving buckets and carries them when
+    it rolls. A class rolling into Porites goes to its species' bucket. A
+    class whose parent is missing or excluded drops.
+
+    Raises ValueError when `counts` has keys that are not classes (unless
+    `allow_unknown_keys`), or lacks more than MAX_ABSENT_CLASS_SHARE of the
+    classes: either means the counts come from another config.
     """
+    unknown = sorted(set(counts) - classes)
+    if unknown:
+        if not allow_unknown_keys:
+            raise ValueError(
+                f"{len(unknown)} support-count class key(s) are not classes of this config"
+                f" (counts from another config?): {unknown}"
+            )
+        logger.warning(
+            "%d support-count class key(s) are not classes of this config; ignoring: %s",
+            len(unknown),
+            unknown,
+        )
+    absent = sorted(classes - set(counts))
+    if absent:
+        logger.warning(
+            "%d of %d class(es) are absent from the support counts and have no support: %s",
+            len(absent),
+            len(classes),
+            absent,
+        )
+        if len(absent) > MAX_ABSENT_CLASS_SHARE * len(classes):
+            raise ValueError(
+                f"{len(absent)} of {len(classes)} classes are absent from the support counts,"
+                f" over {MAX_ABSENT_CLASS_SHARE:.0%} (counts from another config?): {absent}"
+            )
     support = {
         key: ClassSupport(counts[key].points, set(counts[key].groups))
         if key in counts
         else ClassSupport()
         for key in classes
     }
-    unknown = sorted(set(counts) - classes)
-    if unknown:
-        logger.warning(
-            "%d support-count class key(s) are not classes of this config; ignoring: %s",
-            len(unknown),
-            unknown,
-        )
     # A rolled-up class forwards to its target, so a later roll-up into it
     # follows the chain and never re-creates it.
     moved: dict[ClassKey, ClassKey | None] = {}
@@ -434,27 +474,34 @@ def apply_min_support(
         return key
 
     def depth(key: ClassKey) -> int:
+        # Doubled so a Porites bucket sits between Porites and its species.
         ba_id, gf_id = key
-        return len(ba_lib.get_ancestor_ids(ba_id)) + (1 if gf_id else 0)
+        return 2 * len(ba_lib.get_ancestor_ids(ba_id)) + (1 if gf_id else 0)
 
     rolled: list[MinSupportRollup] = []
     # Targets always sit at a shallower level, so each level is final once
     # reached and a level's merges cannot change any class judged in it.
     for level in range(max(map(depth, support), default=-1), -1, -1):
         for key in sorted(k for k in support if depth(k) == level):
-            entry = support[key]
-            if entry.points >= min_points and len(entry.groups) >= min_groups:
-                continue
             ba_id, gf_id = key
             leaving = [key]
+            if ba_id == porites_uuid and not gf_id:
+                leaving += sorted(k for k in support if k[0] == ba_id and k[1])
+            points = sum(support[k].points for k in leaving)
+            groups = set[tuple[str, str]]().union(*(support[k].groups for k in leaving))
+            if points >= min_points and len(groups) >= min_groups:
+                continue
             if gf_id:
                 target: ClassKey | None = (ba_id, "")
             else:
                 ancestors = ba_lib.get_ancestor_ids(ba_id)
                 parent = ancestors[-1] if ancestors else None
                 target = None if parent is None or parent in excluded_uuids else (parent, "")
-                if ba_id == porites_uuid:
-                    leaving += sorted(k for k in support if k[0] == ba_id and k[1])
+                if target is not None and porites_uuid is not None and parent == porites_uuid:
+                    gf = bucket_gf_uuid_lookup[species_gf_lookup.get(ba_id, "")]
+                    bucket = (porites_uuid, gf)
+                    if bucket in support or bucket in moved:
+                        target = bucket
             target = resolve(target)
             merged = ClassSupport()
             for k in leaving:
@@ -467,17 +514,25 @@ def apply_min_support(
                 dest = support.setdefault(target, ClassSupport())
                 dest.points += merged.points
                 dest.groups |= merged.groups
-    return set(support), [r._replace(target=resolve(r.target)) for r in rolled]
+    final_rolled = [r._replace(target=resolve(r.target)) for r in rolled]
+    dropped_bas = {r.class_key[0] for r in final_rolled if r.target is None}
+    return MinSupportResult(set(support), final_rolled, dropped_bas)
 
 
 def _nearest_included(
-    ba_id: str, ba_lib: BenthicAttributeLibrary, included: set[str]
+    ba_id: str,
+    ba_lib: BenthicAttributeLibrary,
+    included: set[str],
+    dropped: set[str] | frozenset[str] = frozenset(),
 ) -> str | None:
-    """The BA itself if included, else its nearest included ancestor."""
-    if ba_id in included:
-        return ba_id
-    ancestors_leaf_first = reversed(ba_lib.get_ancestor_ids(ba_id))
-    return next((a for a in ancestors_leaf_first if a in included), None)
+    """The BA itself if included, else its nearest included ancestor;
+    None when the walk reaches a `dropped` BA first."""
+    for a in [ba_id, *reversed(ba_lib.get_ancestor_ids(ba_id))]:
+        if a in included:
+            return a
+        if a in dropped:
+            return None
+    return None
 
 
 def class_changes(
@@ -486,6 +541,7 @@ def class_changes(
     excluded_uuids: set[str],
     before: set[str],
     after: set[str],
+    dropped_after: set[str] | frozenset[str] = frozenset(),
 ) -> list[tuple[str, str | None, str | None]]:
     """(BA, class before, class after) for each BA whose class differs
     between two included sets; None means its annotations drop."""
@@ -494,7 +550,7 @@ def class_changes(
         if ba_id in excluded_uuids or ba_id not in ba_lib.by_id:
             continue
         old = _nearest_included(ba_id, ba_lib, before)
-        new = _nearest_included(ba_id, ba_lib, after)
+        new = _nearest_included(ba_id, ba_lib, after, dropped_after)
         if old != new:
             changes.append((ba_id, old, new))
     return changes
@@ -512,6 +568,8 @@ def build_rollup_rows(
     excluded_uuids: set[str],
     bucket_gf_uuid_lookup: dict[str, str],
     species_gf_lookup: dict[str, str],
+    dropped_bas: set[str] | frozenset[str] = frozenset(),
+    rolled_classes: set[ClassKey] | frozenset[ClassKey] = frozenset(),
 ) -> tuple[list[tuple[str, str, str, str]], dict[str, int]]:
     """Walk the BA hierarchy from each CoralNet-mapped BA up to a
     top-108 ancestor, emitting rollup rows.
@@ -521,8 +579,29 @@ def build_rollup_rows(
     from the labels CSV. All other top-108 BAs collapse GF to ''.
 
     Annotations whose source BA is in excluded_uuids are dropped (no
-    rollup row, no walking past).
+    rollup row, no walking past), as are those whose walk reaches a
+    `dropped_bas` BA before an included one. Each of `rolled_classes`
+    also gets a row, since MERMAID annotations can carry a class key that
+    no CoralNet entry has.
     """
+
+    def rollup_target(src_ba: str, src_gf: str) -> tuple[str, str] | None:
+        target_ba = _nearest_included(src_ba, ba_lib, top108_uuids, dropped_bas)
+        if target_ba is None:
+            return None
+        # Determine target_gf. Porites is special; everyone else collapses.
+        if porites_uuid is not None and target_ba == porites_uuid:
+            if src_gf:
+                bucket_name = _porites_bucket(gf_library.id_to_name(src_gf))
+            elif src_ba == porites_uuid:
+                # Porites genus, no CN GF -> the empty bucket.
+                bucket_name = ""
+            else:
+                # Porites species, no CN GF -> use species' inherent.
+                bucket_name = species_gf_lookup.get(src_ba, "")
+            return target_ba, bucket_gf_uuid_lookup[bucket_name]
+        return target_ba, ""
+
     rollups: dict[tuple[str, str], tuple[str, str]] = {}
     dropped = {
         "no_top_level": 0,
@@ -548,29 +627,18 @@ def build_rollup_rows(
             )
             continue
 
-        target_ba = _nearest_included(src_ba, ba_lib, top108_uuids)
-        if target_ba is None:
+        target = rollup_target(src_ba, src_gf)
+        if target is None:
             dropped["no_top_level"] += 1
             continue
-
-        # Determine target_gf. Porites is special; everyone else collapses.
-        if porites_uuid is not None and target_ba == porites_uuid:
-            if src_gf:
-                bucket_name = _porites_bucket(gf_library.id_to_name(src_gf))
-            elif src_ba == porites_uuid:
-                # Porites genus, no CN GF -> the empty bucket.
-                bucket_name = ""
-            else:
-                # Porites species, no CN GF -> use species' inherent.
-                bucket_name = species_gf_lookup.get(src_ba, "")
-            target_gf = bucket_gf_uuid_lookup[bucket_name]
-        else:
-            target_gf = ""
-
         # Skip self-mappings (no rollup needed).
-        if (src_ba, src_gf) == (target_ba, target_gf):
+        if (src_ba, src_gf) == target:
             continue
-        rollups[(src_ba, src_gf)] = (target_ba, target_gf)
+        rollups[(src_ba, src_gf)] = target
+    for class_key in sorted(rolled_classes - rollups.keys()):
+        target = rollup_target(*class_key)
+        if target is not None:
+            rollups[class_key] = target
 
     rows = sorted(
         (src_ba, src_gf, to_ba, to_gf) for (src_ba, src_gf), (to_ba, to_gf) in rollups.items()
@@ -693,6 +761,10 @@ def write_readme(
     min_support_rows: list[tuple[str, int, int, str]] | None = None,
 ) -> None:
     cli = " ".join(sys.argv)
+    support_counts_row = ""
+    if "support_counts" in audits:
+        sc = audits["support_counts"]
+        support_counts_row = f"| `{sc['path']}` | {sc['mtime']} | `{sc['sha1_prefix']}` |\n"
     coarsening_block = ""
     if coarsening_rules:
         added = added_classes or []
@@ -765,7 +837,7 @@ MERMAID API. For each CoralNet-mapped benthic attribute:
 | --- | --- | --- |
 | `{audits["labels"]["path"]}` | {audits["labels"]["mtime"]} | `{audits["labels"]["sha1_prefix"]}` |
 | `{audits["sources"]["path"]}` | {audits["sources"]["mtime"]} | `{audits["sources"]["sha1_prefix"]}` |
-
+{support_counts_row}
 Live MERMAID API (snapshotted at run time):
 - `https://api.datamermaid.org/v1/benthicattributes/?limit=5000` -> sha1 `{audits["ba_api"]}`
 - `https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet` -> sha1 `{audits["cn_api"]}`
@@ -915,6 +987,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Distinct (site, project) groups a class needs to stay (only with --min-support-counts).",
     )
     p.add_argument(
+        "--allow-unknown-support-keys",
+        action="store_true",
+        help=(
+            "Ignore, with a warning, support-count class keys that are not classes of"
+            " this config, instead of refusing them (only with --min-support-counts)."
+        ),
+    )
+    p.add_argument(
         "--skip-validation",
         action="store_true",
         help="Skip round-tripping outputs through pipeline schemas (useful for tests).",
@@ -981,17 +1061,28 @@ def main(argv: list[str] | None = None) -> int:
     bucket_gf_uuid_lookup = (
         _build_bucket_gf_uuid_lookup(gf_library) if porites_uuid is not None else {"": ""}
     )
+    species_gf_lookup = _load_species_gf_lookup(labels_df)
     min_support_rows: list[tuple[str, int, int, str]] | None = None
+    dropped_bas: set[str] = set()
+    rolled_classes: set[ClassKey] = set()
     if args.min_support_counts is not None:
-        final_classes, rolled = apply_min_support(
-            set(build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)),
+        audits["support_counts"] = _file_audit(args.min_support_counts)
+        pre_min_support_classes = set(
+            build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)
+        )
+        final_classes, rolled, dropped_bas = apply_min_support(
+            pre_min_support_classes,
             read_support_counts(args.min_support_counts),
             ba_lib,
             excluded_uuids,
             porites_uuid,
+            bucket_gf_uuid_lookup,
+            species_gf_lookup,
             args.min_points,
             args.min_groups,
+            allow_unknown_keys=args.allow_unknown_support_keys,
         )
+        rolled_classes = pre_min_support_classes - final_classes
         top108_uuids = {ba for ba, _ in final_classes}
         # A merged bucket maps to '', so its annotations land in (Porites, '').
         bucket_gf_uuid_lookup = {
@@ -1000,7 +1091,8 @@ def main(argv: list[str] | None = None) -> int:
         }
         coarsening_rules.append(
             f"min support (>= {args.min_points} points and >= {args.min_groups} groups,"
-            f" counts from {args.min_support_counts.name}, deepest level first)"
+            f" counts from {args.min_support_counts.name}, deepest level first,"
+            " Porites judged with its surviving growth-form buckets)"
         )
 
         def class_name(key: ClassKey | None) -> str:
@@ -1020,8 +1112,8 @@ def main(argv: list[str] | None = None) -> int:
         excluded_uuids,
         uncoarsened_uuids,
         top108_uuids,
+        dropped_bas,
     )
-    species_gf_lookup = _load_species_gf_lookup(labels_df)
 
     rollup_rows, stats = build_rollup_rows(
         cn_mapping,
@@ -1032,6 +1124,8 @@ def main(argv: list[str] | None = None) -> int:
         excluded_uuids,
         bucket_gf_uuid_lookup,
         species_gf_lookup,
+        dropped_bas,
+        rolled_classes,
     )
     included_rows = build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)
 
