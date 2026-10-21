@@ -1,0 +1,45 @@
+# Launcher config for the all-sources + MERMAID coarse grouped-holdout training run
+# with the min-support label filter (94 -> 80 classes), the grouped validation
+# split, CCA x3 and Turf x1.5 sampling.
+#
+# The dataset/training/mlflow blocks live in
+# sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5/training_config.yaml
+# (mounted into the container as /opt/ml/input/data/config/training_config.yaml).
+# This file describes ONLY the launcher's job: block.
+#
+# The image is training-gval-turfcca-20261020, built from this branch at
+# 6ee7a6e: this run changes only the mounted config, not the code.
+#
+# CCA x3 + Turf x1.5 follow-up for draft PR #116, compared against the
+# Turf/CCA x3 run 7a46d513b2ac40ed99300b8423473e7f (only Turf differs).
+#
+# Submit with:
+#   uv run python scripts/launch_training.py \
+#       --run-config sagemaker/runs/coralnet-all-mermaid-coarse-grouped-minsupport-gval-cca3-turf1p5.yaml \
+#       --config-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5/ \
+#       --mlflow-tracking-uri <arn>
+#
+# Compute mirrors coralnet-top108-full.yaml: the balanced subsample caps the
+# training set at ~7.4M annotations, so size is comparable despite the larger
+# (all-sources + MERMAID) input. CCA x3 + Turf x1.5 adds ~0.59M rows, so the
+# 72 h ceiling stays.
+#
+# max_runtime_hours is a ceiling, not a target: the job stops when training
+# finishes (early_stopping_patience=3), and you pay only for actual runtime.
+# Set to 72h (2x coralnet-top108-full's 36h) for headroom on the larger input.
+
+job:
+  name_prefix: mermaid-classifier-gval-cca3-turf15
+  image: mermaid-classifier-jobs:training-gval-turfcca-20261020
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.c5.9xlarge
+  volume_gb: 400
+  max_runtime_hours: 72
+  env:
+    FEATURE_CACHE_DIR: /tmp/feature_cache
+    SPACER_EXTRACTORS_CACHE_DIR: /tmp/spacer_extractors
+  tags:
+    pr: "116"
+    branch: feat/grouped-val-turfcca
+    config_commit: "87d0b0f"
+    baseline_mlflow_run: "7a46d513b2ac40ed99300b8423473e7f"
