@@ -166,6 +166,30 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertEqual(dataset.included_labels_csv, str(tmp / "included_labels.csv"))
         self.assertEqual(training.epochs, 5)
         self.assertEqual(training.early_stopping_patience, 3)
+        self.assertEqual(training.early_stopping_metric, "val_loss")
+
+
+class EarlyStoppingMetricTest(unittest.TestCase):
+    def _load(self, metric: str) -> TrainingRunConfig:
+        yaml_text = MINIMAL_YAML.replace(
+            "early_stopping_patience: 3",
+            f"early_stopping_patience: 3\n  early_stopping_metric: {metric}",
+        )
+        with TemporaryDirectory() as td:
+            return TrainingRunConfig.from_yaml_path(_write(Path(td), yaml_text))
+
+    def test_val_accuracy_round_trips_to_training_options(self):
+        config = self._load("val_accuracy")
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "rollups.csv").write_text("from_ba_id,from_gf_id,to_ba_id,to_gf_id\n")
+            (tmp / "included_labels.csv").write_text("ba_id,gf_id\n")
+            _, training, _ = config.build_options(config_dir=tmp)
+        self.assertEqual(training.early_stopping_metric, "val_accuracy")
+
+    def test_invalid_metric_rejected_at_load(self):
+        with self.assertRaises(ValidationError):
+            self._load("val_f1")
 
 
 class MLflowModelNameTest(unittest.TestCase):
@@ -481,3 +505,27 @@ class GvalCca3Turf1p5ConfigTest(GvalTurfCcaConfigTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GvalCca3Turf1p5AccStopConfigTest(GvalTurfCcaConfigTest):
+    """The accuracy-stopping rerun keeps the Turf x1.5 data and changes only early stopping."""
+
+    NEW = (
+        GvalTurfCcaConfigTest.CONFIGS
+        / "coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5_accstop"
+    )
+    PREVIOUS = (
+        GvalTurfCcaConfigTest.CONFIGS
+        / "coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5"
+    )
+
+    def test_data_files_identical_to_turf1p5(self):
+        for name in ("val_groups.csv", "excluded_images.csv", "rollups.csv", "included_labels.csv"):
+            with self.subTest(name=name):
+                self.assertTrue(filecmp.cmp(self.NEW / name, self.PREVIOUS / name, shallow=False))
+
+    def test_early_stopping_is_val_accuracy_with_patience_8(self):
+        config = TrainingRunConfig.from_yaml_path(self.NEW / "training_config.yaml")
+        _, training_options, _ = config.build_options(config_dir=self.NEW)
+        self.assertEqual(training_options.early_stopping_metric, "val_accuracy")
+        self.assertEqual(training_options.early_stopping_patience, 8)
