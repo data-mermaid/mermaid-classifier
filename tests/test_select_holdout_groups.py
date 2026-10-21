@@ -108,6 +108,19 @@ class WriteFoldConfigsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             shg.write_fold_configs(self.parent, self.groups, folds=2)
 
+    def test_parent_with_val_groups_is_an_error(self):
+        # One val file cannot serve every fold: some fold would hold out its groups.
+        (self.parent / "training_config.yaml").write_text(
+            PARENT_YAML.replace(
+                "  holdout_fold: test\n",
+                "  holdout_fold: test\n  val_groups_csv: val_groups.csv\n"
+                "  split_mode: images\n  ref_val_ratios: [0.1, 0.0]\n",
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "val_groups_csv"):
+            shg.write_fold_configs(self.parent, self.groups, folds=2)
+        self.assertFalse((self.root / "cfg_fold0").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

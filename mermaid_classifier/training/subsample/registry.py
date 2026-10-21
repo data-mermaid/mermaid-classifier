@@ -31,6 +31,7 @@ need to change when a strategy is added; it routes through
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 from mermaid_classifier.training.subsample.options import (
@@ -61,6 +62,15 @@ def compute_per_class_targets(
     dict as a DuckDB table and joins it against a deterministic
     ROW_NUMBER() to produce the subsampled annotations table.
 
+    Per-class multipliers (``options.class_target_multipliers``) are
+    applied after the allocator, so ``_trim_overshoot`` cannot undo
+    them: ``t' = min(n_c, max(min(n_c, min_per_class), floor(t*m + 0.5)))``.
+    They scale the derived cap (``total // K`` for ``'balanced'``), so
+    ``3.0`` keeps meaning "3x the balanced cap". Targets stay clamped to
+    the available rows, and the realised total can exceed
+    ``total_annotations``. A multiplier key absent from ``class_counts``
+    raises ValueError.
+
     Raises ValueError if the strategy is unknown (in addition to the
     eager ``__post_init__`` check on SubsampleOptions, which guards
     against invalid strategy names at construction time -- the
@@ -76,7 +86,28 @@ def compute_per_class_targets(
             f" Registered: {available!r}."
             f" SUBSAMPLE_STRATEGIES knows: {sorted(SUBSAMPLE_STRATEGIES)!r}."
         )
-    return _ALLOCATORS[options.strategy](options, class_counts)
+    targets = _ALLOCATORS[options.strategy](options, class_counts)
+    return _apply_multipliers(options, class_counts, targets)
+
+
+def _apply_multipliers(
+    options: SubsampleOptions,
+    class_counts: ClassCounts,
+    targets: ClassTargets,
+) -> ClassTargets:
+    multipliers = options.multipliers_by_class()
+    if not multipliers:
+        return targets
+    unknown = sorted(set(multipliers) - set(class_counts))
+    if unknown:
+        names = [f"{ba}::{gf}" for ba, gf in unknown]
+        raise ValueError(f"class_target_multipliers names classes not in the data: {names!r}")
+    scaled = dict(targets)
+    for cls, m in multipliers.items():
+        n = class_counts[cls]
+        floor = min(n, options.min_per_class)
+        scaled[cls] = min(n, max(floor, math.floor(targets[cls] * m + 0.5)))
+    return scaled
 
 
 def _stratified(

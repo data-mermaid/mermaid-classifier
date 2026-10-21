@@ -15,6 +15,7 @@ from mermaid_classifier.training.holdout_selection import (
     build_coverage_report,
     coverage_warnings,
     select_holdout,
+    select_val_groups,
     site_test_shares,
 )
 
@@ -50,6 +51,69 @@ def _site_groups(df: pd.DataFrame, site: str) -> set[tuple[str, str]]:
 LOOSE = SelectionParams(
     test_frac=0.10, folds=5, min_test_points=30, max_class_group_loss=0.25, seed=0
 )
+
+
+class ValSelectionTest(unittest.TestCase):
+    def _test_groups(self, df: pd.DataFrame) -> set[tuple[str, str]]:
+        sel = select_holdout(df, LOOSE, beta_sources=set())
+        return {g for g, f in sel.assignments.items() if f == "test"}
+
+    def test_val_is_disjoint_from_test_and_never_unknown(self):
+        df = _synthetic_counts()
+        tests = self._test_groups(df)
+        val = select_val_groups(df, tests, LOOSE).assignments
+        self.assertTrue(val)
+        self.assertFalse(set(val) & tests)
+        self.assertNotIn((MERMAID, "unknown"), val)
+
+    def test_each_site_selects_about_val_frac_of_its_non_test_groups(self):
+        df = _synthetic_counts()
+        tests = self._test_groups(df)
+        val = select_val_groups(df, tests, LOOSE).assignments
+        # 36 non-test CoralNet and 18 non-test MERMAID groups, 10% rounded half up.
+        for site, expected in ((CORALNET, 4), (MERMAID, 2)):
+            self.assertEqual(len([g for g in val if g[0] == site]), expected, site)
+
+    def test_every_class_keeps_a_non_val_non_test_group(self):
+        df = _synthetic_counts()
+        tests = self._test_groups(df)
+        val = set(select_val_groups(df, tests, LOOSE).assignments)
+        for class_key, sub in df.groupby("class_key"):
+            gs = {(str(s), str(p)) for s, p in zip(sub["site"], sub["project_id"], strict=True)}
+            self.assertTrue(gs - val - tests, class_key)
+
+    def test_a_class_confined_to_one_group_never_loses_it_to_val(self):
+        rows = [("rare", CORALNET, "1", 500)]
+        for i in range(2, 22):
+            rows.append(("common", CORALNET, str(i), 50))
+        val = select_val_groups(_counts(rows), set(), LOOSE).assignments
+        self.assertNotIn((CORALNET, "1"), val)
+
+    def test_deterministic_and_row_order_independent(self):
+        df = _synthetic_counts()
+        tests = self._test_groups(df)
+        shuffled = df.sample(frac=1.0, random_state=3).reset_index(drop=True)
+        a = select_val_groups(df, tests, LOOSE)
+        b = select_val_groups(shuffled, tests, LOOSE)
+        self.assertEqual(a.assignments, b.assignments)
+        self.assertEqual(a.assignments, select_val_groups(df, tests, LOOSE).assignments)
+
+    def test_shortfall_names_the_site_and_speaks_of_val_groups(self):
+        df = _synthetic_counts()
+        tests = self._test_groups(df)
+        tight = dataclasses.replace(LOOSE, max_test_point_frac=0.001)
+        result = select_val_groups(df, tests, tight)
+        self.assertIn(CORALNET, result.short_sites)
+        self.assertTrue(result.warnings)
+        for w in result.warnings:
+            self.assertNotIn("test groups", w)
+            self.assertNotIn("max_test_point_frac", w)
+        self.assertTrue(any("max_val_point_frac" in w for w in result.warnings))
+
+    def test_no_shortfall_when_every_site_reaches_its_target(self):
+        df = _synthetic_counts()
+        result = select_val_groups(df, self._test_groups(df), LOOSE)
+        self.assertEqual(result.short_sites, [])
 
 
 class SelectionTest(unittest.TestCase):

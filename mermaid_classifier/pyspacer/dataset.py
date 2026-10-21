@@ -50,6 +50,8 @@ from mermaid_classifier.pyspacer.label_specs import (
     ImageExclusionFilter,
     LabelFilter,
     LabelRollupSpec,
+    ValGroups,
+    tag_exclude_clause,
 )
 from mermaid_classifier.pyspacer.options import (
     Artifacts,
@@ -57,7 +59,7 @@ from mermaid_classifier.pyspacer.options import (
     Sites,
 )
 from mermaid_classifier.pyspacer.settings import settings
-from mermaid_classifier.pyspacer.splitting import MIN_IMAGES_PER_CLASS, split_by_image
+from mermaid_classifier.pyspacer.splitting import required_images, split_by_image
 from mermaid_classifier.pyspacer.utils import logging_config_for_script
 from mermaid_classifier.training.subsample import (
     SubsampleOptions,
@@ -99,6 +101,7 @@ class TrainingDataset:
         # holdout cap; None otherwise.
         self._subsample_group_audit_df: pd.DataFrame | None = None
         self._holdout_audit_df: pd.DataFrame | None = None
+        self._val_audit_df: pd.DataFrame | None = None
         if settings.feature_cache_dir:
             os.makedirs(settings.feature_cache_dir, exist_ok=True)
             self._feature_dir = settings.feature_cache_dir
@@ -127,6 +130,10 @@ class TrainingDataset:
             # Test groups leave a CV run entirely: neither trained on nor
             # evaluated. Holdout rows stay, tagged, for later steps.
             self.duck_conn.execute("DELETE FROM annotations WHERE is_excluded")
+
+        if options.val_groups_csv:
+            # Before the feature listing and download, which take hours at scale.
+            self._check_val_rows_trainable()
 
         if options.include_mermaid or options.coralnet_manifest_uri:
             feature_prefixes = self.feature_source_prefixes()
@@ -157,15 +164,22 @@ class TrainingDataset:
             with self.section_profiling("Per-class subsampling"):
                 self._apply_subsample(options.subsample)
 
+        cap_seed = options.subsample.seed if options.subsample is not None else 0
         if options.holdout_max_per_class is not None:
-            seed = options.subsample.seed if options.subsample is not None else 0
             with self.section_profiling("Capping holdout rows per class"):
-                self._cap_holdout_rows(options.holdout_max_per_class, seed)
+                self._cap_holdout_rows(options.holdout_max_per_class, cap_seed)
+        if options.val_groups_csv and options.val_max_per_class is not None:
+            with self.section_profiling("Capping val rows per class"):
+                self._cap_val_rows(options.val_max_per_class, cap_seed)
+        if options.val_groups_csv:
+            # Missing feature vectors and the subsample can empty a class.
+            self._check_val_rows_trainable()
 
         self.labels = self.prep_annotations_for_pyspacer()
 
         with self.section_profiling("Tag DuckDB rows with training set"):
             self.add_training_set_names()
+        self._assert_eval_groups_disjoint()
 
         self.set_train_summary_stats()
 
@@ -209,17 +223,24 @@ class TrainingDataset:
         self.holdout_groups = _load_csv_spec(options.holdout_groups_csv, HoldoutGroups)
         # Fail on a bad fold before any data is read.
         self.holdout_groups.validate_holdout_fold(options.holdout_fold)
+        self.val_groups = _load_csv_spec(options.val_groups_csv, ValGroups)
+        if options.val_groups_csv and self.val_groups.is_empty():
+            raise ValueError(f"val_groups_csv {options.val_groups_csv} lists no groups.")
+        if not self.val_groups.is_empty() and not self.holdout_groups.is_empty():
+            self.val_groups.check_disjoint(self.holdout_groups, options.holdout_fold)
         # Without the lookup every MERMAID row is project 'all', so no
         # listed MERMAID project can match.
         mermaid_groups = sorted(
-            group_id
-            for site, group_id in self.holdout_groups.group_folds
-            if site == Sites.MERMAID.value
+            {
+                group_id
+                for site, group_id in [*self.holdout_groups.group_folds, *self.val_groups.groups]
+                if site == Sites.MERMAID.value
+            }
         )
         if options.include_mermaid and mermaid_groups and not options.mermaid_project_lookup_uri:
             raise ValueError(
-                f"holdout_groups_csv lists MERMAID group(s) {mermaid_groups}, but"
-                f" mermaid_project_lookup_uri is unset, so no MERMAID row has a project."
+                f"holdout_groups_csv or val_groups_csv lists MERMAID group(s) {mermaid_groups},"
+                f" but mermaid_project_lookup_uri is unset, so no MERMAID row has a project."
             )
 
         # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
@@ -236,7 +257,8 @@ class TrainingDataset:
         Populate the `annotations` table: read the CoralNet and MERMAID
         annotations, roll up and filter labels, drop excluded images,
         check the MERMAID project-lookup tolerance on the surviving images,
-        dedupe points, and tag holdout groups (is_holdout / is_excluded).
+        dedupe points, and tag holdout groups (is_holdout / is_excluded) and
+        val groups (is_val).
 
         Needs no feature-vector listing or download.
         """
@@ -265,9 +287,9 @@ class TrainingDataset:
                 "SELECT COUNT(*), COUNT(DISTINCT feature_vector) FROM annotations"
             ).fetchone()
 
-        # Lets holdout tagging tell a mistyped group from one filtering emptied.
+        # Lets group tagging tell a mistyped group from one filtering emptied.
         groups_read: set[tuple[str, str]] = set()
-        if not self.holdout_groups.is_empty():
+        if not self.holdout_groups.is_empty() or not self.val_groups.is_empty():
             groups_read = {
                 (str(site), str(project_id))
                 for site, project_id in self.duck_conn.execute(
@@ -356,6 +378,13 @@ class TrainingDataset:
                 groups_read=groups_read,
             )
 
+        with self.section_profiling("Tagging val groups"):
+            self.val_groups.tag_in_duckdb(
+                duck_conn=self.duck_conn,
+                duck_table_name="annotations",
+                groups_read=groups_read,
+            )
+
     def _dedupe_points(self) -> None:
         """
         Make `annotations` hold at most one row per point, keyed by
@@ -411,22 +440,27 @@ class TrainingDataset:
             f"{conflict_points:,}",
         )
 
-    def _has_holdout_column(self) -> bool:
+    def _has_column(self, name: str) -> bool:
         columns = self.duck_conn.execute("DESCRIBE annotations").fetchall()
-        return any(c[0] == "is_holdout" for c in columns)
+        return any(c[0] == name for c in columns)
+
+    def _has_holdout_column(self) -> bool:
+        return self._has_column("is_holdout")
 
     def _apply_subsample(self, opts: SubsampleOptions) -> None:
         """Deterministic per-class subsampling of the annotations table.
 
         Replaces the old non-deterministic ``annotation_limit`` block.
         Runs after rollup + included-labels filter, before the
-        train/ref/val split. Only rows with ``is_holdout = FALSE`` take
-        part: per-class targets come from their counts, and holdout rows
-        pass through untouched (``_cap_holdout_rows`` bounds those).
+        train/ref/val split. Only rows with ``is_holdout`` and ``is_val``
+        both FALSE take part: per-class targets, and the class count a
+        balanced cap divides by, come from their counts. Holdout and val
+        rows pass through untouched (``_cap_holdout_rows`` and
+        ``_cap_val_rows`` bound those).
 
         Pipeline (all in DuckDB, in-process):
 
-          1. Read per-class counts of the non-holdout annotations,
+          1. Read per-class counts of the candidate annotations,
              keyed by ``(benthic_attribute_id, growth_form_id)``. Both
              columns are post-rollup at this point.
           2. Call ``compute_per_class_targets(opts, counts)`` to get
@@ -456,10 +490,10 @@ class TrainingDataset:
             ``opts.oversample`` field.
         """
         self._subsample_group_audit_df = None
-        has_holdout = self._has_holdout_column()
-        # Holdout rows are set aside from the subsample, not counted in it.
+        # Holdout and val rows are set aside from the subsample, not counted in it.
+        set_aside = " OR ".join(flag for flag in ("is_holdout", "is_val") if self._has_column(flag))
         candidates = (
-            "(SELECT * FROM annotations WHERE NOT is_holdout)" if has_holdout else ("annotations")
+            f"(SELECT * FROM annotations WHERE NOT ({set_aside}))" if set_aside else "annotations"
         )
 
         # Step 1: per-class counts (deterministic ORDER BY for stable
@@ -539,7 +573,11 @@ class TrainingDataset:
 
         self.duck_conn.register("_subsample_targets", allocation_df)
         try:
-            holdout_union = " UNION ALL BY NAME SELECT * FROM annotations WHERE is_holdout"
+            set_aside_union = (
+                f" UNION ALL BY NAME SELECT * FROM annotations WHERE {set_aside}"
+                if set_aside
+                else ""
+            )
             self.duck_conn.execute(
                 "CREATE OR REPLACE TABLE annotations AS"
                 " WITH numbered AS ("
@@ -553,7 +591,7 @@ class TrainingDataset:
                 " SELECT n.* EXCLUDE (_rn)"
                 " FROM numbered n"
                 f" JOIN _subsample_targets t USING ({join_using})"
-                " WHERE n._rn <= t.target_n" + (holdout_union if has_holdout else "")
+                " WHERE n._rn <= t.target_n" + set_aside_union
             )
         finally:
             self.duck_conn.unregister("_subsample_targets")
@@ -569,6 +607,7 @@ class TrainingDataset:
         ).fetchall()
         realized_by_cls = {(ba, gf): n for ba, gf, n in realized_rows}
 
+        multipliers = opts.multipliers_by_class()
         per_class_audit = pd.DataFrame(
             [
                 {
@@ -577,6 +616,7 @@ class TrainingDataset:
                     "pre_count": class_counts[(ba, gf)],
                     "target_n": targets.get((ba, gf), 0),
                     "realized_n": realized_by_cls.get((ba, gf), 0),
+                    "target_multiplier": multipliers.get((ba, gf), 1.0),
                 }
                 for (ba, gf) in sorted(class_counts)
             ]
@@ -620,25 +660,33 @@ class TrainingDataset:
         )
 
     def _cap_holdout_rows(self, max_per_class: int, seed: int = 0) -> None:
-        """Cap each class's holdout rows at ``max_per_class``.
+        """Cap each class's holdout rows; see ``_cap_tagged_rows``."""
+        self._holdout_audit_df = self._cap_tagged_rows("is_holdout", max_per_class, seed)
+
+    def _cap_val_rows(self, max_per_class: int, seed: int = 0) -> None:
+        """Cap each class's val-group rows; see ``_cap_tagged_rows``."""
+        self._val_audit_df = self._cap_tagged_rows("is_val", max_per_class, seed)
+
+    def _cap_tagged_rows(self, flag: str, max_per_class: int, seed: int) -> pd.DataFrame | None:
+        """Cap each class's rows tagged ``flag`` at ``max_per_class``.
 
         Keeps whole images first: within a class (not per group), rows are
         ordered by a seeded md5 of the feature vector, so the survivors
-        cluster by image. Non-holdout rows are untouched. A no-op, leaving
-        ``_holdout_audit_df`` None, when there are no holdout rows.
+        cluster by image. Other rows are untouched. Returns the per-class
+        (available, realized) audit, or None, as a no-op, when no row is
+        tagged. ``flag`` is interpolated, so it must be a code constant.
         """
-        self._holdout_audit_df = None
-        if not self._has_holdout_column():
-            return
+        if not self._has_column(flag):
+            return None
 
         available_rows = self.duck_conn.execute(
             "SELECT benthic_attribute_id, growth_form_id, COUNT(*)"
-            " FROM annotations WHERE is_holdout"
+            f" FROM annotations WHERE {flag}"
             " GROUP BY benthic_attribute_id, growth_form_id"
             " ORDER BY benthic_attribute_id, growth_form_id"
         ).fetchall()
         if not available_rows:
-            return
+            return None
 
         self.duck_conn.execute(
             "CREATE OR REPLACE TABLE annotations AS"
@@ -649,22 +697,29 @@ class TrainingDataset:
             f"              ORDER BY md5('{int(seed)}' || feature_vector),"
             "                       feature_vector, site, project_id, image_id, row, col"
             "          ) AS _rn"
-            "   FROM annotations WHERE is_holdout"
+            f"   FROM annotations WHERE {flag}"
             " )"
             " SELECT * EXCLUDE (_rn) FROM numbered"
             f" WHERE _rn <= {int(max_per_class)}"
-            " UNION ALL BY NAME SELECT * FROM annotations WHERE NOT is_holdout"
+            f" UNION ALL BY NAME SELECT * FROM annotations WHERE NOT {flag}"
         )
 
         realized_by_cls = {
             (ba, gf): n
             for ba, gf, n in self.duck_conn.execute(
                 "SELECT benthic_attribute_id, growth_form_id, COUNT(*)"
-                " FROM annotations WHERE is_holdout"
+                f" FROM annotations WHERE {flag}"
                 " GROUP BY benthic_attribute_id, growth_form_id"
             ).fetchall()
         }
-        self._holdout_audit_df = pd.DataFrame(
+        logger.info(
+            "Cap on %s rows applied: max_per_class=%s, rows %s -> %s",
+            flag,
+            max_per_class,
+            f"{sum(n for _, _, n in available_rows):,}",
+            f"{sum(realized_by_cls.values()):,}",
+        )
+        return pd.DataFrame(
             [
                 {
                     "benthic_attribute_id": ba,
@@ -674,12 +729,6 @@ class TrainingDataset:
                 }
                 for ba, gf, n in available_rows
             ]
-        )
-        logger.info(
-            "Holdout cap applied: max_per_class=%s, holdout rows %s -> %s",
-            max_per_class,
-            f"{sum(n for _, _, n in available_rows):,}",
-            f"{sum(realized_by_cls.values()):,}",
         )
 
     def cleanup(self):
@@ -1104,9 +1153,12 @@ class TrainingDataset:
         train/ref/val by `options.split_mode`.
 
         Holdout rows (is_holdout) take no part in the split: they become
-        `self.holdout_labels`, which is empty when there are none.
+        `self.holdout_labels`, which is empty when there are none. Val-group
+        rows (is_val) take no part either: with `options.val_groups_csv` they
+        are the val set, and train/ref come from the remaining rows.
         """
         has_holdout = self._has_holdout_column()
+        has_val = self._has_column("is_val")
         with self.section_profiling("Collecting feature paths"):
             annotations_by_image = duckdb_grouped_rows(
                 duck_conn=self.duck_conn,
@@ -1118,8 +1170,10 @@ class TrainingDataset:
             # First pass: collect annotations and unique S3 keys.
             s3_keys: dict[tuple[str, str], str] = {}
             tmp_root = self._feature_dir
-            # (bucket, key, site, project_id, split annotations, holdout annotations)
-            image_data: list[tuple[str, str, str, str, list[Annotation], list[Annotation]]] = []
+            # (bucket, key, site, project_id, split, holdout and val annotations)
+            image_data: list[
+                tuple[str, str, str, str, list[Annotation], list[Annotation], list[Annotation]]
+            ] = []
 
             for rows in annotations_by_image:
                 # Here, in one loop iteration, we're given all the
@@ -1132,6 +1186,7 @@ class TrainingDataset:
 
                 image_annotations: list[Annotation] = []
                 holdout_annotations: list[Annotation] = []
+                val_annotations: list[Annotation] = []
 
                 # One annotation per row.
                 for row in rows:
@@ -1146,6 +1201,8 @@ class TrainingDataset:
                     )
                     if has_holdout and bool(row["is_holdout"]):
                         holdout_annotations.append(annotation)
+                    elif has_val and bool(row["is_val"]):
+                        val_annotations.append(annotation)
                     else:
                         image_annotations.append(annotation)
 
@@ -1165,6 +1222,7 @@ class TrainingDataset:
                         project_id,
                         image_annotations,
                         holdout_annotations,
+                        val_annotations,
                     )
                 )
 
@@ -1185,6 +1243,7 @@ class TrainingDataset:
             # Build ImageLabels with filesystem DataLocations.
             labels_data = ImageLabels()
             holdout_data = ImageLabels()
+            val_data = ImageLabels()
 
             for (
                 bucket,
@@ -1193,6 +1252,7 @@ class TrainingDataset:
                 project_id,
                 image_annotations,
                 holdout_annotations,
+                val_annotations,
             ) in image_data:
                 # Skip images whose feature file failed to download.
                 if (bucket, feature_bucket_path) in failed_keys:
@@ -1208,20 +1268,29 @@ class TrainingDataset:
                     labels_data.add_image(feature_loc, image_annotations)
                 if holdout_annotations:
                     holdout_data.add_image(feature_loc, holdout_annotations)
+                if val_annotations:
+                    val_data.add_image(feature_loc, val_annotations)
                 self.feature_loc_to_source[feature_loc] = (site, project_id)
 
             self.holdout_labels = holdout_data
 
+        subsample = self.options.subsample
+        seed = subsample.seed if subsample is not None else 0
+
+        def stable_key(loc: DataLocation) -> str:
+            # The download dir differs per run; the S3 location does not.
+            return "/".join(self._feature_path_to_s3_location[loc.key])
+
         with self.section_profiling(f"Splitting train/ref/val ({self.options.split_mode})"):
-            if self.options.split_mode == "images":
-                subsample = self.options.subsample
+            if self.options.val_groups_csv:
+                split = self._split_with_grouped_val(labels_data, val_data, seed, stable_key)
+            elif self.options.split_mode == "images":
                 split = preprocess_labels(
                     split_by_image(
                         labels_data,
                         self.options.ref_val_ratios,
-                        seed=subsample.seed if subsample is not None else 0,
-                        # The download dir differs per run; the S3 location does not.
-                        stable_key=lambda loc: "/".join(self._feature_path_to_s3_location[loc.key]),
+                        seed=seed,
+                        stable_key=stable_key,
                     )
                 )
             else:
@@ -1233,13 +1302,95 @@ class TrainingDataset:
         self._log_split_drops(labels_data, split)
         return split
 
+    def _check_val_rows_trainable(self) -> None:
+        """
+        Raise ValueError if no row is is_val, or if a class has is_val rows but
+        no rows outside the holdout and val groups. A cheap DuckDB check ahead
+        of the feature download; `_split_with_grouped_val` rechecks the labels.
+        """
+        val_count = self.duck_conn.execute(
+            "SELECT count(*) FROM annotations WHERE is_val"
+        ).fetchall()[0][0]
+        if val_count == 0:
+            raise ValueError(
+                "val_groups_csv is set, but no annotation is in a val group after"
+                " filtering, so early stopping would have nothing to select on."
+            )
+        val_only = [
+            combine_ba_gf(str(ba), str(gf))
+            for ba, gf in self.duck_conn.execute(
+                "SELECT benthic_attribute_id, growth_form_id FROM annotations"
+                " GROUP BY ALL"
+                " HAVING bool_or(is_val) AND NOT bool_or(NOT is_val AND NOT is_holdout)"
+                " ORDER BY ALL"
+            ).fetchall()
+        ]
+        if val_only:
+            raise ValueError(
+                f"{len(val_only)} class(es) have val-group rows but no training rows outside"
+                f" the holdout and val groups, so the model cannot learn them:"
+                f" {', '.join(val_only)}. Move a group of each into training, or filter"
+                f" the class out."
+            )
+
+    def _split_with_grouped_val(
+        self,
+        labels_data: ImageLabels,
+        val_data: ImageLabels,
+        seed: int,
+        stable_key: Callable[[DataLocation], str],
+    ) -> TrainingTaskLabels:
+        """
+        Train/ref from an image split of `labels_data` with no val share, and
+        `val_data` (the val-group rows) as val.
+
+        PySpacer filters every set to the classes in both train and ref, so a
+        val class the model does not train on is dropped from val.
+        """
+        if val_data.label_count == 0:
+            raise ValueError(
+                "val_groups_csv is set, but no annotation is in a val group after"
+                " filtering, capping and the feature-vector check, so early stopping"
+                " would have nothing to select on."
+            )
+        val_only = sorted(val_data.classes_set - labels_data.classes_set, key=str)
+        if val_only:
+            raise ValueError(
+                f"{len(val_only)} class(es) have val-group rows but no training rows outside"
+                f" the holdout and val groups, so the model cannot learn them:"
+                f" {', '.join(str(label) for label in val_only)}. Move a group of each into"
+                f" training, or filter the class out."
+            )
+        image_split = split_by_image(
+            labels_data, (self.options.ref_val_ratios[0], 0.0), seed=seed, stable_key=stable_key
+        )
+        split = preprocess_labels(
+            TrainingTaskLabels(train=image_split.train, ref=image_split.ref, val=val_data)
+        )
+
+        dropped_val = sorted(val_data.classes_set - split.val.classes_set, key=str)
+        if dropped_val:
+            logger.info(
+                "Val drops %d class(es) the split left out of train or ref: %s",
+                len(dropped_val),
+                ", ".join(str(label) for label in dropped_val),
+            )
+        unscored = sorted(split.train.classes_set - split.val.classes_set, key=str)
+        if unscored:
+            logger.warning(
+                "%d model class(es) have no val points, so early stopping ignores them: %s",
+                len(unscored),
+                ", ".join(str(label) for label in unscored),
+            )
+        return split
+
     def _log_split_drops(self, before: ImageLabels, after: TrainingTaskLabels) -> None:
         """
         Log by name each class the split removed, and count them.
 
         PySpacer drops a class missing from train or ref from all three sets.
-        A class in MIN_IMAGES_PER_CLASS or more images could have reached
-        every set, so its drop is a warning; a rarer class's drop is info.
+        A class in `required_images(ref_val_ratios)` or more images could
+        have reached every set, so its drop is a warning; a rarer class's drop is info.
         """
         kept = after.train.classes_set | after.ref.classes_set | after.val.classes_set
         images_per_class: Counter[LabelId] = Counter()
@@ -1248,20 +1399,22 @@ class TrainingDataset:
         dropped = sorted(set(images_per_class) - kept, key=str)
         self._split_dropped_bagfs = len(dropped)
 
+        min_images = required_images(self.options.ref_val_ratios)
+
         def describe(labels: list[LabelId]) -> str:
             return ", ".join(
                 f"{label}: {images_per_class[label]}, {before.label_count_per_class[label]}"
                 for label in labels
             )
 
-        common = [label for label in dropped if images_per_class[label] >= MIN_IMAGES_PER_CLASS]
-        rare = [label for label in dropped if images_per_class[label] < MIN_IMAGES_PER_CLASS]
+        common = [label for label in dropped if images_per_class[label] >= min_images]
+        rare = [label for label in dropped if images_per_class[label] < min_images]
         if common:
             logger.warning(
                 "Split drops %d class(es) in %d or more images from train, ref and val"
                 " (class: images, points): %s",
                 len(common),
-                MIN_IMAGES_PER_CLASS,
+                min_images,
                 describe(common),
             )
         if rare:
@@ -1269,7 +1422,7 @@ class TrainingDataset:
                 "Split drops %d class(es) in fewer than %d images from train, ref and val"
                 " (class: images, points): %s",
                 len(rare),
-                MIN_IMAGES_PER_CLASS,
+                min_images,
                 describe(rare),
             )
 
@@ -1432,6 +1585,30 @@ class TrainingDataset:
                 f"  USING (bucket, feature_vector, row, col)"
             )
 
+    def _assert_eval_groups_disjoint(self) -> None:
+        """
+        Raise RuntimeError if a (site, project_id) group has rows in holdout and
+        in any other set, or, with `options.val_groups_csv`, in both train/ref
+        and val. An image-split val shares groups with train by design.
+        """
+        conflict = "bool_or(training_set = 'holdout') AND bool_or(training_set <> 'holdout')"
+        if self.options.val_groups_csv:
+            conflict += (
+                " OR (bool_or(training_set IN ('train', 'ref')) AND bool_or(training_set = 'val'))"
+            )
+        conflicts = self.duck_conn.execute(
+            f"SELECT site, project_id, string_agg(DISTINCT training_set, '/' ORDER BY training_set)"
+            f" FROM annotations WHERE training_set IS NOT NULL"
+            f" GROUP BY site, project_id HAVING {conflict}"
+            f" ORDER BY site, project_id"
+        ).fetchall()
+        if conflicts:
+            raise RuntimeError(
+                f"{len(conflicts)} group(s) feed more than one of train+ref, val and holdout"
+                f" (site, project_id): sets: "
+                + ", ".join(f"({site}, {pid}): {sets}" for site, pid, sets in conflicts)
+            )
+
     def _add_tuples_to_table(
         self, table_name: str, tuples: list[tuple[str, str, int, int, str]]
     ) -> None:
@@ -1585,6 +1762,7 @@ class TrainingDataset:
             "bagfs": num_of_bagfs,
             "bagfs_dropped": bagfs_dropped,
             "bagfs_dropped_by_split": self._split_dropped_bagfs,
+            "annotations_val_source": "groups" if self.options.val_groups_csv else "split",
             **(self._dedupe_stats or {}),
         }
 
@@ -1605,22 +1783,17 @@ class TrainingDataset:
         )
 
     def get_annotations(self, log_spec: str):
+        select = f"SELECT * {tag_exclude_clause(self.duck_conn, 'annotations')} FROM annotations"
         if log_spec == "all":
-            query = "SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations"
+            query = select
         elif match := re.fullmatch(r"s(\d+)", log_spec):
             cn_source_id = match.groups()[0]
             query = (
-                f"SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations"
-                f" WHERE site = '{Sites.CORALNET.value}'"
-                f" AND project_id = '{cn_source_id}'"
+                f"{select} WHERE site = '{Sites.CORALNET.value}' AND project_id = '{cn_source_id}'"
             )
         elif match := re.fullmatch(r"i(\d+)", log_spec):
             cn_image_id = match.groups()[0]
-            query = (
-                f"SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations"
-                f" WHERE site = '{Sites.CORALNET.value}'"
-                f" AND image_id = '{cn_image_id}'"
-            )
+            query = f"{select} WHERE site = '{Sites.CORALNET.value}' AND image_id = '{cn_image_id}'"
         else:
             raise ValueError(f"Unsupported annotations log spec: {log_spec}")
 

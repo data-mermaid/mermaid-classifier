@@ -23,12 +23,16 @@ import csv
 import dataclasses
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import yaml
 from classifier_train import (
     _resolve_local_aws_credentials,  # pyright: ignore[reportPrivateUsage]  # shared local-credential bootstrap
 )
+
+if TYPE_CHECKING:
+    from mermaid_classifier.pyspacer.options import DatasetOptions
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT = REPO_ROOT.parent
@@ -81,6 +85,12 @@ def write_fold_configs(config_dir: Path, groups_csv: Path, folds: int) -> list[P
         )
     if dataset.holdout_groups_csv is None:
         raise ValueError("The parent config sets no dataset.holdout_groups_csv.")
+    if dataset.val_groups_csv is not None:
+        raise ValueError(
+            "The parent config sets dataset.val_groups_csv. CV with grouped val needs a val"
+            " file per fold that lists none of that fold's groups, which fold configs do"
+            " not write."
+        )
     sources = {
         name: config_dir / name
         for name in (
@@ -141,6 +151,23 @@ def resolve_out_path(
             " --no-write-fold-configs."
         )
     return path
+
+
+def all_data_options(dataset_options: DatasetOptions) -> DatasetOptions:
+    """
+    `dataset_options` with holdout and val groups unset, so no row is tagged or dropped.
+
+    Without val groups the val share must be positive, so a zero share
+    becomes 0.1; nothing that reads these options runs the split.
+    """
+    ref_ratio, val_ratio = dataset_options.ref_val_ratios
+    return dataclasses.replace(
+        dataset_options,
+        holdout_groups_csv=None,
+        holdout_fold="test",
+        val_groups_csv=None,
+        ref_val_ratios=(ref_ratio, val_ratio or 0.1),
+    )
 
 
 def load_config_then_pyspacer(config_dir: Path):
@@ -234,10 +261,8 @@ def main(argv: list[str] | None = None) -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     dataset_options, _, _ = config.build_options(config_dir=config_dir)
-    # Selection runs on all data: an existing holdout CSV must not tag or drop rows.
-    dataset_options = dataclasses.replace(
-        dataset_options, holdout_groups_csv=None, holdout_fold="test"
-    )
+    # Selection runs on all data: existing holdout or val CSVs must not tag or drop rows.
+    dataset_options = all_data_options(dataset_options)
 
     dataset = training_dataset_cls.filtered_annotations_only(dataset_options)
     try:

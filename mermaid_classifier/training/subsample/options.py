@@ -29,6 +29,8 @@ The pipeline (``TrainingDataset._apply_subsample``) doesn't change.
 from __future__ import annotations
 
 import dataclasses
+import json
+import math
 from typing import Literal
 
 # Authoritative list of strategy names. Kept in this module so it can
@@ -72,6 +74,14 @@ class SubsampleOptions:
                               seeded-md5 order.
         seed               -- salt for the ``source_spread`` image md5.
                               Unused by ``'ordered'``.
+        class_target_multipliers
+                           -- per-class scale on the allocator's target, keyed
+                              ``"<ba_id>::<gf_id>"`` (gf may be empty). A
+                              multiplier rather than an absolute target: the
+                              cap is derived (``total // K``), so ``3.0``
+                              keeps meaning "3x the balanced cap". Targets are
+                              clamped to available rows, so the realised total
+                              can exceed ``total_annotations``.
 
     Determinism: the built-in allocators carry no random state.
     Determinism is a property of the SQL applied in
@@ -84,6 +94,7 @@ class SubsampleOptions:
     min_per_class: int = 0
     within_class: Literal["ordered", "source_spread"] = "ordered"
     seed: int = 0
+    class_target_multipliers: dict[str, float] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.strategy not in SUBSAMPLE_STRATEGIES:
@@ -103,12 +114,41 @@ class SubsampleOptions:
         if self.seed < 0:
             raise ValueError(f"seed must be >= 0, got {self.seed!r}")
 
+        self.class_target_multipliers = self._validated_multipliers()
+
         if self.strategy == "stratified" and self.total_annotations is None:
             raise ValueError("strategy='stratified' requires total_annotations")
         if self.strategy == "balanced" and self.total_annotations is None:
             raise ValueError(
                 "strategy='balanced' requires total_annotations (split equally across classes)"
             )
+
+    def _validated_multipliers(self) -> dict[str, float]:
+        normalised: dict[str, float] = {}
+        for key, value in self.class_target_multipliers.items():
+            ba_id, sep, _gf_id = key.partition("::")
+            if not sep or not ba_id.strip():
+                raise ValueError(
+                    f"class_target_multipliers key must be '<ba_id>::<gf_id>', got {key!r}"
+                )
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"class_target_multipliers value must be finite, got {value!r} for {key!r}"
+                )
+            if value <= 0:
+                raise ValueError(
+                    f"class_target_multipliers value must be > 0, got {value!r} for {key!r}"
+                )
+            normalised[key.lower()] = float(value)
+        return normalised
+
+    def multipliers_by_class(self) -> dict[tuple[str, str], float]:
+        """The multipliers keyed by ``(ba_id, gf_id)``."""
+        result: dict[tuple[str, str], float] = {}
+        for key, value in self.class_target_multipliers.items():
+            ba_id, _, gf_id = key.partition("::")
+            result[(ba_id, gf_id)] = value
+        return result
 
     def to_log_dict(self) -> dict[str, object]:
         """Flat dict suitable for ``mlflow.log_params``.
@@ -123,4 +163,9 @@ class SubsampleOptions:
             "subsample/min_per_class": self.min_per_class,
             "subsample/within_class": self.within_class,
             "subsample/seed": self.seed,
+            "subsample/class_target_multipliers": (
+                json.dumps(dict(sorted(self.class_target_multipliers.items())))
+                if self.class_target_multipliers
+                else ""
+            ),
         }

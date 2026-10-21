@@ -1,0 +1,86 @@
+# Training run: the gval_turfcca config with Turf algae lowered from x3 to
+# x1.5; CCA stays x3, and val_groups.csv, the holdout and early stopping are
+# unchanged. Run 7a46d513 (gval_turfcca) raised Turf recall 36 -> 62 but
+# over-predicted Turf (cover bias +6.4 points) and pulled macroalgae recall
+# 51 -> 39. Compare against 7a46d513b2ac40ed99300b8423473e7f to isolate the
+# Turf change, and against 31c89e1bdc8b4c699161be40ba701632 (the min-support
+# run) for the overall effect. Same test fold as both.
+#
+# The holdout groups (holdout_groups.csv) are a byte-identical copy of
+# coralnet_all_plus_mermaid_coarse_grouped/holdout_groups.csv, so results are
+# comparable with that run (MLflow run daa1b079e30d43da9080a0fda7492dcd).
+#
+# training reads the manifest, not sources.csv, so no sources.csv is kept here.
+#
+# NOTE: training reads feature vectors from 2605-coralnet-public-sources, so
+# every source in the manifest must have its featurevectors present.
+
+dataset:
+  include_mermaid: true
+  # Image-grouped split: all annotations of an image stay in one split.
+  split_mode: images
+  # Verbatim S3 URI of the all-sources manifest parquet
+  # (scripts/build_coralnet_manifest.py run with no --sources-csv/--source-ids).
+  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/all/coralnet_classifier_manifest_all.parquet
+  # Private bucket. The lookup must never go to the public coral-reef-training bucket.
+  # Generated 2026-10-19 from prod (read-only); regenerate on launch day — unmatched MERMAID images fail the run (MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED defaults to 0)
+  mermaid_project_lookup_uri: s3://dev-datamermaid-sm-sources/etl-outputs/mermaid/mermaid_image_projects_20261019.parquet
+  # These images were confirmed after the 2026-10-19 lookup and are excluded because they have no project; regenerate the list if the export is rebuilt again before launch.
+  excluded_images_csv: excluded_images.csv
+  # Byte-identical copy of the grouped config's selection (coralnet_all_plus_mermaid_coarse_grouped/holdout_groups.csv). Do not regenerate it.
+  holdout_groups_csv: holdout_groups.csv
+  # The CV runs use folds 0-4.
+  holdout_fold: test
+  holdout_max_per_class: 3000
+  # Source-grouped validation, disjoint from the holdout (select_val_groups.py).
+  val_groups_csv: val_groups.csv
+  # Larger than the holdout's 3000 because val drives epoch selection.
+  val_max_per_class: 5000
+  # The EfficientNet that produced this run's feature vectors.
+  feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
+  drop_growthforms: false
+  label_rollup_spec_csv: rollups.csv
+  included_labels_csv: included_labels.csv
+  # Val comes from val_groups.csv, so no ratio is carved from the reference split.
+  ref_val_ratios: [0.1, 0.0]
+  # Class-balanced subsampling. The per-class cap is total_annotations // K,
+  # where K counts the classes with rows after rollup. Run 4886658a had
+  # 22.2M // 111 = 200,000. Mapping its subsample/per_class_counts through
+  # this rollups.csv gives K = 94, so 200,000 x 94 holds that cap, and the
+  # most common classes get no more data than in 4886658a. Check after the
+  # run: the largest target_n in subsample/per_class_counts is 200,000.
+  subsample:
+    strategy: balanced
+    total_annotations: 18800000
+    min_per_class: 200
+    # Spreads each class's quota across sources. Seed salts the per-image hash.
+    within_class: source_spread
+    seed: 0
+    # Balanced cap 18.8M // 80 = 235,000: CCA x3 = 705,000, Turf x1.5 = 352,500.
+    # Turf x3 in run 7a46d513 over-predicted Turf at macroalgae's expense.
+    class_target_multipliers:
+      "20090bf4-868e-431b-974c-ab9be5bbdb5f::": 1.5  # Turf algae
+      "f4df7abd-3d51-42fb-8cab-5102b95fad8e::": 3.0  # Crustose coralline algae
+  weighting:
+    enabled: true
+    weight_ratio_cap: 5000.0
+
+training:
+  epochs: 40
+  early_stopping_patience: 3
+
+mlflow:
+  experiment_name: coralnet-all-mermaid-coarse-grouped-minsupport
+  model_name: coralnet-all-mermaid-coarse-minsupport-gval-cca3-turf15
+
+env:
+  # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
+  # do not override here.
+  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
+  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
+  # The measured upstream gap is ~7.3% of distinct CoralNet feature vectors
+  # (raw images absent upstream — unfixable). The threshold is measured on
+  # distinct feature vectors, so "5" would abort the run; "10" tolerates the
+  # gap and drops the unbacked annotations.
+  TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "10"
+  MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

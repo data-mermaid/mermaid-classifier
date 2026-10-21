@@ -27,6 +27,8 @@ class _Options:
     include_mermaid: bool = False
     mermaid_project_lookup_uri: str | None = None
     included_labels_csv: str | None = None
+    val_groups_csv: str | None = None
+    ref_val_ratios: tuple[float, float] = (0.1, 0.1)
 
 
 def _dataset():
@@ -91,12 +93,21 @@ class MainTest(unittest.TestCase):
         )
         dataset.cleanup.assert_called_once()
 
-    def test_dataset_is_built_with_holdout_tagging_disabled(self):
+    def test_dataset_is_built_with_holdout_and_val_tagging_disabled(self):
+        grouped_val = _Options(
+            holdout_groups_csv="old.csv",
+            holdout_fold=0,
+            val_groups_csv="val.csv",
+            ref_val_ratios=(0.2, 0.0),
+        )
         with tempfile.TemporaryDirectory() as td:
-            _, _, dataset_cls = self._run(td)
+            _, _, dataset_cls = self._run(td, options=grouped_val)
         (options,), _ = dataset_cls.filtered_annotations_only.call_args
         self.assertIsNone(options.holdout_groups_csv)
         self.assertEqual(options.holdout_fold, "test")
+        self.assertIsNone(options.val_groups_csv)
+        # Without val groups the val share must be positive; no split runs here.
+        self.assertEqual(options.ref_val_ratios, (0.2, 0.1))
 
     def test_mermaid_rows_without_a_project_lookup_stop_the_count(self):
         options = _Options(holdout_groups_csv=None, holdout_fold="test", include_mermaid=True)

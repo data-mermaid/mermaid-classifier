@@ -1,0 +1,45 @@
+# Launcher config for the all-sources + MERMAID coarse grouped-holdout training run
+# with the min-support label filter (94 -> 80 classes), the grouped validation
+# split, and Turf/CCA x3 sampling.
+#
+# The dataset/training/mlflow blocks live in
+# sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_turfcca/training_config.yaml
+# (mounted into the container as /opt/ml/input/data/config/training_config.yaml).
+# This file describes ONLY the launcher's job: block.
+#
+# The image is built from this branch with docker/jobs/training.Dockerfile and
+# tagged training-gval-turfcca-20261020 (a branch build, not training-latest).
+#
+# Grouped-val + Turf/CCA x3 run for draft PR #116 (stacked on #115), compared
+# against the min-support run 31c89e1bdc8b4c699161be40ba701632.
+#
+# Submit with:
+#   uv run python scripts/launch_training.py \
+#       --run-config sagemaker/runs/coralnet-all-mermaid-coarse-grouped-minsupport-gval-turfcca.yaml \
+#       --config-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_turfcca/ \
+#       --mlflow-tracking-uri <arn>
+#
+# Compute mirrors coralnet-top108-full.yaml: the balanced subsample caps the
+# training set at ~7.4M annotations, so size is comparable despite the larger
+# (all-sources + MERMAID) input. Turf/CCA x3 adds ~0.94M rows, so the 72 h
+# ceiling stays.
+#
+# max_runtime_hours is a ceiling, not a target: the job stops when training
+# finishes (early_stopping_patience=3), and you pay only for actual runtime.
+# Set to 72h (2x coralnet-top108-full's 36h) for headroom on the larger input.
+
+job:
+  name_prefix: mermaid-classifier-groupedval
+  image: mermaid-classifier-jobs:training-gval-turfcca-20261020
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.c5.9xlarge
+  volume_gb: 400
+  max_runtime_hours: 72
+  env:
+    FEATURE_CACHE_DIR: /tmp/feature_cache
+    SPACER_EXTRACTORS_CACHE_DIR: /tmp/spacer_extractors
+  tags:
+    pr: "116"
+    branch: feat/grouped-val-turfcca
+    config_commit: "234630b"
+    baseline_mlflow_run: "31c89e1bdc8b4c699161be40ba701632"

@@ -139,31 +139,52 @@ class ClusterCounts:
     gt: FloatArray  # (S, K) points whose ground truth is class k
     pred: FloatArray  # (S, K) predictions of class k
     n: FloatArray  # (S,) points
+    cluster_ids: list[str]  # (S,) the cluster of each row, sorted
 
 
 def cluster_counts(
-    gt: Sequence[str], pred: Sequence[str], clusters: Sequence[str]
+    gt: Sequence[str],
+    pred: Sequence[str],
+    clusters: Sequence[str],
+    *,
+    classes: Sequence[str] | None = None,
+    point_weights: Sequence[float] | None = None,
 ) -> ClusterCounts:
+    """
+    Per-cluster counts, each point adding its weight (1 by default).
+
+    `classes` fixes the column list, so counts for two runs line up; a label
+    outside it raises ValueError. By default it is the sorted union of labels.
+    """
     gt_arr = np.asarray(gt, dtype=str)
     pred_arr = np.asarray(pred, dtype=str)
     cluster_arr = np.asarray(clusters, dtype=str)
-    classes = sorted(set(gt_arr.tolist()) | set(pred_arr.tolist()))
+    if classes is None:
+        class_list = sorted(set(gt_arr.tolist()) | set(pred_arr.tolist()))
+    else:
+        class_list = list(classes)
+        unknown = sorted((set(gt_arr.tolist()) | set(pred_arr.tolist())) - set(class_list))
+        if unknown:
+            raise ValueError(f"Label(s) outside the given class list: {unknown}.")
+    weights = (
+        np.ones(len(gt_arr)) if point_weights is None else np.asarray(point_weights, dtype=float)
+    )
     cluster_ids = sorted(set(cluster_arr.tolist()))
-    cls_idx = {c: i for i, c in enumerate(classes)}
+    cls_idx = {c: i for i, c in enumerate(class_list)}
     cl_idx = {c: i for i, c in enumerate(cluster_ids)}
     s = np.array([cl_idx[c] for c in cluster_arr], dtype=int)
     g = np.array([cls_idx[c] for c in gt_arr], dtype=int)
     p = np.array([cls_idx[c] for c in pred_arr], dtype=int)
-    shape = (len(cluster_ids), len(classes))
+    shape = (len(cluster_ids), len(class_list))
     tp = np.zeros(shape)
     gt_counts = np.zeros(shape)
     pred_counts = np.zeros(shape)
     hit = p == g
-    np.add.at(tp, (s[hit], g[hit]), 1)
-    np.add.at(gt_counts, (s, g), 1)
-    np.add.at(pred_counts, (s, p), 1)
-    n = np.bincount(s, minlength=len(cluster_ids)).astype(float)
-    return ClusterCounts(classes, tp, gt_counts, pred_counts, n)
+    np.add.at(tp, (s[hit], g[hit]), weights[hit])
+    np.add.at(gt_counts, (s, g), weights)
+    np.add.at(pred_counts, (s, p), weights)
+    n = np.bincount(s, weights=weights, minlength=len(cluster_ids)).astype(float)
+    return ClusterCounts(class_list, tp, gt_counts, pred_counts, n, cluster_ids)
 
 
 def _metric_arrays(
@@ -203,14 +224,17 @@ def point_estimates(c: ClusterCounts) -> dict[str, FloatArray | float]:
     return out
 
 
+def bootstrap_weights(n_clusters: int, reps: int, seed: int) -> FloatArray:
+    """(R, S): how many times each of S clusters appears in each of R resamples."""
+    rng = np.random.default_rng(seed)
+    return rng.multinomial(n_clusters, np.full(n_clusters, 1 / n_clusters), size=reps).astype(float)
+
+
 def cluster_bootstrap_intervals(
     c: ClusterCounts, reps: int = DEFAULT_REPS, seed: int = 0
 ) -> tuple[dict[str, FloatArray | float], dict[str, FloatArray | float]]:
     """95% percentile (low, high) intervals from resampling whole clusters."""
-    n_clusters = len(c.n)
-    rng = np.random.default_rng(seed)
-    # (R, S): how many times each cluster appears in each resample.
-    w = rng.multinomial(n_clusters, np.full(n_clusters, 1 / n_clusters), size=reps).astype(float)
+    w = bootstrap_weights(len(c.n), reps, seed)
     m = _metric_arrays(w @ c.tp, w @ c.gt, w @ c.pred, w @ c.n)
     lo: dict[str, FloatArray | float] = {}
     hi: dict[str, FloatArray | float] = {}

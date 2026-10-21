@@ -16,6 +16,7 @@ import pandas as pd
 Group = tuple[str, str]
 
 TEST_FOLD = "test"
+VAL_FOLD = "val"
 # Rows whose MERMAID image has no project; they always train.
 UNKNOWN_GROUP = "unknown"
 CORALNET_SITE = "coralnet"
@@ -46,6 +47,8 @@ class HoldoutSelection:
     # Group -> "test" or "0".."K-1". 'unknown' groups are absent.
     assignments: dict[Group, str]
     warnings: list[str]
+    # Sites that reached fewer chosen groups than their target.
+    short_sites: list[str] = dataclasses.field(default_factory=list)
 
 
 def _tiebreak(seed: int, group: Group) -> float:
@@ -92,6 +95,7 @@ def select_holdout(
     }
 
     warnings: list[str] = []
+    short_sites: list[str] = []
     test_groups: set[Group] = set()
     # Per (site, class): CoralNet test points must not make MERMAID look covered.
     test_points: dict[tuple[str, str], int] = {}
@@ -133,6 +137,7 @@ def select_holdout(
                 if best is None or key < best:
                     best = key
             if best is None:
+                short_sites.append(site)
                 if chosen == 0 and cap_blocked and len(candidates) >= 2:
                     warnings.append(
                         f"site {site!r}: max_test_point_frac={params.max_test_point_frac} leaves"
@@ -156,7 +161,38 @@ def select_holdout(
     assignments: dict[Group, str] = dict.fromkeys(test_groups, TEST_FOLD)
     remaining = sorted(g for g in class_points if g[1] != UNKNOWN_GROUP and g not in test_groups)
     assignments.update(_assign_folds(class_points, remaining, params))
-    return HoldoutSelection(assignments=assignments, warnings=warnings)
+    return HoldoutSelection(assignments=assignments, warnings=warnings, short_sites=short_sites)
+
+
+def without_groups(counts: pd.DataFrame, groups: set[Group]) -> pd.DataFrame:
+    """`counts` minus the rows of `groups`, reindexed."""
+    keep = [
+        (str(s), str(p)) not in groups
+        for s, p in zip(counts["site"], counts["project_id"], strict=True)
+    ]
+    return pd.DataFrame(counts.loc[keep]).reset_index(drop=True)
+
+
+def select_val_groups(
+    counts: pd.DataFrame, test_groups: set[Group], params: SelectionParams
+) -> HoldoutSelection:
+    """
+    Choose early-stopping val groups from the groups outside `test_groups`.
+
+    Runs the test-group greedy on the non-test rows with one fold and no Beta
+    exclusion. `assignments` holds only the val groups, each mapped to
+    `VAL_FOLD`; every other group, 'unknown' included, is absent and trains.
+    """
+    counts_nt = without_groups(counts, test_groups)
+    picked = select_holdout(counts_nt, dataclasses.replace(params, folds=1), beta_sources=set())
+    val = dict.fromkeys(
+        (g for g, fold in picked.assignments.items() if fold == TEST_FOLD), VAL_FOLD
+    )
+    warnings = [
+        w.replace("test groups", "val groups").replace("max_test_point_frac", "max_val_point_frac")
+        for w in picked.warnings
+    ]
+    return HoldoutSelection(assignments=val, warnings=warnings, short_sites=picked.short_sites)
 
 
 def _assign_folds(

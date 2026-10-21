@@ -51,6 +51,36 @@ class OptionsValidationTest(unittest.TestCase):
             SubsampleOptions(strategy="balanced", total_annotations=100, seed=-1)
 
 
+class MultiplierValidationTest(unittest.TestCase):
+    def _make(self, multipliers):
+        return SubsampleOptions(
+            strategy="balanced",
+            total_annotations=1000,
+            class_target_multipliers=multipliers,
+        )
+
+    def test_key_without_separator_rejected(self):
+        with self.assertRaisesRegex(ValueError, "class_target_multipliers"):
+            self._make({"abc": 3.0})
+
+    def test_key_with_empty_benthic_attribute_rejected(self):
+        with self.assertRaisesRegex(ValueError, "class_target_multipliers"):
+            self._make({"::gf": 3.0})
+
+    def test_non_positive_value_rejected(self):
+        for bad in (0.0, -1.0):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "> 0"):
+                self._make({"a::": bad})
+
+    def test_non_finite_value_rejected(self):
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "finite"):
+                self._make({"a::": bad})
+
+    def test_empty_growth_form_key_accepted(self):
+        self.assertEqual(self._make({"a::": 3.0}).multipliers_by_class(), {("a", ""): 3.0})
+
+
 class LogDictTest(unittest.TestCase):
     """to_log_dict is what TrainingRunner hands mlflow.log_params, so these
     keys are the names a run is read back by."""
@@ -67,8 +97,30 @@ class LogDictTest(unittest.TestCase):
                 "subsample/min_per_class": 10,
                 "subsample/within_class": "ordered",
                 "subsample/seed": 0,
+                "subsample/class_target_multipliers": "",
             },
         )
+
+    def test_multipliers_are_logged_as_sorted_json(self):
+        options = SubsampleOptions(
+            strategy="balanced",
+            total_annotations=1000,
+            class_target_multipliers={"b::g": 2.0, "a::": 3.0},
+        )
+
+        self.assertEqual(
+            options.to_log_dict()["subsample/class_target_multipliers"],
+            '{"a::": 3.0, "b::g": 2.0}',
+        )
+
+    def test_keys_are_lower_cased_and_exposed_as_class_keys(self):
+        options = SubsampleOptions(
+            strategy="balanced",
+            total_annotations=1000,
+            class_target_multipliers={"ABC-1::GF": 3},
+        )
+
+        self.assertEqual(options.multipliers_by_class(), {("abc-1", "gf"): 3.0})
 
     def test_source_spread_and_seed_reach_the_logged_params(self):
         options = SubsampleOptions(

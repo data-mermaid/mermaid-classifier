@@ -5,6 +5,7 @@ CSV-defined label specifications for the training pipeline.
 - LabelRollupSpec: roll up fine-grained BA+GF combos to coarser categories.
 - ImageExclusionFilter: withhold specific images from training data.
 - HoldoutGroups: assign (site, project) groups to the test set or a CV fold.
+- ValGroups: name (site, project) groups whose rows form the val set.
 """
 
 import logging
@@ -25,6 +26,7 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
+from mermaid_classifier.training.holdout_selection import UNKNOWN_GROUP
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +306,39 @@ class ImageExclusionFilter(CsvSpec):
 
 HOLDOUT_TEST_FOLD = "test"
 
+# Columns the group specs add to the annotations table; never part of an artifact.
+TAG_COLUMNS = ("is_holdout", "is_excluded", "is_val")
+
+
+def tag_exclude_clause(duck_conn: duckdb.DuckDBPyConnection, duck_table_name: str) -> str:
+    """
+    An `EXCLUDE (...)` clause naming the TAG_COLUMNS the table has, or "" for none.
+    DuckDB's EXCLUDE fails on a missing column, so only present ones are named.
+    """
+    present = {row[0] for row in duck_conn.execute(f"DESCRIBE {duck_table_name}").fetchall()}
+    tags = [name for name in TAG_COLUMNS if name in present]
+    return f"EXCLUDE ({', '.join(tags)})" if tags else ""
+
+
+def _create_groups_table(
+    duck_conn: duckdb.DuckDBPyConnection,
+    groups_table_name: str,
+    columns: dict[str, list[str]],
+) -> None:
+    """
+    Create `groups_table_name` with one VARCHAR column per key of `columns`,
+    holding its values. The explicit schema keeps the columns VARCHAR when
+    there are no rows. Names are interpolated, so they must be code constants.
+    """
+    groups_df = pd.DataFrame(columns)  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning  # pyright: ignore[reportUnusedVariable]
+    column_sql = ", ".join(f"{name} VARCHAR" for name in columns)
+    duck_conn.execute(f"CREATE TABLE {groups_table_name} ({column_sql})")
+    duck_conn.execute(f"INSERT INTO {groups_table_name} SELECT * FROM groups_df")
+
+
+def _describe_groups(groups: list[tuple[str, str]]) -> str:
+    return ", ".join(f"({site}, {group_id})" for site, group_id in groups)
+
 
 class HoldoutGroups(CsvSpec):
     """
@@ -387,19 +422,17 @@ class HoldoutGroups(CsvSpec):
         self.validate_holdout_fold(holdout_fold)
 
         ordered_groups = sorted(self.group_folds.items())
-        groups_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL via Python-scope scanning  # pyright: ignore[reportUnusedVariable]
-            {
-                "site": [site for (site, _), _ in ordered_groups],
-                "group_id": [group_id for (_, group_id), _ in ordered_groups],
-                "fold": [fold for _, fold in ordered_groups],
-            }
-        )
 
         with duckdb_temp_table_name(duck_conn, base_name="holdout_groups") as groups_table_name:
-            duck_conn.execute(
-                f"CREATE TABLE {groups_table_name} (site VARCHAR, group_id VARCHAR, fold VARCHAR)"
+            _create_groups_table(
+                duck_conn,
+                groups_table_name,
+                {
+                    "site": [site for (site, _), _ in ordered_groups],
+                    "group_id": [group_id for (_, group_id), _ in ordered_groups],
+                    "fold": [fold for _, fold in ordered_groups],
+                },
             )
-            duck_conn.execute(f"INSERT INTO {groups_table_name} SELECT * FROM groups_df")
 
             # holdout_fold is validated above to be 'test' or a listed
             # integer string, so interpolating it is safe.
@@ -475,4 +508,138 @@ class HoldoutGroups(CsvSpec):
                 " exclusion or dedupe (site, group_id): fold: %s",
                 len(filtered_out),
                 describe(filtered_out),
+            )
+
+
+class ValGroups(CsvSpec):
+    """
+    A CSV-defined spec naming the groups whose rows form the val
+    (early-stopping) set. A group is a (site, project_id) pair, as in
+    `HoldoutGroups`.
+
+    Columns: site, group_id. Repeated rows are idempotent. The 'unknown'
+    group (MERMAID images with no project) is rejected: its rows always train.
+    """
+
+    column_specs = [
+        ColumnSpec(name="site", allow_blank=False),
+        ColumnSpec(name="group_id", allow_blank=False),
+    ]
+    # Numeric group ids must not read as blank.
+    read_dtype = str
+
+    def __init__(self, csv_file: typing.TextIO):
+        self.groups: set[tuple[str, str]] = set()
+
+        super().__init__(csv_file=csv_file)
+
+    def per_row_init_action(self, row: dict[str, str | None]) -> None:
+        site = str(row["site"])
+        group_id = str(row["group_id"])
+        if group_id == UNKNOWN_GROUP:
+            raise ValueError(
+                f"Val group ({site}, {group_id}) is the group of images with no project;"
+                f" those rows always train and cannot be val."
+            )
+        self.groups.add((site, group_id))
+
+    def is_empty(self) -> bool:
+        return len(self.groups) == 0
+
+    def check_disjoint(self, holdout: HoldoutGroups, holdout_fold: str) -> None:
+        """
+        Raise ValueError naming every val group in the holdout test fold, and,
+        when `holdout_fold` is a CV fold, every val group in that fold.
+        """
+        in_test = sorted(g for g in self.groups if holdout.group_folds.get(g) == HOLDOUT_TEST_FOLD)
+        in_fold = []
+        if holdout_fold != HOLDOUT_TEST_FOLD:
+            in_fold = sorted(g for g in self.groups if holdout.group_folds.get(g) == holdout_fold)
+        problems: list[str] = []
+        if in_test:
+            problems.append(
+                f"{len(in_test)} val group(s) are in the holdout test fold (site, group_id):"
+                f" {_describe_groups(in_test)}."
+            )
+        if in_fold:
+            problems.append(
+                f"{len(in_fold)} val group(s) are in holdout_fold {holdout_fold!r}"
+                f" (site, group_id): {_describe_groups(in_fold)}. CV with grouped val"
+                f" needs a val file per fold that lists none of that fold's groups."
+            )
+        if problems:
+            raise ValueError(" ".join(problems))
+
+    def tag_in_duckdb(
+        self,
+        duck_conn: duckdb.DuckDBPyConnection,
+        duck_table_name: str,
+        groups_read: set[tuple[str, str]] | None = None,
+    ) -> None:
+        """
+        Add a boolean is_val column to the given table: the row's
+        (site, project_id) is listed and the row is not is_holdout. The table
+        must already have is_holdout (see `HoldoutGroups.tag_in_duckdb`).
+        Every row is kept.
+
+        A listed group with no rows would leave the val set silently smaller.
+        `groups_read` is the (site, project_id) set before label filtering: a
+        group in it lost its rows to filtering, which is logged as a warning;
+        any other unmatched group raises ValueError.
+        """
+        ordered_groups = sorted(self.groups)
+
+        with duckdb_temp_table_name(duck_conn, base_name="val_groups") as groups_table_name:
+            _create_groups_table(
+                duck_conn,
+                groups_table_name,
+                {
+                    "site": [site for site, _ in ordered_groups],
+                    "group_id": [group_id for _, group_id in ordered_groups],
+                },
+            )
+
+            # Listed groups are unique, so the join cannot fan rows out.
+            duck_conn.execute(
+                f"CREATE OR REPLACE TABLE {duck_table_name} AS"
+                f" SELECT a.*, (g.site IS NOT NULL AND NOT a.is_holdout) AS is_val"
+                f" FROM {duck_table_name} a"
+                f"  LEFT JOIN {groups_table_name} g"
+                f"   ON a.site = g.site AND a.project_id = g.group_id"
+            )
+
+            matched_groups = {
+                (str(site), str(group_id))
+                for site, group_id in duck_conn.execute(
+                    f"SELECT DISTINCT g.site, g.group_id"
+                    f" FROM {duck_table_name} a"
+                    f"  JOIN {groups_table_name} g"
+                    f"   ON a.site = g.site AND a.project_id = g.group_id"
+                ).fetchall()
+            }
+
+        if self.is_empty():
+            return
+        logger.log(
+            logging.WARNING if not matched_groups else logging.INFO,
+            "Val groups matched %s of %s listed group(s) in this dataset.",
+            len(matched_groups),
+            len(self.groups),
+        )
+        unmatched = sorted(self.groups - matched_groups)
+        read = groups_read or set()
+        filtered_out = [g for g in unmatched if g in read]
+        absent = [g for g in unmatched if g not in read]
+        if absent:
+            raise ValueError(
+                f"{len(absent)} val group(s) match no rows even before label filtering"
+                f" (site, group_id): {_describe_groups(absent)}. Check the group ids, and"
+                f" that MERMAID groups have a mermaid_project_lookup_uri."
+            )
+        if filtered_out:
+            logger.warning(
+                "%d val group(s) lost every row to rollup, label filtering, image"
+                " exclusion or dedupe (site, group_id): %s",
+                len(filtered_out),
+                _describe_groups(filtered_out),
             )

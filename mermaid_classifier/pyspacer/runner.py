@@ -28,6 +28,7 @@ from mermaid_classifier.pyspacer.inference import (
     export_artifact,
     load_predictor,
 )
+from mermaid_classifier.pyspacer.label_specs import tag_exclude_clause
 from mermaid_classifier.pyspacer.metrics import (
     MetricsContext,
     MetricsCoordinator,
@@ -125,6 +126,7 @@ class TrainingRunner:
                 on_epoch_end=self._on_epoch_end,
                 class_weight=class_weight,
                 early_stopping_patience=(self.training_options.early_stopping_patience),
+                early_stopping_metric=self.training_options.early_stopping_metric,
             )
 
             # Train directly via the trainer — no pickle round-trip. pyspacer's
@@ -297,6 +299,7 @@ class MLflowTrainingRunner(TrainingRunner):
                     if self.training_options.early_stopping_patience is not None
                     else ""
                 ),
+                "early_stopping_metric": self.training_options.early_stopping_metric,
             }
 
             mlflow.log_params(training_options_to_log)
@@ -323,6 +326,8 @@ class MLflowTrainingRunner(TrainingRunner):
                 ),
                 "holdout_fold": self.dataset_options.holdout_fold,
                 "holdout_max_per_class": self.dataset_options.holdout_max_per_class or "",
+                "val_groups_csv": os.path.basename(self.dataset_options.val_groups_csv or ""),
+                "val_max_per_class": self.dataset_options.val_max_per_class or "",
                 "ref_val_ratios": str(self.dataset_options.ref_val_ratios),
                 "split_mode": self.dataset_options.split_mode,
             }
@@ -469,7 +474,7 @@ class MLflowTrainingRunner(TrainingRunner):
         On the final epoch (whether the run hit the epoch budget or
         triggered early stopping) the trainer adds summary fields
         (`final_epoch`, `early_stopped`, `best_val_epoch`,
-        `best_val_loss`); we log them as flat scalar metrics so they're
+        `best_val_loss`, `best_val_accuracy`); we log them as flat scalar metrics so they're
         easy to query post-hoc.
         """
         step = int(metrics["epoch"])  # type: ignore[arg-type]
@@ -502,6 +507,12 @@ class MLflowTrainingRunner(TrainingRunner):
                 mlflow.log_metric(
                     "early_stop/best_val_loss",
                     float(metrics["best_val_loss"]),
+                    step=0,  # type: ignore[arg-type]
+                )
+            if metrics.get("best_val_accuracy") is not None:
+                mlflow.log_metric(
+                    "early_stop/best_val_accuracy",
+                    float(metrics["best_val_accuracy"]),
                     step=0,  # type: ignore[arg-type]
                 )
 
@@ -653,6 +664,13 @@ class MLflowTrainingRunner(TrainingRunner):
             return
         self.log_dataframe(self._with_class_names(df), "holdout/per_class_counts")
 
+    def _log_val_audit(self) -> None:
+        """Log the per-class val cap audit; nothing if no cap applied."""
+        df = getattr(self.dataset, "_val_audit_df", None)
+        if df is None or df.empty:
+            return
+        self.log_dataframe(self._with_class_names(df), "val/per_class_counts")
+
     @staticmethod
     def _with_class_names(df: pd.DataFrame) -> pd.DataFrame:
         """Append ba_name / gf_name columns to a table keyed by BA and GF ids,
@@ -721,6 +739,11 @@ class MLflowTrainingRunner(TrainingRunner):
             mlflow.log_text(self.dataset.holdout_groups.csv_text, "holdout_groups.csv")
             mlflow.log_param("holdout_groups_count", len(self.dataset.holdout_groups.group_folds))
 
+        if not self.dataset.val_groups.is_empty():
+            mlflow.log_text(self.dataset.val_groups.csv_text, "val_groups.csv")
+            mlflow.log_param("val_groups_count", len(self.dataset.val_groups.groups))
+        self._log_val_audit()
+
         # Number of images and annotations from each CN source and from
         # MERMAID.
         # First, before filtering (this is what's present in S3).
@@ -758,8 +781,9 @@ class MLflowTrainingRunner(TrainingRunner):
 
         # Always log the validation split annotations so others can
         # independently re-evaluate the model.
+        exclude = tag_exclude_clause(self.dataset.duck_conn, "annotations")
         val_annotations_df = self.dataset.duck_conn.execute(
-            "SELECT * EXCLUDE (is_holdout, is_excluded) FROM annotations WHERE training_set = 'val'"
+            f"SELECT * {exclude} FROM annotations WHERE training_set = 'val'"
         ).fetch_df()
         self.log_dataframe(val_annotations_df, "annotations_val")
 

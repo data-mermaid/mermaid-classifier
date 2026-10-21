@@ -1,0 +1,46 @@
+# Launcher config for the all-sources + MERMAID coarse grouped-holdout training run
+# with the min-support label filter (94 -> 80 classes), the grouped validation
+# split, CCA x3 and Turf x1.5 sampling, and early stopping on validation
+# accuracy with patience 8.
+#
+# The dataset/training/mlflow blocks live in
+# sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5_accstop/training_config.yaml
+# (mounted into the container as /opt/ml/input/data/config/training_config.yaml).
+# This file describes ONLY the launcher's job: block.
+#
+# The image is training-gval-accstop-20261021, built from this branch at
+# 4aa4104, which adds training.early_stopping_metric.
+#
+# Accuracy-stopping rerun for draft PR #116, compared against the CCA x3 +
+# Turf x1.5 run fa4b78434b554a989de77999d01598eb (only early stopping differs).
+#
+# Submit with:
+#   uv run python scripts/launch_training.py \
+#       --run-config sagemaker/runs/coralnet-all-mermaid-coarse-grouped-minsupport-gval-cca3-turf1p5-accstop.yaml \
+#       --config-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5_accstop/ \
+#       --mlflow-tracking-uri <arn>
+#
+# Compute mirrors coralnet-top108-full.yaml: the balanced subsample caps the
+# training set at ~7.4M annotations, so size is comparable despite the larger
+# (all-sources + MERMAID) input. CCA x3 + Turf x1.5 adds ~0.59M rows, so the
+# 72 h ceiling stays.
+#
+# max_runtime_hours is a ceiling, not a target: the job stops when training
+# finishes (early_stopping_patience=8 on val_accuracy), and you pay only for actual runtime.
+# Set to 72h (2x coralnet-top108-full's 36h) for headroom on the larger input.
+
+job:
+  name_prefix: mermaid-classifier-gval-accstop
+  image: mermaid-classifier-jobs:training-gval-accstop-20261021
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.c5.9xlarge
+  volume_gb: 400
+  max_runtime_hours: 72
+  env:
+    FEATURE_CACHE_DIR: /tmp/feature_cache
+    SPACER_EXTRACTORS_CACHE_DIR: /tmp/spacer_extractors
+  tags:
+    pr: "116"
+    branch: feat/grouped-val-turfcca
+    config_commit: "622a760"
+    baseline_mlflow_run: "fa4b78434b554a989de77999d01598eb"

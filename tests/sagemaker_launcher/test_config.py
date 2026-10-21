@@ -9,6 +9,7 @@ where build_options constructs the option dataclasses.
 
 from __future__ import annotations
 
+import filecmp
 import textwrap
 import unittest
 from pathlib import Path
@@ -82,6 +83,34 @@ class SubsampleStrategiesTest(unittest.TestCase):
             """)
             )
 
+    def test_class_target_multipliers_round_trip_to_options(self):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"]["subsample"] = {
+            "strategy": "balanced",
+            "total_annotations": 1000,
+            "class_target_multipliers": {"20090BF4-868E::": 3.0},
+        }
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            config = TrainingRunConfig.from_yaml_path(_write(tmp, _yaml.dump(base)))
+            dataset = config.build_options(config_dir=tmp)[0]
+        assert dataset.subsample is not None
+        self.assertEqual(dataset.subsample.multipliers_by_class(), {("20090bf4-868e", ""): 3.0})
+
+    def test_bad_multiplier_key_rejected_at_config_load(self):
+        with self.assertRaises(ValidationError):
+            self._load(
+                textwrap.dedent("""\
+                  subsample:
+                    strategy: balanced
+                    total_annotations: 1000
+                    class_target_multipliers:
+                      not-a-key: 3.0
+            """)
+            )
+
 
 class WeightingTest(unittest.TestCase):
     def test_invalid_weight_ratio_cap_rejected(self):
@@ -137,6 +166,30 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertEqual(dataset.included_labels_csv, str(tmp / "included_labels.csv"))
         self.assertEqual(training.epochs, 5)
         self.assertEqual(training.early_stopping_patience, 3)
+        self.assertEqual(training.early_stopping_metric, "val_loss")
+
+
+class EarlyStoppingMetricTest(unittest.TestCase):
+    def _load(self, metric: str) -> TrainingRunConfig:
+        yaml_text = MINIMAL_YAML.replace(
+            "early_stopping_patience: 3",
+            f"early_stopping_patience: 3\n  early_stopping_metric: {metric}",
+        )
+        with TemporaryDirectory() as td:
+            return TrainingRunConfig.from_yaml_path(_write(Path(td), yaml_text))
+
+    def test_val_accuracy_round_trips_to_training_options(self):
+        config = self._load("val_accuracy")
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "rollups.csv").write_text("from_ba_id,from_gf_id,to_ba_id,to_gf_id\n")
+            (tmp / "included_labels.csv").write_text("ba_id,gf_id\n")
+            _, training, _ = config.build_options(config_dir=tmp)
+        self.assertEqual(training.early_stopping_metric, "val_accuracy")
+
+    def test_invalid_metric_rejected_at_load(self):
+        with self.assertRaises(ValidationError):
+            self._load("val_f1")
 
 
 class MLflowModelNameTest(unittest.TestCase):
@@ -319,6 +372,52 @@ class SourceSpreadOptionsTest(unittest.TestCase):
             self._build({"holdout_max_per_class": 0})
 
 
+class ValGroupsOptionsTest(unittest.TestCase):
+    """val_groups_csv and val_max_per_class parse, resolve, and pass their cross-field rules."""
+
+    GROUPED_VAL = {
+        "val_groups_csv": "val_groups.csv",
+        "split_mode": "images",
+        "ref_val_ratios": [0.1, 0.0],
+    }
+
+    def _build(self, dataset_patch: dict):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"].update(dataset_patch)
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            path = _write(tmp, _yaml.dump(base))
+            config = TrainingRunConfig.from_yaml_path(path)
+            return config.build_options(config_dir=tmp)[0], tmp
+
+    def test_fields_reach_dataset_options(self):
+        dataset, tmp = self._build({**self.GROUPED_VAL, "val_max_per_class": 250})
+        self.assertEqual(dataset.val_groups_csv, str(tmp / "val_groups.csv"))
+        self.assertEqual(dataset.val_max_per_class, 250)
+        self.assertEqual(dataset.ref_val_ratios, (0.1, 0.0))
+
+    def test_defaults_leave_val_to_the_split(self):
+        dataset, _ = self._build({})
+        self.assertIsNone(dataset.val_groups_csv)
+        self.assertEqual(dataset.val_max_per_class, 3000)
+
+    def test_inconsistent_val_settings_are_rejected(self):
+        cases = {
+            "points split with val groups": {**self.GROUPED_VAL, "split_mode": "points"},
+            "val share with val groups": {**self.GROUPED_VAL, "ref_val_ratios": [0.1, 0.1]},
+            "no val share without val groups": {
+                "split_mode": "images",
+                "ref_val_ratios": [0.1, 0.0],
+            },
+            "zero val cap": {**self.GROUPED_VAL, "val_max_per_class": 0},
+        }
+        for name, patch in cases.items():
+            with self.subTest(name), self.assertRaises(ValidationError):
+                self._build(patch)
+
+
 class ExampleYamlTest(unittest.TestCase):
     def test_committed_example_loads(self):
         # Resolve relative to the repo root (the tests/ dir is one
@@ -333,5 +432,100 @@ class ExampleYamlTest(unittest.TestCase):
         self.assertIsNotNone(config.dataset.subsample)
 
 
+class GvalTurfCcaConfigTest(unittest.TestCase):
+    """The committed gval_turfcca config stays paired with the min-support holdout."""
+
+    REPO = Path(__file__).resolve().parent.parent.parent
+    CONFIGS = REPO / "sagemaker" / "configs"
+    NEW = CONFIGS / "coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_turfcca"
+    BASE = CONFIGS / "coralnet_all_plus_mermaid_coarse_grouped_minsupport"
+    MULTIPLIER_KEYS = (
+        "20090bf4-868e-431b-974c-ab9be5bbdb5f",
+        "f4df7abd-3d51-42fb-8cab-5102b95fad8e",
+    )
+
+    def test_config_loads_and_builds_options(self):
+        config = TrainingRunConfig.from_yaml_path(self.NEW / "training_config.yaml")
+        config.build_options(config_dir=self.NEW)
+
+    def test_holdout_groups_identical_to_min_support(self):
+        self.assertTrue(
+            filecmp.cmp(
+                self.NEW / "holdout_groups.csv",
+                self.BASE / "holdout_groups.csv",
+                shallow=False,
+            )
+        )
+
+    def test_val_groups_disjoint_from_holdout(self):
+        from mermaid_classifier.pyspacer.label_specs import HoldoutGroups, ValGroups
+
+        with (
+            open(self.NEW / "val_groups.csv") as val_file,
+            open(self.NEW / "holdout_groups.csv") as holdout_file,
+        ):
+            val = ValGroups(val_file)
+            holdout = HoldoutGroups(holdout_file)
+        val.check_disjoint(holdout, "test")
+
+    def test_multiplier_keys_in_included_labels(self):
+        included = (self.NEW / "included_labels.csv").read_text().lower()
+        for key in self.MULTIPLIER_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(key, included)
+
+
+class GvalCca3Turf1p5ConfigTest(GvalTurfCcaConfigTest):
+    """The CCA x3 / Turf x1.5 follow-up shares the gval_turfcca val groups and holdout."""
+
+    NEW = (
+        GvalTurfCcaConfigTest.CONFIGS
+        / "coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5"
+    )
+    PREVIOUS = GvalTurfCcaConfigTest.NEW
+
+    def test_val_groups_identical_to_gval_turfcca(self):
+        self.assertTrue(
+            filecmp.cmp(
+                self.NEW / "val_groups.csv", self.PREVIOUS / "val_groups.csv", shallow=False
+            )
+        )
+
+    def test_multipliers_are_cca_3_and_turf_1_5(self):
+        config = TrainingRunConfig.from_yaml_path(self.NEW / "training_config.yaml")
+        assert config.dataset.subsample is not None
+        self.assertEqual(
+            config.dataset.subsample.class_target_multipliers,
+            {
+                "20090bf4-868e-431b-974c-ab9be5bbdb5f::": 1.5,
+                "f4df7abd-3d51-42fb-8cab-5102b95fad8e::": 3.0,
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class GvalCca3Turf1p5AccStopConfigTest(GvalTurfCcaConfigTest):
+    """The accuracy-stopping rerun keeps the Turf x1.5 data and changes only early stopping."""
+
+    NEW = (
+        GvalTurfCcaConfigTest.CONFIGS
+        / "coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5_accstop"
+    )
+    PREVIOUS = (
+        GvalTurfCcaConfigTest.CONFIGS
+        / "coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5"
+    )
+
+    def test_data_files_identical_to_turf1p5(self):
+        for name in ("val_groups.csv", "excluded_images.csv", "rollups.csv", "included_labels.csv"):
+            with self.subTest(name=name):
+                self.assertTrue(filecmp.cmp(self.NEW / name, self.PREVIOUS / name, shallow=False))
+
+    def test_early_stopping_is_val_accuracy_with_patience_8(self):
+        config = TrainingRunConfig.from_yaml_path(self.NEW / "training_config.yaml")
+        _, training_options, _ = config.build_options(config_dir=self.NEW)
+        self.assertEqual(training_options.early_stopping_metric, "val_accuracy")
+        self.assertEqual(training_options.early_stopping_patience, 8)

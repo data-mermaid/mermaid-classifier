@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from mermaid_classifier.training.cv_aggregate import (
+    bootstrap_weights,
     cluster_bootstrap_intervals,
     cluster_counts,
     combine_cv_runs,
@@ -196,6 +197,49 @@ class BootstrapTest(unittest.TestCase):
         counts = cluster_counts(df["gt_bagf"], df["pred_bagf"], df["project_id"])
         lo, hi = cluster_bootstrap_intervals(counts, reps=400, seed=0)
         self.assertEqual((lo["accuracy"], hi["accuracy"]), (0.0, 1.0))
+
+
+class ClusterCountsOptionsTest(unittest.TestCase):
+    def test_point_weights_scale_counts(self):
+        counts = cluster_counts(
+            ["a", "a", "b"], ["a", "b", "b"], ["s1", "s1", "s2"], point_weights=[2.0, 3.0, 0.5]
+        )
+        np.testing.assert_allclose(counts.tp, [[2.0, 0.0], [0.0, 0.5]])
+        np.testing.assert_allclose(counts.gt, [[5.0, 0.0], [0.0, 0.5]])
+        np.testing.assert_allclose(counts.pred, [[2.0, 3.0], [0.0, 0.5]])
+        np.testing.assert_allclose(counts.n, [5.0, 0.5])
+
+    def test_fixed_class_list_keeps_absent_classes_and_records_cluster_ids(self):
+        counts = cluster_counts(["b"], ["b"], ["s1"], classes=["a", "b", "c"])
+        self.assertEqual(counts.classes, ["a", "b", "c"])
+        self.assertEqual(counts.cluster_ids, ["s1"])
+        np.testing.assert_allclose(counts.gt, [[0.0, 1.0, 0.0]])
+
+    def test_label_outside_the_fixed_class_list_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "zzz"):
+            cluster_counts(["a"], ["zzz"], ["s1"], classes=["a"])
+
+
+class BootstrapRegressionTest(unittest.TestCase):
+    def test_intervals_are_unchanged_at_a_fixed_seed(self):
+        # Values recorded from the implementation before bootstrap_weights existed.
+        df = _synthetic_df()
+        counts = cluster_counts(df["gt_bagf"], df["pred_bagf"], df["site"] + ":" + df["project_id"])
+        lo, hi = cluster_bootstrap_intervals(counts, reps=300, seed=3)
+        np.testing.assert_allclose(
+            lo["recall"], [0.7323191575387782, 0.707226624827146, 0.7014518462986854]
+        )
+        np.testing.assert_allclose(
+            hi["precision"], [0.8673117897727273, 0.8186694627739043, 0.8586902769324407]
+        )
+        self.assertAlmostEqual(lo["accuracy"], 0.7242708333333333)
+        self.assertAlmostEqual(hi["accuracy"], 0.8305555555555556)
+        self.assertAlmostEqual(hi["macro_f1"], 0.8296500347018153)
+
+    def test_bootstrap_weights_resample_every_cluster_count(self):
+        w = bootstrap_weights(5, 40, 0)
+        self.assertEqual(w.shape, (40, 5))
+        np.testing.assert_array_equal(w.sum(axis=1), np.full(40, 5.0))
 
 
 class SummaryTest(unittest.TestCase):

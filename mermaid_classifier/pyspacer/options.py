@@ -145,12 +145,34 @@ class DatasetOptions:
     md5 order) to bound the feature downloads for evaluation. None keeps
     every holdout row. Has no effect when nothing is held out.
 
+    val_groups_csv
+    val_max_per_class
+
+    Local filepath of a CSV naming the groups whose rows form the val
+    (early-stopping) set, so model selection scores sources the model
+    never trains on. A group is a (site, project_id) pair.
+    - If this file isn't specified, val comes from the train/ref/val split.
+    - Recognized columns:
+      site -- 'coralnet' or 'mermaid'.
+      group_id -- The CoralNet source ID, or the MERMAID project ID; never
+        'unknown'.
+    - Requires split_mode 'images' and ref_val_ratios[1] == 0: train and
+      ref still come from the image split of the remaining rows, which has
+      no val share.
+    - No val group may be in the holdout test fold, nor in holdout_fold.
+    - Every class with val rows needs training rows too.
+    val_max_per_class caps each class's val rows the way
+    holdout_max_per_class caps holdout rows. None keeps every val row. Has
+    no effect unless val_groups_csv is set.
+
     ref_val_ratios
 
     Determines the ratios of training annotations that will go into
     the train, ref (reference), and val (validation) sets.
     This is a tuple of two floats. For example, specifying (0.05, 0.1)
     means 5% into ref, 10% into val, and the rest (85%) into train.
+    The val share must be positive, unless val_groups_csv is set, in which
+    case it must be 0.
     PySpacer has an explanation of the three sets here:
     https://github.com/coralnet/pyspacer?tab=readme-ov-file#train_classifier
 
@@ -165,7 +187,8 @@ class DatasetOptions:
       (see mermaid_classifier.pyspacer.splitting). Classes in fewer than
       3 images are dropped first. ref_val_ratios apply with no ref cap.
       Seeded by subsample.seed, or 0 without a subsample.
-    Holdout rows never enter train/ref/val in either mode.
+    Holdout rows never enter train/ref/val in either mode, nor do val-group
+    rows.
 
     subsample
 
@@ -211,6 +234,8 @@ class DatasetOptions:
     holdout_groups_csv: str | None = None
     holdout_fold: str = "test"
     holdout_max_per_class: int | None = 3000
+    val_groups_csv: str | None = None
+    val_max_per_class: int | None = 3000
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     split_mode: Literal["points", "images"] = "points"
     # Optional per-class subsampling. None means use all annotations.
@@ -223,6 +248,26 @@ class DatasetOptions:
     # strategies.
     weighting: SampleWeightingOptions | None = None
 
+    def __post_init__(self) -> None:
+        val_ratio = self.ref_val_ratios[1]
+        if self.val_groups_csv:
+            if self.split_mode != "images":
+                raise ValueError(
+                    f"val_groups_csv needs split_mode 'images', got {self.split_mode!r}."
+                )
+            # An explicit 0 keeps a configured val share from silently
+            # adding a second, image-split val set.
+            if val_ratio != 0:
+                raise ValueError(
+                    f"val_groups_csv supplies the val set, so ref_val_ratios[1] must be 0,"
+                    f" got {val_ratio}."
+                )
+        elif val_ratio <= 0:
+            raise ValueError(
+                f"ref_val_ratios[1] must be positive unless val_groups_csv supplies the"
+                f" val set, got {val_ratio}."
+            )
+
 
 @dataclasses.dataclass
 class TrainingOptions:
@@ -231,7 +276,8 @@ class TrainingOptions:
 
     Number of pyspacer training epochs to run. Acts as the upper bound:
     if ``early_stopping_patience`` is set and triggered, training stops
-    earlier and the best-val_loss classifier is restored.
+    earlier and the best classifier (by ``early_stopping_metric``) is
+    restored.
 
     The MLP architecture and learning rate are fixed at the production
     values baked into ``MermaidTrainer`` (``hidden_layer_sizes=(500,
@@ -240,19 +286,31 @@ class TrainingOptions:
 
     early_stopping_patience
 
-    If set to a positive int, training stops once ``epoch/val_loss`` has
-    not improved for this many consecutive epochs, AND the classifier
-    is restored to its state at the epoch with the lowest val_loss
-    (rather than the latest epoch's state). None disables early
-    stopping; the loop runs for the full ``epochs`` budget.
+    If set to a positive int, training stops once the
+    ``early_stopping_metric`` (val_loss or val_accuracy) has not improved
+    for this many consecutive epochs, AND the classifier
+    is restored to its state at the best epoch by
+    ``early_stopping_metric`` (rather than the latest epoch's state).
+    None disables early stopping; the loop runs for the full ``epochs``
+    budget.
 
     Recommended starting value: 3. Lower (1-2) is too jumpy given the
     natural epoch-to-epoch noise in val_loss; higher (>5) wastes wall
     time on epochs that are unlikely to recover.
+
+    early_stopping_metric
+
+    The validation metric that drives early stopping and best-classifier
+    selection. ``"val_loss"`` (default): lower is better. ``"val_accuracy"``:
+    higher is better. With a val set drawn from unseen sources, val_loss can
+    bottom early and then rise from over-confident wrong predictions while
+    val_accuracy keeps improving; ``"val_accuracy"`` then selects a later
+    epoch.
     """
 
     epochs: int = 10
     early_stopping_patience: int | None = None
+    early_stopping_metric: Literal["val_loss", "val_accuracy"] = "val_loss"
 
 
 @dataclasses.dataclass

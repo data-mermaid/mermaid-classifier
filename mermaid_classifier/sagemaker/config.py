@@ -42,6 +42,7 @@ class SubsampleConfig(BaseModel):
     min_per_class: int = 0
     within_class: Literal["ordered", "source_spread"] = "ordered"
     seed: int = 0
+    class_target_multipliers: dict[str, float] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_via_options(self) -> SubsampleConfig:
@@ -55,6 +56,7 @@ class SubsampleConfig(BaseModel):
             min_per_class=self.min_per_class,
             within_class=self.within_class,
             seed=self.seed,
+            class_target_multipliers=self.class_target_multipliers,
         )
         return self
 
@@ -95,6 +97,8 @@ class DatasetConfig(BaseModel):
     # 'test' or a CV fold number; YAML's bare `holdout_fold: 2` is coerced.
     holdout_fold: str = "test"
     holdout_max_per_class: int | None = Field(default=3000, gt=0)
+    val_groups_csv: str | None = None
+    val_max_per_class: int | None = Field(default=3000, gt=0)
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     split_mode: Literal["points", "images"] = "points"
     subsample: SubsampleConfig | None = None
@@ -108,6 +112,28 @@ class DatasetConfig(BaseModel):
         if not isinstance(v, str) or not (v == "test" or (v.isascii() and v.isdigit())):
             raise ValueError(f"holdout_fold must be 'test' or a non-negative integer, got {v!r}")
         return v
+
+    @model_validator(mode="after")
+    def _val_groups_fit_the_split(self) -> DatasetConfig:
+        # Repeats DatasetOptions.__post_init__'s rules, which cannot run at
+        # load: importing pyspacer here would read Settings() too early.
+        val_ratio = self.ref_val_ratios[1]
+        if self.val_groups_csv:
+            if self.split_mode != "images":
+                raise ValueError(
+                    f"val_groups_csv needs split_mode 'images', got {self.split_mode!r}."
+                )
+            if val_ratio != 0:
+                raise ValueError(
+                    f"val_groups_csv supplies the val set, so ref_val_ratios[1] must be 0,"
+                    f" got {val_ratio}."
+                )
+        elif val_ratio <= 0:
+            raise ValueError(
+                f"ref_val_ratios[1] must be positive unless val_groups_csv supplies the"
+                f" val set, got {val_ratio}."
+            )
+        return self
 
     def label_rollup_spec_csv_path(self, base: Path) -> Path | None:
         return None if self.label_rollup_spec_csv is None else base / self.label_rollup_spec_csv
@@ -124,6 +150,9 @@ class DatasetConfig(BaseModel):
     def holdout_groups_csv_path(self, base: Path) -> Path | None:
         return None if self.holdout_groups_csv is None else base / self.holdout_groups_csv
 
+    def val_groups_csv_path(self, base: Path) -> Path | None:
+        return None if self.val_groups_csv is None else base / self.val_groups_csv
+
 
 class TrainingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -134,6 +163,7 @@ class TrainingConfig(BaseModel):
     # so they are intentionally not exposed here.
     epochs: int = 10
     early_stopping_patience: int | None = None
+    early_stopping_metric: Literal["val_loss", "val_accuracy"] = "val_loss"
 
 
 class MLflowConfig(BaseModel):
@@ -221,6 +251,7 @@ class TrainingRunConfig(BaseModel):
                 min_per_class=d.subsample.min_per_class,
                 within_class=d.subsample.within_class,
                 seed=d.subsample.seed,
+                class_target_multipliers=d.subsample.class_target_multipliers,
             )
 
         weighting = None
@@ -246,6 +277,8 @@ class TrainingRunConfig(BaseModel):
             holdout_groups_csv=_resolve(d.holdout_groups_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             holdout_fold=d.holdout_fold,
             holdout_max_per_class=d.holdout_max_per_class,
+            val_groups_csv=_resolve(d.val_groups_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            val_max_per_class=d.val_max_per_class,
             ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions
             split_mode=d.split_mode,
             subsample=subsample,
@@ -256,6 +289,7 @@ class TrainingRunConfig(BaseModel):
         training_options = TrainingOptions(
             epochs=t.epochs,
             early_stopping_patience=t.early_stopping_patience,
+            early_stopping_metric=t.early_stopping_metric,
         )
 
         m = self.mlflow

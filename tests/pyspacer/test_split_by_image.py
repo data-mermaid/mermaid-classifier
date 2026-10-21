@@ -9,7 +9,7 @@ from spacer.data_classes import DataLocation, ImageLabels
 from spacer.messages import TrainingTaskLabels
 from spacer.task_utils import preprocess_labels
 
-from mermaid_classifier.pyspacer.splitting import split_by_image
+from mermaid_classifier.pyspacer.splitting import required_images, split_by_image
 
 
 def _labels(images: dict[str, list[str]]) -> ImageLabels:
@@ -183,6 +183,74 @@ class InvalidRatiosTest(unittest.TestCase):
     def test_ratios_leaving_no_train_set_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "ratios"):
             split_by_image(_labels(_background_dataset({"a": 5})), (0.5, 0.5), seed=0)
+
+    def test_zero_val_ratio_is_accepted(self):
+        split_by_image(_labels(_background_dataset({"a": 5})), (0.1, 0.0), seed=0)
+
+    def test_zero_ref_ratio_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "ratios"):
+            split_by_image(_labels(_background_dataset({"a": 5})), (0.0, 0.1), seed=0)
+
+    def test_negative_val_ratio_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "ratios"):
+            split_by_image(_labels(_background_dataset({"a": 5})), (0.1, -0.1), seed=0)
+
+
+class NoValShareTest(unittest.TestCase):
+    IMAGES_PER_CLASS = {"c2": 2, "c3": 3, "c10": 10, "c40": 40}
+
+    def setUp(self):
+        self.images = _background_dataset(self.IMAGES_PER_CLASS)
+        self.labels = _labels(self.images)
+        self.split = split_by_image(self.labels, (0.2, 0.0), seed=0)
+
+    def test_val_is_empty(self):
+        self.assertEqual(len(self.split.val.keys()), 0)
+
+    def test_train_and_ref_partition_every_image(self):
+        keys = _set_keys(self.split)
+        self.assertFalse(keys["train"] & keys["ref"])
+        self.assertEqual(
+            keys["train"] | keys["ref"], {DataLocation("filesystem", k) for k in self.images}
+        )
+
+    def test_every_class_is_in_train_and_ref(self):
+        expected = {*self.IMAGES_PER_CLASS, "bg"}
+        for name in ("train", "ref"):
+            with self.subTest(set=name):
+                self.assertEqual(self.split[name].classes_set, expected)
+
+    def test_class_in_exactly_two_images_is_kept(self):
+        self.assertIn("c2", self.split.train.classes_set)
+        self.assertIn("c2", self.split.ref.classes_set)
+
+    def test_same_seed_gives_the_same_split(self):
+        again = split_by_image(self.labels, (0.2, 0.0), seed=0)
+        self.assertEqual(_set_keys(self.split), _set_keys(again))
+
+
+class RequiredImagesTest(unittest.TestCase):
+    def test_counts_the_sets_with_a_share(self):
+        self.assertEqual(required_images((0.1, 0.1)), 3)
+        self.assertEqual(required_images((0.1, 0.0)), 2)
+
+
+class GoldenSplitTest(unittest.TestCase):
+    """The (ref, val) split of a fixed fixture, frozen literally."""
+
+    def test_split_membership_is_unchanged(self):
+        images = _background_dataset({"c3": 3, "c4": 4, "c10": 10, "c20": 20})
+        keys = _set_keys(split_by_image(_labels(images), (0.1, 0.1), seed=0))
+        names = {name: {k.key for k in members} for name, members in keys.items()}
+        self.assertEqual(
+            names["val"],
+            {"img/c10/1", "img/c20/14", "img/c20/7", "img/c3/0", "img/c4/1"},
+        )
+        self.assertEqual(
+            names["ref"],
+            {"img/c10/5", "img/c20/10", "img/c20/2", "img/c3/2", "img/c4/0"},
+        )
+        self.assertEqual(len(names["train"]), 27)
 
 
 if __name__ == "__main__":

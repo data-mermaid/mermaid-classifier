@@ -18,6 +18,7 @@ from sklearn.metrics import accuracy_score, recall_score
 from spacer.data_classes import ImageLabels, ValResults
 from spacer.train_utils import evaluate_classifier
 
+from mermaid_classifier.pyspacer.label_specs import tag_exclude_clause
 from mermaid_classifier.pyspacer.metrics import MetricsContext, MetricsCoordinator
 from mermaid_classifier.pyspacer.metrics._logging import log_dataframe
 from mermaid_classifier.pyspacer.options import Sites
@@ -111,9 +112,10 @@ def holdout_annotations_df(
         "preds", points[[*_POINT_KEY, "pred_bagf", "pred_score", "in_model_classes"]]
     )
     join_on = " AND ".join(f"a.{c} = p.{c}" for c in _POINT_KEY)
+    exclude = tag_exclude_clause(duck_conn, "annotations")
     try:
         return duck_conn.execute(
-            "SELECT a.* EXCLUDE (is_holdout, is_excluded),"
+            f"SELECT a.* {exclude},"
             " p.pred_bagf, p.pred_score, p.in_model_classes"
             " FROM (SELECT * FROM annotations WHERE training_set = 'holdout') a"
             f" LEFT JOIN preds p ON {join_on}"

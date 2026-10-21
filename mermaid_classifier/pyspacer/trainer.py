@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from logging import getLogger
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from sklearn.calibration import (
@@ -58,10 +58,16 @@ class MermaidTrainer(ClassifierTrainer):
         on_epoch_end: Callable[[dict[str, Any]], None] | None = None,
         class_weight: dict[str, float] | None = None,
         early_stopping_patience: int | None = None,
+        early_stopping_metric: Literal["val_loss", "val_accuracy"] = "val_loss",
     ):
         if early_stopping_patience is not None and early_stopping_patience < 1:
             raise ValueError(
                 f"early_stopping_patience must be >= 1 or None, got {early_stopping_patience!r}"
+            )
+        if early_stopping_metric not in ("val_loss", "val_accuracy"):
+            raise ValueError(
+                f"early_stopping_metric must be 'val_loss' or 'val_accuracy',"
+                f" got {early_stopping_metric!r}"
             )
         self.batch_size = batch_size
         self.on_epoch_end = on_epoch_end
@@ -69,12 +75,14 @@ class MermaidTrainer(ClassifierTrainer):
         # underlying TorchMLPClassifier.
         self.class_weight = class_weight
         # Early stopping. None disables. When set: each epoch the val
-        # loss is computed (already logged to MLflow); a deepcopy of
-        # clf is taken on each new minimum; if val_loss fails to
-        # improve for `patience` consecutive epochs, training breaks
-        # and clf is restored to its best-val_loss state. The restored
-        # clf is what gets calibrated and returned.
+        # metric named by `early_stopping_metric` is read (val_loss:
+        # lower is better; val_accuracy: higher is better); a deepcopy
+        # of clf is taken on each strict improvement; if the metric
+        # fails to improve for `patience` consecutive epochs, training
+        # breaks and clf is restored to its best-metric state. The
+        # restored clf is what gets calibrated and returned.
         self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_metric = early_stopping_metric
         # Populated by __call__; readable by the runner for MLflow
         # logging. Pre-initialized so the runner never hits an
         # AttributeError when patience is None.
@@ -128,7 +136,13 @@ class MermaidTrainer(ClassifierTrainer):
             # Early-stopping bookkeeping. All three remain None when
             # early_stopping_patience is None, so the no-ES path adds
             # zero overhead.
+            # best_val_loss / best_val_accuracy are the val values at the
+            # best epoch by the chosen metric; best_metric_value is the
+            # chosen metric's best value (the improvement-test baseline).
+            use_loss = self.early_stopping_metric == "val_loss"
+            best_metric_value: float = float("inf") if use_loss else float("-inf")
             best_val_loss: float = float("inf")
+            best_val_accuracy: float | None = None
             best_clf_snapshot = None
             best_epoch_idx: int | None = None
             epochs_since_best: int = 0
@@ -154,8 +168,9 @@ class MermaidTrainer(ClassifierTrainer):
                 # same pattern as ref_accuracy. These give the canonical
                 # overfitting signal -- if training_loss continues to
                 # drop while val_loss rises, the model is starting to
-                # memorize. val and ref are independent held-out splits,
-                # so both are needed for a robust signal.
+                # memorize. Ref and val are both kept out of train; with
+                # val_groups_csv, val is whole held-out sources, which ref
+                # never is, so val_loss also tracks unseen-source error.
                 #
                 # Note: clf here is the uncalibrated MLP head (Platt
                 # calibration runs after all epochs). predict_proba on
@@ -169,11 +184,19 @@ class MermaidTrainer(ClassifierTrainer):
 
                 # Early-stopping bookkeeping (no-op if patience is None).
                 if self.early_stopping_patience is not None:
-                    if val_loss < best_val_loss:
+                    metric_value = val_loss if use_loss else val_acc
+                    improved = (
+                        metric_value < best_metric_value
+                        if use_loss
+                        else metric_value > best_metric_value
+                    )
+                    if improved:
+                        best_metric_value = metric_value
                         best_val_loss = val_loss
+                        best_val_accuracy = val_acc
                         best_epoch_idx = epoch
                         # Snapshot the current clf state so we can
-                        # restore it if a later epoch overfits. deepcopy
+                        # restore it if a later epoch regresses. deepcopy
                         # is the safe path for sklearn-compatible
                         # estimators with arbitrary internal state.
                         best_clf_snapshot = copy.deepcopy(clf)
@@ -212,6 +235,8 @@ class MermaidTrainer(ClassifierTrainer):
                         if best_epoch_idx is not None:
                             cb_metrics["best_val_epoch"] = best_epoch_idx + 1
                             cb_metrics["best_val_loss"] = best_val_loss
+                            cb_metrics["best_val_accuracy"] = best_val_accuracy
+                            cb_metrics["early_stopping_metric"] = self.early_stopping_metric
                     self.on_epoch_end(cb_metrics)
 
                 if (
@@ -221,18 +246,18 @@ class MermaidTrainer(ClassifierTrainer):
                     stop_reason = "early_stopping"
                     logger.info(
                         f"Early stopping at epoch {epoch + 1}:"
-                        f" val_loss has not improved for"
+                        f" {self.early_stopping_metric} has not improved for"
                         f" {self.early_stopping_patience} consecutive"
                         f" epochs. Best was epoch"
                         f" {(best_epoch_idx or 0) + 1}"
-                        f" (val_loss={best_val_loss:.4f})."
+                        f" ({self.early_stopping_metric}={best_metric_value:.4f})."
                     )
                     break
 
-            # Restore the best-val_loss classifier when early stopping
+            # Restore the best-metric classifier when early stopping
             # is active. Done unconditionally (not just on early-stop
             # break) so a run that completed its full epoch budget
-            # still uses the best-val_loss snapshot rather than the
+            # still uses the best-metric snapshot rather than the
             # last-epoch one. When patience is None we never took a
             # snapshot, and clf is whatever the last epoch produced.
             if (
@@ -243,12 +268,12 @@ class MermaidTrainer(ClassifierTrainer):
                 logger.info(
                     f"Restoring classifier from epoch"
                     f" {(best_epoch_idx or 0) + 1}"
-                    f" (val_loss={best_val_loss:.4f}); latest epoch"
+                    f" ({self.early_stopping_metric}={best_metric_value:.4f}); latest epoch"
                     f" was {epochs_since_best} epochs past best."
                 )
                 clf = best_clf_snapshot
             # Stash a small summary on self for runner-side logging
-            # (read by MLflowTrainingRunner._log_early_stop_info).
+            # (read by MLflowTrainingRunner._on_epoch_end).
             self._early_stop_info = {
                 "enabled": self.early_stopping_patience is not None,
                 "patience": self.early_stopping_patience,
@@ -256,6 +281,8 @@ class MermaidTrainer(ClassifierTrainer):
                 "final_epoch": epoch + 1,
                 "best_val_epoch": (best_epoch_idx + 1 if best_epoch_idx is not None else None),
                 "best_val_loss": (best_val_loss if best_val_loss != float("inf") else None),
+                "best_val_accuracy": best_val_accuracy,
+                "early_stopping_metric": self.early_stopping_metric,
             }
 
         # Calibration: stream ref data in batches — avoids loading full feature
