@@ -451,5 +451,33 @@ class GvalTurfCcaConfigTest(unittest.TestCase):
                 self.assertIn(key, included)
 
 
+class GvalCca3Turf1p5ConfigTest(GvalTurfCcaConfigTest):
+    """The CCA x3 / Turf x1.5 follow-up shares the gval_turfcca val groups and holdout."""
+
+    NEW = (
+        GvalTurfCcaConfigTest.CONFIGS
+        / "coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_cca3_turf1p5"
+    )
+    PREVIOUS = GvalTurfCcaConfigTest.NEW
+
+    def test_val_groups_identical_to_gval_turfcca(self):
+        self.assertTrue(
+            filecmp.cmp(
+                self.NEW / "val_groups.csv", self.PREVIOUS / "val_groups.csv", shallow=False
+            )
+        )
+
+    def test_multipliers_are_cca_3_and_turf_1_5(self):
+        config = TrainingRunConfig.from_yaml_path(self.NEW / "training_config.yaml")
+        assert config.dataset.subsample is not None
+        self.assertEqual(
+            config.dataset.subsample.class_target_multipliers,
+            {
+                "20090bf4-868e-431b-974c-ab9be5bbdb5f::": 1.5,
+                "f4df7abd-3d51-42fb-8cab-5102b95fad8e::": 3.0,
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
