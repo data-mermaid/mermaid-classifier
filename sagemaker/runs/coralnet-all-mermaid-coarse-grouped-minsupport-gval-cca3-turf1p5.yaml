@@ -41,5 +41,5 @@ job:
   tags:
     pr: "116"
     branch: feat/grouped-val-turfcca
-    config_commit: "87d0b0f"
+    config_commit: "e4ae962"
     baseline_mlflow_run: "7a46d513b2ac40ed99300b8423473e7f"
