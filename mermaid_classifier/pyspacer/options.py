@@ -276,7 +276,8 @@ class TrainingOptions:
 
     Number of pyspacer training epochs to run. Acts as the upper bound:
     if ``early_stopping_patience`` is set and triggered, training stops
-    earlier and the best-val_loss classifier is restored.
+    earlier and the best classifier (by ``early_stopping_metric``) is
+    restored.
 
     The MLP architecture and learning rate are fixed at the production
     values baked into ``MermaidTrainer`` (``hidden_layer_sizes=(500,
@@ -285,19 +286,31 @@ class TrainingOptions:
 
     early_stopping_patience
 
-    If set to a positive int, training stops once ``epoch/val_loss`` has
-    not improved for this many consecutive epochs, AND the classifier
-    is restored to its state at the epoch with the lowest val_loss
-    (rather than the latest epoch's state). None disables early
-    stopping; the loop runs for the full ``epochs`` budget.
+    If set to a positive int, training stops once the
+    ``early_stopping_metric`` (val_loss or val_accuracy) has not improved
+    for this many consecutive epochs, AND the classifier
+    is restored to its state at the best epoch by
+    ``early_stopping_metric`` (rather than the latest epoch's state).
+    None disables early stopping; the loop runs for the full ``epochs``
+    budget.
 
     Recommended starting value: 3. Lower (1-2) is too jumpy given the
     natural epoch-to-epoch noise in val_loss; higher (>5) wastes wall
     time on epochs that are unlikely to recover.
+
+    early_stopping_metric
+
+    The validation metric that drives early stopping and best-classifier
+    selection. ``"val_loss"`` (default): lower is better. ``"val_accuracy"``:
+    higher is better. With a val set drawn from unseen sources, val_loss can
+    bottom early and then rise from over-confident wrong predictions while
+    val_accuracy keeps improving; ``"val_accuracy"`` then selects a later
+    epoch.
     """
 
     epochs: int = 10
     early_stopping_patience: int | None = None
+    early_stopping_metric: Literal["val_loss", "val_accuracy"] = "val_loss"
 
 
 @dataclasses.dataclass

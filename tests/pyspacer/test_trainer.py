@@ -172,6 +172,14 @@ class EarlyStoppingConstructorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "early_stopping_patience"):
             MermaidTrainer(batch_size=10, early_stopping_patience=0)
 
+    def test_invalid_metric_rejected(self):
+        with self.assertRaisesRegex(ValueError, "early_stopping_metric"):
+            MermaidTrainer(batch_size=10, early_stopping_metric="val_f1")  # pyright: ignore
+
+    def test_known_metrics_accepted(self):
+        for metric in ("val_loss", "val_accuracy"):
+            MermaidTrainer(batch_size=10, early_stopping_metric=metric)
+
 
 class EarlyStoppingBehaviorTest(unittest.TestCase):
     """End-to-end early-stopping behavior with a scripted val_loss schedule.
@@ -237,12 +245,13 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         return labels
 
     @staticmethod
-    def _scripted_trainer(val_loss_schedule, **kwargs):
+    def _scripted_trainer(val_loss_schedule, val_acc_schedule=None, **kwargs):
         """Return a MermaidTrainer subclass instance whose
         _calc_acc_and_log_loss_batched yields scripted val_loss
-        values (val_acc fixed at 0.5 -- the test only cares about loss).
+        values; val_acc is fixed at 0.5 unless val_acc_schedule is given.
         """
         schedule = list(val_loss_schedule)
+        acc_schedule = None if val_acc_schedule is None else list(val_acc_schedule)
 
         class Scripted(MermaidTrainer):
             def __init__(self_, *a, **kw):
@@ -255,17 +264,20 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
                         "val_loss schedule exhausted; trainer ran for more epochs than expected"
                     )
                 loss = self_._scripted_remaining.pop(0)
-                return 0.5, float(loss)
+                acc = 0.5 if acc_schedule is None else acc_schedule.pop(0)
+                return float(acc), float(loss)
 
         return Scripted(batch_size=10, **kwargs)
 
-    def _run(self, schedule, patience, n_epochs):
+    def _run(self, schedule, patience, n_epochs, acc_schedule=None, **trainer_kwargs):
         labels = self._make_synth_labels(seed=0)
         captured = []
         trainer = self._scripted_trainer(
             schedule,
+            acc_schedule,
             on_epoch_end=lambda m: captured.append(dict(m)),
             early_stopping_patience=patience,
+            **trainer_kwargs,
         )
         trainer(labels, nbr_epochs=n_epochs, pc_models=[])
         return trainer, captured
@@ -340,3 +352,131 @@ class EarlyStoppingBehaviorTest(unittest.TestCase):
         self.assertIn("final_epoch", captured[-1])
         self.assertIn("best_val_epoch", captured[-1])
         self.assertIn("best_val_loss", captured[-1])
+
+    def test_default_metric_is_val_loss(self):
+        """Without early_stopping_metric, selection follows val_loss even
+        when accuracy would pick a different epoch."""
+        losses = [1.0, 0.8, 0.9, 0.95]
+        accs = [0.5, 0.52, 0.6, 0.7]
+        trainer, _ = self._run(losses, patience=2, n_epochs=10, acc_schedule=accs)
+        info = trainer._early_stop_info
+        self.assertEqual(info["early_stopping_metric"], "val_loss")
+        self.assertEqual(info["best_val_epoch"], 2)
+
+    def test_val_accuracy_keeps_training_past_loss_minimum(self):
+        """Loss bottoms at epoch 2 and rises while accuracy keeps rising:
+        accuracy selection runs the full budget and restores the last epoch."""
+        losses = [1.0, 0.8, 0.9, 1.0, 1.1, 1.2]
+        accs = [0.50, 0.52, 0.54, 0.56, 0.57, 0.58]
+        trainer, captured = self._run(
+            losses,
+            patience=2,
+            n_epochs=6,
+            acc_schedule=accs,
+            early_stopping_metric="val_accuracy",
+        )
+        info = trainer._early_stop_info
+        self.assertEqual(len(captured), 6)
+        self.assertEqual(info["stop_reason"], "budget_exhausted")
+        self.assertEqual(info["best_val_epoch"], 6)
+        self.assertAlmostEqual(info["best_val_accuracy"], 0.58)
+        # best_val_loss is the val_loss at the best (accuracy) epoch.
+        self.assertAlmostEqual(info["best_val_loss"], 1.2)
+        self.assertEqual(info["early_stopping_metric"], "val_accuracy")
+
+    def test_val_accuracy_restores_best_accuracy_epoch(self):
+        """Accuracy peaks at epoch 3; the restored snapshot is epoch 3's."""
+        losses = [1.0, 0.9, 0.95, 1.0, 1.1]
+        accs = [0.50, 0.55, 0.60, 0.58, 0.57]
+        labels = self._make_synth_labels(seed=0)
+        snapshots = []
+
+        class Recording(MermaidTrainer):
+            def _calibrate_in_batches(self_, clf, ref_labels):
+                snapshots.append(clf)
+                return super()._calibrate_in_batches(clf, ref_labels)
+
+        epoch_clfs = []
+
+        def scripted(self_, clf, lbls, classes_list):
+            epoch_clfs.append(clf)
+            return accs.pop(0), losses.pop(0)
+
+        Recording._calc_acc_and_log_loss_batched = scripted  # pyright: ignore
+        trainer = Recording(
+            batch_size=10, early_stopping_patience=2, early_stopping_metric="val_accuracy"
+        )
+        trainer(labels, nbr_epochs=10, pc_models=[])
+        info = trainer._early_stop_info
+        self.assertEqual(info["stop_reason"], "early_stopping")
+        self.assertEqual(info["final_epoch"], 5)
+        self.assertEqual(info["best_val_epoch"], 3)
+        self.assertAlmostEqual(info["best_val_accuracy"], 0.60)
+        self.assertAlmostEqual(info["best_val_loss"], 0.95)
+        # The calibrated clf is a deepcopy snapshot, not the live (epoch 5) clf.
+        self.assertIsNot(snapshots[0], epoch_clfs[-1])
+
+    def test_val_accuracy_patience_triggers_when_accuracy_stalls(self):
+        accs = [0.5, 0.6, 0.6, 0.59]  # ties are not improvements
+        losses = [1.0, 0.9, 0.8, 0.7]
+        trainer, captured = self._run(
+            losses,
+            patience=2,
+            n_epochs=10,
+            acc_schedule=accs,
+            early_stopping_metric="val_accuracy",
+        )
+        info = trainer._early_stop_info
+        self.assertEqual(info["stop_reason"], "early_stopping")
+        self.assertEqual(info["final_epoch"], 4)
+        self.assertEqual(info["best_val_epoch"], 2)
+        self.assertTrue(captured[-1]["early_stopped"])
+
+    def test_callback_carries_metric_keys_on_final_epoch(self):
+        accs = [0.5, 0.6, 0.55]
+        losses = [1.0, 0.9, 0.95]
+        _, captured = self._run(
+            losses,
+            patience=1,
+            n_epochs=10,
+            acc_schedule=accs,
+            early_stopping_metric="val_accuracy",
+        )
+        final = captured[-1]
+        self.assertEqual(final["early_stopping_metric"], "val_accuracy")
+        self.assertEqual(final["best_val_epoch"], 2)
+        self.assertAlmostEqual(final["best_val_accuracy"], 0.6)
+        self.assertAlmostEqual(final["best_val_loss"], 0.9)
+        self.assertNotIn("best_val_accuracy", captured[0])
+
+
+class RunnerEarlyStopMetricLoggingTest(unittest.TestCase):
+    """MLflowTrainingRunner._on_epoch_end logs the best-epoch accuracy."""
+
+    @staticmethod
+    def _logged(extra):
+        from mermaid_classifier.pyspacer.runner import MLflowTrainingRunner
+
+        metrics = {
+            "epoch": 4,
+            "ref_accuracy": 0.5,
+            "val_accuracy": 0.6,
+            "val_loss": 0.9,
+            "training_loss": 0.4,
+            "cumulative_seconds": 1.0,
+            "final_epoch": 5,
+            "early_stopped": True,
+            "best_val_epoch": 3,
+            "best_val_loss": 0.8,
+            **extra,
+        }
+        with mock.patch("mermaid_classifier.pyspacer.runner.mlflow") as m_mlflow:
+            MLflowTrainingRunner._on_epoch_end(mock.Mock(), metrics)
+        return {c.args[0]: (c.args[1], c.kwargs) for c in m_mlflow.log_metric.call_args_list}
+
+    def test_best_val_accuracy_logged_at_step_zero(self):
+        logged = self._logged({"best_val_accuracy": 0.61})
+        self.assertEqual(logged["early_stop/best_val_accuracy"], (0.61, {"step": 0}))
+
+    def test_absent_best_val_accuracy_not_logged(self):
+        self.assertNotIn("early_stop/best_val_accuracy", self._logged({}))

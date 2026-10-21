@@ -163,6 +163,7 @@ class TrainingConfig(BaseModel):
     # so they are intentionally not exposed here.
     epochs: int = 10
     early_stopping_patience: int | None = None
+    early_stopping_metric: Literal["val_loss", "val_accuracy"] = "val_loss"
 
 
 class MLflowConfig(BaseModel):
@@ -288,6 +289,7 @@ class TrainingRunConfig(BaseModel):
         training_options = TrainingOptions(
             epochs=t.epochs,
             early_stopping_patience=t.early_stopping_patience,
+            early_stopping_metric=t.early_stopping_metric,
         )
 
         m = self.mlflow

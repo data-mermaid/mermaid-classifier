@@ -126,6 +126,7 @@ class TrainingRunner:
                 on_epoch_end=self._on_epoch_end,
                 class_weight=class_weight,
                 early_stopping_patience=(self.training_options.early_stopping_patience),
+                early_stopping_metric=self.training_options.early_stopping_metric,
             )
 
             # Train directly via the trainer — no pickle round-trip. pyspacer's
@@ -298,6 +299,7 @@ class MLflowTrainingRunner(TrainingRunner):
                     if self.training_options.early_stopping_patience is not None
                     else ""
                 ),
+                "early_stopping_metric": self.training_options.early_stopping_metric,
             }
 
             mlflow.log_params(training_options_to_log)
@@ -472,7 +474,7 @@ class MLflowTrainingRunner(TrainingRunner):
         On the final epoch (whether the run hit the epoch budget or
         triggered early stopping) the trainer adds summary fields
         (`final_epoch`, `early_stopped`, `best_val_epoch`,
-        `best_val_loss`); we log them as flat scalar metrics so they're
+        `best_val_loss`, `best_val_accuracy`); we log them as flat scalar metrics so they're
         easy to query post-hoc.
         """
         step = int(metrics["epoch"])  # type: ignore[arg-type]
@@ -505,6 +507,12 @@ class MLflowTrainingRunner(TrainingRunner):
                 mlflow.log_metric(
                     "early_stop/best_val_loss",
                     float(metrics["best_val_loss"]),
+                    step=0,  # type: ignore[arg-type]
+                )
+            if metrics.get("best_val_accuracy") is not None:
+                mlflow.log_metric(
+                    "early_stop/best_val_accuracy",
+                    float(metrics["best_val_accuracy"]),
                     step=0,  # type: ignore[arg-type]
                 )
 
