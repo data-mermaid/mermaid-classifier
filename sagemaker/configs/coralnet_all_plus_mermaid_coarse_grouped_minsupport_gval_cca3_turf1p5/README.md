@@ -17,12 +17,20 @@ smaller Turf boost keeps part of the Turf gain without that leakage.
 
 ## Provenance
 
-Every file except `training_config.yaml` and this README is a byte-identical
-copy from `coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_turfcca/`,
-including `val_groups.csv` (112 groups) and `holdout_groups.csv`. The
+Every file except `training_config.yaml`, `excluded_images.csv` and this
+README is a byte-identical copy from
+`coralnet_all_plus_mermaid_coarse_grouped_minsupport_gval_turfcca/`, including
+`val_groups.csv` (112 groups) and `holdout_groups.csv`. The
 `training_config.yaml` differs only in the Turf multiplier, the header comment
 and `mlflow.model_name`. See that directory's README for how `val_groups.csv`
 was generated.
+
+`excluded_images.csv` adds 100 MERMAID images (151 in all) that reached the
+MERMAID training data on 2026-10-20/21, after the 2026-10-19 project lookup, so
+the lookup leaves them unmatched and the run refuses to start. Excluding them
+keeps the training data the same as run 7a46d513's. They were listed with the
+pipeline's own loader as the MERMAID images with `project_id = 'unknown'` after
+filters.
 
 ## Comparing
 
