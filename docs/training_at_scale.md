@@ -188,7 +188,7 @@ Edit:
 ## 5. Dry-run the launcher
 
 Before paying SageMaker, validate the config and print the planned
-Estimator without uploading or submitting:
+training job without uploading or submitting:
 
 ```bash
 export MLFLOW_ARN=arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-2OMU4VP53ZS2
@@ -218,7 +218,7 @@ uv run python scripts/launch_training.py \
 
 Expect: ~10-20 minutes wall-clock, ~$0.15, an MLflow run with metrics
 + artifacts, CloudWatch logs streaming live to your terminal via
-`estimator.fit(wait=True, logs="All")`.
+`TrainingJob.wait(logs=True)`.
 
 ## 7. Production run
 
@@ -341,7 +341,7 @@ restarts from epoch zero. Use only for runs you're OK retrying.
 
 The container needs to reach MLflow (the always-on SageMaker MLflow App).
 The URI flows through the launcher's `--mlflow-tracking-uri` flag into the
-`MLFLOW_TRACKING_SERVER` env var on the Estimator. The training run
+`MLFLOW_TRACKING_SERVER` env var in the training job environment. The training run
 appears under whatever `experiment_name` is set in the YAML.
 
 For SageMaker-managed MLflow Apps (ARN of the form

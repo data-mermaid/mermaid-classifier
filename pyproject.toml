@@ -73,7 +73,7 @@ jupyterlab = [
     "ipympl",
 ]
 sagemaker = [
-    "sagemaker>=2.0,<3.0",
+    "sagemaker-core>=2.27,<3",
 ]
 
 # On Linux (i.e. the SageMaker training image) pull torch + torchvision from

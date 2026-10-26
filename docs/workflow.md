@@ -71,7 +71,7 @@ Choose one path based on scale:
 | Path | Script | When |
 | - | - | - |
 | **Local** | `classifier_train.py` | Loads a committed config (default `sagemaker/configs/coralnet_top108_best`; `--config-dir` picks another) and runs it locally via `MLflowTrainingRunner` — the *same* `training_config.yaml` the SageMaker path consumes, so local and SageMaker share one recipe. Requires AWS SSO. |
-| **SageMaker** | `launch_training.py` + `sagemaker_train_entrypoint.py` | Launches a SageMaker TrainingJob via an Estimator. The entrypoint reads a YAML config and runs `MLflowTrainingRunner` inside the container. See [training_at_scale.md](training_at_scale.md). |
+| **SageMaker** | `launch_training.py` + `sagemaker_train_entrypoint.py` | Launches a SageMaker TrainingJob with sagemaker-core. The entrypoint reads a YAML config and runs `MLflowTrainingRunner` inside the container. See [training_at_scale.md](training_at_scale.md). |
 
 ---
 
