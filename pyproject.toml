@@ -8,6 +8,9 @@ version = "0.1a1"
 requires-python = ">=3.12"
 dependencies = [
     "boto3",
+    # Floor for the eMudhra intermediate CA compromise fix. Keeps installs
+    # from resolving an older CA bundle.
+    "certifi>=2026.10.19",
     "jinja2",
 ]
 
