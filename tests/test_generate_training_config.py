@@ -81,6 +81,19 @@ DEAD_CORAL = "ba-dead-0000-0000-000000000012"  # excluded; parent Bare substrate
 BLEACHED_CORAL = "ba-bleached-000-0000-000000000013"  # excluded; parent Hard coral
 OTHER_INVERTEBRATES = "ba-otherinv-000-0000-000000000014"  # excluded; no parent
 
+# Coarsening fixtures: a single-region genus with a species, a species
+# under a suffixed genus name, and a species whose only ancestor is excluded.
+AGARICIIDAE = "ba-agariciidae-00-0000-000000000015"
+AGARICIA = "ba-agaricia-0000-0000-000000000016"  # single region
+AGARICIA_AGARICITES = "ba-agaag-0000-0000-000000000017"  # single region
+TURBINARIA_CORAL = "ba-turbcoral-000-0000-000000000018"
+TURBINARIA_RENIFORMIS = "ba-turbren-0000-0000-000000000019"
+ACANTHASTER_PLANCI = "ba-cots-0000-0000-00000000001a"  # parent excluded
+HELIOSERIS_CUCULLATA = "ba-helio-0000-0000-00000000001b"  # not top-108; under Agariciidae
+
+REGION_ATLANTIC = "region-atlantic"
+REGION_INDO_PACIFIC = "region-indo-pacific"
+
 # Growth form UUIDs.
 GF_BRANCHING = "gf-branching-000-0000-000000000001"
 GF_MASSIVE = "gf-massive-000-0000-000000000002"
@@ -131,7 +144,18 @@ BA_RECORDS = [
     _ba_record(OTHER_INVERTEBRATES, "Other invertebrates", None),
     _ba_record(ORPHAN_FAMILY, "Orphan family", None),
     _ba_record(ORPHAN_BA, "Orphan species", ORPHAN_FAMILY),
+    _ba_record(AGARICIIDAE, "Agariciidae", HARD_CORAL),
+    _ba_record(AGARICIA, "Agaricia", AGARICIIDAE),
+    _ba_record(AGARICIA_AGARICITES, "Agaricia agaricites", AGARICIA),
+    _ba_record(TURBINARIA_CORAL, "Turbinaria-coral", HARD_CORAL),
+    _ba_record(TURBINARIA_RENIFORMIS, "Turbinaria reniformis", TURBINARIA_CORAL),
+    _ba_record(ACANTHASTER_PLANCI, "Acanthaster planci", OTHER_INVERTEBRATES),
+    _ba_record(HELIOSERIS_CUCULLATA, "Helioseris cucullata", AGARICIIDAE),
 ]
+
+SINGLE_REGION_BAS = {AGARICIA, AGARICIA_AGARICITES}
+# The labels CSV's `id` column holds the MERMAID BA UUID.
+_NAME_TO_UUID = {r["name"]: r["id"] for r in BA_RECORDS}
 
 # Top-108 names. Includes the three EXCLUDED_NAMES with top100=1 to
 # verify the defensive exclusion path.
@@ -179,6 +203,12 @@ def _make_fake_ba_lib() -> BenthicAttributeLibrary:
     fake.by_parent = {}
     for r in BA_RECORDS:
         fake.by_parent.setdefault(r["parent"], []).append(r)
+    fake.region_ids_by_id = {
+        r["id"]: frozenset({REGION_ATLANTIC})
+        if r["id"] in SINGLE_REGION_BAS
+        else frozenset({REGION_ATLANTIC, REGION_INDO_PACIFIC})
+        for r in BA_RECORDS
+    }
     return fake
 
 
@@ -260,7 +290,7 @@ def _write_labels_csv(path: Path, names: list[str]) -> None:
         for i, name in enumerate(names):
             w.writerow(
                 {
-                    "id": f"csv-id-{i}",
+                    "id": _NAME_TO_UUID.get(name, f"csv-id-{i}"),
                     "name": name,
                     "top100": 1,
                     "growth forms": LABELS_GROWTH_FORMS.get(name, ""),
@@ -554,6 +584,114 @@ class UnresolvedTop108Tests(_GenerateConfigTestCase):
         self.assertEqual(rc, 0)
         readme = (self.output_dir / "README.md").read_text()
         self.assertIn(GHOST_NAME, readme)
+
+
+class IsSpeciesTests(unittest.TestCase):
+    def setUp(self):
+        self.ba_lib = _make_fake_ba_lib()
+
+    def test_binomial_under_its_genus_is_species(self):
+        self.assertTrue(gtc.is_species(ACROPORA_HUMILIS, self.ba_lib))
+        self.assertTrue(gtc.is_species(PORITES_ASTREOIDES, self.ba_lib))
+
+    def test_binomial_under_suffixed_genus_is_species(self):
+        self.assertTrue(gtc.is_species(TURBINARIA_RENIFORMIS, self.ba_lib))
+
+    def test_orphan_species_name_is_species(self):
+        self.assertTrue(gtc.is_species(ACANTHASTER_PLANCI, self.ba_lib))
+
+    def test_genus_and_common_names_are_not_species(self):
+        for ba_id in (ACROPORA, HARD_CORAL, TURF_ALGAE, BARE_SUBSTRATE, ORPHAN_BA):
+            with self.subTest(ba_id=ba_id):
+                self.assertFalse(gtc.is_species(ba_id, self.ba_lib))
+
+
+class IsRegionSpecificTests(unittest.TestCase):
+    def setUp(self):
+        self.ba_lib = _make_fake_ba_lib()
+
+    def test_single_region_is_region_specific(self):
+        self.assertTrue(gtc.is_region_specific(AGARICIA, self.ba_lib))
+
+    def test_multi_region_is_not_region_specific(self):
+        self.assertFalse(gtc.is_region_specific(ACROPORA, self.ba_lib))
+
+    def test_no_regions_is_not_region_specific(self):
+        self.ba_lib.region_ids_by_id[ACROPORA] = frozenset()
+        self.assertFalse(gtc.is_region_specific(ACROPORA, self.ba_lib))
+
+
+COARSEN_TOP108_NAMES = TOP108_NAMES + ["Agaricia", "Agaricia agaricites", "Acanthaster planci"]
+COARSEN_CN_ENTRIES = DEFAULT_CN_ENTRIES + [
+    _entry("a1", AGARICIA, "", "Agaricia"),
+    _entry("a2", AGARICIA_AGARICITES, "", "Agaricia agaricites"),
+    _entry("a3", AGARICIA_AGARICITES, GF_FOLIOSE, "Agaricia agaricites", "Foliose"),
+    _entry("c1", ACANTHASTER_PLANCI, "", "Acanthaster planci"),
+    _entry("h1", HELIOSERIS_CUCULLATA, "", "Helioseris cucullata"),
+]
+
+
+class CoarseningTests(_GenerateConfigTestCase):
+    def setUp(self):
+        super().setUp()
+        _write_labels_csv(self.labels_csv, COARSEN_TOP108_NAMES)
+
+    def run_coarsened(self, *flags: str) -> None:
+        self.run_main(extra_args=list(flags), cn_entries=COARSEN_CN_ENTRIES)
+
+    def test_species_roll_up_to_genus(self):
+        self.run_coarsened("--roll-up-species")
+        included_ba = {ba for (ba, _) in self.get_included_set()}
+        rollups = self.get_rollup_lookup()
+        self.assertNotIn(AGARICIA_AGARICITES, included_ba)
+        self.assertIn(AGARICIA, included_ba)
+        self.assertEqual(rollups[(AGARICIA_AGARICITES, "")], (AGARICIA, ""))
+        self.assertEqual(rollups[(AGARICIA_AGARICITES, GF_FOLIOSE)], (AGARICIA, ""))
+
+    def test_porites_species_rolls_into_its_growth_form_bucket(self):
+        self.run_coarsened("--roll-up-species")
+        included = self.get_included_set()
+        rollups = self.get_rollup_lookup()
+        self.assertNotIn((PORITES_ASTREOIDES, ""), included)
+        self.assertEqual(rollups[(PORITES_ASTREOIDES, "")], (PORITES, GF_MASSIVE))
+
+    def test_region_specific_genus_cascades_to_family(self):
+        self.run_coarsened("--roll-up-species", "--roll-up-region-specific")
+        included_ba = {ba for (ba, _) in self.get_included_set()}
+        rollups = self.get_rollup_lookup()
+        self.assertNotIn(AGARICIA, included_ba)
+        self.assertIn(AGARICIIDAE, included_ba)
+        self.assertEqual(rollups[(AGARICIA, "")], (AGARICIIDAE, ""))
+        self.assertEqual(rollups[(AGARICIA_AGARICITES, "")], (AGARICIIDAE, ""))
+
+    def test_species_under_excluded_parent_drops(self):
+        self.run_coarsened("--roll-up-species")
+        included_ba = {ba for (ba, _) in self.get_included_set()}
+        self.assertNotIn(ACANTHASTER_PLANCI, included_ba)
+        self.assertNotIn(OTHER_INVERTEBRATES, included_ba)
+        self.assertNotIn((ACANTHASTER_PLANCI, ""), self.get_rollup_lookup())
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn("| Acanthaster planci | Acanthaster planci | (dropped) |", readme)
+
+    def test_label_outside_top108_reroutes_to_added_class(self):
+        self.run_coarsened("--roll-up-species", "--roll-up-region-specific")
+        rollups = self.get_rollup_lookup()
+        self.assertEqual(rollups[(HELIOSERIS_CUCULLATA, "")], (AGARICIIDAE, ""))
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn("| Helioseris cucullata | Hard coral | Agariciidae |", readme)
+        self.assertIn("Classes added as roll-up targets (1): Agariciidae.", readme)
+
+    def test_readme_lists_each_class_change(self):
+        self.run_coarsened("--roll-up-species", "--roll-up-region-specific")
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn("| Agaricia agaricites | Agaricia agaricites | Agariciidae |", readme)
+        self.assertIn("| Porites astreoides | Porites astreoides | Porites |", readme)
+
+    def test_label_with_no_coarser_ancestor_is_kept(self):
+        self.ba_lib.region_ids_by_id[TURF_ALGAE] = frozenset({REGION_ATLANTIC})
+        self.run_coarsened("--roll-up-region-specific")
+        included_ba = {ba for (ba, _) in self.get_included_set()}
+        self.assertIn(TURF_ALGAE, included_ba)
 
 
 if __name__ == "__main__":
