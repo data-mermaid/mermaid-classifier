@@ -201,6 +201,7 @@ def image_set_from_args(args: argparse.Namespace) -> ImageSet:
         min_points=args.min_points,
         seed=args.seed,
         sites=IMAGE_SET.sites,
+        score_threshold=args.score_threshold,
     )
 
 
@@ -257,8 +258,13 @@ def build_tasks_and_config(image_set: ImageSet) -> tuple[list[dict[str, Any]], s
     )
     # One S3 read per image feeds both reference models from the same rows.
     keys, feature_matrix = features.stack_features(points)
-    v1_preds = v1_infer.predict_from_features(keys, feature_matrix, predictor)
-    beta_preds = beta_infer.predict_points(keys, feature_matrix, image_set.beta_classifier)
+    v1_preds = ls_tasks.apply_threshold(
+        v1_infer.score_from_features(keys, feature_matrix, predictor), image_set.score_threshold
+    )
+    beta_preds = ls_tasks.apply_threshold(
+        beta_infer.score_points(keys, feature_matrix, image_set.beta_classifier),
+        image_set.score_threshold,
+    )
 
     toplevel_name = make_toplevel_name()
     tasks = ls_tasks.build_tasks(
@@ -270,11 +276,14 @@ def build_tasks_and_config(image_set: ImageSet) -> tuple[list[dict[str, Any]], s
         resolver.uri,
         resolver.size,
         image_set=image_set.name,
+        score_threshold=image_set.score_threshold,
     )
     # Restrict the expert taxonomy to V1's label set plus the Beta labels this set
     # actually shows, so every reference label a reviewer can see has a selectable path.
     # Ground truth is already rolled into V1's classes, so it adds nothing.
-    restrict_paths = sorted(label_path(c) for c in classes | set(beta_preds.values()))
+    # A thresholded-away Beta point (None) shows no label, so it needs no path.
+    shown_beta = {bagf for bagf in beta_preds.values() if bagf is not None}
+    restrict_paths = sorted(label_path(c) for c in classes | shown_beta)
     config = ls_config.build_taxonomy_config(ba_lib, gf_lib, restrict_paths=restrict_paths)
     return tasks, config
 
@@ -441,6 +450,12 @@ def _add_image_set_args(p: argparse.ArgumentParser) -> None:
         "--beta-classifier",
         default=IMAGE_SET.beta_classifier,
         help="Beta classifier pickle (scored in an isolated scikit-learn 1.1.3 subprocess)",
+    )
+    p.add_argument(
+        "--score-threshold",
+        type=float,
+        default=IMAGE_SET.score_threshold,
+        help="leave model points scoring below this unclassified (default: show every label)",
     )
     p.add_argument(
         "--v1-rollup-csv",

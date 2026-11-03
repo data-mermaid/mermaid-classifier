@@ -15,6 +15,7 @@ The sample is stratified by site: each `SiteSpec` in `sites` contributes a share
 `n_images` proportional to its `weight`, and each share is drawn independently.
 """
 
+import dataclasses
 from dataclasses import dataclass
 
 
@@ -44,6 +45,9 @@ class ImageSet:
     min_points: int  # only sample images with >= this many ground-truth points
     seed: int  # RNG seed — change it to draw a different random sample
     sites: tuple[SiteSpec, ...]  # the strata, and each one's share of n_images
+    # Model points whose top-1 score is below this are left unclassified on the v1 and
+    # Beta tabs, as mermaid-api's CLASSIFIED_THRESHOLD does. None shows every label.
+    score_threshold: float | None = None
 
 
 CORALNET_SITE = SiteSpec(
@@ -140,4 +144,13 @@ MINSUPPORT_IMAGE_SET = ImageSet(
     sites=(CORALNET_ALL_SITE, MERMAID_SITE),
 )
 
-IMAGE_SET = MINSUPPORT_IMAGE_SET
+# MINSUPPORT_IMAGE_SET with one change: both models' points scoring below 0.5 (the
+# MERMAID API's CLASSIFIED_THRESHOLD) are left unclassified. Same seed, held-out CSV and
+# sites, so it draws the same images as the min-support project.
+MINSUPPORT_T05_IMAGE_SET = dataclasses.replace(
+    MINSUPPORT_IMAGE_SET,
+    name="Model Review minsup >=0.5 (20 img)+Beta+Comparison",
+    score_threshold=0.5,
+)
+
+IMAGE_SET = MINSUPPORT_T05_IMAGE_SET

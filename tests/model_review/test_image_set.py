@@ -5,6 +5,7 @@ from mermaid_classifier.model_review.image_set import (
     COARSE_IMAGE_SET,
     IMAGE_SET,
     MINSUPPORT_IMAGE_SET,
+    MINSUPPORT_T05_IMAGE_SET,
     V1_IMAGE_SET,
     ImageSet,
     SiteSpec,
@@ -22,8 +23,22 @@ class ImageSetTest(unittest.TestCase):
         self.assertEqual(IMAGE_SET.min_points, 15)
         self.assertEqual(IMAGE_SET.beta_classifier, "../models/beta_model/classifier.pkl")
 
-    def test_active_set_is_the_minsupport_model(self):
-        self.assertIs(IMAGE_SET, MINSUPPORT_IMAGE_SET)
+    def test_active_set_is_the_thresholded_minsupport_set(self):
+        self.assertIs(IMAGE_SET, MINSUPPORT_T05_IMAGE_SET)
+        self.assertEqual(IMAGE_SET.score_threshold, 0.5)
+
+    def test_thresholded_set_differs_from_minsupport_only_in_name_and_threshold(self):
+        # Same seed, held-out CSV and sites, so it draws the same images.
+        self.assertEqual(
+            dataclasses.replace(MINSUPPORT_T05_IMAGE_SET, name="x", score_threshold=None),
+            dataclasses.replace(MINSUPPORT_IMAGE_SET, name="x"),
+        )
+        self.assertIsNone(MINSUPPORT_IMAGE_SET.score_threshold)
+
+    def test_minsupport_set_is_kept_unchanged(self):
+        self.assertEqual(
+            MINSUPPORT_IMAGE_SET.name, "Model Review minsup (20 img) + Beta + Comparison"
+        )
         self.assertEqual(IMAGE_SET.seed, 3)
         self.assertEqual(IMAGE_SET.classifier, "m-3201af06083c47519f5dd2a1653e96c9")
         self.assertEqual(
@@ -49,8 +64,8 @@ class ImageSetTest(unittest.TestCase):
         )
 
     def test_set_names_are_distinct(self):
-        names = {s.name for s in (V1_IMAGE_SET, COARSE_IMAGE_SET, MINSUPPORT_IMAGE_SET)}
-        self.assertEqual(len(names), 3)
+        sets = (V1_IMAGE_SET, COARSE_IMAGE_SET, MINSUPPORT_IMAGE_SET, MINSUPPORT_T05_IMAGE_SET)
+        self.assertEqual(len({s.name for s in sets}), 4)
 
     def test_two_sites_weighted_two_to_one(self):
         self.assertEqual([s.site for s in IMAGE_SET.sites], ["coralnet", "mermaid"])

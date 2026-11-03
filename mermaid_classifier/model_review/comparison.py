@@ -17,9 +17,12 @@ COMPARISON_MODEL_VERSION = "Comparison"
 
 GROUND_TRUTH = "ground-truth"
 
+# What a model's line reads when its top-1 score fell below the image set's threshold.
+UNCLASSIFIED = "Unclassified (below score threshold)"
+
 
 def comparison_text(
-    entries: Sequence[tuple[str, str]],
+    entries: Sequence[tuple[str, str | None]],
     label_name: Callable[[str], str],
     reference: str = GROUND_TRUTH,
 ) -> str:
@@ -28,14 +31,19 @@ def comparison_text(
     ``entries`` is ``(set name, BA::GF)`` in the order the lines should read. The
     reference set carries no marker; every other line is marked match or differs, so
     a disagreement is visible without comparing the paths character by character.
+    A ``None`` BA::GF is a point the model left unclassified: it reads ``UNCLASSIFIED``
+    and carries no marker, since it asserts no label to agree or disagree with.
 
     The marker compares the *rendered* labels, not the BA::GF ids behind them, so it
     always agrees with the two lines a reviewer is reading.
     """
-    rendered = [(name, label_name(bagf)) for name, bagf in entries]
+    rendered = [(name, label_name(bagf) if bagf is not None else None) for name, bagf in entries]
     ref_label = next((label for name, label in rendered if name == reference), None)
     lines: list[str] = []
     for name, label in rendered:
+        if label is None:
+            lines.append(f"{name}: {UNCLASSIFIED}")
+            continue
         line = f"{name}: {label}"
         if name != reference and ref_label is not None:
             line += "  — match" if label == ref_label else "  — differs"

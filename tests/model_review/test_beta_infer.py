@@ -23,7 +23,7 @@ def _features_path(argv):
     return Path(argv[argv.index("--features") + 1])
 
 
-def _writer(preds, version=beta_infer.BETA_SKLEARN, status=0, stderr=""):
+def _writer(preds, version=beta_infer.BETA_SKLEARN, status=0, stderr="", scores=None):
     """A fake runner that writes `preds` where the real subprocess would."""
 
     def run(argv, env):
@@ -31,6 +31,7 @@ def _writer(preds, version=beta_infer.BETA_SKLEARN, status=0, stderr=""):
             np.savez_compressed(
                 _out_path(argv),
                 pred_bagf=np.array(preds, dtype=str),
+                pred_score=np.array(scores if scores is not None else [0.9] * len(preds)),
                 sklearn_version=str(version),
             )
         return status, stderr
@@ -72,6 +73,12 @@ class PredictPointsTest(unittest.TestCase):
     def test_maps_each_key_to_its_prediction(self):
         preds = self._predict(_writer(["ba1::gf1", "ba2::"]))
         self.assertEqual(preds, {("A", 10, 20): "ba1::gf1", ("A", 30, 40): "ba2::"})
+
+    def test_score_points_pairs_each_label_with_its_score(self):
+        scored = beta_infer.score_points(
+            _KEYS, _MATRIX, str(self.pkl), run=_writer(["ba1::gf1", "ba2::"], scores=[0.7, 0.4])
+        )
+        self.assertEqual(scored, {("A", 10, 20): ("ba1::gf1", 0.7), ("A", 30, 40): ("ba2::", 0.4)})
 
     def test_hands_the_feature_matrix_to_the_subprocess(self):
         seen = {}
@@ -170,6 +177,22 @@ class BetaScoreContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             preds = self._predict(["ba1::gf1", "ba2::"], tmp)
         self.assertEqual(preds, {("A", 10, 20): "ba1::gf1", ("A", 30, 40): "ba2::"})
+
+    def test_real_script_writes_each_points_top1_probability(self):
+        from sklearn.linear_model import LogisticRegression
+
+        clf = LogisticRegression().fit(_MATRIX.astype(np.float64), ["ba1::gf1", "ba2::"])
+        expected = clf.predict_proba(_MATRIX.astype(np.float64)).max(axis=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            pkl = Path(tmp) / "classifier.pkl"
+            with open(pkl, "wb") as f:
+                pickle.dump(clf, f)
+            import sklearn
+
+            with mock.patch.object(beta_infer, "BETA_SKLEARN", sklearn.__version__):
+                scored = beta_infer.score_points(_KEYS, _MATRIX, str(pkl), run=self._run_here)
+        self.assertEqual([label for label, _ in scored.values()], ["ba1::gf1", "ba2::"])
+        np.testing.assert_allclose([score for _, score in scored.values()], expected, rtol=1e-6)
 
     def test_classes_without_a_growth_form_separator_are_refused(self):
         # models/beta_model/ also holds a bare-BA-id pickle; scoring it would produce

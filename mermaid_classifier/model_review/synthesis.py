@@ -29,11 +29,13 @@ def build_point_table(
             data.get("image_url", ""),
         )
         for p in data["original_points"]:
-            # A tasks file with no Beta reference layer leaves `beta` unset.
+            # A tasks file with no Beta reference layer leaves `beta` unset, and a
+            # thresholded image set stores None for a point a model left unclassified.
+            v1 = p.get("v1")
             beta = p.get("beta")
             ref[(image_id, p["row"], p["col"])] = (
                 roll(p["gt"]),
-                roll(p["v1"]),
+                roll(v1) if v1 else None,
                 roll(beta) if beta else None,
             )
 

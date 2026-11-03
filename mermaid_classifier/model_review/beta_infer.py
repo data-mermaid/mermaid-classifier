@@ -5,7 +5,7 @@ scikit-learn 1.1.3 and unpicklable under the 1.5.2 this project pins (calibratio
 internals differ), and it has no portable ``model.pt``/``model.json`` form. It is
 therefore scored out of process: ``beta_score.py`` runs under a uv-managed ephemeral
 environment holding the pinned scikit-learn, reading a feature matrix and writing back
-one BA::GF label per point.
+one BA::GF label and its score per point.
 
 Beta shares V1's EfficientNet extractor, so the same pre-extracted feature vectors
 score both and the matrix is loaded once (see ``features.stack_features``).
@@ -77,13 +77,13 @@ def _run(argv: list[str], env: dict[str, str]) -> tuple[int, str]:
     return proc.returncode, proc.stderr
 
 
-def predict_points(
+def score_points(
     keys: Sequence[PointKey],
     features: NDArray[np.float32],
     classifier_pkl: str,
     run: Runner = _run,
-) -> dict[PointKey, str]:
-    """Top-1 BA::GF per point, for rows aligned with ``keys``."""
+) -> dict[PointKey, tuple[str, float]]:
+    """Top-1 (BA::GF, score) per point, for rows aligned with ``keys``."""
     pkl = Path(classifier_pkl).resolve()
     if not pkl.is_file():
         raise BetaScoringError(f"Beta classifier pickle not found: {pkl}")
@@ -113,6 +113,7 @@ def predict_points(
 
         loaded = np.load(out_npz, allow_pickle=False)
         preds = [str(p) for p in loaded["pred_bagf"]]
+        scores = [float(s) for s in loaded["pred_score"]]
         version = str(loaded["sklearn_version"])
 
     if version != BETA_SKLEARN:
@@ -122,4 +123,15 @@ def predict_points(
         )
     if len(preds) != len(keys):
         raise BetaScoringError(f"Beta returned {len(preds)} predictions for {len(keys)} points.")
-    return dict(zip(keys, preds, strict=True))
+    return dict(zip(keys, zip(preds, scores, strict=True), strict=True))
+
+
+def predict_points(
+    keys: Sequence[PointKey],
+    features: NDArray[np.float32],
+    classifier_pkl: str,
+    run: Runner = _run,
+) -> dict[PointKey, str]:
+    """Top-1 BA::GF per point, for rows aligned with ``keys``."""
+    scored = score_points(keys, features, classifier_pkl, run=run)
+    return {key: label for key, (label, _) in scored.items()}

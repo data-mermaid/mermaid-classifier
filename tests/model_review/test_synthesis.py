@@ -218,6 +218,25 @@ class SynthesisTest(unittest.TestCase):
             ],
         )
 
+    def test_unclassified_model_point_is_excluded_not_counted_wrong(self):
+        # A thresholded image set stores None for a point a model left unclassified.
+        tasks = [
+            {
+                "data": {
+                    "image_id": "A",
+                    "original_points": [
+                        {"row": 1, "col": 1, "gt": "hc::", "v1": None, "beta": "hc::"},
+                        {"row": 2, "col": 2, "gt": "hc::", "v1": "hc::", "beta": None},
+                    ],
+                }
+            }
+        ]
+        experts = [ExpertLabel("A", "e1", 1, 1, "hc::")]
+        df = synthesis.build_point_table(tasks, experts, _roll)
+        self.assertIsNone(df.iloc[0].v1_top)
+        self.assertEqual(synthesis.v1_vs_gt_rate(tasks, _roll), 1.0)
+        self.assertEqual(synthesis.beta_vs_gt_rate(tasks, _roll), 1.0)
+
     def test_point_table_defaults_provenance_when_absent(self):
         # Existing-style tasks without provenance keys must still work (empty strings).
         df = synthesis.build_point_table(_TASKS, _EXPERTS, _roll)

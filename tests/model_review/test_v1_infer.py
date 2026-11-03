@@ -73,6 +73,12 @@ class PredictFromFeaturesTest(unittest.TestCase):
         preds = v1_infer.predict_from_features(keys, matrix, _FakePredictor())
         self.assertEqual(preds, {("A", 10, 20): "ba2::", ("A", 30, 40): "ba2::"})
 
+    def test_score_from_features_returns_the_top1_probability(self):
+        keys = [("A", 10, 20)]
+        matrix = np.zeros((1, 4), dtype=np.float32)
+        scored = v1_infer.score_from_features(keys, matrix, _FakePredictor())
+        self.assertEqual(scored, {("A", 10, 20): ("ba2::", 1.0)})
+
     def test_row_count_mismatch_is_rejected(self):
         # A silent mismatch would shift every label after the gap onto the wrong point.
         with self.assertRaises(ValueError):

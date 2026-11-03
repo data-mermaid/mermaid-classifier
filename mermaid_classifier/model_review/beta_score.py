@@ -1,12 +1,13 @@
-"""Score the Beta classifier pickle and write its top-1 label per point.
+"""Score the Beta classifier pickle and write its top-1 label and score per point.
 
 Runs as a standalone script inside a uv-managed ephemeral environment whose only
 packages are scikit-learn 1.1.3 and numpy<2 (see ``beta_infer.py``), so it imports
 nothing from ``mermaid_classifier`` and nothing outside stdlib/numpy/sklearn.
 
 Input:  ``--features F.npz`` holding ``X`` of shape ``(n_points, dim)``.
-Output: ``--out P.npz`` holding ``pred_bagf`` (n_points BA::GF strings) and
-``sklearn_version`` (the caller verifies it is the pinned one).
+Output: ``--out P.npz`` holding ``pred_bagf`` (n_points BA::GF strings), ``pred_score``
+(each point's top-1 probability) and ``sklearn_version`` (the caller verifies it is the
+pinned one).
 """
 
 import argparse
@@ -49,13 +50,16 @@ def main() -> None:
         )
 
     preds = np.empty(x.shape[0], dtype=object)
+    scores = np.empty(x.shape[0], dtype=np.float64)
     for i in range(0, x.shape[0], BATCH):
         proba = clf.predict_proba(x[i : i + BATCH])
         preds[i : i + BATCH] = classes[proba.argmax(axis=1)]
+        scores[i : i + BATCH] = proba.max(axis=1)
 
     np.savez_compressed(
         args.out,
         pred_bagf=preds.astype(str),
+        pred_score=scores,
         sklearn_version=str(sklearn.__version__),
     )
     print(f"scored {x.shape[0]} points over {len(classes)} classes -> {args.out}")

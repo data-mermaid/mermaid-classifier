@@ -13,7 +13,27 @@ from mermaid_classifier.model_review.features import (
 )
 from mermaid_classifier.model_review.sample import ReviewPoint
 
-__all__ = ["default_feature_loader", "predict_from_features", "predict_points"]
+__all__ = [
+    "default_feature_loader",
+    "predict_from_features",
+    "predict_points",
+    "score_from_features",
+]
+
+
+def score_from_features(
+    keys: Sequence[PointKey],
+    features: NDArray[np.float32],
+    predictor: Any,
+) -> dict[PointKey, tuple[str, float]]:
+    """Top-1 (BA::GF, score) per point, from a matrix whose rows align with ``keys``."""
+    labels = list(predictor.classes)
+    proba = predictor.predict_proba(features)
+    scored = {}
+    for key, row_proba in zip(keys, proba, strict=True):
+        top = int(np.argmax(row_proba))
+        scored[key] = (labels[top], float(row_proba[top]))
+    return scored
 
 
 def predict_from_features(
@@ -22,10 +42,8 @@ def predict_from_features(
     predictor: Any,
 ) -> dict[PointKey, str]:
     """Top-1 BA::GF per point, from a matrix whose rows align with ``keys``."""
-    labels = list(predictor.classes)
-    proba = predictor.predict_proba(features)
     return {
-        key: labels[int(np.argmax(row_proba))] for key, row_proba in zip(keys, proba, strict=True)
+        key: label for key, (label, _) in score_from_features(keys, features, predictor).items()
     }
 
 

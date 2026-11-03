@@ -7,9 +7,13 @@ path). Each task carries five predictions: ``blank`` (unlabelled fixed points â€
 the reviewer's blind starting layer, set as the project model_version), the
 ``Beta``, ``ground-truth`` and ``v1`` reference tabs, and ``Comparison``, which
 holds every set's label for a point in one perRegion text block.
+
+An image set with a score threshold leaves each model point whose top-1 score falls
+below it unclassified: the point keeps its place on that model's tab, grey and with
+no taxonomy label, exactly like the blank starting layer.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from mermaid_classifier.model_review.comparison import (
@@ -17,6 +21,7 @@ from mermaid_classifier.model_review.comparison import (
     GROUND_TRUTH,
     comparison_text,
 )
+from mermaid_classifier.model_review.features import PointKey
 from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
 from mermaid_classifier.model_review.sample import ReviewPoint
 
@@ -27,6 +32,20 @@ BLANK_MODEL_VERSION = "Unlabelled Starting Set"
 
 # The model currently deployed to the MERMAID API, shown as a read-only reference tab.
 BETA_MODEL_VERSION = "Beta"
+
+
+def apply_threshold(
+    scored: Mapping[PointKey, tuple[str, float]], threshold: float | None
+) -> dict[PointKey, str | None]:
+    """Each point's top-1 label, or ``None`` where its score is below ``threshold``.
+
+    ``>=`` matches mermaid-api's ``CLASSIFIED_THRESHOLD`` test, so a point shown as
+    classified here is one the API would classify. ``None`` keeps every label.
+    """
+    return {
+        key: label if threshold is None or score >= threshold else None
+        for key, (label, score) in scored.items()
+    }
 
 
 def _blank_keypoint(idx: int, x: float, y: float, width: int, height: int) -> dict[str, Any]:
@@ -118,11 +137,27 @@ def _point_results(
     ]
 
 
+def _model_point_results(
+    idx: int,
+    x: float,
+    y: float,
+    width: int,
+    height: int,
+    bagf: str | None,
+    label_path: Callable[[str], list[str]],
+    toplevel_name: Callable[[str], str],
+) -> list[dict[str, Any]]:
+    """A model's point: labelled, or blank where the model left it unclassified."""
+    if bagf is None:
+        return [_blank_keypoint(idx, x, y, width, height)]
+    return _point_results(idx, x, y, width, height, toplevel_name(bagf), label_path(bagf))
+
+
 def build_task(
     image_id: str,
     points: list[ReviewPoint],
-    v1_preds: dict[tuple[str, int, int], str],
-    beta_preds: dict[tuple[str, int, int], str],
+    v1_preds: Mapping[PointKey, str | None],
+    beta_preds: Mapping[PointKey, str | None],
     label_path: Callable[[str], list[str]],
     toplevel_name: Callable[[str], str],
     image_url: Callable[[ReviewPoint], str],
@@ -155,12 +190,10 @@ def build_task(
             )
         )
         v1_result.extend(
-            _point_results(idx, x, y, width, height, toplevel_name(v1_bagf), label_path(v1_bagf))
+            _model_point_results(idx, x, y, width, height, v1_bagf, label_path, toplevel_name)
         )
         beta_result.extend(
-            _point_results(
-                idx, x, y, width, height, toplevel_name(beta_bagf), label_path(beta_bagf)
-            )
+            _model_point_results(idx, x, y, width, height, beta_bagf, label_path, toplevel_name)
         )
         compare_result.extend(
             _compare_results(
@@ -208,13 +241,14 @@ def build_task(
 
 def build_tasks(
     points: list[ReviewPoint],
-    v1_preds: dict[tuple[str, int, int], str],
-    beta_preds: dict[tuple[str, int, int], str],
+    v1_preds: Mapping[PointKey, str | None],
+    beta_preds: Mapping[PointKey, str | None],
     label_path: Callable[[str], list[str]],
     toplevel_name: Callable[[str], str],
     image_url: Callable[[ReviewPoint], str],
     image_size: Callable[[ReviewPoint], tuple[int, int]],
     image_set: str = "",
+    score_threshold: float | None = None,
 ) -> list[dict[str, Any]]:
     # Tasks, exports and synthesis all key on image_id alone, so ids must not repeat
     # across sites. CoralNet ids are integers and MERMAID ids UUIDs, so this cannot fire
@@ -242,4 +276,6 @@ def build_tasks(
     for task in tasks:
         # Provenance: which image set this task belongs to (carried through export/synthesis).
         task["data"]["image_set"] = image_set
+        # The threshold the model tabs were cut at (None = every top-1 label shown).
+        task["data"]["score_threshold"] = score_threshold
     return tasks

@@ -1,7 +1,8 @@
 import unittest
 
 from mermaid_classifier.model_review import ls_tasks
-from mermaid_classifier.model_review.comparison import COMPARISON_MODEL_VERSION
+from mermaid_classifier.model_review.comparison import COMPARISON_MODEL_VERSION, UNCLASSIFIED
+from mermaid_classifier.model_review.ls_config import UNLABELED_TOPLEVEL
 from mermaid_classifier.model_review.sample import ReviewPoint
 
 
@@ -173,6 +174,69 @@ class LsTasksTest(unittest.TestCase):
             self.points, self.v1, self.beta, _label_path, _toplevel, _url, _size
         )
         self.assertTrue(all(t["data"]["image_set"] == "" for t in tasks))
+
+
+class ThresholdTest(unittest.TestCase):
+    def setUp(self):
+        self.points = [
+            ReviewPoint("coralnet", "A", "109", 250, 500, "gtA1::", "k", "b"),
+            ReviewPoint("coralnet", "A", "109", 100, 200, "gtA2::", "k", "b"),
+        ]
+        # (100, 200) sorts first, so it is pt-0; its v1 label is below the threshold.
+        self.v1 = {("A", 250, 500): "v1A1::", ("A", 100, 200): None}
+        self.beta = {("A", 250, 500): None, ("A", 100, 200): "btA2::"}
+
+    def _layer(self, version):
+        task = ls_tasks.build_task(
+            "A", self.points, self.v1, self.beta, _label_path, _toplevel, _url, _size
+        )
+        return next(p for p in task["predictions"] if p["model_version"] == version), task
+
+    def test_apply_threshold_keeps_scores_at_or_above_and_drops_below(self):
+        scored = {("A", 1, 1): ("x::", 0.5), ("A", 2, 2): ("y::", 0.49), ("A", 3, 3): ("z::", 0.8)}
+        self.assertEqual(
+            ls_tasks.apply_threshold(scored, 0.5),
+            {("A", 1, 1): "x::", ("A", 2, 2): None, ("A", 3, 3): "z::"},
+        )
+
+    def test_apply_threshold_none_keeps_every_label(self):
+        scored = {("A", 1, 1): ("x::", 0.01)}
+        self.assertEqual(ls_tasks.apply_threshold(scored, None), {("A", 1, 1): "x::"})
+
+    def test_unclassified_point_stays_on_the_tab_grey_and_unlabelled(self):
+        v1, _ = self._layer("v1")
+        pt0 = [r for r in v1["result"] if r["id"] == "pt-0"]
+        self.assertEqual(len(pt0), 1)  # keypoint only, no taxonomy entry
+        self.assertEqual(pt0[0]["value"]["keypointlabels"], [UNLABELED_TOPLEVEL])
+        pt1 = [r for r in v1["result"] if r["id"] == "pt-1"]
+        self.assertEqual({r["type"] for r in pt1}, {"keypointlabels", "taxonomy"})
+
+    def test_beta_tab_is_thresholded_too(self):
+        beta, _ = self._layer(ls_tasks.BETA_MODEL_VERSION)
+        pt1 = [r for r in beta["result"] if r["id"] == "pt-1"]
+        self.assertEqual([r["type"] for r in pt1], ["keypointlabels"])
+
+    def test_comparison_reads_unclassified_for_a_dropped_point(self):
+        comp, _ = self._layer(COMPARISON_MODEL_VERSION)
+        text = next(r for r in comp["result"] if r["type"] == "textarea" and r["id"] == "pt-0")
+        self.assertIn(f"v1: {UNCLASSIFIED}", text["value"]["text"])
+
+    def test_original_points_record_none_for_a_dropped_point(self):
+        _, task = self._layer("v1")
+        self.assertIsNone(task["data"]["original_points"][0]["v1"])
+
+    def test_build_tasks_stamps_the_threshold(self):
+        tasks = ls_tasks.build_tasks(
+            self.points,
+            self.v1,
+            self.beta,
+            _label_path,
+            _toplevel,
+            _url,
+            _size,
+            score_threshold=0.5,
+        )
+        self.assertTrue(all(t["data"]["score_threshold"] == 0.5 for t in tasks))
 
 
 class SiteProvenanceTest(unittest.TestCase):

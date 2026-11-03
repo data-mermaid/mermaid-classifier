@@ -1,6 +1,10 @@
 import unittest
 
-from mermaid_classifier.model_review.comparison import COMPARISON_MODEL_VERSION, comparison_text
+from mermaid_classifier.model_review.comparison import (
+    COMPARISON_MODEL_VERSION,
+    UNCLASSIFIED,
+    comparison_text,
+)
 
 _PATHS = {
     "hc-branch::": "Hard coral :: Acroporidae :: Acropora :: Branching",
@@ -40,6 +44,12 @@ class ComparisonTextTest(unittest.TestCase):
         # marker never contradicts the two lines on screen.
         text = self._text([("ground-truth", "hc-branch::"), ("v1", "hc-branch-dup::")])
         self.assertTrue(text.splitlines()[1].endswith("— match"))
+
+    def test_unclassified_set_reads_unclassified_with_no_marker(self):
+        text = self._text([("ground-truth", "hc-branch::"), ("v1", None), ("Beta", "sand::")])
+        lines = text.splitlines()
+        self.assertEqual(lines[1], f"v1: {UNCLASSIFIED}")
+        self.assertTrue(lines[2].endswith("— differs"))
 
     def test_fine_label_is_the_full_path(self):
         text = self._text([("ground-truth", "hc-branch::")])

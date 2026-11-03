@@ -87,6 +87,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(image_set.beta_classifier, IMAGE_SET.beta_classifier)
         self.assertEqual(image_set.min_points, IMAGE_SET.min_points)
         self.assertEqual(image_set.sites, IMAGE_SET.sites)  # per-site layout is not a flag
+        self.assertEqual(image_set.score_threshold, IMAGE_SET.score_threshold)
+
+    def test_score_threshold_flag_overrides_the_image_set(self):
+        args = cli.build_parser().parse_args(["build-tasks", "--score-threshold", "0.7"])
+        self.assertEqual(cli.image_set_from_args(args).score_threshold, 0.7)
 
     def _image_set(self, name="model-review"):
         from mermaid_classifier.model_review.image_set import ImageSet, SiteSpec
