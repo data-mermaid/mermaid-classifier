@@ -87,6 +87,48 @@ class MermaidProjectLookupTest(unittest.TestCase):
             dataset.read_mermaid_data()
         return dataset
 
+    def _load(
+        self,
+        mermaid_df: pd.DataFrame,
+        lookup_df: pd.DataFrame,
+        lookup_allowed: int = 0,
+        missing_allowed: int = 0,
+        excluded_images: tuple[str, ...] = (),
+        included_labels: tuple[str, ...] = (),
+    ) -> TrainingDataset:
+        """Run the filtered-annotations load, where the unmatched check lives."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        mermaid_path = _write_parquet(tmp.name, "mermaid.parquet", mermaid_df)
+        lookup_path = _write_parquet(tmp.name, "lookup.parquet", lookup_df)
+        excluded_csv = included_csv = None
+        if excluded_images:
+            excluded_csv = str(Path(tmp.name) / "excluded.csv")
+            Path(excluded_csv).write_text("image_id\n" + "".join(f"{i}\n" for i in excluded_images))
+        if included_labels:
+            included_csv = str(Path(tmp.name) / "included.csv")
+            Path(included_csv).write_text(
+                "ba_id,gf_id\n" + "".join(f"{b},\n" for b in included_labels)
+            )
+        options = DatasetOptions(
+            include_mermaid=True,
+            mermaid_project_lookup_uri=lookup_path,
+            excluded_images_csv=excluded_csv,
+            included_labels_csv=included_csv,
+        )
+        with (
+            override_settings(
+                aws_anonymous="True",
+                mermaid_annotations_parquet_pattern=mermaid_path,
+                mermaid_project_lookup_percent_unmatched_allowed=lookup_allowed,
+                training_inputs_percent_missing_allowed=missing_allowed,
+            ),
+            mock.patch("mermaid_classifier.pyspacer.dataset.S3FileSystem"),
+        ):
+            dataset = TrainingDataset.filtered_annotations_only(options)
+        self.addCleanup(dataset.cleanup)
+        return dataset
+
     def _projects(self, dataset) -> dict[str, str]:
         return dict(
             dataset.duck_conn.execute("SELECT image_id, project_id FROM annotations").fetchall()
@@ -97,19 +139,19 @@ class MermaidProjectLookupTest(unittest.TestCase):
         self.assertEqual(self._projects(dataset), {"i1": "pA", "i2": "pB"})
 
     def test_unmatched_images_are_unknown_within_tolerance(self):
-        dataset = self._read(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), lookup_allowed=60)
+        dataset = self._load(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), lookup_allowed=60)
         self.assertEqual(self._projects(dataset), {"i1": "pA", "i2": "unknown"})
 
     def test_unmatched_over_tolerance_raises(self):
         with self.assertRaisesRegex(RuntimeError, "project lookup"):
-            self._read(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), lookup_allowed=10)
+            self._load(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), lookup_allowed=10)
 
     def test_single_unmatched_image_raises_despite_generous_missing_fv_tolerance(self):
         images = [f"i{n}" for n in range(10)]
         with self.assertRaisesRegex(
             RuntimeError, "Regenerate the lookup.*MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED"
         ):
-            self._read(
+            self._load(
                 _mermaid_df(images),
                 _lookup_df(dict.fromkeys(images[:-1], "pA")),
                 missing_allowed=10,
@@ -117,7 +159,7 @@ class MermaidProjectLookupTest(unittest.TestCase):
 
     def test_raising_lookup_tolerance_allows_single_unmatched_image(self):
         images = [f"i{n}" for n in range(10)]
-        dataset = self._read(
+        dataset = self._load(
             _mermaid_df(images),
             _lookup_df(dict.fromkeys(images[:-1], "pA")),
             lookup_allowed=10,
@@ -138,6 +180,42 @@ class MermaidProjectLookupTest(unittest.TestCase):
     def test_no_lookup_keeps_project_all(self):
         dataset = self._read(_mermaid_df(["i1", "i2"]), None)
         self.assertEqual(self._projects(dataset), {"i1": "all", "i2": "all"})
+
+    def test_read_keeps_unmatched_images_unknown_without_checking(self):
+        dataset = self._read(_mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}))
+        self.assertEqual(self._projects(dataset), {"i1": "pA", "i2": "unknown"})
+
+    def test_excluded_unmatched_image_does_not_raise(self):
+        dataset = self._load(
+            _mermaid_df(["i1", "i2"]), _lookup_df({"i1": "pA"}), excluded_images=("i2",)
+        )
+        self.assertEqual(self._projects(dataset), {"i1": "pA"})
+
+    def test_unmatched_image_that_is_not_excluded_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "project lookup"):
+            self._load(
+                _mermaid_df(["i1", "i2", "i3"]),
+                _lookup_df({"i1": "pA"}),
+                excluded_images=("i3",),
+            )
+
+    def test_unmatched_image_with_all_labels_filtered_out_does_not_raise(self):
+        mermaid = pd.concat(
+            [_mermaid_df(["i1"]), _mermaid_df(["i2"], ba_id="ba_b")], ignore_index=True
+        )
+        dataset = self._load(mermaid, _lookup_df({"i1": "pA"}), included_labels=("ba_a",))
+        self.assertEqual(self._projects(dataset), {"i1": "pA"})
+
+    def test_denominator_counts_only_surviving_images(self):
+        # 1 unmatched of 2 survivors is 50%; counting the excluded image too
+        # would read 1 of 3 and slip under a 40% tolerance.
+        with self.assertRaisesRegex(RuntimeError, r"\(1 of 2\)"):
+            self._load(
+                _mermaid_df(["i1", "i2", "i3"]),
+                _lookup_df({"i1": "pA", "i3": "pA"}),
+                lookup_allowed=40,
+                excluded_images=("i3",),
+            )
 
 
 def _seed_points(dataset, rows: list[dict[str, object]]) -> None:
