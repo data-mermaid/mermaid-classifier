@@ -10,6 +10,7 @@ Dataclass option containers and the Sites enum for the training pipeline.
 
 import dataclasses
 import enum
+from typing import Literal
 
 import pandas as pd
 
@@ -111,6 +112,39 @@ class DatasetOptions:
     - Applied independently of the label rollups and inclusion/exclusion
       filters above: a listed image is removed regardless of its BA+GF.
 
+    mermaid_project_lookup_uri
+
+    S3 URI (or local path) of a parquet mapping MERMAID image IDs to
+    projects, with columns image_id, project_id, project_name, site_id.
+    When set, MERMAID rows take that project_id (so a MERMAID project is
+    a group, like a CoralNet source); an image absent from the lookup gets
+    project_id 'unknown'. When unset, every MERMAID row has project_id 'all'.
+    - Too many unmatched images (more than
+      MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED percent, default 0,
+      independent of TRAINING_INPUTS_PERCENT_MISSING_ALLOWED) aborts the run, as
+      does an image that maps to more than one project.
+
+    holdout_groups_csv
+    holdout_fold
+
+    Local filepath of a CSV assigning groups to the held-out test set or
+    to cross-validation folds. A group is a (site, project_id) pair.
+    - If this file isn't specified, nothing is held out.
+    - Recognized columns:
+      site -- 'coralnet' or 'mermaid'.
+      group_id -- The CoralNet source ID, or the MERMAID project ID.
+      fold -- 'test', or a non-negative integer fold number.
+    - holdout_fold is 'test' (the default) or one of the fold numbers in
+      the CSV. Rows of groups in that fold are tagged is_holdout. When it
+      is a fold number, rows of the 'test' groups are tagged is_excluded
+      and dropped, so a CV run neither trains nor evaluates on them.
+
+    holdout_max_per_class
+
+    Caps each class's holdout rows (keeping whole images first, in seeded
+    md5 order) to bound the feature downloads for evaluation. None keeps
+    every holdout row. Has no effect when nothing is held out.
+
     ref_val_ratios
 
     Determines the ratios of training annotations that will go into
@@ -119,6 +153,19 @@ class DatasetOptions:
     means 5% into ref, 10% into val, and the rest (85%) into train.
     PySpacer has an explanation of the three sets here:
     https://github.com/coralnet/pyspacer?tab=readme-ov-file#train_classifier
+
+    split_mode
+
+    How the non-holdout annotations are split into train/ref/val.
+    - 'points' (the default): PySpacer's point-level stratified split, so
+      one image's points can land in different sets. PySpacer reads its
+      5,000-point ref cap (TRAINING_BATCH_LABEL_COUNT) at import, so ref
+      is the smaller of ref_val_ratios[0] x N and 5,000 points.
+    - 'images': each image goes whole to one set, stratified by class
+      (see mermaid_classifier.pyspacer.splitting). Classes in fewer than
+      3 images are dropped first. ref_val_ratios apply with no ref cap.
+      Seeded by subsample.seed, or 0 without a subsample.
+    Holdout rows never enter train/ref/val in either mode.
 
     subsample
 
@@ -160,7 +207,12 @@ class DatasetOptions:
     included_labels_csv: str | None = None
     excluded_labels_csv: str | None = None
     excluded_images_csv: str | None = None
+    mermaid_project_lookup_uri: str | None = None
+    holdout_groups_csv: str | None = None
+    holdout_fold: str = "test"
+    holdout_max_per_class: int | None = 3000
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
+    split_mode: Literal["points", "images"] = "points"
     # Optional per-class subsampling. None means use all annotations.
     # See mermaid_classifier.training.subsample for available strategies
     # and how to add new ones (e.g. effective-number, log-balanced).

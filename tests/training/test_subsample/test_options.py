@@ -33,6 +33,23 @@ class OptionsValidationTest(unittest.TestCase):
                 min_per_class=-1,
             )
 
+    def test_within_class_defaults_to_ordered_with_seed_zero(self):
+        options = SubsampleOptions(strategy="balanced", total_annotations=100)
+        self.assertEqual(options.within_class, "ordered")
+        self.assertEqual(options.seed, 0)
+
+    def test_unknown_within_class_rejected(self):
+        with self.assertRaisesRegex(ValueError, "within_class"):
+            SubsampleOptions(
+                strategy="balanced",
+                total_annotations=100,
+                within_class="random",  # pyright: ignore[reportArgumentType]
+            )
+
+    def test_negative_seed_rejected(self):
+        with self.assertRaisesRegex(ValueError, "seed"):
+            SubsampleOptions(strategy="balanced", total_annotations=100, seed=-1)
+
 
 class LogDictTest(unittest.TestCase):
     """to_log_dict is what TrainingRunner hands mlflow.log_params, so these
@@ -48,8 +65,20 @@ class LogDictTest(unittest.TestCase):
                 "subsample/strategy": "balanced",
                 "subsample/total_annotations": 1000,
                 "subsample/min_per_class": 10,
+                "subsample/within_class": "ordered",
+                "subsample/seed": 0,
             },
         )
+
+    def test_source_spread_and_seed_reach_the_logged_params(self):
+        options = SubsampleOptions(
+            strategy="balanced", total_annotations=1000, within_class="source_spread", seed=7
+        )
+
+        logged = options.to_log_dict()
+
+        self.assertEqual(logged["subsample/within_class"], "source_spread")
+        self.assertEqual(logged["subsample/seed"], 7)
 
 
 if __name__ == "__main__":

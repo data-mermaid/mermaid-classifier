@@ -29,6 +29,7 @@ The pipeline (``TrainingDataset._apply_subsample``) doesn't change.
 from __future__ import annotations
 
 import dataclasses
+from typing import Literal
 
 # Authoritative list of strategy names. Kept in this module so it can
 # be imported without touching the registry (avoids circular imports
@@ -38,6 +39,9 @@ SUBSAMPLE_STRATEGIES: tuple[str, ...] = (
     "stratified",
     "balanced",
 )
+
+# How rows are chosen within a class once its target count is known.
+WITHIN_CLASS_MODES: tuple[str, ...] = ("ordered", "source_spread")
 
 
 @dataclasses.dataclass
@@ -59,16 +63,27 @@ class SubsampleOptions:
                               default) lets a class drop out of the
                               subsample if its proportional share rounds
                               to 0.
+        within_class       -- how a class's target is filled. ``'ordered'``
+                              keeps the first rows by ``(site, project_id,
+                              image_id, row, col)``. ``'source_spread'``
+                              water-fills the target across the groups
+                              (site, project_id) holding the class, then
+                              takes whole images within each group in
+                              seeded-md5 order.
+        seed               -- salt for the ``source_spread`` image md5.
+                              Unused by ``'ordered'``.
 
     Determinism: the built-in allocators carry no random state.
     Determinism is a property of the SQL applied in
     TrainingDataset._apply_subsample (deterministic ORDER BY on a
-    primary-key tuple, not RANDOM()).
+    primary-key tuple or a seeded md5, not RANDOM()).
     """
 
     strategy: str = "stratified"
     total_annotations: int | None = None
     min_per_class: int = 0
+    within_class: Literal["ordered", "source_spread"] = "ordered"
+    seed: int = 0
 
     def __post_init__(self) -> None:
         if self.strategy not in SUBSAMPLE_STRATEGIES:
@@ -81,6 +96,12 @@ class SubsampleOptions:
             )
         if self.min_per_class < 0:
             raise ValueError(f"min_per_class must be >= 0, got {self.min_per_class!r}")
+        if self.within_class not in WITHIN_CLASS_MODES:
+            raise ValueError(
+                f"within_class must be one of {WITHIN_CLASS_MODES}, got {self.within_class!r}"
+            )
+        if self.seed < 0:
+            raise ValueError(f"seed must be >= 0, got {self.seed!r}")
 
         if self.strategy == "stratified" and self.total_annotations is None:
             raise ValueError("strategy='stratified' requires total_annotations")
@@ -100,4 +121,6 @@ class SubsampleOptions:
             "subsample/strategy": self.strategy,
             "subsample/total_annotations": self.total_annotations,
             "subsample/min_per_class": self.min_per_class,
+            "subsample/within_class": self.within_class,
+            "subsample/seed": self.seed,
         }

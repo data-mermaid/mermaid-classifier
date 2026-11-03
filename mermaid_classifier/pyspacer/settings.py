@@ -97,6 +97,9 @@ class Settings(BaseSettings):
 
     mlflow_tracking_server: str | None = None
     training_inputs_percent_missing_allowed: int = 0
+    # Separate from the missing-feature tolerance: an unmatched MERMAID image
+    # trains as project_id 'unknown' and can leak a held-out group's data.
+    mermaid_project_lookup_percent_unmatched_allowed: int = 0
     spacer_extractors_cache_dir: str | None = None
     # Override for training batch size. If None (default),
     # training_batch_size() auto-calculates at runtime. Typed as int so
@@ -149,11 +152,3 @@ def set_env_vars_for_packages():
             # Ensure the value's set in the OS environment
             # so that spacer or MLflow sees it.
             os.environ[env_var_name] = var_value
-
-    # Effectively disable PySpacer's ref set size cap.
-    # PySpacer's split_labels() caps the ref set via
-    # config.TRAINING_BATCH_LABEL_COUNT. With batch calibration in
-    # trainer.py, the ref set no longer needs to fit in memory at once,
-    # so we set this to a very large value to let ref_val_ratios alone
-    # determine the ref set size.
-    os.environ["SPACER_TRAINING_BATCH_LABEL_COUNT"] = str(2**31 - 1)
