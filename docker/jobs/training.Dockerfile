@@ -40,9 +40,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --extra training
 
 # Layer 2: install the project itself (non-editable).
+# --reinstall-package rebuilds mermaid-classifier from the copied source each
+# time. Its version is static, so uv would otherwise reuse a cached wheel from
+# the cache mount. It also refreshes the package's cache entry.
 COPY mermaid_classifier/ ./mermaid_classifier/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-editable --extra training
+    uv sync --frozen --no-editable --extra training --reinstall-package mermaid-classifier
 
 # Layer 3: entrypoint + SageMaker scripts.
 COPY scripts/sagemaker_train_entrypoint.py ./scripts/

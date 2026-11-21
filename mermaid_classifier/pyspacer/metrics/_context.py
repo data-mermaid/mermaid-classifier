@@ -4,7 +4,7 @@ import dataclasses
 import typing
 
 import numpy as np
-from spacer.data_classes import ValResults
+from spacer.data_classes import ImageLabels, ValResults
 
 if typing.TYPE_CHECKING:
     from mermaid_classifier.common.benthic_attributes import (
@@ -35,6 +35,15 @@ class MetricsContext:
     val_gt_labels: "list[typing.Any] | None" = None
     ba_to_top: "dict[str, str] | None" = None
     ba_paths: "dict[str, list[str]] | None" = None
+    # The split val_results was computed on; None means dataset.labels.val.
+    eval_labels: ImageLabels | None = None
+
+    def evaluated_labels(self) -> ImageLabels:
+        """The ImageLabels whose points val_results covers, in order."""
+        if self.eval_labels is not None:
+            return self.eval_labels
+        assert self.dataset is not None
+        return self.dataset.labels.val
 
     def validate(self):
         """Check that inputs are valid for metric computation.

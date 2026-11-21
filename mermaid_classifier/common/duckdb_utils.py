@@ -218,17 +218,20 @@ def duckdb_grouped_rows(
     duck_conn: duckdb.DuckDBPyConnection,
     duck_table_name: str,
     grouping_column_names: list[str],
+    extra_order_column_names: list[str] | None = None,
 ) -> typing.Generator[list[Series], None, None]:
     """
     Fetch rows from the given DuckDB table in groups, with each group
     consisting of all rows that have a particular set of values in the
     given columns.
+
+    `extra_order_column_names` orders the rows within each group.
     """
 
     # Ordering by a set of columns should mean that, for any set of values
     # for those columns, all the rows with that set of values are all
     # together - which is our goal here.
-    columns_str = ", ".join(grouping_column_names)
+    columns_str = ", ".join(grouping_column_names + (extra_order_column_names or []))
     rows = duck_conn.execute(f"SELECT * FROM {duck_table_name} ORDER BY {columns_str}")
 
     grouping_values = None
