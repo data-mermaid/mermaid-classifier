@@ -235,6 +235,7 @@ class TrainingDataset:
         """
         Populate the `annotations` table: read the CoralNet and MERMAID
         annotations, roll up and filter labels, drop excluded images,
+        check the MERMAID project-lookup tolerance on the surviving images,
         dedupe points, and tag holdout groups (is_holdout / is_excluded).
 
         Needs no feature-vector listing or download.
@@ -338,6 +339,11 @@ class TrainingDataset:
                 100.0 * ann_after_exclusion / max(ann_before, 1),
                 100.0 * img_after_exclusion / max(img_before, 1),
             )
+
+        # Only unmatched images that survive the filters can reach training
+        # or evaluation, so only those count against the tolerance.
+        if self.options.include_mermaid and self.options.mermaid_project_lookup_uri:
+            self._check_unmatched_mermaid_images()
 
         with self.section_profiling("Deduplicating points"):
             self._dedupe_points()
@@ -733,7 +739,7 @@ class TrainingDataset:
             params,
         )
         if lookup_uri:
-            self._check_unmatched_mermaid_images()
+            self._log_unmatched_mermaid_images("before filters")
 
         # Get project-level stats before applying any further filters.
         self.artifacts.mermaid_project_stats = self.compute_project_stats(
@@ -768,15 +774,30 @@ class TrainingDataset:
                 f" such as: {[r[0] for r in ambiguous]}"
             )
 
-    def _check_unmatched_mermaid_images(self) -> None:
-        """Log MERMAID images the lookup left as 'unknown'; raise if too many."""
+    def _count_unmatched_mermaid_images(self) -> tuple[int, int]:
+        """(MERMAID images with project_id 'unknown', distinct MERMAID images) in `annotations`."""
         unmatched, total = self.duck_conn.execute(
             "SELECT count(DISTINCT image_id) FILTER (WHERE project_id = 'unknown'),"
             " count(DISTINCT image_id)"
             f" FROM annotations WHERE site = '{Sites.MERMAID.value}'"
         ).fetchall()[0]
+        return unmatched, total
+
+    def _log_unmatched_mermaid_images(self, stage: str) -> None:
+        unmatched, total = self._count_unmatched_mermaid_images()
         logger.info(
-            "MERMAID project lookup left %s of %s image(s) unmatched (project_id 'unknown').",
+            "MERMAID project lookup left %s of %s image(s) unmatched (project_id 'unknown') %s.",
+            f"{unmatched:,}",
+            f"{total:,}",
+            stage,
+        )
+
+    def _check_unmatched_mermaid_images(self) -> None:
+        """Log MERMAID images the lookup left as 'unknown' after the filters; raise if too many."""
+        unmatched, total = self._count_unmatched_mermaid_images()
+        logger.info(
+            "MERMAID project lookup left %s of %s image(s) unmatched (project_id 'unknown')"
+            " after filters.",
             f"{unmatched:,}",
             f"{total:,}",
         )
