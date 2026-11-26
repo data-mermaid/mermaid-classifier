@@ -354,3 +354,11 @@ App's backing S3 bucket; the execution role's S3 grants cover this.
 If a run logs metrics/params successfully but fails on
 `log_artifact`, the artifact bucket isn't covered by the execution
 role's S3 policy -- escalate to the IaC owner.
+
+## Dataset bucket access
+
+Training reads pinned dataset versions and feature sets from the
+`mermaid-ic-datasets` S3 bucket. The execution role needs read access to
+that bucket. If a run fails with an access-denied error while it syncs a
+dataset, the role's S3 policy does not cover the bucket -- escalate to the
+IaC owner.

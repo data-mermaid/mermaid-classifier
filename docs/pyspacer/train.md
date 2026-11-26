@@ -36,7 +36,7 @@ dataset:
       manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
       features:
         family: efficientnet-v1
-        manifest_sha256: "<feature-set sha256>"
+        manifest_sha256: "c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e"
       labels: coralnet            # or: mermaid
       groups_csv: groups.csv      # optional; omit to train on every group
   # taxonomy:                      # required when any dataset has `labels: mermaid`
@@ -219,7 +219,7 @@ runner = MLflowTrainingRunner(
                 features=FeatureSetPin(
                     dataset=dataset,
                     family="efficientnet-v1",
-                    manifest_sha256="<feature-set sha256>",
+                    manifest_sha256="c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e",
                 ),
                 labels="coralnet",
                 groups_csv="labels/groups.csv",   # None trains on every group
