@@ -51,9 +51,8 @@ mlflow:
   # annotations_to_log: all  # Uncomment to log all annotations as an artifact.
 
 # Env vars applied BEFORE importing mermaid_classifier. Keep secrets
-# out of this file; commit only non-sensitive values. The launcher
-# overrides MLFLOW_TRACKING_SERVER from its --mlflow-tracking-uri
-# flag, so the value here is just a placeholder for local smoke runs.
+# out of this file; commit only non-sensitive values.
 env:
-  MLFLOW_TRACKING_SERVER: file:./mlruns
+  # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri
+  # (on SageMaker) or by .env (locally); do not override here.
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

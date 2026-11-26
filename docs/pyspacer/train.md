@@ -67,7 +67,7 @@ mlflow:
   # annotations_to_log: all        # log all annotations as an artifact (not just the val split)
 
 env:                               # applied before pyspacer is imported (so Settings() picks them up)
-  MLFLOW_TRACKING_SERVER: file:./mlruns
+  MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"   # never MLFLOW_TRACKING_SERVER: it would override the launcher's
 ```
 
 The full schema (every accepted key + validation) lives in
