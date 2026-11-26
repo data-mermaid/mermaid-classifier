@@ -59,7 +59,7 @@ class ClassifierTrainMainTest(unittest.TestCase):
                     "c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e", "ef" * 32
                 )
             )
-            for sibling in ("rollups.csv", "included_labels.csv", "groups.csv"):
+            for sibling in ("rollups.csv", "groups.csv"):
                 shutil.copy(EXAMPLE_CONFIG_DIR / sibling, config_dir / sibling)
             with (
                 patch.object(self.module, "_resolve_local_aws_credentials"),

@@ -25,7 +25,6 @@ dataset:
   feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
   label_rollup_spec_csv: rollups.csv
-  included_labels_csv: included_labels.csv
   ref_val_ratios: [0.1, 0.1]
   # Subsample. Strategies: 'stratified', 'balanced'.
   # Keep this section out (set to null) to disable subsampling entirely.
