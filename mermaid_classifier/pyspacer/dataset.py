@@ -7,6 +7,8 @@ feature coverage, and produces pyspacer-ready train/ref/val splits.
 """
 
 import functools
+import hashlib
+import io
 import os
 import re
 import tempfile
@@ -306,6 +308,18 @@ def feature_set_extractor(manifest: FeatureSetManifest) -> ExtractorSpec:
     return ExtractorSpec.from_dict({name: manifest.extractor.get(name) for name in fields})
 
 
+def _read_holdout_groups(path: str | None) -> tuple[HoldoutGroups, str | None]:
+    """The holdout spec at `path` and the sha256 of the bytes it was parsed from.
+
+    An unset path is an empty spec with no hash.
+    """
+    if not path:
+        return HoldoutGroups(StringIO("")), None
+    data = Path(path).read_bytes()
+    # TextIOWrapper decodes as open() does, so the spec matches a direct read.
+    return HoldoutGroups(io.TextIOWrapper(io.BytesIO(data))), hashlib.sha256(data).hexdigest()
+
+
 def _holdout_groups_unselected(
     holdout_groups: HoldoutGroups,
     options: DatasetOptions,
@@ -449,7 +463,11 @@ class TrainingDataset:
             options.excluded_images_csv, ImageExclusionFilter
         )
 
-        self.holdout_groups = _load_csv_spec(options.holdout_groups_csv, HoldoutGroups)
+        # The hash is of the bytes parsed here, so lineage describes what this run read.
+        self.holdout_groups, self.holdout_groups_sha256 = _read_holdout_groups(
+            options.holdout_groups_csv
+        )
+        self.mermaid_project_lookup_sha256: str | None = None
         # Fail on a bad holdout spec before any data is read.
         self.holdout_groups.validate_holdout_fold(options.holdout_fold)
         self._check_holdout_groups_can_match()
@@ -964,7 +982,11 @@ class TrainingDataset:
 
         lookup_uri = self.options.mermaid_project_lookup_uri
         if lookup_uri and any(source.labels == "mermaid" for source in self.options.datasets):
-            self._apply_mermaid_project_lookup(self._local_lookup_path(client, lookup_uri))
+            lookup_path = self._local_lookup_path(client, lookup_uri)
+            self.mermaid_project_lookup_sha256 = hashlib.sha256(
+                Path(lookup_path).read_bytes()
+            ).hexdigest()
+            self._apply_mermaid_project_lookup(lookup_path)
 
         # Project-level stats before any filtering, unmapped labels included.
         self.artifacts.coralnet_project_stats = self.compute_project_stats(

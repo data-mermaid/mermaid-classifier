@@ -20,8 +20,6 @@ from typing import Any, Literal
 import pandas as pd
 from segdata_spec.manifest import FeatureSetPin, Pin
 
-from mermaid_classifier.common.s3_utils import sha256_of_uri
-from mermaid_classifier.pyspacer.label_specs import HoldoutGroups
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.training.sample_weighting import SampleWeightingOptions
 from mermaid_classifier.training.subsample import SubsampleOptions
@@ -279,12 +277,19 @@ def training_data_lineage(
     options: DatasetOptions,
     groups: Mapping[str, frozenset[str] | None],
     coralnet_mapping: pd.DataFrame | None = None,
+    *,
+    lookup_sha256: str | None = None,
+    holdout_sha256: str | None = None,
+    holdout_n: int = 0,
 ) -> dict[str, Any]:
     """The dataset, group-selection, feature-set and taxonomy pins a run trains on.
 
     `groups` maps each dataset name to its resolved group selection.
     `coralnet_mapping` is the label mapping the run used; it is recorded only
     when a dataset has `labels == "coralnet"`.
+    `lookup_sha256` and `holdout_sha256` are the sha256 of the lookup and holdout
+    CSV bytes the run read (`holdout_n` is the CSV's group count); each block is
+    recorded only when its file was read.
     """
     taxonomy = options.taxonomy
     lineage: dict[str, Any] = {
@@ -315,20 +320,15 @@ def training_data_lineage(
     ):
         lineage["coralnet_label_mapping"] = mapping_lineage(coralnet_mapping)
     lookup_uri = options.mermaid_project_lookup_uri
-    if lookup_uri:
-        lineage["mermaid_project_lookup"] = {"uri": lookup_uri, "sha256": sha256_of_uri(lookup_uri)}
-    if options.holdout_groups_csv:
-        lineage["holdout_groups"] = _holdout_groups_lineage(
-            options.holdout_groups_csv, options.holdout_fold
-        )
+    if lookup_uri and lookup_sha256 is not None:
+        lineage["mermaid_project_lookup"] = {"uri": lookup_uri, "sha256": lookup_sha256}
+    if options.holdout_groups_csv and holdout_sha256 is not None:
+        lineage["holdout_groups"] = {
+            "sha256": holdout_sha256,
+            "n": holdout_n,
+            "fold": options.holdout_fold,
+        }
     return lineage
-
-
-def _holdout_groups_lineage(path: str, fold: str) -> dict[str, Any]:
-    """Identify a holdout CSV by the sha256 of its bytes, its group count and the held-out fold."""
-    with open(path) as csv_file:
-        n_groups = len(HoldoutGroups(csv_file).group_folds)
-    return {"sha256": sha256_of_uri(path), "n": n_groups, "fold": fold}
 
 
 def lineage_params(lineage: dict[str, Any]) -> dict[str, str]:

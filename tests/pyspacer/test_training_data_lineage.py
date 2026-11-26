@@ -2,10 +2,7 @@
 
 import dataclasses
 import hashlib
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
 
 import pandas as pd
 from segdata_spec.manifest import FeatureSetPin, Pin
@@ -164,45 +161,35 @@ class CoralNetMappingLineageTest(unittest.TestCase):
         self.assertEqual(params["coralnet_label_mapping/n"], "2")
 
 
-# sha256 of each fixture file's bytes, hand-computed with `shasum -a 256`.
-LOOKUP_BYTES = b"lookup parquet bytes"
-LOOKUP_SHA256 = "fb2997bdcafedbb64070f9e564ef93450cba64fb418879aa1f55487ebfe6c9af"
-HOLDOUT_CSV = "site,group_id,fold\ncoralnet,7,test\nmermaid,P1,0\n"
-HOLDOUT_SHA256 = "8636d2978221810fccfed347edb4806ba281ec7b136b40ba1ead59de5dcca34a"
+LOOKUP_SHA256 = "1" * 64
+HOLDOUT_SHA256 = "2" * 64
 
 
 class HoldoutLineageTest(unittest.TestCase):
-    """The lookup and holdout CSV a run reads are recorded by content hash."""
+    """The lookup and holdout hashes a run read are recorded and flattened."""
 
     def test_lookup_and_holdout_are_recorded_and_flattened(self):
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        lookup = tmp / "lookup.parquet"
-        lookup.write_bytes(LOOKUP_BYTES)
-        holdout = tmp / "holdout_groups.csv"
-        holdout.write_text(HOLDOUT_CSV)
         options = dataclasses.replace(
             OPTIONS,
-            mermaid_project_lookup_uri=str(lookup),
-            holdout_groups_csv=str(holdout),
+            mermaid_project_lookup_uri="s3://bucket/lookup.parquet",
+            holdout_groups_csv="/configs/x/holdout_groups.csv",
             holdout_fold="0",
         )
 
-        lineage = training_data_lineage(options, GROUPS)
+        lineage = training_data_lineage(
+            options, GROUPS, lookup_sha256=LOOKUP_SHA256, holdout_sha256=HOLDOUT_SHA256, holdout_n=2
+        )
         params = lineage_params(lineage)
 
         self.assertEqual(
-            lineage["mermaid_project_lookup"], {"uri": str(lookup), "sha256": LOOKUP_SHA256}
+            lineage["mermaid_project_lookup"],
+            {"uri": "s3://bucket/lookup.parquet", "sha256": LOOKUP_SHA256},
         )
         self.assertEqual(lineage["holdout_groups"], {"sha256": HOLDOUT_SHA256, "n": 2, "fold": "0"})
         self.assertEqual(
+            {k: v for k, v in params.items() if not k.startswith(("dataset/", "taxonomy/"))},
             {
-                key: value
-                for key, value in params.items()
-                if not key.startswith(("dataset/", "taxonomy/"))
-            },
-            {
-                "mermaid_project_lookup/uri": str(lookup),
+                "mermaid_project_lookup/uri": "s3://bucket/lookup.parquet",
                 "mermaid_project_lookup/sha256": LOOKUP_SHA256,
                 "holdout_groups/sha256": HOLDOUT_SHA256,
                 "holdout_groups/n": "2",

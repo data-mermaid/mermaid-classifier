@@ -519,7 +519,14 @@ class MLflowTrainingRunner(TrainingRunner):
         groups = self.dataset.groups
         # Set by read_datasets only when a coralnet dataset is present.
         mapping = getattr(self.dataset.artifacts, "coralnet_label_mapping", None)
-        training_data = training_data_lineage(self.dataset_options, groups, mapping)
+        training_data = training_data_lineage(
+            self.dataset_options,
+            groups,
+            mapping,
+            lookup_sha256=self.dataset.mermaid_project_lookup_sha256,
+            holdout_sha256=self.dataset.holdout_groups_sha256,
+            holdout_n=len(self.dataset.holdout_groups.group_folds),
+        )
         mlflow.log_params(lineage_params(training_data))
         for name, selection in groups.items():
             if selection is not None:

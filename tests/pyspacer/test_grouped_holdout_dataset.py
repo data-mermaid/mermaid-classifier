@@ -359,6 +359,40 @@ class HoldoutTaggingInitTest(_Harness):
         self.assertNotIn("is_excluded", dataset.get_annotations("all").columns)
 
 
+class ReadTimeHashesTest(_Harness):
+    """The lookup and holdout hashes describe the bytes read, not the files' later state."""
+
+    def test_hashes_are_of_the_bytes_read_even_after_the_files_change(self):
+        pin, taxonomy = self.publish_mermaid([("m1", 1, 1, 1), ("m2", 1, 1, 1)])
+        lookup = self.lookup([("m1", "P1"), ("m2", "P2")])
+        lookup_sha256 = hashlib.sha256(Path(lookup).read_bytes()).hexdigest()
+        holdout = self.write("holdout.csv", "site,group_id,fold\nmermaid,P1,test\n")
+        options = DatasetOptions(
+            datasets=[_unsynced(pin, "mermaid")],
+            taxonomy=taxonomy,
+            mermaid_project_lookup_uri=lookup,
+            holdout_groups_csv=holdout,
+        )
+        dataset = load_training_dataset(
+            self.fake,
+            options,
+            CORALNET_MAPPING,
+            filtered_only=True,
+            feature_cache_dir=str(self.tmp / "cache"),
+        )
+        self.addCleanup(dataset.cleanup)
+
+        Path(holdout).write_text("site,group_id,fold\nmermaid,P2,test\n")
+        write_project_lookup(lookup, [("m1", "P9")])
+
+        # sha256 of b"site,group_id,fold\nmermaid,P1,test\n", hand-computed.
+        self.assertEqual(
+            dataset.holdout_groups_sha256,
+            "a7c864ec103963d620ca389108cf3143a849fb7d2ae84e38da0a6d55a0c42020",
+        )
+        self.assertEqual(dataset.mermaid_project_lookup_sha256, lookup_sha256)
+
+
 class CoralNetHoldoutTest(_Harness):
     """CoralNet holdout groups: the groups_csv cross-check and the cap before sync."""
 
