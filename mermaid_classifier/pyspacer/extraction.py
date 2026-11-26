@@ -23,9 +23,6 @@ if TYPE_CHECKING:
 
     from mermaid_classifier.pyspacer.inference import ExtractorSpec
 
-# Written at the root of a feature-vector prefix by the job that produced it.
-SIDECAR_FILENAME = "_extractor_spec.json"
-
 
 def weights_data_location(uri: str) -> DataLocation:
     """Parse an s3://bucket/key URI or filesystem path into a DataLocation."""

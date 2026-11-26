@@ -35,8 +35,7 @@ uv run python scripts/launch_training.py             # submit a TrainingJob
 uv run python scripts/launch_processing.py           # submit ProcessingJob(s)
 #   scripts/sagemaker_train_entrypoint.py runs inside the container: YAML -> MLflowTrainingRunner
 
-# CoralNet data preparation:
-uv run python scripts/build_coralnet_manifest.py     # ETL parquets -> raw-image manifest parquet
+# Feature and reference preparation:
 uv run python scripts/build_feature_set.py           # pyspacer features for a pinned dataset version -> feature family
 uv run python scripts/extract_reference_features.py  # stack .fv files into a reference matrix
 
@@ -99,17 +98,27 @@ If you bump sklearn, you must re-prove parity and update the pin + constant toge
 (`runner.py`). Flow: resolve one `ExtractorSpec` across every feature source
 (`resolve_extractor_spec`; sources that disagree stop the run, because a head
 fitted across two feature spaces is wrong in a way no later gate detects) →
-load the CoralNet manifest parquet (built by `scripts/build_coralnet_manifest.py`)
-+ MERMAID Parquet via DuckDB from S3 → map CoralNet label IDs to MERMAID BA+GF
-(`CoralNetMermaidMapping`) → filter/rollup (`LabelFilter`, `LabelRollupSpec`,
+sync the pinned dataset tables and taxonomy from `mermaid-ic-datasets` (`segdata-spec`
+`sync_tables`; `config.datasets:` entries, `taxonomy:` pin) → select each dataset's
+`groups_csv` groups → map labels to MERMAID BA+GF (`labels: coralnet` through
+`CoralNetMermaidMapping`; `labels: mermaid` from BA ids plus growth-form names
+resolved via the taxonomy pin) → filter/rollup (`LabelFilter`, `LabelRollupSpec`,
 `ImageExclusionFilter`, all `CsvSpec` subclasses in `label_specs.py`) →
-validate `.fv` feature vectors exist on S3 →
+`sync_feature_set` the pinned feature sets into the run's feature cache (no bucket
+listing; threads = `settings.download_max_workers`); images a feature set does not
+index count against `TRAINING_INPUTS_PERCENT_MISSING_ALLOWED` →
 train/ref/val split via PySpacer's `preprocess_labels` → train via
 `MermaidTrainer` (`trainer.py`, a PySpacer `ClassifierTrainer` subclass doing
 batched calibration + per-epoch MLflow callbacks; ref and train data are never
 both in memory) → log model, metrics, confusion matrices to MLflow. The
 `DatasetOptions` / `TrainingOptions` / `MLflowOptions` dataclasses live in
-`options.py`; cross-cutting helpers (`section_profiling`,
+`options.py`. Lineage (dataset, feature-set and taxonomy pins; group-selection sha256
+and count) goes to MLflow params (`dataset/<name>/...`, `taxonomy/<name>/...`), to
+`groups/<name>.csv` artifacts, and to `model.json` under `training_data`. For runs with
+any `labels: coralnet` dataset, lineage also holds `coralnet_label_mapping: {sha256, n}`, a
+fingerprint of the live CoralNet→MERMAID mapping the run used (`mapping_lineage` in
+`options.py`), logged to MLflow before training starts (`MLflowTrainingRunner.log_dataset_artifacts`).
+Cross-cutting helpers (`section_profiling`,
 `download_features_parallel`) in `_pipeline_utils.py`.
 
 ### Pluggable strategies (`mermaid_classifier/training/`)
@@ -177,14 +186,13 @@ break the resulting cycle — more machinery than the separation buys.
   family never mixes feature spaces; it skips existing files and puts with
   `If-None-Match: *` + CRC64NVME. It publishes no index: `segdata features attach`
   (segdata-etl) adopts the files and publishes the feature-set index. Training does
-  not read these families yet; it still reads `CORALNET_TRAIN_DATA_BUCKET`.
+  read these families through `sync_feature_set`, pinned by the config's
+  `features: {family, manifest_sha256}`.
 - The features image is Python 3.12 + cu128 torch (`uv sync --frozen --extra training
   --extra cuda --no-group cpu`). Every other sync gets CPU torch through the default
   `cpu` dependency group; `cuda` and `cpu` conflict, so never sync both.
 - `shard.items_from` in a processing run YAML is optional. Without it worker `i` gets
   `<per_worker_arg> i/<workers>` (for `--shard i/n`).
-- `mermaid_classifier/coralnet/manifest.py` (+ `scripts/build_coralnet_manifest.py`)
-  builds the raw-image CoralNet manifest Parquet that dataset loading reads from S3.
 - `pyspacer/swap_monitor.py`, `pyspacer/mlflow_model.py`, `pyspacer/annotation.py` and
   `common/plots.py` support the above; none is an entry point.
 
@@ -202,8 +210,8 @@ break the resulting cycle — more machinery than the separation buys.
   in CI, having executed nothing. `tests/test_suite_layout.py` fails if one is
   missing.
 - **Shared fixtures live in `tests/support/`** — `paths` (repo root, and
-  putting `scripts/` on `sys.path`), `settings`, `dataset`, `calibrated_model`,
-  `coralnet_tables`. The rule is scope: a fixture used inside one test package
+  putting `scripts/` on `sys.path`), `settings`, `dataset`, `calibrated_model`.
+  The rule is scope: a fixture used inside one test package
   stays there (`pyspacer/metrics_test_helpers.py`, `region_eval/fixtures.py`),
   and one crossing packages goes in `support/`. No test module imports from
   another test module.
@@ -224,7 +232,7 @@ break the resulting cycle — more machinery than the separation buys.
   (`Hard coral::`). Tests assert this.
 - **Settings**: pydantic `Settings` reads an `.env` from the cwd; names are
   lowercase in code, UPPERCASE in `.env`. See `.env.example` (repo root) for the
-  full set (`CORALNET_TRAIN_DATA_BUCKET`, `WEIGHTS_LOCATION`, `AWS_ANONYMOUS`,
+  full set (`WEIGHTS_LOCATION`, `AWS_ANONYMOUS`,
   `MLFLOW_TRACKING_SERVER`, `SPACER_BATCH_SIZE`, …). `SPACER_BATCH_SIZE` is
   auto-derived from available RAM when unset.
 - **Test isolation**: `support.settings.override_settings()` /
@@ -233,10 +241,7 @@ break the resulting cycle — more machinery than the separation buys.
   test in the process); `support.dataset.NoInitDataset` bypasses the
   S3/API-hitting `TrainingDataset.__init__`;
   `CoralNetMermaidMapping._download_mapping` is mocked. The suite makes no
-  outbound network connections, except DuckDB's `httpfs` extension install
-  fallback (`dataset.py`'s `duck_conn`, `build_coralnet_manifest.py`'s
-  `_configure_duckdb_s3`) when the extension isn't already installed locally —
-  anything new that would must be stubbed.
+  outbound network connections; anything new that would must be stubbed.
 - **A training config must name its extractor.** `dataset.feature_extractor_weights`
   is required by `DatasetConfig`, so a typo or omission fails at config load rather
   than mid-run. It replaced an inert `env: WEIGHTS_LOCATION` line that nothing on
@@ -244,13 +249,10 @@ break the resulting cycle — more machinery than the separation buys.
   `build_feature_set.py` and `annotation.py`.
 - **Config dirs are repo-root-relative**: a committed training config is a
   `sagemaker/configs/<name>/` dir (`training_config.yaml` plus whichever of
-  `rollups.csv` / `included_labels.csv` that run needs — the siblings are
-  optional). Some dirs also keep the `sources.csv` fed to
-  `scripts/build_coralnet_manifest.py --sources-csv` when the run's
-  `dataset.coralnet_manifest_uri` was built — provenance for the manifest, not
-  something training reads; `coralnet_all_plus_mermaid/` carries no
-  `sources.csv` because its manifest was built with no `--sources-csv` /
-  `--source-ids` (all available CoralNet sources). Scripts run from the
+  `rollups.csv` / `included_labels.csv` / `groups.csv` that run needs — the siblings
+  are optional). `groups.csv` lists one dataset group per line (CoralNet: `s<id>`)
+  and is named by a `datasets:` entry's `groups_csv`; an entry without it trains on
+  every group of its version (`coralnet_all_plus_mermaid/`). Scripts run from the
   repo root; both `classifier_train.py` (local) and the SageMaker launcher load
   a config by repo-root-relative `--config-dir` and share that one
   `training_config.yaml` (single source of truth — no recipe duplication).

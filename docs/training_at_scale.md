@@ -179,8 +179,8 @@ Edit:
 - `sagemaker/runs/my-run.yaml` to adjust the SageMaker shape
   (`job.image`, `job.instance_type`, `job.max_runtime_hours`, etc.).
 - `sagemaker/configs/my-run/training_config.yaml` to point at your
-  CoralNet manifest (`dataset.coralnet_manifest_uri`, built ahead of time by
-  `scripts/build_coralnet_manifest.py`) and your rollups / included-labels
+  pinned dataset versions (`dataset.datasets`, plus `dataset.taxonomy` for
+  `labels: mermaid`), their `groups.csv`, and your rollups / included-labels
   CSVs (the CSV paths are resolved as siblings of the YAML, so just
   `rollups.csv`, not `/abs/path/rollups.csv`). Replace the placeholder CSVs
   with the real ones for your experiment.
@@ -354,3 +354,11 @@ App's backing S3 bucket; the execution role's S3 grants cover this.
 If a run logs metrics/params successfully but fails on
 `log_artifact`, the artifact bucket isn't covered by the execution
 role's S3 policy -- escalate to the IaC owner.
+
+## Dataset bucket access
+
+Training reads pinned dataset versions and feature sets from the
+`mermaid-ic-datasets` S3 bucket. The execution role needs read access to
+that bucket. If a run fails with an access-denied error while it syncs a
+dataset, the role's S3 policy does not cover the bucket -- escalate to the
+IaC owner.

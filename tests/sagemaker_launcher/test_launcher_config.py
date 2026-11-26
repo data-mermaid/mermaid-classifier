@@ -103,7 +103,7 @@ class ParseRunConfigTest(unittest.TestCase):
                     "volume_gb": 1,
                     "max_runtime_hours": 1,
                 },
-                "dataset": {"include_mermaid": False},
+                "dataset": {"datasets": []},
                 "mlflow": {"experiment_name": "foo"},
             }
         )

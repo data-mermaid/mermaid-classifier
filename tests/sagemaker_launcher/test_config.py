@@ -14,14 +14,23 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import yaml
 from pydantic import ValidationError
+from segdata_spec.manifest import FeatureSetPin, Pin
 
 from mermaid_classifier.sagemaker.config import TrainingRunConfig
 
 MINIMAL_YAML = textwrap.dedent("""
     dataset:
-      include_mermaid: true
-      coralnet_manifest_uri: s3://bucket/coralnet_manifest.parquet
+      datasets:
+        - name: coralnet-raw
+          version: 20261124-5ab21b3
+          manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+          features:
+            family: efficientnet-v1
+            manifest_sha256: abababababababababababababababababababababababababababababababab
+          labels: coralnet
+          groups_csv: groups.csv
       feature_extractor_weights: s3://bucket/efficientnet.pt
       label_rollup_spec_csv: rollups.csv
       included_labels_csv: included_labels.csv
@@ -130,7 +139,18 @@ class BuildOptionsTest(unittest.TestCase):
         self.assertIsInstance(dataset, DatasetOptions)
         self.assertIsInstance(training, TrainingOptions)
         self.assertIsInstance(mlflow, MLflowOptions)
-        self.assertEqual(dataset.coralnet_manifest_uri, "s3://bucket/coralnet_manifest.parquet")
+        [source] = dataset.datasets
+        self.assertEqual(
+            source.pin,
+            Pin(
+                name="coralnet-raw",
+                version="20261124-5ab21b3",
+                manifest_sha256="b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b",
+            ),
+        )
+        self.assertEqual(source.labels, "coralnet")
+        self.assertEqual(source.groups_csv, str(tmp / "groups.csv"))
+        self.assertIsNone(dataset.taxonomy)
         # The CSVs the YAML names must reach DatasetOptions as resolved paths;
         # dropping them silently trains against every label.
         self.assertEqual(dataset.label_rollup_spec_csv, str(tmp / "rollups.csv"))
@@ -200,6 +220,100 @@ class StrictSchemaTest(unittest.TestCase):
                 TrainingRunConfig.from_yaml_path(path)
 
 
+def _load_dict(raw: dict) -> TrainingRunConfig:
+    with TemporaryDirectory() as td:
+        return TrainingRunConfig.from_yaml_path(_write(Path(td), yaml.dump(raw)))
+
+
+class DatasetPinsTest(unittest.TestCase):
+    """The `datasets:` list is hand-edited, so a malformed pin must fail at
+    config load, before a SageMaker job spends anything reaching S3."""
+
+    def test_the_feature_set_pin_carries_exactly_its_entrys_dataset_pin(self):
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), MINIMAL_YAML)
+            config = TrainingRunConfig.from_yaml_path(path)
+            dataset, _training, _mlflow = config.build_options(config_dir=Path(td))
+        [source] = dataset.datasets
+        self.assertEqual(
+            source.features,
+            FeatureSetPin(
+                dataset=Pin(
+                    name="coralnet-raw",
+                    version="20261124-5ab21b3",
+                    manifest_sha256=(
+                        "b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b"
+                    ),
+                ),
+                family="efficientnet-v1",
+                manifest_sha256="ab" * 32,
+            ),
+        )
+
+    def test_a_mermaid_entry_without_a_taxonomy_pin_is_rejected(self):
+        base = yaml.safe_load(MINIMAL_YAML)
+        base["dataset"]["datasets"][0]["labels"] = "mermaid"
+        with self.assertRaisesRegex(ValidationError, "taxonomy"):
+            _load_dict(base)
+
+    def test_a_mermaid_entry_with_a_taxonomy_pin_builds_the_taxonomy_pin(self):
+        base = yaml.safe_load(MINIMAL_YAML)
+        base["dataset"]["datasets"][0]["labels"] = "mermaid"
+        base["dataset"]["taxonomy"] = {"version": "20261124-e6abfad", "manifest_sha256": "cd" * 32}
+        with TemporaryDirectory() as td:
+            path = _write(Path(td), yaml.dump(base))
+            config = TrainingRunConfig.from_yaml_path(path)
+            dataset, _training, _mlflow = config.build_options(config_dir=Path(td))
+        self.assertEqual(
+            dataset.taxonomy,
+            Pin(name="mermaid-benthic", version="20261124-e6abfad", manifest_sha256="cd" * 32),
+        )
+
+    def test_two_entries_of_one_labels_kind_are_rejected_naming_kind_and_datasets(self):
+        for kind, first, second in (
+            ("mermaid", "mermaid-a", "mermaid-b"),
+            ("coralnet", "coralnet-a", "coralnet-b"),
+        ):
+            base = yaml.safe_load(MINIMAL_YAML)
+            base["dataset"]["taxonomy"] = {
+                "version": "20261124-e6abfad",
+                "manifest_sha256": "cd" * 32,
+            }
+            entry = base["dataset"]["datasets"][0]
+            entry["labels"] = kind
+            entry["name"] = first
+            base["dataset"]["datasets"].append({**entry, "name": second})
+            with self.subTest(kind=kind):
+                with self.assertRaises(ValidationError) as ctx:
+                    _load_dict(base)
+                message = str(ctx.exception)
+                self.assertIn(f"`labels: {kind}`", message)
+                self.assertIn(first, message)
+                self.assertIn(second, message)
+
+    def test_a_non_hex_sha_is_rejected_naming_its_field(self):
+        cases = {
+            "features.manifest_sha256": ("features", "not-a-sha"),
+            "datasets.0.manifest_sha256": (None, "B" * 64),
+        }
+        for field, (nested, value) in cases.items():
+            base = yaml.safe_load(MINIMAL_YAML)
+            entry = base["dataset"]["datasets"][0]
+            (entry[nested] if nested else entry)["manifest_sha256"] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValidationError, field):
+                _load_dict(base)
+
+    def test_retired_dataset_keys_are_rejected(self):
+        for key, value in (
+            ("coralnet_manifest_uri", "s3://bucket/m.parquet"),
+            ("include_mermaid", True),
+        ):
+            base = yaml.safe_load(MINIMAL_YAML)
+            base["dataset"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValidationError, key):
+                _load_dict(base)
+
+
 class ExampleYamlTest(unittest.TestCase):
     def test_committed_example_loads(self):
         # Resolve relative to the repo root (the tests/ dir is one
@@ -210,8 +324,7 @@ class ExampleYamlTest(unittest.TestCase):
             example.is_file(),
             f"Example YAML not found at {example}",
         )
-        config = TrainingRunConfig.from_yaml_path(example)
-        self.assertIsNotNone(config.dataset.subsample)
+        TrainingRunConfig.from_yaml_path(example)
 
 
 if __name__ == "__main__":

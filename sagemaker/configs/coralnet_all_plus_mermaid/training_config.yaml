@@ -1,21 +1,35 @@
-# Training run: ALL CoralNet sources/images/annotations available in the
-# 20260623_nogit ETL outputs (built with no source subset), PLUS MERMAID data.
+# Training run: every CoralNet source in the pinned coralnet-raw version,
+# PLUS the pinned MERMAID version.
 #
 # Dataset/label/sampling settings match coralnet_top108_full verbatim EXCEPT
-# include_mermaid=true and the all-sources manifest URI. included_labels.csv
+# the MERMAID dataset entry and the absent groups_csv. included_labels.csv
 # and rollups.csv are verbatim copies from coralnet_top108_full/ (top-108
 # benthic-attribute hierarchy).
 #
-# NOTE: training reads feature vectors from 2605-coralnet-public-sources, so
-# every source in the manifest must have its featurevectors present.
-# TRAINING_INPUTS_PERCENT_MISSING_ALLOWED="5" tolerates a 5% gap; sources whose
-# feature extraction has not completed will count against that budget.
+# NOTE: images the feature sets do not index count against
+# TRAINING_INPUTS_PERCENT_MISSING_ALLOWED below.
 
 dataset:
-  include_mermaid: true
-  # Verbatim S3 URI of the all-sources manifest parquet
-  # (scripts/build_coralnet_manifest.py run with no --sources-csv/--source-ids).
-  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/all/coralnet_classifier_manifest_all.parquet
+  # Every CoralNet source (no groups_csv) plus every MERMAID image.
+  datasets:
+    - name: coralnet-raw
+      version: 20261124-5ab21b3
+      manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+      features:
+        family: efficientnet-v1
+        manifest_sha256: c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e
+      labels: coralnet
+    - name: mermaid
+      version: 20261124-cfc389d
+      manifest_sha256: f7a1495475bcf0feeedfe91230e376233a41a00d22c57209eac8142865b049a8
+      features:
+        family: efficientnet-v1
+        manifest_sha256: f3ca2077a54e4b811877425fd783a6fd14dbc7dd66671da886a9a5bbadc5ac97
+      labels: mermaid
+  # Resolves the MERMAID dataset's growth-form names to ids.
+  taxonomy:
+    version: 20261124-e6abfad
+    manifest_sha256: fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43
   # The EfficientNet that produced this run's feature vectors.
   feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
@@ -48,8 +62,6 @@ mlflow:
 env:
   # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
   # do not override here.
-  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
-  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
   # The measured upstream gap is ~7.3% of distinct CoralNet feature vectors
   # (raw images absent upstream — unfixable). The threshold is measured on
   # distinct feature vectors, so "5" would abort the run; "10" tolerates the

@@ -515,18 +515,20 @@ class IncludedLabelCountTests(_GenerateConfigTestCase):
         self.assertEqual(included_ba, EXPECTED_INCLUDED_BA_UUIDS)
 
 
-class SourcesPassthroughTests(_GenerateConfigTestCase):
-    def test_sources_passthrough_id_column(self):
-        self.run_main()
-        ids = [r["id"] for r in self.read_csv_rows("sources.csv")]
-        self.assertEqual(ids, ["10", "20", "30"])
+class GroupsOutputTests(_GenerateConfigTestCase):
+    """groups.csv is what a `datasets:` entry's groups_csv reads: no header,
+    one CoralNet group `s<id>` per line."""
 
-    def test_sources_passthrough_source_id_column(self):
+    def test_groups_from_the_id_column(self):
+        self.run_main()
+        self.assertEqual((self.output_dir / "groups.csv").read_text(), "s10\ns20\ns30\n")
+        self.assertFalse((self.output_dir / "sources.csv").exists())
+
+    def test_groups_from_the_source_id_column(self):
         alt = self.tmp / "sources_alt.csv"
         _write_sources_csv(alt, [42, 99], column="Source ID")
         self.run_main(sources_csv=alt)
-        ids = [r["id"] for r in self.read_csv_rows("sources.csv")]
-        self.assertEqual(ids, ["42", "99"])
+        self.assertEqual((self.output_dir / "groups.csv").read_text(), "s42\ns99\n")
 
 
 class ValidationTests(_GenerateConfigTestCase):
@@ -540,11 +542,10 @@ class ValidationTests(_GenerateConfigTestCase):
         with self.assertRaises(ValueError):
             gtc.validate_outputs(self.output_dir)
 
-    def test_sources_csv_missing_id_column_rejected(self):
+    def test_a_groups_line_that_is_not_a_coralnet_group_is_rejected(self):
         self.run_main(extra_args=["--skip-validation"])
-        sources_path = self.output_dir / "sources.csv"
-        sources_path.write_text("not_id\n1\n2\n")
-        with self.assertRaises(ValueError):
+        (self.output_dir / "groups.csv").write_text("id\ns1\n")
+        with self.assertRaisesRegex(ValueError, "'id'"):
             gtc.validate_outputs(self.output_dir)
 
 
