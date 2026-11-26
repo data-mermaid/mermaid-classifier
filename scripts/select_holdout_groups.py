@@ -66,7 +66,8 @@ def write_fold_configs(config_dir: Path, groups_csv: Path, folds: int) -> list[P
     `mlflow.experiment_name` suffixed `-cv` and `mlflow.model_name` suffixed
     `-cv-fold{k}`. The launcher uploads a config dir as a unit, so `../` paths
     would not exist remotely: each fold dir gets its own copy of the label
-    CSVs the parent references and of `groups_csv`.
+    CSVs and `datasets[].groups_csv` files the parent references, and of
+    `groups_csv` (the holdout selection).
     """
     from mermaid_classifier.sagemaker.config import TrainingRunConfig
 
@@ -88,6 +89,7 @@ def write_fold_configs(config_dir: Path, groups_csv: Path, folds: int) -> list[P
             dataset.included_labels_csv,
             dataset.excluded_labels_csv,
             dataset.excluded_images_csv,
+            *(entry.groups_csv for entry in dataset.datasets),
         )
         if name
     }
@@ -247,7 +249,8 @@ def main(argv: list[str] | None = None) -> None:
         ).fetchall()
     finally:
         dataset.cleanup()
-    if dataset_options.include_mermaid and not dataset_options.mermaid_project_lookup_uri:
+    has_mermaid = any(source.labels == "mermaid" for source in dataset_options.datasets)
+    if has_mermaid and not dataset_options.mermaid_project_lookup_uri:
         print(
             "No mermaid_project_lookup_uri in the config: every MERMAID row is project 'all',"
             " so MERMAID holdout is skipped."

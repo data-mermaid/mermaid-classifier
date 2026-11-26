@@ -27,7 +27,7 @@ from typing import Any
 
 import boto3
 
-from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+from mermaid_classifier.sagemaker.launcher_config import ShardConfig, parse_run_config
 
 ACCOUNT = "554812291621"
 REGION = "us-east-1"
@@ -37,6 +37,8 @@ ECR_HOST = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com"
 KNOWN_SHORT_REPOS = {"mermaid-classifier-jobs"}
 TERMINAL_STATES = {"Completed", "Failed", "Stopped"}
 DEFAULT_POLL_INTERVAL_S = 60
+# Container directory whose contents SageMaker uploads when the job ends.
+PROCESSING_OUTPUT_DIR = "/opt/ml/processing/output"
 
 log = logging.getLogger("launch_processing")
 
@@ -78,6 +80,15 @@ def load_items(csv_path: Path, column: str | None) -> list[str]:
         return [row[column] for row in reader if row[column]]
 
 
+def worker_items(shard: ShardConfig, config_dir: Path) -> list[list[str]]:
+    """Return each worker's items: CSV chunks with ``items_from``, else ``["i/<workers>"]``."""
+    if shard.items_from is None:
+        return [[f"{i}/{shard.workers}"] for i in range(shard.workers)]
+    items = load_items(config_dir / shard.items_from, shard.items_column)
+    log.info("Sharding %d items across %d workers", len(items), shard.workers)
+    return chunk_items(items, shard.workers)
+
+
 def build_processing_request(
     *,
     cfg: Any,
@@ -93,8 +104,9 @@ def build_processing_request(
     if worker_items is not None:
         assert proc.shard is not None, "worker_items requires processing.shard"
         container_args.extend([proc.shard.per_worker_arg, ",".join(worker_items)])
+    job_name = f"{run_id}-{worker_idx}"
     return {
-        "ProcessingJobName": f"{run_id}-{worker_idx}",
+        "ProcessingJobName": job_name,
         "RoleArn": EXEC_ROLE,
         "AppSpecification": {
             "ImageUri": expand_image_uri(job.image),
@@ -107,12 +119,24 @@ def build_processing_request(
                 "VolumeSizeInGB": job.volume_gb,
             },
         },
+        "ProcessingOutputConfig": {
+            "Outputs": [
+                {
+                    "OutputName": "output",
+                    "S3Output": {
+                        "S3Uri": f"s3://{STAGING_BUCKET}/runs/{run_id}/output/{job_name}/",
+                        "LocalPath": PROCESSING_OUTPUT_DIR,
+                        "S3UploadMode": "EndOfJob",
+                    },
+                }
+            ]
+        },
         "StoppingCondition": {"MaxRuntimeInSeconds": job.max_runtime_hours * 3600},
         "Environment": {
             **job.env,
             # Launcher-owned: sits after job.env so a YAML env block cannot
             # redirect these. The features image (features-entrypoint.sh) execs
-            # build_feature_bucket.py directly and ignores this var; only the
+            # build_feature_set.py directly and ignores this var; only the
             # training image's shim dispatches on it.
             "AWS_DEFAULT_REGION": REGION,
             "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
@@ -201,11 +225,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Build the request list (with or without shard).
     if cfg.processing.shard:
-        items = load_items(
-            args.config_dir / cfg.processing.shard.items_from, cfg.processing.shard.items_column
-        )
-        chunks = chunk_items(items, cfg.processing.shard.workers)
-        log.info("Sharding %d items across %d workers", len(items), len(chunks))
+        chunks = worker_items(cfg.processing.shard, args.config_dir)
         requests = [
             build_processing_request(cfg=cfg, run_id=run_id, worker_idx=i, worker_items=chunk)
             for i, chunk in enumerate(chunks)

@@ -39,6 +39,7 @@ def make_dataset(test_case: unittest.TestCase) -> NoInitDataset:
     test_case.addCleanup(dataset.cleanup)
     dataset.profiled_sections = []
     dataset._feature_path_to_s3_location = {}
+    dataset._feature_sets = {}
     dataset.feature_loc_to_source = {}
     dataset.options = DatasetOptions(ref_val_ratios=(0.1, 0.1))
     # artifacts is already set by NoInitDataset.__init__ (Artifacts())

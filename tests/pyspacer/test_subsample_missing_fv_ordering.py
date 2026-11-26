@@ -5,155 +5,92 @@ Subsample targets (including the ``min_per_class`` floor) are derived from
 whatever the ``annotations`` table holds at the moment ``_apply_subsample``
 runs. If that happens before ``handle_missing_feature_vectors``, the
 deterministic row selection can land entirely on rows whose feature vector
-is later found missing on S3 -- collapsing a class to far below its floor,
+is later found absent from the feature index -- collapsing a class to far below its floor,
 and leaving the ``subsample/per_class_counts`` audit's ``realized_n``
 pointing at a row count that no longer exists once training actually
-begins. This drives a real ``TrainingDataset.__init__()`` end-to-end (all
-S3/API touchpoints stubbed) to pin the ordering that prevents that.
+begins. This drives a real ``TrainingDataset.__init__()`` end-to-end (against an S3 fake
+holding a published dataset version) to pin the ordering that prevents that.
 """
 
 from __future__ import annotations
 
-import json
+import shutil
 import tempfile
 import unittest
-from unittest import mock
+from pathlib import Path
 
-import duckdb
-import pandas as pd
-from support.extractor import make_extractor_spec
-from support.settings import override_settings
-
-from mermaid_classifier.pyspacer.dataset import TrainingDataset
-from mermaid_classifier.pyspacer.extraction import SIDECAR_FILENAME
-from mermaid_classifier.pyspacer.options import DatasetOptions
+from mermaid_classifier.pyspacer.options import DatasetOptions, PinnedDataset
 from mermaid_classifier.training.subsample import SubsampleOptions
+from pyspacer.segdata_fixtures import (
+    FakeS3,
+    Image,
+    label_row,
+    load_training_dataset,
+    publish_dataset,
+    publish_feature_set,
+)
 
-TEST_BUCKET = "test-mermaid-bucket"
-MERMAID_PREFIX = f"s3://{TEST_BUCKET}/mermaid/"
-
-# Two of the rare class's three images are missing their feature vector;
-# img_c is the only one actually present on S3.
-_PRESENT_FEATURE_PATHS = {
-    f"{TEST_BUCKET}/mermaid/img_c_featurevector",
-    f"{TEST_BUCKET}/mermaid/img_common_featurevector",
-}
-
-
-class _FakeS3:
-    """Stands in for the s3fs handle: __init__ calls only find(), exists(),
-    and cat_file() on it, all fully determined ahead of time here."""
-
-    def __init__(self, present: set[str], sidecars: dict[str, bytes]) -> None:
-        self._present = present
-        self._sidecars = sidecars
-
-    def find(self, path: str) -> list[str]:  # noqa: ARG002 -- single prefix in play
-        return sorted(self._present)
-
-    def exists(self, key: str) -> bool:
-        return key in self._sidecars
-
-    def cat_file(self, key: str) -> bytes:
-        return self._sidecars[key]
+# CoralNet label 1 is the rare class, label 2 the common one.
+_MAPPING = [
+    {
+        "provider_id": str(label_id),
+        "provider_label": ba_id,
+        "benthic_attribute_id": ba_id,
+        "benthic_attribute_name": ba_id,
+        "growth_form_id": None,
+        "growth_form_name": None,
+    }
+    for label_id, ba_id in ((1, "ba_rare"), (2, "ba_common"))
+]
 
 
-class _FakeBALibrary:
-    def id_to_name(self, ba_id: str | None) -> str | None:
-        return None if ba_id is None else f"BA[{ba_id}]"
+def _points() -> list[tuple[str, int, int, int]]:
+    points: list[tuple[str, int, int, int]] = []
 
-
-class _FakeGFLibrary:
-    def id_to_name(self, gf_id: str | None) -> str | None:
-        if gf_id is None:
-            return None
-        return "" if gf_id == "" else f"GF[{gf_id}]"
-
-
-def _annotations_rows() -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-
-    def add_image(image_id: str, ba_id: str, n_points: int) -> None:
-        for i in range(n_points):
-            rows.append(
-                {
-                    "image_id": image_id,
-                    "row": i,
-                    "col": i,
-                    "benthic_attribute_id": ba_id,
-                    "growth_form_id": "",
-                }
-            )
+    def add_image(image_id: str, label_id: int, n_points: int) -> None:
+        points.extend((image_id, i, i, label_id) for i in range(n_points))
 
     # Rare class: 16 rows pre-drop, spread over 3 images. img_a/img_b (8
-    # rows total) are missing their feature vector; only img_c (8 rows)
-    # is truly available with features.
-    add_image("img_a", "ba_rare", 4)
-    add_image("img_b", "ba_rare", 4)
-    add_image("img_c", "ba_rare", 8)
+    # rows total) are absent from the feature index; only img_c (8 rows)
+    # has features.
+    add_image("img_a", 1, 4)
+    add_image("img_b", 1, 4)
+    add_image("img_c", 1, 8)
     # Common class: present in full, just there to give the 'balanced'
     # allocator a second class to split its budget across.
-    add_image("img_common", "ba_common", 20)
-    return rows
+    add_image("img_common", 2, 20)
+    return points
 
 
 class SubsampleAfterMissingFeatureVectorDropTest(unittest.TestCase):
     """Drives a real TrainingDataset.__init__() and pins the ordering."""
 
-    def _run_dataset(self, parquet_path: str) -> TrainingDataset:
-        sidecar_spec = make_extractor_spec(8)
-        sidecars = {MERMAID_PREFIX + SIDECAR_FILENAME: json.dumps(sidecar_spec.to_dict()).encode()}
-        fake_s3 = _FakeS3(_PRESENT_FEATURE_PATHS, sidecars)
-
+    def test_min_per_class_and_audit_survive_uneven_feature_coverage(self):
+        fake = FakeS3()
+        cache = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, cache, ignore_errors=True)
+        images = [Image(i, "s1") for i in ("img_a", "img_b", "img_c", "img_common")]
+        pin = publish_dataset(fake, "coralnet-raw", images, _points(), [label_row(1), label_row(2)])
+        features = publish_feature_set(fake, pin, ["img_c", "img_common"], n_missing=2)
         options = DatasetOptions(
-            include_mermaid=True,
-            coralnet_manifest_uri=None,
+            datasets=[PinnedDataset(pin=pin, features=features, labels="coralnet")],
+            feature_extractor_weights="s3://test-bucket/efficientnet.pt",
             subsample=SubsampleOptions(strategy="balanced", total_annotations=24, min_per_class=6),
             ref_val_ratios=(0.1, 0.1),
         )
 
-        with (
-            override_settings(
-                aws_anonymous="True",
-                mermaid_train_data_bucket=TEST_BUCKET,
-                mermaid_annotations_parquet_pattern=parquet_path,
-                download_max_workers=1,
-                # True upstream gap is 2 of 4 distinct feature paths (50%);
-                # 70 also clears the pre-fix code's inflated post-subsample
-                # ratio, so the abort itself doesn't mask the assertions below.
-                training_inputs_percent_missing_allowed=70,
-            ),
-            mock.patch("mermaid_classifier.pyspacer.dataset.S3FileSystem", return_value=fake_s3),
-            mock.patch(
-                "mermaid_classifier.pyspacer.dataset.download_features_parallel",
-                return_value=set(),
-            ),
-            mock.patch(
-                "mermaid_classifier.pyspacer.dataset.get_benthic_attribute_library",
-                return_value=_FakeBALibrary(),
-            ),
-            mock.patch(
-                "mermaid_classifier.pyspacer.dataset.get_growth_form_library",
-                return_value=_FakeGFLibrary(),
-            ),
-        ):
-            return TrainingDataset(options)
-
-    def test_min_per_class_and_audit_survive_uneven_feature_coverage(self):
-        annotations_df = pd.DataFrame(_annotations_rows())  # noqa: F841 -- referenced by name below
-
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete_on_close=False) as parquet_f:
-            # DuckDB reopens the file to write it, so close our handle first.
-            parquet_f.close()
-            writer_conn = duckdb.connect()
-            writer_conn.register("annotations_df", annotations_df)
-            writer_conn.execute(
-                f"COPY (SELECT * FROM annotations_df) TO '{parquet_f.name}' (FORMAT parquet)"
-            )
-            writer_conn.close()
-
-            dataset = self._run_dataset(parquet_f.name)
-            self.addCleanup(dataset.cleanup)
+        dataset = load_training_dataset(
+            fake,
+            options,
+            _MAPPING,
+            feature_cache_dir=str(cache),
+            download_max_workers=1,
+            # True upstream gap is 2 of 4 distinct images (50%); 70 also
+            # clears the pre-fix code's inflated post-subsample ratio, so the
+            # abort itself doesn't mask the assertions below.
+            training_inputs_percent_missing_allowed=70,
+        )
+        self.addCleanup(dataset.cleanup)
 
         # 8 of the rare class's 16 rows truly have a feature vector; the
         # subsample must size its target off that true count, not shrink

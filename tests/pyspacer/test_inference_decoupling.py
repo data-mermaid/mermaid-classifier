@@ -27,10 +27,10 @@ _TRAINING_ONLY_MODULES = (
     "duckdb",
     "pandas",
     "matplotlib",
-    "s3fs",
     "pyarrow",
     "bs4",
     "yaml",
+    "segdata_spec",
 )
 
 # Entry points the [inference] extra must be able to import. torch_classifier

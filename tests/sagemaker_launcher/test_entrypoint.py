@@ -35,8 +35,14 @@ def _load_entrypoint():
 
 MINIMAL_YAML = textwrap.dedent("""
     dataset:
-      include_mermaid: false
-      coralnet_manifest_uri: s3://bucket/coralnet_manifest.parquet
+      datasets:
+        - name: coralnet-raw
+          version: 20261124-5ab21b3
+          manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+          features:
+            family: efficientnet-v1
+            manifest_sha256: abababababababababababababababababababababababababababababababab
+          labels: coralnet
       feature_extractor_weights: s3://bucket/efficientnet.pt
       label_rollup_spec_csv: rollups.csv
       included_labels_csv: included_labels.csv

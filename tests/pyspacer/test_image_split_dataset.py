@@ -1,18 +1,18 @@
 """TrainingDataset's split step: split_mode, holdout labels, and the
 training_set tags and stats that follow from them.
 
-Uses a real in-memory DuckDB; feature downloads and the BA/GF libraries
-are stubbed.
+Uses a real in-memory DuckDB; the synced feature set and the BA/GF
+libraries are stubbed.
 """
 
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import pandas as pd
 from support.dataset import make_dataset
-from support.settings import override_settings
 
 from mermaid_classifier.pyspacer.options import DatasetOptions
 from mermaid_classifier.pyspacer.splitting import split_by_image
@@ -33,6 +33,7 @@ def _rows(
         for n in range(_POINTS_PER_IMAGE):
             rows.append(
                 {
+                    "dataset": "ds",
                     "image_id": image,
                     "row": n,
                     "col": n,
@@ -59,6 +60,13 @@ def _rows(
     return rows
 
 
+class _FeatureSetStub:
+    """The FeatureSet surface prep_annotations_for_pyspacer reads: a cached path per image."""
+
+    def path(self, image_id: str) -> Path:
+        return Path("/cache") / f"{image_id}.featurevector"
+
+
 class _FakeLibrary:
     def id_to_name(self, value: str | None) -> str | None:
         return value
@@ -71,18 +79,12 @@ class _SplitCase(unittest.TestCase):
         include_holdout: bool = True,
         extra: tuple[tuple[str, str, bool], ...] = (),
     ):
-        override = override_settings(aws_anonymous="True", download_max_workers=1)
-        override.__enter__()
-        self.addCleanup(override.__exit__, None, None, None)
         dataset = make_dataset(self)
+        dataset._feature_sets = {"ds": _FeatureSetStub()}
         dataset.options = DatasetOptions(ref_val_ratios=(0.1, 0.1), split_mode=split_mode)  # pyright: ignore[reportArgumentType]
         df = pd.DataFrame(_rows(include_holdout, extra))  # noqa: F841 -- DuckDB scans by name
         dataset.duck_conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
         with (
-            mock.patch(
-                "mermaid_classifier.pyspacer.dataset.download_features_parallel",
-                return_value=set(),
-            ) as download,
             mock.patch(
                 "mermaid_classifier.pyspacer.dataset.get_benthic_attribute_library",
                 return_value=_FakeLibrary(),
@@ -95,7 +97,6 @@ class _SplitCase(unittest.TestCase):
             dataset.labels = dataset.prep_annotations_for_pyspacer()
             dataset.add_training_set_names()
             dataset.set_train_summary_stats()
-        self.downloaded = set(download.call_args.args[0])
         return dataset
 
 
@@ -134,7 +135,6 @@ class ImageSplitDatasetTest(_SplitCase):
                     dataset.holdout_labels.label_count,
                     len(_HOLDOUT_IMAGES) * _POINTS_PER_IMAGE,
                 )
-                self.assertIn(("b", "fv/hold_0"), self.downloaded)
 
     def test_points_mode_split_ignores_holdout_rows(self):
         def non_holdout_tags(dataset) -> list[tuple]:

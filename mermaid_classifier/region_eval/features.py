@@ -18,7 +18,7 @@ Features are cast to float32. The extractor writes float64, which doubles the
 cache for precision no downstream head uses.
 
 Downloads run in parallel into `download_dir` through
-`download_features_parallel`, the training pipeline's own S3 downloader.
+`download_features_parallel`.
 `download_dir` is a scratch directory that does not outlive the run.
 """
 

@@ -71,21 +71,6 @@ class Settings(BaseSettings):
 
     # ML inputs
 
-    coralnet_train_data_bucket: str = "coral-reef-training"
-    mermaid_train_data_bucket: str = "coral-reef-training"
-    # Annotation file paths/patterns require settings to be overrideable
-    # for unit tests, because these files are read in with DuckDB,
-    # and DuckDB is not easy (if even possible) to use with Python
-    # mock, being C++ under the hood.
-    coralnet_annotations_csv_pattern: str = (
-        # The placeholders get filled in with a format() call during use.
-        # Custom patterns don't HAVE to include the placeholders.
-        # They just get used if they're present.
-        "s3://{coralnet_train_data_bucket}/s{source_id}/annotations.csv"
-    )
-    mermaid_annotations_parquet_pattern: str = (
-        "s3://{mermaid_train_data_bucket}/mermaid/mermaid_confirmed_annotations.parquet"
-    )
     weights_location: str | None = None
     aws_region: str = "us-east-1"
     aws_anonymous: Literal["False", "True"] = "False"

@@ -26,13 +26,18 @@ _GROUPS = [
 ]
 
 
-def _seed(dataset: NoInitDataset) -> None:
+_DATASET = "coralnet-raw"
+
+
+def _seed(dataset: NoInitDataset, feature_layout: str = "{project}/{ba}_img{i}.fv") -> None:
+    """Seed the table; `feature_layout` formats each image's feature key."""
     rows = []
     for (site, project, holdout), ba, n_images, points in _GROUPS:
         for i in range(n_images):
             for p in range(points):
                 rows.append(
                     {
+                        "dataset": _DATASET,
                         "site": site,
                         "project_id": project,
                         "image_id": f"{project}_{ba}_img{i}",
@@ -42,7 +47,7 @@ def _seed(dataset: NoInitDataset) -> None:
                         "benthic_attribute_id": ba,
                         "growth_form_id": "",
                         "bucket": "my-bucket",
-                        "feature_vector": f"{project}/{ba}_img{i}.fv",
+                        "feature_vector": feature_layout.format(project=project, ba=ba, i=i),
                         "is_holdout": holdout,
                         "is_excluded": False,
                     }
@@ -52,14 +57,11 @@ def _seed(dataset: NoInitDataset) -> None:
 
 
 def _md5_ranked_images(project: str, ba: str, n_images: int, seed: int = 0) -> list[str]:
-    """The project's images in md5(seed || feature_vector) order: a digest
+    """The project's images in md5(seed || dataset/image_id) order: a digest
     every DuckDB version computes the same way."""
     images = [f"{project}_{ba}_img{i}" for i in range(n_images)]
     return sorted(
-        images,
-        key=lambda image: hashlib.md5(
-            f"{seed}{project}/{image.removeprefix(project + '_')}.fv".encode()
-        ).hexdigest(),
+        images, key=lambda image: hashlib.md5(f"{seed}{_DATASET}/{image}".encode()).hexdigest()
     )
 
 
@@ -122,6 +124,20 @@ class SourceSpreadTest(_Base):
         second = set(self._rows("project_id = 's2'"))
 
         self.assertNotEqual(first, second)
+
+    def test_the_feature_key_layout_does_not_change_the_sample(self):
+        selections = []
+        for layout in ("{project}/{ba}_img{i}.fv", "features/v2/{ba}-{i}-{project}.featurevector"):
+            _seed(self.dataset, feature_layout=layout)
+            self.dataset._apply_subsample(self.opts)
+            selections.append(
+                sorted(
+                    self.dataset.duck_conn.execute(
+                        "SELECT image_id, row, col FROM annotations WHERE NOT is_holdout"
+                    ).fetchall()
+                )
+            )
+        self.assertEqual(selections[0], selections[1])
 
     def test_group_audit_lists_available_quota_and_realized(self):
         self.dataset._apply_subsample(self.opts)

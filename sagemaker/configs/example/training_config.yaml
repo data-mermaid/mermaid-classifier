@@ -10,15 +10,21 @@
 # CSV paths are resolved as siblings of THIS file. Bare filenames only.
 
 dataset:
-  include_mermaid: false
-  # Manifest parquet built by scripts/build_coralnet_manifest.py; this is a
-  # verbatim S3 URI, not a sibling file. Replace for real runs.
-  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/example/coralnet_classifier_manifest_example.parquet
+  # The 2 CoralNet sources in groups.csv, which are present in
+  # coralnet-raw@20261124-5ab21b3; enough for a smoke run.
+  datasets:
+    - name: coralnet-raw
+      version: 20261124-5ab21b3
+      manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+      features:
+        family: efficientnet-v1
+        manifest_sha256: c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e
+      labels: coralnet
+      groups_csv: groups.csv
   # The EfficientNet that produced this run's feature vectors.
   feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
   label_rollup_spec_csv: rollups.csv
-  included_labels_csv: included_labels.csv
   ref_val_ratios: [0.1, 0.1]
   # Subsample. Strategies: 'stratified', 'balanced'.
   # Keep this section out (set to null) to disable subsampling entirely.
@@ -45,11 +51,8 @@ mlflow:
   # annotations_to_log: all  # Uncomment to log all annotations as an artifact.
 
 # Env vars applied BEFORE importing mermaid_classifier. Keep secrets
-# out of this file; commit only non-sensitive values. The launcher
-# overrides MLFLOW_TRACKING_SERVER from its --mlflow-tracking-uri
-# flag, so the value here is just a placeholder for local smoke runs.
+# out of this file; commit only non-sensitive values.
 env:
-  MLFLOW_TRACKING_SERVER: file:./mlruns
-  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
-  MERMAID_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
+  # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri
+  # (on SageMaker) or by .env (locally); do not override here.
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
