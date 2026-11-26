@@ -171,6 +171,47 @@ processing:
             ],
         )
 
+    def test_each_worker_uploads_its_processing_output_under_the_run(self):
+        from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+
+        cfg = parse_run_config(
+            """
+job:
+  name_prefix: mermaid-features
+  image: mermaid-classifier-jobs:features-latest
+  entrypoint: scripts/build_feature_set.py
+  instance_type: ml.g5.xlarge
+  volume_gb: 100
+  max_runtime_hours: 12
+processing:
+  container_args: []
+""",
+            kind="processing",
+            strict=True,
+        )
+
+        req = lp.build_processing_request(
+            cfg=cfg, run_id="mermaid-features-20260525T120000Z", worker_idx=3, worker_items=None
+        )
+
+        self.assertEqual(
+            req["ProcessingOutputConfig"],
+            {
+                "Outputs": [
+                    {
+                        "OutputName": "output",
+                        "S3Output": {
+                            "S3Uri": "s3://dev-datamermaid-sm-data/runs/"
+                            "mermaid-features-20260525T120000Z/output/"
+                            "mermaid-features-20260525T120000Z-3/",
+                            "LocalPath": "/opt/ml/processing/output",
+                            "S3UploadMode": "EndOfJob",
+                        },
+                    }
+                ]
+            },
+        )
+
     @patch("launch_processing.datetime")
     def test_a_yaml_env_block_cannot_redirect_launcher_owned_env_keys(self, mock_dt):
         """CONTAINER_ENTRYPOINT_SCRIPT and AWS_DEFAULT_REGION are the

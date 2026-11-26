@@ -37,6 +37,8 @@ ECR_HOST = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com"
 KNOWN_SHORT_REPOS = {"mermaid-classifier-jobs"}
 TERMINAL_STATES = {"Completed", "Failed", "Stopped"}
 DEFAULT_POLL_INTERVAL_S = 60
+# Container directory whose contents SageMaker uploads when the job ends.
+PROCESSING_OUTPUT_DIR = "/opt/ml/processing/output"
 
 log = logging.getLogger("launch_processing")
 
@@ -102,8 +104,9 @@ def build_processing_request(
     if worker_items is not None:
         assert proc.shard is not None, "worker_items requires processing.shard"
         container_args.extend([proc.shard.per_worker_arg, ",".join(worker_items)])
+    job_name = f"{run_id}-{worker_idx}"
     return {
-        "ProcessingJobName": f"{run_id}-{worker_idx}",
+        "ProcessingJobName": job_name,
         "RoleArn": EXEC_ROLE,
         "AppSpecification": {
             "ImageUri": expand_image_uri(job.image),
@@ -115,6 +118,18 @@ def build_processing_request(
                 "InstanceType": job.instance_type,
                 "VolumeSizeInGB": job.volume_gb,
             },
+        },
+        "ProcessingOutputConfig": {
+            "Outputs": [
+                {
+                    "OutputName": "output",
+                    "S3Output": {
+                        "S3Uri": f"s3://{STAGING_BUCKET}/runs/{run_id}/output/{job_name}/",
+                        "LocalPath": PROCESSING_OUTPUT_DIR,
+                        "S3UploadMode": "EndOfJob",
+                    },
+                }
+            ]
         },
         "StoppingCondition": {"MaxRuntimeInSeconds": job.max_runtime_hours * 3600},
         "Environment": {
