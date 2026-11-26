@@ -1,6 +1,6 @@
 # Launcher config for the coarse-label-set variant of the all-sources +
 # MERMAID run. Identical job shape to coralnet-all-mermaid.yaml; only the
-# name prefix and image tag differ.
+# name prefix differs.
 #
 # The dataset/training/mlflow blocks live in
 # sagemaker/configs/coralnet_all_plus_mermaid_coarse/training_config.yaml.
@@ -11,12 +11,9 @@
 #       --config-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse/ \
 #       --mlflow-tracking-uri <arn>
 #
-# The image is built from feat/coarse-label-set rather than training-latest,
-# which predates the feature_extractor_weights config key.
-
 job:
   name_prefix: mermaid-classifier-all-mermaid-coarse
-  image: mermaid-classifier-jobs:training-coarse-label-set
+  image: mermaid-classifier-jobs:training-latest
   entrypoint: scripts/sagemaker_train_entrypoint.py
   instance_type: ml.c5.9xlarge
   volume_gb: 400

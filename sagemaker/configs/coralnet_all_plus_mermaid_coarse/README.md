@@ -1,6 +1,6 @@
 # Training Config: coralnet_all_plus_mermaid_coarse
 
-Generated 2026-10-05 18:09 UTC by
+Generated 2026-11-26 19:43 UTC by
 `scripts/generate_training_config.py`. Regenerate with:
 
 ```
@@ -27,12 +27,14 @@ MERMAID API. For each CoralNet-mapped benthic attribute:
 | `sagemaker/sources/CoralNetSourcesKept.csv` | 2026-02-17 20:26:28 UTC | `f57b50298e` |
 
 Live MERMAID API (snapshotted at run time):
-- `https://api.datamermaid.org/v1/benthicattributes/?limit=5000` -> sha1 `b11f2da182`
+- `https://api.datamermaid.org/v1/benthicattributes/?limit=5000` -> sha1 `1ad95d3ef5`
 - `https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet` -> sha1 `162f687588`
 
 ## Outputs
 
-- `sources.csv` - **327** CoralNet source IDs (pass-through; no filtering).
+- `groups.csv` - not committed for this config: the generated file is deleted
+  because the training config sets no `groups_csv`, so every group in the
+  pinned datasets is used.
 - `included_labels.csv` - **94** `(ba_id, gf_id)` rows
   (Porites contributes 3 rows for the Branching / Massive / other-none buckets;
   every other top-108 BA contributes 1 row).
