@@ -10,7 +10,8 @@
 # See docs/feature_extraction_at_scale.md for the full build/push recipe.
 
 # CUDA 12.8 matches the cu128 torch wheels the `cuda` extra locks.
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+# nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda@sha256:17e2934e1fa96152b14f78078bfbafd0f00f391df995dc6c641a720fce1202bb
 
 # git fetches the segdata-spec git dependency; libgl1/libglib2.0-0 back the image libs.
 RUN apt-get update && \
@@ -18,7 +19,8 @@ RUN apt-get update && \
         ca-certificates git build-essential libgl1 libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /uvx /usr/local/bin/
+# ghcr.io/astral-sh/uv:0.10.0
+COPY --from=ghcr.io/astral-sh/uv@sha256:78a7ff97cd27b7124a5f3c2aefe146170793c56a1e03321dd31a289f6d82a04f /uv /uvx /usr/local/bin/
 
 # Ubuntu 22.04 ships Python 3.10, so uv installs a managed 3.12 under /opt/python.
 ENV PYTHONUNBUFFERED=1 \
