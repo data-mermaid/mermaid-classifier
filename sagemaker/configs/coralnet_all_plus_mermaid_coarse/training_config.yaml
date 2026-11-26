@@ -1,28 +1,44 @@
-# Training run: coralnet_all_plus_mermaid with a coarser label set. Species
-# and labels MERMAID lists in exactly one region are rolled up to their
+# Training run: coarse label set over the pinned coralnet-raw and mermaid
+# datasets (every CoralNet group plus every MERMAID image). Species and
+# labels MERMAID lists in exactly one region are rolled up to their
 # nearest ancestor that is neither (or dropped, when that ancestor is an
 # excluded label), because v1 fits both poorly.
 #
-# Everything except the label CSVs, total_annotations and the mlflow block
-# matches coralnet_all_plus_mermaid/training_config.yaml, whose run is MLflow
-# 4886658aa7cf44f1935af4f0b0fca6b5. That is not the deployed v1 (run
-# 8ab6b87e86974841935aa9ad482bc317, an older pipeline at 7.4M), so compare
-# against 4886658a for the effect of the label set alone. Regenerate the label CSVs with:
+# The dataset pins match coralnet_all_plus_mermaid/training_config.yaml. The
+# comparison baseline should be a run in this same pinned-dataset format, not
+# an earlier run that read the retired manifest and feature-bucket data path.
+#
+# Regenerate the label CSVs and README.md with:
 #   uv run python scripts/generate_training_config.py \
 #       --output-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse \
 #       --roll-up-species --roll-up-region-specific
-# then delete the generated sources.csv: the manifest was built from all
-# CoralNet sources, as for coralnet_all_plus_mermaid/. README.md lists every
-# label whose class changes; its sources.csv line does not apply here.
+# then delete the generated groups.csv: with no groups_csv, every group in the
+# pinned datasets is used. README.md lists every label whose class changes.
 #
-# NOTE: training reads feature vectors from 2605-coralnet-public-sources, so
-# every source in the manifest must have its featurevectors present.
+# NOTE: images the feature sets do not index count against
+# TRAINING_INPUTS_PERCENT_MISSING_ALLOWED below.
 
 dataset:
-  include_mermaid: true
-  # Verbatim S3 URI of the all-sources manifest parquet
-  # (scripts/build_coralnet_manifest.py run with no --sources-csv/--source-ids).
-  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/all/coralnet_classifier_manifest_all.parquet
+  # Every CoralNet source (no groups_csv) plus every MERMAID image.
+  datasets:
+    - name: coralnet-raw
+      version: 20261124-5ab21b3
+      manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+      features:
+        family: efficientnet-v1
+        manifest_sha256: c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e
+      labels: coralnet
+    - name: mermaid
+      version: 20261124-cfc389d
+      manifest_sha256: f7a1495475bcf0feeedfe91230e376233a41a00d22c57209eac8142865b049a8
+      features:
+        family: efficientnet-v1
+        manifest_sha256: f3ca2077a54e4b811877425fd783a6fd14dbc7dd66671da886a9a5bbadc5ac97
+      labels: mermaid
+  # Resolves the MERMAID dataset's growth-form names to ids.
+  taxonomy:
+    version: 20261124-e6abfad
+    manifest_sha256: fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43
   # The EfficientNet that produced this run's feature vectors.
   feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
@@ -30,11 +46,8 @@ dataset:
   included_labels_csv: included_labels.csv
   ref_val_ratios: [0.1, 0.1]
   # Class-balanced subsampling. The per-class cap is total_annotations // K,
-  # where K counts the classes with rows after rollup. Run 4886658a had
-  # 22.2M // 111 = 200,000. Mapping its subsample/per_class_counts through
-  # this rollups.csv gives K = 94, so 200,000 x 94 holds that cap, and the
-  # most common classes get no more data than in 4886658a. Check after the
-  # run: the largest target_n in subsample/per_class_counts is 200,000.
+  # where K counts the classes with rows after rollup. The value below is
+  # pending a recount of K on the pinned datasets and will be backfilled.
   subsample:
     strategy: balanced
     total_annotations: 18800000
@@ -54,8 +67,6 @@ mlflow:
 env:
   # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
   # do not override here.
-  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
-  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
   # The measured upstream gap is ~7.3% of distinct CoralNet feature vectors
   # (raw images absent upstream — unfixable). The threshold is measured on
   # distinct feature vectors, so "5" would abort the run; "10" tolerates the
