@@ -2,8 +2,9 @@
 
 Replicates the CoralNet -> MERMAID -> top-108 mapping logic from the
 mermaid-segmentation notebook coralnet_eda_validated.ipynb, against the
-live MERMAID API. Produces sources.csv, included_labels.csv,
-rollups.csv, and an audit README.md.
+live MERMAID API. Produces groups.csv (the CoralNet source groups a
+training config's `datasets:` entry names in `groups_csv`),
+included_labels.csv, rollups.csv, and an audit README.md.
 
 For each CoralNet-mapped benthic attribute:
 
@@ -32,6 +33,7 @@ import csv
 import hashlib
 import json
 import logging
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +47,9 @@ from mermaid_classifier.common.benthic_attributes import (
     GrowthFormLibrary,
 )
 from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
+
+# A CoralNet dataset group: `s` followed by the source id.
+_CORALNET_GROUP = re.compile(r"s[0-9]+")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT = REPO_ROOT.parent
@@ -419,8 +424,8 @@ def write_included_labels_csv(rows: list[tuple[str, str]], out_path: Path) -> in
     return len(rows)
 
 
-def copy_sources_csv(in_path: Path, out_path: Path) -> int:
-    """Pass-through: read input, normalize id-or-Source-ID column, write."""
+def write_groups_csv(in_path: Path, out_path: Path) -> int:
+    """Write each source id of the id-or-Source-ID input column as group `s<id>`, one per line."""
     df = pd.read_csv(in_path)
     if "id" in df.columns:
         col = "id"
@@ -428,7 +433,7 @@ def copy_sources_csv(in_path: Path, out_path: Path) -> int:
         col = "Source ID"
     else:
         raise ValueError(f"{in_path}: must have an 'id' or 'Source ID' column")
-    out_path.write_text("id\n" + "\n".join(str(int(s)) for s in df[col]) + "\n")
+    out_path.write_text("".join(f"s{int(s)}\n" for s in df[col]))
     return len(df)
 
 
@@ -493,7 +498,8 @@ Live MERMAID API (snapshotted at run time):
 
 ## Outputs
 
-- `sources.csv` - **{counts["n_sources"]}** CoralNet source IDs (pass-through; no filtering).
+- `groups.csv` - **{counts["n_sources"]}** CoralNet source groups, `s<id>` one per line
+  (pass-through; no filtering). Name it in the training config's `groups_csv`.
 - `included_labels.csv` - **{counts["n_included"]}** `(ba_id, gf_id)` rows
   (Porites contributes 3 rows for the Branching / Massive / other-none buckets;
   every other top-108 BA contributes 1 row).
@@ -549,20 +555,18 @@ Porites is the only exception (see above).
 
 def validate_outputs(out_dir: Path) -> None:
     """Round-trip included_labels.csv and rollups.csv through the pipeline's
-    CsvSpec subclasses; check sources.csv has an 'id' column."""
+    CsvSpec subclasses; check every groups.csv line is a CoralNet group."""
     from mermaid_classifier.pyspacer.label_specs import (
         LabelFilter,
         LabelRollupSpec,
     )
 
-    sources_path = out_dir / "sources.csv"
-    with sources_path.open(newline="") as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None or "id" not in reader.fieldnames:
-            raise ValueError(
-                f"{sources_path} must contain an 'id' column"
-                f" (got columns: {list(reader.fieldnames or [])})"
-            )
+    groups_path = out_dir / "groups.csv"
+    bad = [
+        line for line in groups_path.read_text().splitlines() if not _CORALNET_GROUP.fullmatch(line)
+    ]
+    if bad:
+        raise ValueError(f"{groups_path} lines are not CoralNet groups `s<id>`: {bad[:3]!r}")
     with (out_dir / "included_labels.csv").open() as f:
         included = LabelFilter(f, inclusion=True)
     with (out_dir / "rollups.csv").open() as f:
@@ -671,7 +675,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     included_rows = build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)
 
-    n_sources = copy_sources_csv(args.sources_csv, args.output_dir / "sources.csv")
+    n_sources = write_groups_csv(args.sources_csv, args.output_dir / "groups.csv")
     n_rollups = write_rollups_csv(rollup_rows, args.output_dir / "rollups.csv")
     n_included = write_included_labels_csv(included_rows, args.output_dir / "included_labels.csv")
 

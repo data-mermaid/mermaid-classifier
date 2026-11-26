@@ -16,9 +16,18 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+from segdata_spec.manifest import FeatureSetPin, Pin, Version
 
 # Mirrors the MLflow registered-model name regex enforced by the
 # SageMaker MLflow registry. Validating at config load fails the job
@@ -68,15 +77,66 @@ class WeightingConfig(BaseModel):
         return self
 
 
+# A manifest pin is the hex sha256 of the published manifest.json bytes.
+Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+# The taxonomy every `labels: mermaid` entry resolves growth-form names against.
+TAXONOMY_NAME = "mermaid-benthic"
+
+
+class FeatureSetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: str
+    manifest_sha256: Sha256Hex
+
+
+class DatasetPinConfig(BaseModel):
+    """One pinned dataset version, the feature set read for it, and how its labels map."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: Version
+    manifest_sha256: Sha256Hex
+    features: FeatureSetConfig
+    labels: Literal["coralnet", "mermaid"]
+    # One dataset group per line; absent selects every group of the version.
+    groups_csv: str | None = None
+
+    def pin(self) -> Pin:
+        return Pin(name=self.name, version=self.version, manifest_sha256=self.manifest_sha256)
+
+    def feature_set_pin(self) -> FeatureSetPin:
+        return FeatureSetPin(
+            dataset=self.pin(),
+            family=self.features.family,
+            manifest_sha256=self.features.manifest_sha256,
+        )
+
+    def groups_csv_path(self, base: Path) -> Path | None:
+        return None if self.groups_csv is None else base / self.groups_csv
+
+
+class TaxonomyPinConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Version
+    manifest_sha256: Sha256Hex
+
+    def pin(self) -> Pin:
+        return Pin(name=TAXONOMY_NAME, version=self.version, manifest_sha256=self.manifest_sha256)
+
+
 class DatasetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    include_mermaid: bool = True
+    datasets: list[DatasetPinConfig] = Field(min_length=1)
+    taxonomy: TaxonomyPinConfig | None = None
     # Relative paths are resolved as siblings of the YAML file by
     # *_path() helpers. The launcher uploads the YAML and CSVs together
     # to the same S3 prefix so the same resolution works in the
     # container.
-    coralnet_manifest_uri: str | None = None
     # Required: a run must say which extractor produced the feature vectors
     # it trains on. Absent, the released artifact could not record it either.
     feature_extractor_weights: str
@@ -88,6 +148,18 @@ class DatasetConfig(BaseModel):
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     subsample: SubsampleConfig | None = None
     weighting: WeightingConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_datasets(self) -> DatasetConfig:
+        names = [entry.name for entry in self.datasets]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"datasets names a dataset more than once: {repeated}")
+        if self.taxonomy is None and any(entry.labels == "mermaid" for entry in self.datasets):
+            raise ValueError(
+                "a `labels: mermaid` dataset needs a `taxonomy:` pin to resolve growth forms"
+            )
+        return self
 
     def label_rollup_spec_csv_path(self, base: Path) -> Path | None:
         return None if self.label_rollup_spec_csv is None else base / self.label_rollup_spec_csv
@@ -181,6 +253,7 @@ class TrainingRunConfig(BaseModel):
         from mermaid_classifier.pyspacer.options import (
             DatasetOptions,
             MLflowOptions,
+            PinnedDataset,
             TrainingOptions,
         )
         from mermaid_classifier.training.sample_weighting import (
@@ -208,9 +281,19 @@ class TrainingRunConfig(BaseModel):
         def _resolve(p: Path | None) -> str | None:
             return None if p is None else str(p)
 
+        datasets = [
+            PinnedDataset(
+                pin=entry.pin(),
+                features=entry.feature_set_pin(),
+                labels=entry.labels,
+                groups_csv=_resolve(entry.groups_csv_path(config_dir)),
+            )
+            for entry in d.datasets
+        ]
+
         dataset_options = DatasetOptions(
-            include_mermaid=d.include_mermaid,
-            coralnet_manifest_uri=d.coralnet_manifest_uri,
+            datasets=datasets,
+            taxonomy=None if d.taxonomy is None else d.taxonomy.pin(),
             feature_extractor_weights=d.feature_extractor_weights,
             drop_growthforms=d.drop_growthforms,
             label_rollup_spec_csv=_resolve(d.label_rollup_spec_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None

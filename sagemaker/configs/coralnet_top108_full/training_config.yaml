@@ -1,22 +1,26 @@
-# Training run: all 1,370 CoralNet sources currently in
-# 2605-coralnet-public-sources (extracted across this session's batches:
-# 190 pre-existing + 552 from batch 1 + 619 from batch 2). Uses the
-# same top-108 benthic-attribute hierarchy as coralnet_top108_best/.
+# Training run: the 1,216 CoralNet sources in groups.csv, which are the
+# sources present in coralnet-raw@20261124-5ab21b3. Uses the same top-108
+# benthic-attribute hierarchy as coralnet_top108_best/.
 #
 # included_labels.csv and rollups.csv are verbatim copies from
 # sagemaker/configs/coralnet_top108_best/ (generated 2026-05-08 by
 # scripts/generate_training_config.py). Regenerate from the latest
 # MERMAID API if the taxonomy has drifted.
 #
-# Feature-completeness note: 8 of the 1,370 sources are partial
-# (~1.86% of expected featurevectors missing across the bucket),
-# all due to upstream data issues that retry cannot fix.
-# TRAINING_INPUTS_PERCENT_MISSING_ALLOWED="5" tolerates this gap.
+# Images the feature set does not index count against
+# TRAINING_INPUTS_PERCENT_MISSING_ALLOWED="5".
 
 dataset:
-  include_mermaid: false
-  # Verbatim S3 URI of the manifest parquet (scripts/build_coralnet_manifest.py).
-  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/top108_full/coralnet_classifier_manifest_top108_full.parquet
+  datasets:
+    - name: coralnet-raw
+      version: 20261124-5ab21b3
+      manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+      features:
+        family: efficientnet-v1
+        manifest_sha256: "<feature-set sha256 after seeding>"
+      labels: coralnet
+      # Groups (s<source id>) taken from the source ids of the run's former manifest.
+      groups_csv: groups.csv
   # The EfficientNet that produced this run's feature vectors.
   feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
@@ -44,7 +48,5 @@ mlflow:
 env:
   # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
   # do not override here.
-  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
-  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
   TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "5"
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

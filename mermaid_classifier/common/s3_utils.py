@@ -5,8 +5,8 @@ One home for the URI parsing `scripts/build_region_probe.py` and
 `scripts/evaluate_region_probe.py` each carried their own copy of, now that
 `region_eval/score.py` needs the same parsing to accept a probe directory
 published to S3 alongside a local one; and for `download_features_parallel`,
-which both the training pipeline (`pyspacer/dataset.py`) and the region-eval
-feature cache (`region_eval/features.py`) use to fetch `.featurevector` files.
+which the region-eval feature cache (`region_eval/features.py`) uses to fetch
+`.featurevector` files.
 It lives here rather than in `pyspacer/` so a lightweight consumer can reach
 it without importing that subpackage's training-only logging and settings
 setup.

@@ -27,7 +27,6 @@ _TRAINING_ONLY_MODULES = (
     "duckdb",
     "pandas",
     "matplotlib",
-    "s3fs",
     "pyarrow",
     "bs4",
     "yaml",

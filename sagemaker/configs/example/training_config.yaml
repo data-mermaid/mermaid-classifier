@@ -10,10 +10,17 @@
 # CSV paths are resolved as siblings of THIS file. Bare filenames only.
 
 dataset:
-  include_mermaid: false
-  # Manifest parquet built by scripts/build_coralnet_manifest.py; this is a
-  # verbatim S3 URI, not a sibling file. Replace for real runs.
-  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/example/coralnet_classifier_manifest_example.parquet
+  # The 2 CoralNet sources in groups.csv, which are present in
+  # coralnet-raw@20261124-5ab21b3; enough for a smoke run.
+  datasets:
+    - name: coralnet-raw
+      version: 20261124-5ab21b3
+      manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+      features:
+        family: efficientnet-v1
+        manifest_sha256: "<feature-set sha256 after seeding>"
+      labels: coralnet
+      groups_csv: groups.csv
   # The EfficientNet that produced this run's feature vectors.
   feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
@@ -50,6 +57,4 @@ mlflow:
 # flag, so the value here is just a placeholder for local smoke runs.
 env:
   MLFLOW_TRACKING_SERVER: file:./mlruns
-  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
-  MERMAID_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

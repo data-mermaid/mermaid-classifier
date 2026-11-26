@@ -54,7 +54,6 @@ training = [
     # accepts; pydantic-settings is more explicit and searches from cwd.
     "pydantic-settings",
     "pyyaml",
-    "s3fs",
     # Versioned dataset contract: pinned dataset tables and feature-family keys.
     "segdata-spec @ git+https://github.com/data-mermaid/mermaid-segmentation@segdata-spec-v0.2.0#subdirectory=packages/segdata-spec",
     # pyspacer uses scikit-learn, but we also use it directly for metrics.

@@ -22,7 +22,7 @@ from mermaid_classifier.common.benthic_attributes import (
     split_ba_gf,
 )
 from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
-from mermaid_classifier.pyspacer.dataset import TrainingDataset
+from mermaid_classifier.pyspacer.dataset import TrainingDataset, resolve_groups
 from mermaid_classifier.pyspacer.inference import (
     export_artifact,
     load_predictor,
@@ -39,6 +39,8 @@ from mermaid_classifier.pyspacer.options import (
     DatasetOptions,
     MLflowOptions,
     TrainingOptions,
+    lineage_params,
+    training_data_lineage,
 )
 from mermaid_classifier.pyspacer.settings import (
     set_env_vars_for_packages,
@@ -300,9 +302,9 @@ class MLflowTrainingRunner(TrainingRunner):
 
             mlflow.log_params(training_options_to_log)
 
+            training_data = self._log_training_data()
+
             dataset_options_to_log = {
-                "include_mermaid": self.dataset_options.include_mermaid,
-                "coralnet_manifest_uri": self.dataset_options.coralnet_manifest_uri or "",
                 "drop_growthforms": self.dataset_options.drop_growthforms,
                 "label_rollup_spec_csv": os.path.basename(
                     self.dataset_options.label_rollup_spec_csv or ""
@@ -393,6 +395,7 @@ class MLflowTrainingRunner(TrainingRunner):
                         artifact_dir,
                         reference_features=ref_features,
                         extractor=extractor_spec,
+                        training_data=training_data,
                     )
                     model_json = artifact_dir / "model.json"
                     # ManifestError on schema/class-count/input_dim mismatch.
@@ -485,6 +488,21 @@ class MLflowTrainingRunner(TrainingRunner):
                     step=0,  # type: ignore[arg-type]
                 )
 
+    def _log_training_data(self) -> dict[str, Any]:
+        """Log the training-data lineage as params and each group selection as a CSV.
+
+        Returns the lineage block that model.json records.
+        """
+        groups = resolve_groups(self.dataset_options)
+        training_data = training_data_lineage(self.dataset_options, groups)
+        mlflow.log_params(lineage_params(training_data))
+        for name, selection in groups.items():
+            if selection is not None:
+                mlflow.log_text(
+                    "".join(f"{group}\n" for group in sorted(selection)), f"groups/{name}.csv"
+                )
+        return training_data
+
     def _get_model_name(self):
         """
         Model name for MLflow logging purposes.
@@ -510,9 +528,11 @@ class MLflowTrainingRunner(TrainingRunner):
                 as_path = Path(self.dataset_options.label_rollup_spec_csv)
                 model_name += f"-Rollup{self.alphanumeric_only_str(as_path.stem)}"
 
-            if self.dataset_options.coralnet_manifest_uri:
-                as_path = Path(self.dataset_options.coralnet_manifest_uri)
-                model_name += f"-{self.alphanumeric_only_str(as_path.stem)}"
+            for source in self.dataset_options.datasets:
+                # e.g. -coralnetraw202611245ab21b3
+                model_name += "-" + self.alphanumeric_only_str(
+                    f"{source.pin.name}{source.pin.version}"
+                )
 
             if (subsample := self.dataset_options.subsample) is not None:
                 # e.g. -SubStratified400000 or -SubBalanced1770000
