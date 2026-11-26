@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -48,6 +49,7 @@ from support.paths import add_scripts_to_path
 add_scripts_to_path()
 
 import build_feature_set as bfs  # noqa: E402
+import launch_processing as lp  # noqa: E402
 
 BUCKET = DATASET_BUCKET
 DATASET = "coralnet"
@@ -450,6 +452,99 @@ class FailureTest(RunHarness):
 
         self.assertEqual(self.fake.keys_called("put"), [])
         self.assertEqual(self.image_gets(), [])
+
+
+class UnsafeImageIdTest(RunHarness):
+    def test_an_image_id_that_is_not_a_plain_file_name_stops_before_any_claim(self):
+        for image_id in ("../evil", "a/b", "..", ".hidden", ""):
+            with self.subTest(image_id=image_id):
+                self.fake = FakeS3()
+                self.cache = Path(tempfile.mkdtemp())
+                self.addCleanup(shutil.rmtree, self.cache, ignore_errors=True)
+                pin = _publish(
+                    self.fake,
+                    {"ok1": ("s1/ok1.jpg", "s1"), image_id: ("s1/bad.jpg", "s1")},
+                    [("ok1", 1, 1), (image_id, 2, 2)],
+                )
+
+                with self.assertRaises(ValueError):
+                    self.run_script(pin)
+
+                self.assertEqual(self.fake.keys_called("put"), [])
+                self.assertEqual(self.image_gets(), [])
+
+
+class DryRunTest(RunHarness):
+    def test_a_dry_run_claims_reads_and_writes_nothing_and_counts_the_planned_images(self):
+        pin = _publish(
+            self.fake,
+            {"i1": ("s1/i1.jpg", "s1"), "i2": ("s1/i2.jpg", "s1")},
+            [("i1", 1, 1), ("i2", 2, 2)],
+        )
+
+        counters = self.run_script(pin, dry_run=True)
+
+        self.assertEqual(self.fake.keys_called("put"), [])
+        self.assertEqual(self.image_gets(), [])
+        self.assertEqual(self.extract_msgs, [])
+        self.assertEqual((counters.images_ok, counters.images_failed), (2, 0))
+
+
+class ParseShardTest(unittest.TestCase):
+    def test_a_valid_shard_parses_to_index_and_count(self):
+        self.assertEqual(bfs.parse_shard("0/4"), (0, 4))
+        self.assertEqual(bfs.parse_shard("3/4"), (3, 4))
+
+    def test_an_out_of_range_or_malformed_shard_is_refused(self):
+        for text in ("4/4", "-1/4", "0/0", "x", "1"):
+            with self.subTest(text=text), self.assertRaises(argparse.ArgumentTypeError):
+                bfs.parse_shard(text)
+
+    def test_every_shard_the_launcher_hands_out_parses(self):
+        from mermaid_classifier.sagemaker.launcher_config import ShardConfig
+
+        shard = ShardConfig(workers=4, per_worker_arg="--shard")
+
+        parsed = [bfs.parse_shard(item) for [item] in lp.worker_items(shard, Path("unused"))]
+
+        self.assertEqual(parsed, [(0, 4), (1, 4), (2, 4), (3, 4)])
+
+
+class ResolveDeviceTest(unittest.TestCase):
+    def _mock_torch(self, mps: bool, cuda: bool):
+        return mock.patch.dict(
+            sys.modules,
+            {
+                "torch": mock.MagicMock(
+                    cuda=mock.MagicMock(is_available=mock.MagicMock(return_value=cuda)),
+                    backends=mock.MagicMock(
+                        mps=mock.MagicMock(is_available=mock.MagicMock(return_value=mps)),
+                    ),
+                ),
+            },
+        )
+
+    def test_auto_prefers_mps(self):
+        with self._mock_torch(mps=True, cuda=True):
+            self.assertEqual(bfs.resolve_device("auto"), "mps")
+
+    def test_auto_falls_back_to_cuda(self):
+        with self._mock_torch(mps=False, cuda=True):
+            self.assertEqual(bfs.resolve_device("auto"), "cuda")
+
+    def test_auto_falls_back_to_cpu(self):
+        with self._mock_torch(mps=False, cuda=False):
+            self.assertEqual(bfs.resolve_device("auto"), "cpu")
+
+    def test_explicit_mps_when_unavailable_raises(self):
+        with self._mock_torch(mps=False, cuda=False), self.assertRaises(RuntimeError):
+            bfs.resolve_device("mps")
+
+    def test_an_available_explicit_device_is_returned_unchanged(self):
+        """The auto branches all name a device of their own, so only this one
+        proves --device cuda runs on cuda rather than being downgraded."""
+        with self._mock_torch(mps=False, cuda=True):
+            self.assertEqual(bfs.resolve_device("cuda"), "cuda")
 
 
 class SelectImagesTest(unittest.TestCase):
