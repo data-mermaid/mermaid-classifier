@@ -5,8 +5,8 @@ One home for the URI parsing `scripts/build_region_probe.py` and
 `scripts/evaluate_region_probe.py` each carried their own copy of, now that
 `region_eval/score.py` needs the same parsing to accept a probe directory
 published to S3 alongside a local one; and for `download_features_parallel`,
-which both the training pipeline (`pyspacer/dataset.py`) and the region-eval
-feature cache (`region_eval/features.py`) use to fetch `.featurevector` files.
+which the region-eval feature cache (`region_eval/features.py`) uses to fetch
+`.featurevector` files.
 It lives here rather than in `pyspacer/` so a lightweight consumer can reach
 it without importing that subpackage's training-only logging and settings
 setup.
@@ -21,6 +21,10 @@ from typing import TypeGuard
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+# sha256 of zero bytes. `sha256_of_uri` returned it for every S3 object before
+# the stream was rewound, so a recorded weights hash equal to it is unrecorded.
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -61,6 +65,8 @@ def sha256_of_uri(uri: str, chunk_size: int = 1 << 20) -> str:
     # storage_factory and RemoteStorage._load_remote carry no return
     # annotations upstream, so both of these type as optional.
     stream = storage.load(key)  # pyright: ignore[reportOptionalMemberAccess]
+    # S3Storage._load_remote returns its BytesIO positioned at EOF.
+    stream.seek(0)  # pyright: ignore[reportOptionalMemberAccess]
 
     digest = hashlib.sha256()
     while chunk := stream.read(chunk_size):  # pyright: ignore[reportOptionalMemberAccess]

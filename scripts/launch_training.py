@@ -1,7 +1,7 @@
 """Launch a mermaid-classifier training run as a SageMaker TrainingJob.
 
-Reads a per-run YAML and submits CreateTrainingJob via the SageMaker
-SDK's Estimator. The script is script-agnostic: it doesn't know what
+Reads a per-run YAML and submits CreateTrainingJob via sagemaker-core's
+TrainingJob. The script is script-agnostic: it doesn't know what
 the named `job.entrypoint` does. See
 `mermaid-api/iac/sagemaker-launcher-convention.md` for the schema and
 canonical ARNs.
@@ -18,15 +18,23 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import boto3
-from sagemaker.estimator import Estimator
-from sagemaker.inputs import TrainingInput
-from sagemaker.session import Session
+from sagemaker.core.resources import Tag, TrainingJob
+from sagemaker.core.shapes import (
+    AlgorithmSpecification,
+    Channel,
+    DataSource,
+    OutputDataConfig,
+    ResourceConfig,
+    S3DataSource,
+    StoppingCondition,
+)
 
 from mermaid_classifier.sagemaker.launcher_config import parse_run_config
 
@@ -65,13 +73,36 @@ def make_run_id(prefix: str) -> str:
     return f"{prefix}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
 
 
-def build_estimator_kwargs(
+def _upload_config_dir(config_dir: Path, run_id: str, s3_client: Any) -> str:
+    key_prefix = f"runs/{run_id}/config"
+    for p in sorted(config_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(config_dir)
+        s3_client.upload_file(str(p), STAGING_BUCKET, f"{key_prefix}/{rel}")
+    return f"s3://{STAGING_BUCKET}/{key_prefix}/"
+
+
+def _s3_channel(name: str, s3_uri: str, input_mode: str) -> Channel:
+    return Channel(
+        channel_name=name,
+        input_mode=input_mode,
+        data_source=DataSource(
+            s3_data_source=S3DataSource(
+                s3_data_type="S3Prefix",
+                s3_uri=s3_uri,
+                s3_data_distribution_type="FullyReplicated",
+            )
+        ),
+    )
+
+
+def build_training_job_kwargs(
     *,
     cfg: Any,
     run_id: str,
     staging_bucket: str,
     mlflow_uri: str,
-    sm_session: Any,
 ) -> dict[str, Any]:
     job = cfg.job
     env = {
@@ -84,22 +115,40 @@ def build_estimator_kwargs(
         "AWS_DEFAULT_REGION": REGION,
         "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
     }
-    kwargs = {
-        "image_uri": expand_image_uri(job.image),
-        "role": EXEC_ROLE,
-        "instance_count": job.instance_count,
-        "instance_type": job.instance_type,
-        "volume_size": job.volume_gb,
-        "max_run": job.max_runtime_hours * 3600,
-        "output_path": f"s3://{staging_bucket}/runs/{run_id}/output/",
+    max_runtime = job.max_runtime_hours * 3600
+    stopping = {"max_runtime_in_seconds": max_runtime}
+    if job.use_spot:
+        stopping["max_wait_time_in_seconds"] = max_runtime + 3600
+
+    channels = [_s3_channel("config", f"s3://{staging_bucket}/runs/{run_id}/config/", "File")]
+    if cfg.training:
+        channels += [
+            _s3_channel(name, ch.s3_uri, ch.input_mode)
+            for name, ch in cfg.training.channels.items()
+        ]
+
+    kwargs: dict[str, Any] = {
+        "training_job_name": run_id,
+        "role_arn": EXEC_ROLE,
+        "algorithm_specification": AlgorithmSpecification(
+            training_image=expand_image_uri(job.image),
+            training_input_mode="File",
+        ),
+        "resource_config": ResourceConfig(
+            instance_type=job.instance_type,
+            instance_count=job.instance_count,
+            volume_size_in_gb=job.volume_gb,
+        ),
+        "stopping_condition": StoppingCondition(**stopping),
+        "output_data_config": OutputDataConfig(
+            s3_output_path=f"s3://{staging_bucket}/runs/{run_id}/output/"
+        ),
+        "input_data_config": channels,
         "environment": env,
-        "sagemaker_session": sm_session,
-        "base_job_name": job.name_prefix,
-        "tags": [{"Key": k, "Value": v} for k, v in job.tags.items()],
+        "tags": [Tag(key=k, value=v) for k, v in job.tags.items()],
     }
     if job.use_spot:
-        kwargs["use_spot_instances"] = True
-        kwargs["max_wait"] = job.max_runtime_hours * 3600 + 3600
+        kwargs["enable_managed_spot_training"] = True
     return kwargs
 
 
@@ -109,13 +158,6 @@ def _configure_logging():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stdout,
     )
-
-
-def _upload_config_dir(config_dir: Path, run_id: str, sm_session: Any) -> str:
-    key_prefix = f"runs/{run_id}/config"
-    log.info("Uploading %s to s3://%s/%s/", config_dir, STAGING_BUCKET, key_prefix)
-    sm_session.upload_data(path=str(config_dir), bucket=STAGING_BUCKET, key_prefix=key_prefix)
-    return f"s3://{STAGING_BUCKET}/{key_prefix}/"
 
 
 def _cloudwatch_url(run_id: str) -> str:
@@ -160,35 +202,27 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     boto_session = boto3.Session(region_name=REGION)
-    sm_session = Session(boto_session=boto_session)
 
-    _upload_config_dir(args.config_dir.resolve(), run_id, sm_session)
+    _upload_config_dir(args.config_dir.resolve(), run_id, boto_session.client("s3"))
 
-    kwargs = build_estimator_kwargs(
+    kwargs = build_training_job_kwargs(
         cfg=cfg,
         run_id=run_id,
         staging_bucket=STAGING_BUCKET,
         mlflow_uri=args.mlflow_tracking_uri,
-        sm_session=sm_session,
     )
 
     log.info("Run ID:       %s", run_id)
     log.info("CloudWatch:   %s", cw_url)
     log.info("MLflow:       %s", args.mlflow_tracking_uri)
 
-    estimator = Estimator(**kwargs)
-    inputs = {
-        "config": TrainingInput(
-            s3_data=f"s3://{STAGING_BUCKET}/runs/{run_id}/config/", input_mode="File"
-        ),
-    }
-    # Additional channels from cfg.training.channels:
-    if cfg.training:
-        for name, ch in cfg.training.channels.items():
-            inputs[name] = TrainingInput(s3_data=ch.s3_uri, input_mode=ch.input_mode)
-
     log.info("Submitting TrainingJob...")
-    estimator.fit(inputs=inputs, wait=True, logs="All", job_name=run_id)
+    job = TrainingJob.create(**kwargs, session=boto_session, region=REGION)
+    if job is None:
+        raise RuntimeError(f"TrainingJob.create returned no job for {run_id}")
+    # sagemaker-core's log client ignores the passed session and reads the ambient region.
+    os.environ["AWS_DEFAULT_REGION"] = REGION
+    job.wait(logs=True)
     log.info("Job %s reached terminal state.", run_id)
     log.info("CloudWatch: %s", cw_url)
 

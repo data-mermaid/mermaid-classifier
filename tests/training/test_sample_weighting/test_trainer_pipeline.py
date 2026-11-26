@@ -37,10 +37,7 @@ class TrainerPipelineTest(unittest.TestCase):
 
     def _make_runner(self, weighting):
         return TrainingRunner(
-            dataset_options=DatasetOptions(
-                include_mermaid=False,
-                weighting=weighting,
-            ),
+            dataset_options=DatasetOptions(weighting=weighting),
         )
 
     def test_weighting_none_returns_none_and_disabled_log(self):

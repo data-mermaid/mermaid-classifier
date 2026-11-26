@@ -1,5 +1,6 @@
-# Training run: 192 CoralNet sources (from coralnet_best_sources, filtered
-# to InS3=TRUE) with the top-108 benthic-attribute hierarchy.
+# Training run: the 189 CoralNet sources in groups.csv, which are the sources
+# present in coralnet-raw@20261124-5ab21b3, with the top-108
+# benthic-attribute hierarchy.
 #
 # included_labels.csv and rollups.csv are copied verbatim from
 # sagemaker/configs/coralnet_top108/ (generated 2026-05-08 by
@@ -7,9 +8,16 @@
 # MERMAID API if the taxonomy has drifted.
 
 dataset:
-  include_mermaid: false
-  # Verbatim S3 URI of the manifest parquet (scripts/build_coralnet_manifest.py).
-  coralnet_manifest_uri: s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/top108_best/coralnet_classifier_manifest_top108_best.parquet
+  datasets:
+    - name: coralnet-raw
+      version: 20261124-5ab21b3
+      manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+      features:
+        family: efficientnet-v1
+        manifest_sha256: c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e
+      labels: coralnet
+      # Groups (s<source id>) taken from the source ids of the run's former manifest.
+      groups_csv: groups.csv
   # The EfficientNet that produced this run's feature vectors.
   feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
   drop_growthforms: false
@@ -39,7 +47,5 @@ mlflow:
 env:
   # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
   # do not override here.
-  CORALNET_TRAIN_DATA_BUCKET: 2605-coralnet-public-sources
-  MERMAID_TRAIN_DATA_BUCKET: coral-reef-training
   TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "5"
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"

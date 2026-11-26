@@ -1,8 +1,8 @@
 """The frozen region probe set: a fixed slice of MERMAID annotation points
 that any model can be scored on, plus the manifest that pins what it is.
 
-Most committed training configs set `include_mermaid: false`, so a rate
-computed on a run's own validation split would have nothing to compute on. A
+Most committed training configs pin no MERMAID dataset, so a rate computed
+on a run's own validation split would have nothing to compute on. A
 probe set fixed once and scored afterwards works on any run, scores the
 already-published model, and makes v1-vs-v2 a paired comparison on identical
 points.

@@ -30,6 +30,7 @@ def export_artifact(
     reference_features: Any,
     *,
     extractor: ExtractorSpec,
+    training_data: dict[str, Any] | None = None,
     task: str = TASK_NAME,
     tol: float = 1e-6,
     enforce_sklearn_pin: bool = True,
@@ -40,6 +41,9 @@ def export_artifact(
     fitted through, and is the caller's only say over the manifest's
     conditioning record: ``config`` is derived from it rather than passed, so
     a patch size that contradicts the extractor cannot be written.
+
+    ``training_data``, when given, is written as the manifest's top-level
+    ``training_data`` block: the dataset pins the head was trained on.
 
     Returns (model_pt_path, manifest_dict, max_abs_diff). Raises ParityError
     if the frozen graph diverges from ``model.predict_proba`` beyond ``tol``.
@@ -108,6 +112,10 @@ def export_artifact(
             "pyspacer": _pkg_version("pyspacer"),
         },
     }
+
+    if training_data is not None:
+        # Additive like feature_extraction: schema_version stays 1.
+        manifest["training_data"] = training_data
 
     model_pt = output_dir / "model.pt"
     torch.jit.save(frozen, str(model_pt))

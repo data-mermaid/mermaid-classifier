@@ -7,15 +7,18 @@
 
 FROM python:3.12-slim
 
-# Build deps for pyarrow, duckdb, and the rest of the pyspacer chain.
+# Build deps for pyarrow, duckdb, and the rest of the pyspacer chain; git
+# fetches the segdata-spec git dependency.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # uv: fast, lockfile-driven installs. Pinned by digest tag for reproducibility.
-COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /uvx /usr/local/bin/
+# ghcr.io/astral-sh/uv:0.10.0
+COPY --from=ghcr.io/astral-sh/uv@sha256:78a7ff97cd27b7124a5f3c2aefe146170793c56a1e03321dd31a289f6d82a04f /uv /uvx /usr/local/bin/
 
 # Don't write .pyc; don't buffer stdout (SageMaker tails it to CloudWatch).
 # UV_LINK_MODE=copy avoids hardlink warnings when the cache is on a different fs

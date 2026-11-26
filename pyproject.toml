@@ -8,8 +8,15 @@ version = "0.1a1"
 requires-python = ">=3.12"
 dependencies = [
     "boto3",
+    # Floor for the eMudhra intermediate CA compromise fix. Keeps installs
+    # from resolving an older CA bundle.
+    "certifi>=2026.10.19",
     "jinja2",
 ]
+
+# segdata-spec is a git dependency, which hatchling refuses without this.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["mermaid_classifier"]
@@ -47,7 +54,8 @@ training = [
     # accepts; pydantic-settings is more explicit and searches from cwd.
     "pydantic-settings",
     "pyyaml",
-    "s3fs",
+    # Versioned dataset contract: pinned dataset tables and feature-family keys.
+    "segdata-spec @ git+https://github.com/data-mermaid/mermaid-segmentation@segdata-spec-v0.2.0#subdirectory=packages/segdata-spec",
     # pyspacer uses scikit-learn, but we also use it directly for metrics.
     # Pinned in lockstep with PARITY_PROVEN_SKLEARN (see inference extra).
     "scikit-learn==1.5.2",
@@ -73,7 +81,12 @@ jupyterlab = [
     "ipympl",
 ]
 sagemaker = [
-    "sagemaker>=2.0,<3.0",
+    "sagemaker-core>=2.27,<3",
+]
+# CUDA torch for the GPU feature-extraction image; combine with [training].
+cuda = [
+    "torch",
+    "torchvision",
 ]
 
 # On Linux (i.e. the SageMaker training image) pull torch + torchvision from
@@ -86,9 +99,21 @@ name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+# The GPU feature-extraction image (--extra cuda) takes the CUDA 12.8 wheels.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
-torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torch = [
+    { index = "pytorch-cu128", extra = "cuda", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", group = "cpu", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", extra = "cuda", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", group = "cpu", marker = "sys_platform == 'linux'" },
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -101,7 +126,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 # AWS-bootstrap code must run before mermaid_classifier imports (settings read env at import time)
-"scripts/build_feature_bucket.py" = ["E402"]
+"scripts/build_feature_set.py" = ["E402"]
 "scripts/classifier_train.py" = ["E402"]
 
 [tool.ruff.lint.isort]
@@ -135,7 +160,17 @@ reportUnknownLambdaType = false
 
 [dependency-groups]
 sagemaker = []
+cpu = [
+    "torch",
+    "torchvision",
+]
 lint = [
     "ruff",
     "basedpyright",
 ]
+
+[tool.uv]
+# The cpu group is synced by default, so plain installs keep CPU torch on Linux;
+# the GPU image syncs --extra cuda --no-group cpu.
+default-groups = ["cpu"]
+conflicts = [[{ extra = "cuda" }, { group = "cpu" }]]
