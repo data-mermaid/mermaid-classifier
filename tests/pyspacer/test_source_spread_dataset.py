@@ -248,20 +248,21 @@ class HoldoutCapTest(_Base):
         ).fetchall()[0][0]
         self.assertEqual(kept, 106)
 
-    def test_selection_is_stable_across_thread_counts(self):
-        selections = []
-        for threads in (1, 8):
-            _seed(self.dataset)
-            self.dataset.duck_conn.execute(f"SET threads TO {threads}")
-            self.dataset._cap_holdout_rows(15)
-            selections.append(
-                sorted(
-                    self.dataset.duck_conn.execute(
-                        "SELECT image_id, row, col FROM annotations WHERE is_holdout"
-                    ).fetchall()
-                )
-            )
-        self.assertEqual(selections[0], selections[1])
+    def test_a_partly_kept_image_keeps_its_lowest_points(self):
+        # Rows stored highest-first, so only the (row, col) tie-break puts the
+        # lowest points of the partly kept image first.
+        self.dataset.duck_conn.execute(
+            "CREATE OR REPLACE TABLE annotations AS SELECT * FROM annotations ORDER BY row DESC"
+        )
+        self.dataset.duck_conn.execute("SET threads TO 1")
+
+        self.dataset._cap_holdout_rows(15)
+
+        partial = _md5_ranked_images("h1", "ba_a", 4)[1]
+        kept = self.dataset.duck_conn.execute(
+            "SELECT row, col FROM annotations WHERE image_id = ? ORDER BY row, col", [partial]
+        ).fetchall()
+        self.assertEqual(kept, [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)])
 
     def test_audit_lists_available_and_realized_per_class(self):
         self.dataset._cap_holdout_rows(15)
@@ -278,13 +279,6 @@ class HoldoutCapTest(_Base):
 
     def test_no_holdout_rows_is_a_no_op(self):
         self.dataset.duck_conn.execute("DELETE FROM annotations WHERE is_holdout")
-
-        self.dataset._cap_holdout_rows(15)
-
-        self.assertIsNone(self.dataset._holdout_audit_df)
-
-    def test_table_without_holdout_column_is_a_no_op(self):
-        self.dataset.duck_conn.execute("ALTER TABLE annotations DROP COLUMN is_holdout")
 
         self.dataset._cap_holdout_rows(15)
 

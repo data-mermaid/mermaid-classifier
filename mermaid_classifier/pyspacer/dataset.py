@@ -899,9 +899,6 @@ class TrainingDataset:
         ``_holdout_audit_df`` None, when there are no holdout rows.
         """
         self._holdout_audit_df = None
-        if not self._has_holdout_column():
-            return
-
         available_rows = self.duck_conn.execute(
             "SELECT benthic_attribute_id, growth_form_id, COUNT(*)"
             " FROM annotations WHERE is_holdout"
