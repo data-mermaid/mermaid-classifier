@@ -30,6 +30,7 @@ _TRAINING_ONLY_MODULES = (
     "pyarrow",
     "bs4",
     "yaml",
+    "segdata_spec",
 )
 
 # Entry points the [inference] extra must be able to import. torch_classifier

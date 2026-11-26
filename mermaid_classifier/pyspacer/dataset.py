@@ -10,6 +10,7 @@ import functools
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from io import StringIO
@@ -23,6 +24,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from botocore import UNSIGNED
 from botocore.config import Config
+from botocore.exceptions import BotoCoreError
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import FeatureSetManifest
 from segdata_spec.read import (
@@ -36,6 +38,7 @@ from segdata_spec.read import (
 from segdata_spec.sync import FeatureSyncResult, sync_feature_set, sync_tables
 from spacer.data_classes import Annotation, DataLocation, ImageLabels
 from spacer.task_utils import SplitMode, preprocess_labels
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from mermaid_classifier.common.benthic_attributes import (
     CoralNetMermaidMapping,
@@ -74,6 +77,13 @@ from mermaid_classifier.training.subsample import (
 
 logger = logging_config_for_script("train")
 
+# Transient network failures of a feature download. botocore wraps most stream
+# failures in BotoCoreError subclasses, but a raw urllib3 error can escape a body
+# read. segdata-spec's integrity errors are not in this tuple and are never retried.
+TRANSIENT_SYNC_ERRORS = (BotoCoreError, ProtocolError, ReadTimeoutError)
+SYNC_ATTEMPTS = 3
+SYNC_RETRY_DELAY_SECONDS = 1.0
+
 
 def _load_csv_spec[T: CsvSpec](path: str | None, factory: Callable[[TextIO], T]) -> T:
     """A `CsvSpec` read from `path`, or the same type built from an empty CSV.
@@ -105,7 +115,11 @@ _LABEL_TABLE_SCHEMA = pa.schema(
 
 def make_s3_client(max_workers: int) -> Any:
     """A boto3 S3 client with a pooled connection per download worker."""
-    config = Config(max_pool_connections=max_workers, region_name=settings.aws_region)
+    config = Config(
+        max_pool_connections=max_workers,
+        region_name=settings.aws_region,
+        retries={"mode": "standard", "max_attempts": 10},
+    )
     if settings.aws_anonymous == "True":
         config = config.merge(Config(signature_version=UNSIGNED))
     return boto3.client(
@@ -221,6 +235,7 @@ def dataset_annotations(
     points: _Table, images: _Table, label_table: _Table, *, site: Sites, dataset: str
 ) -> _Table:
     """One annotation row per point of an image in `images`, with its mapped BA+GF."""
+    _check_label_ids_present(points, label_table, dataset)
     projects = pa.table(
         {
             "image_id": images.column("image_id"),
@@ -243,6 +258,39 @@ def dataset_annotations(
         .append_column("dataset", pa.array([dataset] * n, pa.string()))
         .append_column("bucket", pa.array([DATASET_BUCKET] * n, pa.string()))
     )
+
+
+def _check_label_ids_present(points: _Table, label_table: _Table, dataset: str) -> None:
+    """Refuse points whose label_id has no row in the dataset's label table."""
+    known = set(label_table.column("label_id").to_pylist())
+    missing = sorted(set(points.column("label_id").to_pylist()) - known)
+    if missing:
+        raise ValueError(
+            f"{dataset}: {len(missing)} point label ids are absent from labels.parquet,"
+            f" e.g. {missing[:5]}"
+        )
+
+
+def _sync_with_retries(dataset: str, sync: Callable[[], FeatureSyncResult]) -> FeatureSyncResult:
+    """Run `sync`, retrying transient network errors; the last failure propagates.
+
+    A retry resumes from the verified files already in the shared cache dir.
+    """
+    for attempt in range(1, SYNC_ATTEMPTS + 1):
+        try:
+            return sync()
+        except TRANSIENT_SYNC_ERRORS as error:
+            if attempt == SYNC_ATTEMPTS:
+                raise
+            logger.warning(
+                "Feature sync for %s failed (attempt %d of %d): %r; retrying",
+                dataset,
+                attempt,
+                SYNC_ATTEMPTS,
+                error,
+            )
+            time.sleep(SYNC_RETRY_DELAY_SECONDS)
+    raise AssertionError("unreachable")
 
 
 def feature_set_extractor(manifest: FeatureSetManifest) -> ExtractorSpec:
@@ -789,13 +837,22 @@ class TrainingDataset:
                     [source.pin.name],
                 ).fetchall()
             ]
-            sync_feature_set(
-                client,
-                source.features,
-                cache_dir,
-                bucket=DATASET_BUCKET,
-                image_ids=image_ids,
-                max_workers=settings.download_max_workers,
+            logger.info("Syncing features for %s: %d images", source.pin.name, len(image_ids))
+            start = time.monotonic()
+            _sync_with_retries(
+                source.pin.name,
+                functools.partial(
+                    sync_feature_set,
+                    client,
+                    source.features,
+                    cache_dir,
+                    bucket=DATASET_BUCKET,
+                    image_ids=image_ids,
+                    max_workers=settings.download_max_workers,
+                ),
+            )
+            logger.info(
+                "Synced features for %s in %.1f s", source.pin.name, time.monotonic() - start
             )
             self._feature_sets[source.pin.name] = open_feature_set(
                 cache_dir, DATASET_BUCKET, source.features
