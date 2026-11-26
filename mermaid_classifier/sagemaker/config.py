@@ -155,6 +155,14 @@ class DatasetConfig(BaseModel):
         repeated = sorted({name for name in names if names.count(name) > 1})
         if repeated:
             raise ValueError(f"datasets names a dataset more than once: {repeated}")
+        for kind in ("coralnet", "mermaid"):
+            of_kind = [entry.name for entry in self.datasets if entry.labels == kind]
+            if len(of_kind) > 1:
+                raise ValueError(
+                    f"datasets has more than one `labels: {kind}` entry ({of_kind}); "
+                    "per-source reports key on the label kind, so two datasets of one "
+                    "kind would merge"
+                )
         if self.taxonomy is None and any(entry.labels == "mermaid" for entry in self.datasets):
             raise ValueError(
                 "a `labels: mermaid` dataset needs a `taxonomy:` pin to resolve growth forms"

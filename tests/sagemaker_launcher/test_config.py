@@ -269,6 +269,28 @@ class DatasetPinsTest(unittest.TestCase):
             Pin(name="mermaid-benthic", version="20261124-e6abfad", manifest_sha256="cd" * 32),
         )
 
+    def test_two_entries_of_one_labels_kind_are_rejected_naming_kind_and_datasets(self):
+        for kind, first, second in (
+            ("mermaid", "mermaid-a", "mermaid-b"),
+            ("coralnet", "coralnet-a", "coralnet-b"),
+        ):
+            base = yaml.safe_load(MINIMAL_YAML)
+            base["dataset"]["taxonomy"] = {
+                "version": "20261124-e6abfad",
+                "manifest_sha256": "cd" * 32,
+            }
+            entry = base["dataset"]["datasets"][0]
+            entry["labels"] = kind
+            entry["name"] = first
+            base["dataset"]["datasets"].append({**entry, "name": second})
+            with self.subTest(kind=kind):
+                with self.assertRaises(ValidationError) as ctx:
+                    _load_dict(base)
+                message = str(ctx.exception)
+                self.assertIn(f"`labels: {kind}`", message)
+                self.assertIn(first, message)
+                self.assertIn(second, message)
+
     def test_a_non_hex_sha_is_rejected_naming_its_field(self):
         cases = {
             "features.manifest_sha256": ("features", "not-a-sha"),
