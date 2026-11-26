@@ -67,10 +67,9 @@ The full schema (every accepted key + validation) lives in
 
 `dataset.feature_extractor_weights` is required, and is the run's statement of
 which EfficientNet produced the `.featurevector` files it trains on. A feature
-prefix built by `scripts/build_feature_bucket.py` carries an
-`_extractor_spec.json` sidecar and the two must agree; a prefix we only read,
-such as CoralNet's public bucket, has no sidecar, so this field is the only
-record. `TrainingDataset` hashes the object and seals the result into
+prefix that carries an `_extractor_spec.json` sidecar must agree with it; a
+prefix we only read, such as CoralNet's public bucket, has no sidecar, so this
+field is the only record. `TrainingDataset` hashes the object and seals the result into
 `model.json` under `feature_extraction`, which the release gate then verifies
 the shipped `efficientnet.pt` against.
 

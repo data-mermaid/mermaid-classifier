@@ -47,13 +47,13 @@ print('imports OK')
 "
 else
     # The features image's `--help` exec imports torch+CUDA at top of
-    # build_feature_bucket.py, which segfaults under qemu emulation on
+    # build_feature_set.py, which segfaults under qemu emulation on
     # ARM hosts. Use a lighter check that runs only the Python
     # interpreter and verifies the worker script is present.
     echo "[smoke] Verifying worker script is reachable in the image..."
     docker run --rm --entrypoint python "${IMAGE}" -c "
 import os
-worker = '/opt/ml/code/scripts/build_feature_bucket.py'
+worker = '/opt/ml/code/scripts/build_feature_set.py'
 assert os.path.exists(worker), f'worker script missing: {worker}'
 # Verify Python can compile (catches syntax errors) without executing
 # the top-level torch import.

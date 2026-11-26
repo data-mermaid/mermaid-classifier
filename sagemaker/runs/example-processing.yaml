@@ -6,26 +6,27 @@
 #       --run-config sagemaker/runs/example-processing.yaml \
 #       --config-dir sagemaker/configs/example/
 #
-# The shard.items_from path is resolved relative to --config-dir;
-# items_column auto-detects the first column when omitted (the
-# example sources.csv has column 'id').
+# With no shard.items_from, worker i of N receives `--shard i/N`, and
+# build_feature_set.py extracts that worker's disjoint share of the images.
 
 job:
   name_prefix: mermaid-features-example
   image: mermaid-classifier-jobs:features-latest
-  entrypoint: scripts/build_feature_bucket.py
+  entrypoint: scripts/build_feature_set.py
   instance_type: ml.g5.xlarge
   volume_gb: 100
   max_runtime_hours: 4
 
 processing:
   container_args:
-    - --target-bucket=2605-coralnet-public-sources
-    - --weights=s3://2605-coralnet-public-sources/efficientnet_weights.pt
+    - --dataset=coralnet
+    - --version=20261124-cfc389d
+    - --manifest-sha256=<manifest sha256 of the pinned version>
+    - --family=efficientnet-b0-v1
+    - --cache-dir=/opt/ml/processing/segdata-cache
+    - --weights=s3://mermaid-config/classifier/v1/efficientnet_weights.pt
     - --device=cuda
     - --no-aws-bootstrap
-    - --skip-existing
   shard:
-    items_from: sources.csv
     workers: 4
-    per_worker_arg: --source-ids
+    per_worker_arg: --shard

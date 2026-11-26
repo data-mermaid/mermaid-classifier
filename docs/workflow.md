@@ -43,20 +43,25 @@ uv run python scripts/generate_training_config.py \
 ## Step 2 — Extract features (build the feature-vector bucket)
 
 Training reads **feature vectors**, not raw images. This step runs pyspacer's
-EfficientNet extractor over every annotated image in a set of CoralNet sources
-and writes a CoralNet-layout feature-vector bucket
-(`s{source_id}/features/i{image_id}.featurevector`) that training then points at
-via `CORALNET_TRAIN_DATA_BUCKET`. It's the heavy, scale-sensitive step — a large
-CoralNet source set is a lot of images to run through the extractor — and the
-**only GPU-accelerated step** (the EfficientNet backbone). Generating the config
-(Step 1), training (Step 3), and inference all run on CPU.
+EfficientNet extractor at the annotated points of a pinned dataset version
+(a `segdata-spec` dataset in the `mermaid-ic-datasets` bucket) and writes one
+`.featurevector` per image into a feature family:
+`features/<store>/<family>/<image_id>.featurevector`. It is the heavy,
+scale-sensitive step and the **only GPU-accelerated step** (the EfficientNet
+backbone). Generating the config (Step 1), training (Step 3), and inference all
+run on CPU.
+
+The script does not publish a feature-set index: `segdata features attach`
+(segdata-etl, in the mermaid-segmentation repo) adopts the family's files and
+publishes the index. Training today does not read these families: it points at a
+CoralNet-layout bucket through `CORALNET_TRAIN_DATA_BUCKET`.
 
 The two scripts do the *same* extraction; they differ in how they run it:
 
 | Script | Role |
 | - | - |
-| `build_feature_bucket.py` | The extractor itself. Runs on a **single machine** (no SageMaker sharding) — threaded S3 I/O (`--max-io-workers`), one process for the EfficientNet forward pass. Idempotent and resumable (a re-run skips images already extracted), so it can grind through a large source set across restarts. Run it directly to build or update the bucket. |
-| `launch_processing.py` | Runs that same extraction **in parallel** for throughput: fans out N sharded SageMaker ProcessingJobs over the source set. Reach for this when a single process would take too long. See [feature_extraction_at_scale.md](feature_extraction_at_scale.md). |
+| `build_feature_set.py` | The extractor itself. Runs on a **single machine** unless given `--shard i/n` — threaded S3 I/O (`--max-io-workers`), one process for the EfficientNet forward pass. Resumable (a re-run skips images whose family file exists). `--groups` / `--groups-csv` limit it to dataset groups. Run it directly to fill a family. |
+| `launch_processing.py` | Runs that same extraction **in parallel** for throughput: fans out N SageMaker ProcessingJobs, each given `--shard i/N`. Reach for this when a single process would take too long. See [feature_extraction_at_scale.md](feature_extraction_at_scale.md). |
 
 > `extract_reference_features.py` is a one-off maintenance script: it stacks
 > real EfficientNet feature vectors into a `.npy` for the TorchScript-vs-sklearn

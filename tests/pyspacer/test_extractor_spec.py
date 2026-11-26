@@ -86,7 +86,7 @@ class FromExtractorTest(unittest.TestCase):
         self.assertEqual(spec.feature_dim, 1280)
 
     def test_a_throughput_subclass_records_the_stock_class(self):
-        # build_feature_bucket.py wraps the extractor to pick a device and a
+        # build_feature_set.py wraps the extractor to pick a device and a
         # batch size. That is the same feature function, so the spec has to
         # name the stock class or serving could never match it.
         class _DeviceCaching(EfficientNetExtractor):
