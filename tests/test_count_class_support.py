@@ -94,6 +94,21 @@ class MainTest(unittest.TestCase):
         )
         dataset.cleanup.assert_called_once()
 
+    def test_failure_after_rewriting_the_csv_leaves_no_stale_sidecar(self):
+        with tempfile.TemporaryDirectory() as td:
+            sidecar = Path(td) / "support.provenance.json"
+            sidecar.write_text('{"counts_sha256": "stale"}')
+            with (
+                mock.patch(
+                    "mermaid_classifier.pyspacer.options.training_data_lineage",
+                    side_effect=RuntimeError("lineage failed"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "lineage failed"),
+            ):
+                self._run(td)
+            self.assertTrue((Path(td) / "support.csv").exists())
+            self.assertFalse(sidecar.exists())
+
     def test_dataset_is_built_with_holdout_tagging_disabled(self):
         with tempfile.TemporaryDirectory() as td:
             _, _, dataset_cls = self._run(td)

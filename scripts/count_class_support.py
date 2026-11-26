@@ -3,7 +3,8 @@
 Reads the config's annotations (read, rollup, filter, dedupe; no feature
 listing or download) and writes ``class_key, site, project_id, n``, plus a
 ``<out stem>.provenance.json`` sidecar recording the dataset, group, taxonomy and
-project-lookup pins counted, which generate_training_config.py checks. A group is
+project-lookup pins counted and the CSV's sha256, which generate_training_config.py
+checks. The label-filter, rollup and excluded-images CSVs are not recorded. A group is
 a CoralNet source or a MERMAID project; a class key is ``<ba>::<gf>``, so an
 empty growth form leaves a trailing ``::``. Prints points and distinct groups
 per class. With ``--check-min-points`` / ``--check-min-groups`` it then exits
@@ -21,7 +22,9 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
+import hashlib
 import json
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -34,6 +37,8 @@ from select_holdout_groups import (
     _resolve,  # pyright: ignore[reportPrivateUsage]  # shared path resolution
     load_config_then_pyspacer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -116,6 +121,13 @@ def main(argv: list[str] | None = None) -> None:
 
     config, training_dataset_cls = load_config_then_pyspacer(config_dir)
     dataset_options, _, _ = config.build_options(config_dir=config_dir)
+    if not dataset_options.mermaid_project_lookup_uri and any(
+        source.labels == "mermaid" for source in dataset_options.datasets
+    ):
+        logger.warning(
+            "The config pins a MERMAID dataset but sets no mermaid_project_lookup_uri,"
+            " so all MERMAID rows count as a single group (project 'all')."
+        )
     # Counts cover all data: an existing holdout CSV must not tag or drop rows.
     dataset_options = dataclasses.replace(
         dataset_options, holdout_groups_csv=None, holdout_fold="test"
@@ -127,13 +139,16 @@ def main(argv: list[str] | None = None) -> None:
         dataset.cleanup()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar = provenance_path(out_path)
+    # A sidecar left from an earlier count must not vouch for the new CSV if this run fails.
+    sidecar.unlink(missing_ok=True)
     counts.to_csv(out_path, index=False)
     print(f"Wrote {len(counts)} class-group rows to {out_path}")
     # The holdout CSV is cleared above, so the lineage records no holdout block.
     lineage = training_data_lineage(
         dataset_options, dataset.groups, lookup_sha256=dataset.mermaid_project_lookup_sha256
     )
-    sidecar = provenance_path(out_path)
+    lineage["counts_sha256"] = hashlib.sha256(out_path.read_bytes()).hexdigest()
     sidecar.write_text(json.dumps(lineage, indent=2, sort_keys=True) + "\n")
     print(f"Wrote the counted pins to {sidecar}")
     checking = args.check_min_points > 0 or args.check_min_groups > 0

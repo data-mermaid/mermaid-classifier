@@ -1162,7 +1162,10 @@ LOOKUP_BYTES = b"lookup parquet bytes"
 LOOKUP_SHA256 = hashlib.sha256(LOOKUP_BYTES).hexdigest()
 
 
-def _training_config_yaml(coralnet_version: str) -> str:
+def _training_config_yaml(
+    coralnet_version: str, taxonomy_version: str, lookup_uri: str | None
+) -> str:
+    lookup_line = "" if lookup_uri is None else f"  mermaid_project_lookup_uri: {lookup_uri}\n"
     return f"""\
 dataset:
   datasets:
@@ -1182,11 +1185,10 @@ dataset:
         manifest_sha256: {"d" * 64}
       labels: mermaid
   taxonomy:
-    version: 20261124-0000003
+    version: {taxonomy_version}
     manifest_sha256: {"e" * 64}
   feature_extractor_weights: s3://weights-bucket/efficientnet_weights.pt
-  mermaid_project_lookup_uri: {LOOKUP_URI}
-  holdout_groups_csv: holdout_groups.csv
+{lookup_line}  holdout_groups_csv: holdout_groups.csv
 training: {{}}
 mlflow: {{}}
 """
@@ -1216,13 +1218,19 @@ class SupportCountsProvenanceTests(_GenerateConfigTestCase):
         self.counts = _well_supported_counts(self.NAMES)
         self.counts[_key(ACROPORA_HUMILIS)] = _support(30, 1, 2, 3)
 
-    def write_config(self, name: str, coralnet_version: str = "20261124-0000001") -> Path:
+    def write_config(
+        self,
+        name: str,
+        coralnet_version: str = "20261124-0000001",
+        taxonomy_version: str = "20261124-0000003",
+        lookup_uri: str | None = LOOKUP_URI,
+    ) -> Path:
         config_dir = self.tmp / name
         config_dir.mkdir()
         (config_dir / "groups.csv").write_text("s10\ns20\n")
         (config_dir / "holdout_groups.csv").write_text("site,group_id,fold\ncoralnet,10,test\n")
         path = config_dir / "training_config.yaml"
-        path.write_text(_training_config_yaml(coralnet_version))
+        path.write_text(_training_config_yaml(coralnet_version, taxonomy_version, lookup_uri))
         return path
 
     def _counted_dataset(self, options, lookup_sha256: str | None) -> SimpleNamespace:
@@ -1289,20 +1297,68 @@ class SupportCountsProvenanceTests(_GenerateConfigTestCase):
         self.assert_rolled_up()
 
     def test_counts_from_other_pins_are_refused_naming_the_field(self):
-        counted = self.write_config("counted")
-        cases = {
+        # (target config overrides, counted lookup sha256, groups.csv after counting, field)
+        cases: dict[str, tuple[dict[str, str], str, str | None, str]] = {
             "coralnet version": (
-                self.write_config("other", coralnet_version="20261125-0000009"),
+                {"coralnet_version": "20261125-0000009"},
                 LOOKUP_SHA256,
+                None,
                 r"datasets\.coralnet-raw\.version",
             ),
-            "lookup sha256": (counted, "0" * 64, r"mermaid_project_lookup\.sha256"),
+            "taxonomy version": (
+                {"taxonomy_version": "20261125-0000008"},
+                LOOKUP_SHA256,
+                None,
+                r"taxonomy\.version",
+            ),
+            "lookup sha256": ({}, "0" * 64, None, r"mermaid_project_lookup\.sha256"),
+            "groups selection": (
+                {},
+                LOOKUP_SHA256,
+                "s10\n",
+                r"datasets\.coralnet-raw\.groups\.sha256",
+            ),
         }
-        for case, (target, counted_lookup_sha256, field) in cases.items():
+        for n, (case, (overrides, counted_sha256, groups, field)) in enumerate(cases.items()):
             with self.subTest(case):
-                self.count(counted, lookup_sha256=counted_lookup_sha256)
+                counted = self.write_config(f"counted{n}")
+                self.count(counted, lookup_sha256=counted_sha256)
+                target = self.write_config(f"target{n}", **overrides) if overrides else counted
+                if groups is not None:
+                    (counted.parent / "groups.csv").write_text(groups)
                 with self.assertRaisesRegex(ValueError, field):
                     self.generate("--training-config", str(target))
+
+    def test_mismatch_is_refused_even_with_the_allow_flag(self):
+        config = self.write_config("cfg")
+        self.count(config, lookup_sha256="0" * 64)
+        with self.assertRaisesRegex(ValueError, r"mermaid_project_lookup\.sha256"):
+            self.generate("--training-config", str(config), "--allow-unverified-support-counts")
+
+    def test_local_lookup_is_hashed_from_disk(self):
+        lookup = self.tmp / "lookup.parquet"
+        lookup.write_bytes(b"local lookup bytes")
+        config = self.write_config("cfg", lookup_uri=str(lookup))
+        self.count(config, lookup_sha256=hashlib.sha256(b"local lookup bytes").hexdigest())
+        self.generate("--training-config", str(config))
+        self.assert_rolled_up()
+        lookup.write_bytes(b"regenerated lookup bytes")
+        with self.assertRaisesRegex(ValueError, r"mermaid_project_lookup\.sha256"):
+            self.generate("--training-config", str(config))
+
+    def test_config_without_a_lookup_is_accepted(self):
+        config = self.write_config("cfg", lookup_uri=None)
+        self.count(config, lookup_sha256=None)
+        self.generate("--training-config", str(config))
+        self.assert_rolled_up()
+
+    def test_counts_edited_after_counting_are_refused(self):
+        config = self.write_config("cfg")
+        self.count(config)
+        with self.counts_csv.open("a") as f:
+            f.write(f"{_key(ACROPORA_HUMILIS)},site-9,proj,500\n")
+        with self.assertRaisesRegex(ValueError, "counts_sha256"):
+            self.generate("--training-config", str(config))
 
     def test_missing_sidecar_is_refused_unless_allowed(self):
         config = self.write_config("cfg")

@@ -780,6 +780,10 @@ def write_readme(
         min_support_block = ""
         if min_support_rows is not None:
             min_support_block = (
+                "\nThe support counts' provenance check covers the dataset, group,"
+                " taxonomy and project-lookup pins and the counts file itself. It does not"
+                " verify the label-filter, rollup or excluded-images CSVs the counts were"
+                " made with: regenerate the counts after editing them.\n"
                 f"\nClasses rolled up by min support ({len(min_support_rows)}),"
                 " in roll-up order:\n\n"
                 "| Class | Points | Groups | Target |\n| --- | --- | --- | --- |\n"
@@ -1015,8 +1019,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "training_config.yaml the generated config trains with. Its dataset, group,"
-            " taxonomy and project-lookup pins must match the support counts'"
-            " provenance sidecar (only with --min-support-counts)."
+            " taxonomy and project-lookup pins, and the counts file's sha256, must match"
+            " the support counts' provenance sidecar (only with --min-support-counts)."
+            " The label-filter, rollup and excluded-images CSVs are not verified:"
+            " regenerate the counts after editing them."
         ),
     )
     p.add_argument(
@@ -1070,7 +1076,8 @@ def _training_config_lineage(config_path: Path) -> dict[str, Any]:
 def verify_support_counts(
     counts_path: Path, training_config: Path | None, allow_unverified: bool
 ) -> None:
-    """Refuse support counts whose provenance sidecar does not match `training_config`.
+    """Refuse support counts whose provenance sidecar does not match `training_config`
+    and the counts file's own sha256.
 
     A missing `training_config` or sidecar is refused unless `allow_unverified`.
     """
@@ -1088,12 +1095,12 @@ def verify_support_counts(
         logger.warning("%s; using the counts unverified.", missing)
         return
     assert training_config is not None
-    mismatches = lineage_mismatches(
-        json.loads(sidecar.read_text()), _training_config_lineage(training_config)
-    )
+    expected = _training_config_lineage(training_config)
+    expected["counts_sha256"] = hashlib.sha256(counts_path.read_bytes()).hexdigest()
+    mismatches = lineage_mismatches(json.loads(sidecar.read_text()), expected)
     if mismatches:
         raise ValueError(
-            f"support counts {counts_path} were counted against other pins than"
+            f"support counts {counts_path} and their provenance sidecar do not match"
             f" --training-config {training_config} (expected): {'; '.join(mismatches)}."
             " Recount with scripts/count_class_support.py against that config."
         )
