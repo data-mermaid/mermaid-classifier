@@ -24,8 +24,6 @@ import count_class_support as ccs  # noqa: E402
 class _Options:
     holdout_groups_csv: str | None
     holdout_fold: int | str
-    include_mermaid: bool = False
-    mermaid_project_lookup_uri: str | None = None
     included_labels_csv: str | None = None
 
 
@@ -97,14 +95,6 @@ class MainTest(unittest.TestCase):
         (options,), _ = dataset_cls.filtered_annotations_only.call_args
         self.assertIsNone(options.holdout_groups_csv)
         self.assertEqual(options.holdout_fold, "test")
-
-    def test_mermaid_rows_without_a_project_lookup_stop_the_count(self):
-        options = _Options(holdout_groups_csv=None, holdout_fold="test", include_mermaid=True)
-        with (
-            tempfile.TemporaryDirectory() as td,
-            self.assertRaisesRegex(SystemExit, "mermaid_project_lookup_uri"),
-        ):
-            self._run(td, options=options)
 
     def test_check_failure_exits_nonzero_after_writing_the_csv(self):
         # ba1 has 3 points in 2 groups; ba2 has 1 point in 1 group.

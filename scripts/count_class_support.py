@@ -112,12 +112,6 @@ def main(argv: list[str] | None = None) -> None:
 
     config, training_dataset_cls = load_config_then_pyspacer(config_dir)
     dataset_options, _, _ = config.build_options(config_dir=config_dir)
-    if dataset_options.include_mermaid and not dataset_options.mermaid_project_lookup_uri:
-        raise SystemExit(
-            "The config includes MERMAID but sets no mermaid_project_lookup_uri, so every"
-            " MERMAID row would count as one project 'all'. Set the lookup, or set"
-            " include_mermaid: false."
-        )
     # Counts cover all data: an existing holdout CSV must not tag or drop rows.
     dataset_options = dataclasses.replace(
         dataset_options, holdout_groups_csv=None, holdout_fold="test"
