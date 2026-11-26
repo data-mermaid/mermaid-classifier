@@ -695,5 +695,48 @@ class CoarseningTests(_GenerateConfigTestCase):
         self.assertIn(TURF_ALGAE, included_ba)
 
 
+# Rollup rows and included labels that the generator writes for the coarsening
+# fixtures with both roll-up options off, as produced before the roll-up
+# options existed.
+UNCOARSENED_ROLLUPS = {
+    ("ba-acrhum-0000-0000-000000000004", ""): ("ba-acropora-0000-0000-000000000003", ""),
+    ("ba-acrhum-0000-0000-000000000004", GF_MASSIVE): (ACROPORA, ""),
+    (ACROPORA, GF_BRANCHING): (ACROPORA, ""),
+    ("ba-acroporidae-000-0000-000000000002", ""): ("ba-hardcoral-0000-0000-000000000001", ""),
+    (AGARICIA_AGARICITES, GF_FOLIOSE): (AGARICIA_AGARICITES, ""),
+    (HELIOSERIS_CUCULLATA, ""): ("ba-hardcoral-0000-0000-000000000001", ""),
+    ("ba-porann-0000-0000-00000000000f", ""): (PORITES, ""),
+    ("ba-porcom-0000-0000-00000000000d", ""): (PORITES, GF_BRANCHING),
+    (PORITES, GF_ENCRUSTING): (PORITES, ""),
+    (PORITES, GF_FOLIOSE): (PORITES, ""),
+    ("ba-porlob-0000-0000-00000000000c", ""): (PORITES, GF_MASSIVE),
+    ("ba-porrus-0000-0000-00000000000e", ""): (PORITES, ""),
+}
+UNCOARSENED_INCLUDED = {
+    (ACROPORA, ""),
+    (AGARICIA_AGARICITES, ""),
+    (AGARICIA, ""),
+    ("ba-bare-0000-0000-000000000011", ""),
+    (ACANTHASTER_PLANCI, ""),
+    ("ba-hardcoral-0000-0000-000000000001", ""),
+    ("ba-poras-0000-0000-000000000010", ""),
+    (PORITES, ""),
+    (PORITES, GF_BRANCHING),
+    (PORITES, GF_MASSIVE),
+    (TURF_ALGAE, ""),
+}
+
+
+class CoarseningOffTests(_GenerateConfigTestCase):
+    def setUp(self):
+        super().setUp()
+        _write_labels_csv(self.labels_csv, COARSEN_TOP108_NAMES)
+
+    def test_no_roll_up_options_leave_rollups_and_included_set_unchanged(self):
+        self.run_main(cn_entries=COARSEN_CN_ENTRIES)
+        self.assertEqual(self.get_rollup_lookup(), UNCOARSENED_ROLLUPS)
+        self.assertEqual(self.get_included_set(), UNCOARSENED_INCLUDED)
+
+
 if __name__ == "__main__":
     unittest.main()
