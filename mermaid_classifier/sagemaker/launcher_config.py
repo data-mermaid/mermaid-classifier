@@ -37,9 +37,15 @@ class JobConfig(BaseModel):
 
 
 class ShardConfig(BaseModel):
+    """Fan-out across workers.
+
+    With ``items_from``, each worker gets a round-robin chunk of the CSV's items;
+    without it, worker ``i`` gets ``i/<workers>``.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    items_from: str
+    items_from: str | None = None
     items_column: str | None = None
     workers: int = Field(gt=0)
     per_worker_arg: str

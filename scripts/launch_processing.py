@@ -27,7 +27,7 @@ from typing import Any
 
 import boto3
 
-from mermaid_classifier.sagemaker.launcher_config import parse_run_config
+from mermaid_classifier.sagemaker.launcher_config import ShardConfig, parse_run_config
 
 ACCOUNT = "554812291621"
 REGION = "us-east-1"
@@ -78,6 +78,15 @@ def load_items(csv_path: Path, column: str | None) -> list[str]:
         return [row[column] for row in reader if row[column]]
 
 
+def worker_items(shard: ShardConfig, config_dir: Path) -> list[list[str]]:
+    """Return each worker's items: CSV chunks with ``items_from``, else ``["i/<workers>"]``."""
+    if shard.items_from is None:
+        return [[f"{i}/{shard.workers}"] for i in range(shard.workers)]
+    items = load_items(config_dir / shard.items_from, shard.items_column)
+    log.info("Sharding %d items across %d workers", len(items), shard.workers)
+    return chunk_items(items, shard.workers)
+
+
 def build_processing_request(
     *,
     cfg: Any,
@@ -112,7 +121,7 @@ def build_processing_request(
             **job.env,
             # Launcher-owned: sits after job.env so a YAML env block cannot
             # redirect these. The features image (features-entrypoint.sh) execs
-            # build_feature_bucket.py directly and ignores this var; only the
+            # build_feature_set.py directly and ignores this var; only the
             # training image's shim dispatches on it.
             "AWS_DEFAULT_REGION": REGION,
             "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
@@ -201,11 +210,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Build the request list (with or without shard).
     if cfg.processing.shard:
-        items = load_items(
-            args.config_dir / cfg.processing.shard.items_from, cfg.processing.shard.items_column
-        )
-        chunks = chunk_items(items, cfg.processing.shard.workers)
-        log.info("Sharding %d items across %d workers", len(items), len(chunks))
+        chunks = worker_items(cfg.processing.shard, args.config_dir)
         requests = [
             build_processing_request(cfg=cfg, run_id=run_id, worker_idx=i, worker_items=chunk)
             for i, chunk in enumerate(chunks)
