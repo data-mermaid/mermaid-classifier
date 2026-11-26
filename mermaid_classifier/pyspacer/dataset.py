@@ -60,6 +60,7 @@ from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
 from mermaid_classifier.pyspacer.extraction import extractor_spec_from_weights
 from mermaid_classifier.pyspacer.inference import ExtractorSpec
 from mermaid_classifier.pyspacer.label_specs import (
+    HOLDOUT_TEST_FOLD,
     HoldoutGroups,
     ImageExclusionFilter,
     LabelFilter,
@@ -309,22 +310,22 @@ def _holdout_groups_unselected(
     holdout_groups: HoldoutGroups,
     options: DatasetOptions,
     groups: Mapping[str, frozenset[str] | None],
-) -> list[str]:
-    """The CoralNet holdout groups, as `s<id>` group names, a coralnet groups_csv leaves out.
+) -> dict[str, str]:
+    """The CoralNet holdout groups a coralnet groups_csv leaves out, as `s<id>` name -> fold.
 
     MERMAID holdout groups are projects, which no groups_csv selects among.
     """
     selections = [
         groups[source.pin.name] for source in options.datasets if source.labels == "coralnet"
     ]
-    return [
-        f"s{group_id}"
-        for site, group_id in sorted(holdout_groups.group_folds)
+    return {
+        f"s{group_id}": fold
+        for (site, group_id), fold in sorted(holdout_groups.group_folds.items())
         if site == Sites.CORALNET.value
         and any(
             selection is not None and f"s{group_id}" not in selection for selection in selections
         )
-    ]
+    }
 
 
 class TrainingDataset:
@@ -471,11 +472,22 @@ class TrainingDataset:
                 f" mermaid_project_lookup_uri is unset, so no MERMAID row has a project."
             )
         unselected = _holdout_groups_unselected(self.holdout_groups, self.options, self.groups)
-        if unselected:
+        # Groups in other CV folds are training data in this run, so their absence only warns.
+        active_folds = {HOLDOUT_TEST_FOLD, self.options.holdout_fold}
+        active = sorted(name for name, fold in unselected.items() if fold in active_folds)
+        inactive = sorted(name for name, fold in unselected.items() if fold not in active_folds)
+        if active:
             raise ValueError(
-                f"holdout_groups_csv lists group(s) {unselected} that the coralnet dataset's"
-                f" groups_csv does not select, so no row of them is read. Add them to the"
-                f" groups_csv or remove them from the holdout CSV."
+                f"holdout_groups_csv lists group(s) {active} in the test fold or holdout_fold"
+                f" {self.options.holdout_fold!r} that the coralnet dataset's groups_csv does"
+                f" not select, so no row of them is read. Add them to the groups_csv or"
+                f" remove them from the holdout CSV."
+            )
+        if inactive:
+            logger.warning(
+                "holdout_groups_csv lists group(s) %s in other folds that the coralnet"
+                " dataset's groups_csv does not select, so no row of them is read.",
+                inactive,
             )
 
     def load_filtered_annotations(self, client: Any) -> None:

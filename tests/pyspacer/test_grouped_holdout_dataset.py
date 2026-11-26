@@ -392,6 +392,15 @@ class CoralNetHoldoutTest(_Harness):
         with self.assertRaisesRegex(ValueError, "s99"):
             self.load(options)
 
+    def test_a_filtered_out_group_in_an_inactive_fold_only_warns(self):
+        options = self._options(
+            "site,group_id,fold\ncoralnet,99,1\n",
+            groups_csv=self.write("groups.csv", "s1\ns2\n"),
+        )
+        with self.assertLogs("train", level="WARNING") as logs:
+            self.load(options)
+        self.assertTrue([line for line in logs.output if "s99" in line], logs.output)
+
     def test_only_the_holdout_images_the_cap_keeps_are_synced(self):
         # Each holdout image has five points per class, so a cap of five keeps
         # one image: the first in md5(seed || dataset/image_id) order.
