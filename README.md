@@ -22,9 +22,9 @@ The `scripts/` directory holds command-line entry points that *drive* the packag
 - `classifier_train.py` — run a training job locally (the production recipe).
 - `generate_report.py` — render a self-contained HTML report from an MLflow run (uses `report_template.html.j2`).
 - `generate_training_config.py` — generate a training-config directory (CoralNet→MERMAID label mapping + rollup).
-- `build_feature_bucket.py` — build a CoralNet-layout feature-vector bucket for an updated source set (idempotent / resumable).
+- `build_feature_set.py` — extract pyspacer feature vectors for a pinned dataset version into a feature family (idempotent / resumable).
 - `extract_reference_features.py` — stack real EfficientNet feature vectors into a `.npy` for the TorchScript-vs-sklearn parity gate.
-- `launch_processing.py` — launch SageMaker ProcessingJob(s) for feature extraction (optional sharding).
+- `launch_processing.py` — launch SageMaker ProcessingJob(s) for feature extraction (`--shard i/n` fan-out, or CSV-item sharding).
 - `launch_training.py` — launch a SageMaker TrainingJob with sagemaker-core (script-agnostic wrapper).
 - `sagemaker_train_entrypoint.py` — SageMaker container entrypoint: reads YAML config → runs `MLflowTrainingRunner`.
 - `release_artifact.py` — release a trained MLflow classifier as immutable version `vN` to `s3://mermaid-config/classifier/<vN>/`.

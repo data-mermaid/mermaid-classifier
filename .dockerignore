@@ -16,8 +16,8 @@ __pycache__
 mlruns
 mlflow.db
 *.log
-build_feature_bucket_progress_*.jsonl
-build_feature_bucket_errors_*.csv
+build_feature_set_progress_*.jsonl
+build_feature_set_errors_*.csv
 
 # Reports + autoresearch.
 report_*.html

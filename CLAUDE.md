@@ -37,7 +37,7 @@ uv run python scripts/launch_processing.py           # submit ProcessingJob(s)
 
 # CoralNet data preparation:
 uv run python scripts/build_coralnet_manifest.py     # ETL parquets -> raw-image manifest parquet
-uv run python scripts/build_feature_bucket.py        # CoralNet-layout feature-vector bucket
+uv run python scripts/build_feature_set.py           # pyspacer features for a pinned dataset version -> feature family
 uv run python scripts/extract_reference_features.py  # stack .fv files into a reference matrix
 
 # Region-mismatch probe (see region_eval below). A published version is immutable --
@@ -171,10 +171,18 @@ break the resulting cycle — more machinery than the separation buys.
   layer behind `scripts/launch_training.py` / `launch_processing.py`. It shares the one
   `training_config.yaml` with local runs, so there is no recipe duplication between
   lanes. Cross-repo conventions live in `../mermaid-api/iac/sagemaker-launcher-convention.md`.
-- `scripts/build_feature_bucket.py` writes `_extractor_spec.json` at the root of
-  the bucket it fills, and refuses a re-run whose extractor differs from it —
-  `--skip-existing` is the default and only asks whether an object exists, so
-  nothing else would stop two feature spaces landing under one prefix.
+- `scripts/build_feature_set.py` writes `features/<store>/<family>/<image_id>.featurevector`
+  for one pinned dataset version (`segdata-spec`, bucket `mermaid-ic-datasets`). It
+  claims the family's extractor (`claim_extractor`) before writing any vector, so one
+  family never mixes feature spaces; it skips existing files and puts with
+  `If-None-Match: *` + CRC64NVME. It publishes no index: `segdata features attach`
+  (segdata-etl) adopts the files and publishes the feature-set index. Training does
+  not read these families yet; it still reads `CORALNET_TRAIN_DATA_BUCKET`.
+- The features image is Python 3.12 + cu128 torch (`uv sync --frozen --extra training
+  --extra cuda --no-group cpu`). Every other sync gets CPU torch through the default
+  `cpu` dependency group; `cuda` and `cpu` conflict, so never sync both.
+- `shard.items_from` in a processing run YAML is optional. Without it worker `i` gets
+  `<per_worker_arg> i/<workers>` (for `--shard i/n`).
 - `mermaid_classifier/coralnet/manifest.py` (+ `scripts/build_coralnet_manifest.py`)
   builds the raw-image CoralNet manifest Parquet that dataset loading reads from S3.
 - `pyspacer/swap_monitor.py`, `pyspacer/mlflow_model.py`, `pyspacer/annotation.py` and
@@ -233,7 +241,7 @@ break the resulting cycle — more machinery than the separation buys.
   is required by `DatasetConfig`, so a typo or omission fails at config load rather
   than mid-run. It replaced an inert `env: WEIGHTS_LOCATION` line that nothing on
   the training path ever read. `settings.weights_location` remains, read only by
-  `build_feature_bucket.py` and `annotation.py`.
+  `build_feature_set.py` and `annotation.py`.
 - **Config dirs are repo-root-relative**: a committed training config is a
   `sagemaker/configs/<name>/` dir (`training_config.yaml` plus whichever of
   `rollups.csv` / `included_labels.csv` that run needs — the siblings are

@@ -1,7 +1,7 @@
-# Container for running scripts/build_feature_bucket.py as a SageMaker
-# Processing Job worker. Launched by scripts/launch_processing.py with
-# shard-based fan-out. Pushes to the mermaid-classifier-jobs ECR repo
-# under the `features-*` tag prefix.
+# Container for running scripts/build_feature_set.py as a SageMaker
+# Processing Job worker on a GPU instance. Launched by
+# scripts/launch_processing.py with `--shard i/n` fan-out. Pushes to the
+# mermaid-classifier-jobs ECR repo under the `features-*` tag prefix.
 #
 # Build from the mermaid-classifier/ directory:
 #   docker buildx build --platform linux/amd64 \
@@ -9,42 +9,49 @@
 #
 # See docs/feature_extraction_at_scale.md for the full build/push recipe.
 
-ARG BASE_IMAGE=pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+# CUDA 12.8 matches the cu128 torch wheels the `cuda` extra locks.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
-FROM ${BASE_IMAGE}
-
-# Some pyspacer deps need build toolchains and image libs. The
-# pytorch/pytorch image is minimal so we install them explicitly.
+# git fetches the segdata-spec git dependency; libgl1/libglib2.0-0 back the image libs.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        git build-essential libgl1 libglib2.0-0 && \
+        ca-certificates git build-essential libgl1 libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /uvx /usr/local/bin/
+
+# Ubuntu 22.04 ships Python 3.10, so uv installs a managed 3.12 under /opt/python.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
 WORKDIR /opt/ml/code
 
-# Install the project and its training extra. We use pip (not uv) inside
-# the container; the base image ships pip but not uv, and pulling uv just
-# to install once isn't worth the complexity.
-COPY pyproject.toml /opt/ml/code/pyproject.toml
-COPY README.md /opt/ml/code/README.md
-COPY mermaid_classifier /opt/ml/code/mermaid_classifier
-COPY scripts /opt/ml/code/scripts
+RUN uv python install 3.12
 
-# build_feature_bucket.py reaches the whole pipeline -- spacer, pandas,
-# the settings layer -- so it needs [training], not the serving subset.
-# Pulls in pyspacer 0.14.0 (pinned in pyproject.toml) and its transitive
-# deps. pip will reconcile torch with whatever pyspacer needs.
-# entrypoint.sh runs the script by path, so an editable install is only
-# about installing from the copied source, not about import resolution.
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e ".[training]"
+# Layer 1: dependencies only, cached while pyproject.toml + uv.lock are unchanged.
+# --extra cuda brings cu128 torch; it conflicts with the default cpu group.
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --python 3.12 --no-install-project \
+        --extra training --extra cuda --no-group cpu
 
+# Layer 2: the project itself (non-editable).
+COPY mermaid_classifier/ ./mermaid_classifier/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --python 3.12 --no-editable \
+        --extra training --extra cuda --no-group cpu
+
+# Layer 3: scripts + entrypoint. The entrypoint runs the script by path.
+COPY scripts ./scripts
 COPY docker/jobs/features-entrypoint.sh /opt/ml/code/entrypoint.sh
 RUN chmod +x /opt/ml/code/entrypoint.sh
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    AWS_DEFAULT_REGION=us-east-1 \
+ENV AWS_DEFAULT_REGION=us-east-1 \
     SPACER_EXTRACTORS_CACHE_DIR=/opt/ml/cache/spacer-extractors
 
 ENTRYPOINT ["/opt/ml/code/entrypoint.sh"]

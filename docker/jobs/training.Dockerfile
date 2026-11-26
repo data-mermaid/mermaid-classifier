@@ -7,11 +7,13 @@
 
 FROM python:3.12-slim
 
-# Build deps for pyarrow, duckdb, and the rest of the pyspacer chain.
+# Build deps for pyarrow, duckdb, and the rest of the pyspacer chain; git
+# fetches the segdata-spec git dependency.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # uv: fast, lockfile-driven installs. Pinned by digest tag for reproducibility.
