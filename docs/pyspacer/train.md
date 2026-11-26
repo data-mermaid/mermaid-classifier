@@ -114,9 +114,7 @@ feature set does not index are dropped from the annotations and count against
 Training on CoralNet sources plus MERMAID takes two entries (see
 `sagemaker/configs/coralnet_all_plus_mermaid/training_config.yaml`): a
 `coralnet-raw` entry with `labels: coralnet` and a `mermaid` entry with
-`labels: mermaid`, plus the `taxonomy` pin. Committed configs hold real dataset
-pins and a placeholder `features.manifest_sha256` until the feature sets are
-seeded.
+`labels: mermaid`, plus the `taxonomy` pin.
 
 `scripts/generate_training_config.py` writes the `groups.csv` for the CoralNet
 sources it was given.

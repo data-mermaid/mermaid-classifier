@@ -249,9 +249,7 @@ break the resulting cycle — more machinery than the separation buys.
   `rollups.csv` / `included_labels.csv` / `groups.csv` that run needs — the siblings
   are optional). `groups.csv` lists one dataset group per line (CoralNet: `s<id>`)
   and is named by a `datasets:` entry's `groups_csv`; an entry without it trains on
-  every group of its version (`coralnet_all_plus_mermaid/`). Committed configs hold
-  real dataset pins and placeholder `features.manifest_sha256` values until the
-  feature sets are seeded. Scripts run from the
+  every group of its version (`coralnet_all_plus_mermaid/`). Scripts run from the
   repo root; both `classifier_train.py` (local) and the SageMaker launcher load
   a config by repo-root-relative `--config-dir` and share that one
   `training_config.yaml` (single source of truth — no recipe duplication).

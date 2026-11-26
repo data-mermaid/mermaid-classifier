@@ -271,7 +271,7 @@ class DatasetPinsTest(unittest.TestCase):
 
     def test_a_non_hex_sha_is_rejected_naming_its_field(self):
         cases = {
-            "features.manifest_sha256": ("features", "<feature-set sha256 after seeding>"),
+            "features.manifest_sha256": ("features", "not-a-sha"),
             "datasets.0.manifest_sha256": (None, "B" * 64),
         }
         for field, (nested, value) in cases.items():
@@ -302,14 +302,7 @@ class ExampleYamlTest(unittest.TestCase):
             example.is_file(),
             f"Example YAML not found at {example}",
         )
-        # The committed feature-set pins are placeholders until the feature
-        # sets are seeded; every other field must load.
-        with self.assertRaises(ValidationError) as ctx:
-            TrainingRunConfig.from_yaml_path(example)
-        self.assertEqual(
-            {error["loc"] for error in ctx.exception.errors()},
-            {("dataset", "datasets", 0, "features", "manifest_sha256")},
-        )
+        TrainingRunConfig.from_yaml_path(example)
 
 
 if __name__ == "__main__":

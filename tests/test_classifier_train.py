@@ -4,8 +4,8 @@ classifier_train.py is a script, not a module; we import it by path. The tests
 mock the local AWS SSO step and the MLflowTrainingRunner factory so they neither
 hit AWS nor run real training, and verify that the local driver:
 
-  * loads a copy of the committed example config, its placeholder feature-set
-    pin filled in, and calls the runner once with options built from it;
+  * loads a copy of the committed example config, its feature-set pin
+    replaced, and calls the runner once with options built from it;
   * defaults to a config dir that exists inside the repo.
 
 build_options() itself does no network I/O (it only constructs dataclasses from
@@ -22,7 +22,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from pydantic import ValidationError
 from support.paths import REPO_ROOT
 
 SCRIPT_PATH = REPO_ROOT / "scripts" / "classifier_train.py"
@@ -56,7 +55,9 @@ class ClassifierTrainMainTest(unittest.TestCase):
             config_dir = Path(td)
             text = (EXAMPLE_CONFIG_DIR / "training_config.yaml").read_text()
             (config_dir / "training_config.yaml").write_text(
-                text.replace('"<feature-set sha256 after seeding>"', "ef" * 32)
+                text.replace(
+                    "c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e", "ef" * 32
+                )
             )
             for sibling in ("rollups.csv", "included_labels.csv", "groups.csv"):
                 shutil.copy(EXAMPLE_CONFIG_DIR / sibling, config_dir / sibling)
@@ -88,14 +89,8 @@ class ClassifierTrainMainTest(unittest.TestCase):
         )
         config_path = default_dir / self.module.CONFIG_FILENAME
         self.assertTrue(config_path.is_file(), msg=f"missing {config_path}")
-        # A malformed default config is a real regression. Its feature-set pins
-        # are placeholders until the feature sets are seeded, and fail alone.
-        with self.assertRaises(ValidationError) as ctx:
-            TrainingRunConfig.from_yaml_path(config_path)
-        self.assertEqual(
-            {error["loc"][-2:] for error in ctx.exception.errors()},
-            {("features", "manifest_sha256")},
-        )
+        # A malformed default config is a real regression.
+        TrainingRunConfig.from_yaml_path(config_path)
 
 
 if __name__ == "__main__":
