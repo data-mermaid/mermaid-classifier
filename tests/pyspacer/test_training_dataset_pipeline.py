@@ -10,12 +10,10 @@ pipeline steps forward from a seeded synthetic ``annotations`` table:
   → prep + split (prep_annotations_for_pyspacer → preprocess_labels)
   → tag rows (add_training_set_names)
 
-``download_features_parallel`` is mocked throughout so no S3 access occurs.
+Feature sets are stood in for by a local path per image, so no S3 access occurs.
 
 Sub-steps characterized
 -----------------------
-- read_mermaid_data: image_id column lands as VARCHAR in the annotations
-  table even when the source parquet's image_id column is numeric
 - _apply_subsample: row count drops to per-class cap; audit df populated
 - prep_annotations_for_pyspacer: returns TrainingTaskLabels with .train/.ref/.val;
   total points across splits equals input count; split respects ref_val_ratios
@@ -28,12 +26,12 @@ Sub-steps NOT characterized (with reason)
 ------------------------------------------
 - roll_up_in_duckdb and filter_in_duckdb: tested on the specs that own them,
   in test_label_specs.py (LabelRollupSpecInDuckDBTest, LabelFilterInDuckDBTest).
-- The full TrainingDataset.__init__ end-to-end: reads CoralNet CSVs and a
-  MERMAID Parquet from S3 via DuckDB, which is impractical to run offline.
+- The full TrainingDataset.__init__ end-to-end: test_dataset_pins.py drives it
+  against published segdata-spec versions in an S3 fake.
 """
 
-import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import pandas as pd
@@ -64,6 +62,7 @@ def _seed_annotations(dataset: NoInitDataset) -> None:
                     "benthic_attribute_id": ba,
                     "growth_form_id": "",
                     "site": "mermaid",
+                    "dataset": "mermaid",
                     "bucket": "my-bucket",
                     "project_id": f"p{i}",
                     "feature_vector": f"{ba}/img_{j}.fv",
@@ -71,57 +70,17 @@ def _seed_annotations(dataset: NoInitDataset) -> None:
             )
     df = pd.DataFrame(rows)  # noqa: F841 — referenced by name in DuckDB SQL
     dataset.duck_conn.execute("CREATE OR REPLACE TABLE annotations AS SELECT * FROM df")
+    dataset._feature_sets = {"mermaid": _CachedFeatures(Path(dataset._feature_dir))}
 
 
-# ---------------------------------------------------------------------------
-# 1. MERMAID ingestion (read_mermaid_data)
-# ---------------------------------------------------------------------------
+class _CachedFeatures:
+    """The one FeatureSet method prep_annotations_for_pyspacer reads."""
 
+    def __init__(self, root: Path) -> None:
+        self._root = root
 
-class ReadMermaidDataImageIdTest(unittest.TestCase):
-    """Characterize read_mermaid_data's image_id column typing."""
-
-    def setUp(self):
-        self.override = override_settings(aws_anonymous="True")
-        self.override.__enter__()
-        self.dataset = make_dataset(self)
-
-    def tearDown(self):
-        self.override.__exit__(None, None, None)
-
-    def test_numeric_image_id_ingests_as_varchar(self):
-        """ImageExclusionFilter.filter_in_duckdb compares image_id as a string,
-        so a MERMAID parquet's image_id column must land as VARCHAR in the
-        annotations table even when the source column is numeric.
-        """
-        mermaid_df = pd.DataFrame(  # noqa: F841 — referenced by name in DuckDB SQL
-            {
-                "image_id": [12345, 67890],
-                "row": [10, 20],
-                "col": [1, 2],
-                "benthic_attribute_id": ["ba_a", "ba_b"],
-                "growth_form_id": ["", ""],
-            }
-        )
-        self.dataset.duck_conn.execute(
-            "CREATE TABLE mermaid_parquet_input AS SELECT * FROM mermaid_df"
-        )
-
-        with tempfile.NamedTemporaryFile(delete_on_close=False) as parquet_f:
-            # DuckDB will reopen the file, so close it first.
-            parquet_f.close()
-            self.dataset.duck_conn.execute(
-                f"COPY (SELECT * FROM mermaid_parquet_input) TO '{parquet_f.name}' (FORMAT parquet)"
-            )
-
-            with override_settings(mermaid_annotations_parquet_pattern=parquet_f.name):
-                self.dataset.read_mermaid_data()
-
-        column_types = {
-            row[0]: row[1]
-            for row in self.dataset.duck_conn.execute("DESCRIBE annotations").fetchall()
-        }
-        self.assertEqual(column_types["image_id"], "VARCHAR")
+    def path(self, image_id: str) -> Path:
+        return self._root / f"{image_id}.featurevector"
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +141,7 @@ class PrepAnnotationsTest(unittest.TestCase):
         self.override.__exit__(None, None, None)
 
     def _call_prep(self):
-        with mock.patch(
-            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
-            return_value=set(),
-        ):
-            return self.dataset.prep_annotations_for_pyspacer()
+        return self.dataset.prep_annotations_for_pyspacer()
 
     def test_total_labels_equal_input_count(self):
         """Sum of train+ref+val label counts equals the number of annotations."""
@@ -210,37 +165,6 @@ class PrepAnnotationsTest(unittest.TestCase):
         self.assertIn("ba_c::", classes)
 
 
-class PrepAnnotationsDownloadFailureTest(unittest.TestCase):
-    """The aggregate warning prep_annotations_for_pyspacer logs on a download
-    failure -- the downloader's own per-key warning lands on a logger this
-    module does not attach to train.log, so this is what a post-mortem from
-    train.log alone can still read.
-    """
-
-    def setUp(self):
-        self.override = override_settings(aws_anonymous="True", download_max_workers=1)
-        self.override.__enter__()
-        self.dataset = make_dataset(self)
-        _seed_annotations(self.dataset)
-
-    def tearDown(self):
-        self.override.__exit__(None, None, None)
-
-    def test_the_aggregate_warning_names_the_failed_keys(self):
-        failed = {("my-bucket", "ba_a/img_0.fv")}
-        with (
-            mock.patch(
-                "mermaid_classifier.pyspacer.dataset.download_features_parallel",
-                return_value=failed,
-            ),
-            self.assertLogs("train", level="WARNING") as logs,
-        ):
-            self.dataset.prep_annotations_for_pyspacer()
-
-        message = "\n".join(logs.output)
-        self.assertIn("ba_a/img_0.fv", message)
-
-
 # ---------------------------------------------------------------------------
 # 4. add_training_set_names
 # ---------------------------------------------------------------------------
@@ -260,11 +184,7 @@ class AddTrainingSetNamesTest(unittest.TestCase):
 
     def test_train_ref_val_counts_match_labels(self):
         """Row counts per set in the table match the label counts from prep."""
-        with mock.patch(
-            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
-            return_value=set(),
-        ):
-            labels = self.dataset.prep_annotations_for_pyspacer()
+        labels = self.dataset.prep_annotations_for_pyspacer()
         self.dataset.labels = labels
         self.dataset.add_training_set_names()
 
@@ -312,11 +232,7 @@ class SetTrainSummaryStatsTest(unittest.TestCase):
         self.dataset = make_dataset(self)
         _seed_annotations(self.dataset)
 
-        with mock.patch(
-            "mermaid_classifier.pyspacer.dataset.download_features_parallel",
-            return_value=set(),
-        ):
-            self.dataset.labels = self.dataset.prep_annotations_for_pyspacer()
+        self.dataset.labels = self.dataset.prep_annotations_for_pyspacer()
         self.dataset.add_training_set_names()
 
         with (

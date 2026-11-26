@@ -548,18 +548,20 @@ class IncludedLabelCountTests(_GenerateConfigTestCase):
         self.assertEqual(included_ba, EXPECTED_INCLUDED_BA_UUIDS)
 
 
-class SourcesPassthroughTests(_GenerateConfigTestCase):
-    def test_sources_passthrough_id_column(self):
-        self.run_main()
-        ids = [r["id"] for r in self.read_csv_rows("sources.csv")]
-        self.assertEqual(ids, ["10", "20", "30"])
+class GroupsOutputTests(_GenerateConfigTestCase):
+    """groups.csv is what a `datasets:` entry's groups_csv reads: no header,
+    one CoralNet group `s<id>` per line."""
 
-    def test_sources_passthrough_source_id_column(self):
+    def test_groups_from_the_id_column(self):
+        self.run_main()
+        self.assertEqual((self.output_dir / "groups.csv").read_text(), "s10\ns20\ns30\n")
+        self.assertFalse((self.output_dir / "sources.csv").exists())
+
+    def test_groups_from_the_source_id_column(self):
         alt = self.tmp / "sources_alt.csv"
         _write_sources_csv(alt, [42, 99], column="Source ID")
         self.run_main(sources_csv=alt)
-        ids = [r["id"] for r in self.read_csv_rows("sources.csv")]
-        self.assertEqual(ids, ["42", "99"])
+        self.assertEqual((self.output_dir / "groups.csv").read_text(), "s42\ns99\n")
 
 
 class ValidationTests(_GenerateConfigTestCase):
@@ -573,11 +575,10 @@ class ValidationTests(_GenerateConfigTestCase):
         with self.assertRaises(ValueError):
             gtc.validate_outputs(self.output_dir)
 
-    def test_sources_csv_missing_id_column_rejected(self):
+    def test_a_groups_line_that_is_not_a_coralnet_group_is_rejected(self):
         self.run_main(extra_args=["--skip-validation"])
-        sources_path = self.output_dir / "sources.csv"
-        sources_path.write_text("not_id\n1\n2\n")
-        with self.assertRaises(ValueError):
+        (self.output_dir / "groups.csv").write_text("id\ns1\n")
+        with self.assertRaisesRegex(ValueError, "'id'"):
             gtc.validate_outputs(self.output_dir)
 
 
@@ -1069,19 +1070,19 @@ def _normalized_readme(text: str, tmp: Path) -> str:
 
 class OutputStabilityTests(_GenerateConfigTestCase):
     """Without --min-support-counts the outputs match the generator's
-    output before min support existed. The digests come from that version;
-    regenerate them only for an intended change to the outputs."""
+    output before min support existed, with the README naming groups.csv.
+    Regenerate the digests only for an intended change to the outputs."""
 
     GOLDEN_SHA256 = {
         (): {
             "rollups.csv": "c1a106106943799b953b391f047717750dd57098b6b238c561e9dc1d9d9c6f88",
             "included_labels.csv": "f38978b65922fac6397f9595485260ce27f3b429b302cf0efcf2f73d559e9bd7",
-            "README.md": "62d8597474bca87bb4fd8f6885e5a27c54ad3387add60b1f4a1093b722048c08",
+            "README.md": "e1e3d9b461b7c53d2cbe66c9855883761d1b2d97b50bd9a4b0f44f23f54d3028",
         },
         ("--roll-up-species", "--roll-up-region-specific"): {
             "rollups.csv": "674fc1b5a8b6ae0456fadfb92dc8b33d2a55e72b11558556dede4a6fa75a23cf",
             "included_labels.csv": "52fad936d0e2df235c096668b84703f20308afc806bd51912f4ad80db1de5b35",
-            "README.md": "ef33361467e7b47d70562b50167f9d5b7af86f5e23433ea0dc3cbff2b6f2df49",
+            "README.md": "4b8c49803c1b8a54be68a219f49b42fb07dc3373ca00eeb05e14722015133b04",
         },
     }
 
@@ -1102,6 +1103,49 @@ class OutputStabilityTests(_GenerateConfigTestCase):
                     name: hashlib.sha256(text.encode()).hexdigest() for name, text in actual.items()
                 }
                 self.assertEqual(digests, expected)
+
+
+# Rollup rows and included labels that the generator writes for the coarsening
+# fixtures with both roll-up options off, as produced before the roll-up
+# options existed.
+UNCOARSENED_ROLLUPS = {
+    ("ba-acrhum-0000-0000-000000000004", ""): ("ba-acropora-0000-0000-000000000003", ""),
+    ("ba-acrhum-0000-0000-000000000004", GF_MASSIVE): (ACROPORA, ""),
+    (ACROPORA, GF_BRANCHING): (ACROPORA, ""),
+    ("ba-acroporidae-000-0000-000000000002", ""): ("ba-hardcoral-0000-0000-000000000001", ""),
+    (AGARICIA_AGARICITES, GF_FOLIOSE): (AGARICIA_AGARICITES, ""),
+    (HELIOSERIS_CUCULLATA, ""): ("ba-hardcoral-0000-0000-000000000001", ""),
+    ("ba-porann-0000-0000-00000000000f", ""): (PORITES, ""),
+    ("ba-porcom-0000-0000-00000000000d", ""): (PORITES, GF_BRANCHING),
+    (PORITES, GF_ENCRUSTING): (PORITES, ""),
+    (PORITES, GF_FOLIOSE): (PORITES, ""),
+    ("ba-porlob-0000-0000-00000000000c", ""): (PORITES, GF_MASSIVE),
+    ("ba-porrus-0000-0000-00000000000e", ""): (PORITES, ""),
+}
+UNCOARSENED_INCLUDED = {
+    (ACROPORA, ""),
+    (AGARICIA_AGARICITES, ""),
+    (AGARICIA, ""),
+    ("ba-bare-0000-0000-000000000011", ""),
+    (ACANTHASTER_PLANCI, ""),
+    ("ba-hardcoral-0000-0000-000000000001", ""),
+    ("ba-poras-0000-0000-000000000010", ""),
+    (PORITES, ""),
+    (PORITES, GF_BRANCHING),
+    (PORITES, GF_MASSIVE),
+    (TURF_ALGAE, ""),
+}
+
+
+class CoarseningOffTests(_GenerateConfigTestCase):
+    def setUp(self):
+        super().setUp()
+        _write_labels_csv(self.labels_csv, COARSEN_TOP108_NAMES)
+
+    def test_no_roll_up_options_leave_rollups_and_included_set_unchanged(self):
+        self.run_main(cn_entries=COARSEN_CN_ENTRIES)
+        self.assertEqual(self.get_rollup_lookup(), UNCOARSENED_ROLLUPS)
+        self.assertEqual(self.get_included_set(), UNCOARSENED_INCLUDED)
 
 
 if __name__ == "__main__":

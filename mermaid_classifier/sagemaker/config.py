@@ -14,12 +14,22 @@ so callers can sequence env-var application correctly.
 
 from __future__ import annotations
 
+import csv
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+from segdata_spec.manifest import FeatureSetPin, Pin, Version
 
 # Mirrors the MLflow registered-model name regex enforced by the
 # SageMaker MLflow registry. Validating at config load fails the job
@@ -27,6 +37,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # `mlflow.sklearn.log_model(registered_model_name=...)` has spent hours
 # of compute.
 _MLFLOW_MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,56}$")
+
+# Validation-context key carrying the YAML's directory, against which
+# relative CSV paths resolve.
+CONFIG_DIR_CONTEXT_KEY = "config_dir"
 
 
 class SubsampleConfig(BaseModel):
@@ -73,15 +87,66 @@ class WeightingConfig(BaseModel):
         return self
 
 
+# A manifest pin is the hex sha256 of the published manifest.json bytes.
+Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+# The taxonomy every `labels: mermaid` entry resolves growth-form names against.
+TAXONOMY_NAME = "mermaid-benthic"
+
+
+class FeatureSetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: str
+    manifest_sha256: Sha256Hex
+
+
+class DatasetPinConfig(BaseModel):
+    """One pinned dataset version, the feature set read for it, and how its labels map."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: Version
+    manifest_sha256: Sha256Hex
+    features: FeatureSetConfig
+    labels: Literal["coralnet", "mermaid"]
+    # One dataset group per line; absent selects every group of the version.
+    groups_csv: str | None = None
+
+    def pin(self) -> Pin:
+        return Pin(name=self.name, version=self.version, manifest_sha256=self.manifest_sha256)
+
+    def feature_set_pin(self) -> FeatureSetPin:
+        return FeatureSetPin(
+            dataset=self.pin(),
+            family=self.features.family,
+            manifest_sha256=self.features.manifest_sha256,
+        )
+
+    def groups_csv_path(self, base: Path) -> Path | None:
+        return None if self.groups_csv is None else base / self.groups_csv
+
+
+class TaxonomyPinConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Version
+    manifest_sha256: Sha256Hex
+
+    def pin(self) -> Pin:
+        return Pin(name=TAXONOMY_NAME, version=self.version, manifest_sha256=self.manifest_sha256)
+
+
 class DatasetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    include_mermaid: bool = True
+    datasets: list[DatasetPinConfig] = Field(min_length=1)
+    taxonomy: TaxonomyPinConfig | None = None
     # Relative paths are resolved as siblings of the YAML file by
     # *_path() helpers. The launcher uploads the YAML and CSVs together
     # to the same S3 prefix so the same resolution works in the
     # container.
-    coralnet_manifest_uri: str | None = None
     # Required: a run must say which extractor produced the feature vectors
     # it trains on. Absent, the released artifact could not record it either.
     feature_extractor_weights: str
@@ -108,6 +173,54 @@ class DatasetConfig(BaseModel):
         if not isinstance(v, str) or not (v == "test" or (v.isascii() and v.isdigit())):
             raise ValueError(f"holdout_fold must be 'test' or a non-negative integer, got {v!r}")
         return v
+
+    @model_validator(mode="after")
+    def _check_datasets(self, info: ValidationInfo) -> DatasetConfig:
+        names = [entry.name for entry in self.datasets]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"datasets names a dataset more than once: {repeated}")
+        for kind in ("coralnet", "mermaid"):
+            of_kind = [entry.name for entry in self.datasets if entry.labels == kind]
+            if len(of_kind) > 1:
+                raise ValueError(
+                    f"datasets has more than one `labels: {kind}` entry ({of_kind}); "
+                    "per-source reports key on the label kind, so two datasets of one "
+                    "kind would merge"
+                )
+        if self.taxonomy is None and any(entry.labels == "mermaid" for entry in self.datasets):
+            raise ValueError(
+                "a `labels: mermaid` dataset needs a `taxonomy:` pin to resolve growth forms"
+            )
+        self._check_mermaid_holdout_has_lookup(info)
+        return self
+
+    def _check_mermaid_holdout_has_lookup(self, info: ValidationInfo) -> None:
+        """Refuse MERMAID holdout groups without a project lookup to give MERMAID rows a project.
+
+        The holdout CSV resolves against the `config_dir` validation context, which
+        `TrainingRunConfig.from_yaml_path` supplies. Without that context, or before
+        scripts/select_holdout_groups.py has written the CSV, the check is skipped and
+        TrainingDataset makes it at load.
+        """
+        context = info.context if isinstance(info.context, dict) else {}
+        config_dir = context.get(CONFIG_DIR_CONTEXT_KEY)
+        if self.holdout_groups_csv is None or self.mermaid_project_lookup_uri or config_dir is None:
+            return
+        csv_path = self.holdout_groups_csv_path(Path(config_dir))
+        if csv_path is None or not csv_path.is_file():
+            return
+        with csv_path.open(newline="") as csv_file:
+            mermaid_groups = sorted(
+                str(row.get("group_id"))
+                for row in csv.DictReader(csv_file)
+                if row.get("site") == "mermaid"
+            )
+        if mermaid_groups:
+            raise ValueError(
+                f"holdout_groups_csv lists MERMAID group(s) {mermaid_groups[:5]}, but"
+                " mermaid_project_lookup_uri is unset, so no MERMAID row has a project"
+            )
 
     def label_rollup_spec_csv_path(self, base: Path) -> Path | None:
         return None if self.label_rollup_spec_csv is None else base / self.label_rollup_spec_csv
@@ -179,7 +292,7 @@ class TrainingRunConfig(BaseModel):
     def from_yaml_path(cls, path: str | Path) -> TrainingRunConfig:
         text = Path(path).read_text()
         raw = yaml.safe_load(text) or {}
-        return cls.model_validate(raw)
+        return cls.model_validate(raw, context={CONFIG_DIR_CONTEXT_KEY: Path(path).parent})
 
     def apply_env(self) -> None:
         """Apply the `env` block to os.environ.
@@ -204,6 +317,7 @@ class TrainingRunConfig(BaseModel):
         from mermaid_classifier.pyspacer.options import (
             DatasetOptions,
             MLflowOptions,
+            PinnedDataset,
             TrainingOptions,
         )
         from mermaid_classifier.training.sample_weighting import (
@@ -233,9 +347,19 @@ class TrainingRunConfig(BaseModel):
         def _resolve(p: Path | None) -> str | None:
             return None if p is None else str(p)
 
+        datasets = [
+            PinnedDataset(
+                pin=entry.pin(),
+                features=entry.feature_set_pin(),
+                labels=entry.labels,
+                groups_csv=_resolve(entry.groups_csv_path(config_dir)),
+            )
+            for entry in d.datasets
+        ]
+
         dataset_options = DatasetOptions(
-            include_mermaid=d.include_mermaid,
-            coralnet_manifest_uri=d.coralnet_manifest_uri,
+            datasets=datasets,
+            taxonomy=None if d.taxonomy is None else d.taxonomy.pin(),
             feature_extractor_weights=d.feature_extractor_weights,
             drop_growthforms=d.drop_growthforms,
             label_rollup_spec_csv=_resolve(d.label_rollup_spec_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
@@ -243,7 +367,7 @@ class TrainingRunConfig(BaseModel):
             excluded_labels_csv=_resolve(d.excluded_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             excluded_images_csv=_resolve(d.excluded_images_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             mermaid_project_lookup_uri=d.mermaid_project_lookup_uri,
-            holdout_groups_csv=_resolve(d.holdout_groups_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            holdout_groups_csv=_resolve(d.holdout_groups_csv_path(config_dir)),
             holdout_fold=d.holdout_fold,
             holdout_max_per_class=d.holdout_max_per_class,
             ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions

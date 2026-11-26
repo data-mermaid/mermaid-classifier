@@ -67,6 +67,21 @@ class ExportTest(unittest.TestCase):
             expected = hashlib.sha256(Path(model_pt).read_bytes()).hexdigest()
             self.assertEqual(manifest["model_pt_sha256"], expected)
 
+    def test_training_data_lands_in_model_json_as_given(self):
+        model, X = make_calibrated_model()
+        training_data = {"datasets": [{"name": "coralnet-raw"}], "taxonomy": None}
+        with tempfile.TemporaryDirectory() as d:
+            export_artifact(
+                model,
+                d,
+                X,
+                extractor=make_extractor_spec(X.shape[1]),
+                training_data=training_data,
+            )
+            written = json.loads((Path(d) / "model.json").read_text())
+        self.assertEqual(written["training_data"], training_data)
+        self.assertEqual(written["schema_version"], 1)
+
     def test_export_raises_when_sklearn_unpinned(self):
         model, X = make_calibrated_model()
         with (

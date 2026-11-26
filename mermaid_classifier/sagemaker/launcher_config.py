@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class JobConfig(BaseModel):
@@ -37,12 +37,24 @@ class JobConfig(BaseModel):
 
 
 class ShardConfig(BaseModel):
+    """Fan-out across workers.
+
+    With ``items_from``, each worker gets a round-robin chunk of the CSV's items;
+    without it, worker ``i`` gets ``i/<workers>``.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    items_from: str
+    items_from: str | None = None
     items_column: str | None = None
     workers: int = Field(gt=0)
     per_worker_arg: str
+
+    @model_validator(mode="after")
+    def _items_column_needs_items_from(self) -> ShardConfig:
+        if self.items_column is not None and self.items_from is None:
+            raise ValueError("shard.items_column is set but shard.items_from is not")
+        return self
 
 
 class ProcessingConfig(BaseModel):

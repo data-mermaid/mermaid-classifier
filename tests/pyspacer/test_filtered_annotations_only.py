@@ -1,76 +1,96 @@
 """TrainingDataset.filtered_annotations_only builds the filtered annotations
-table without listing or downloading feature vectors."""
+table without fetching a feature index or a feature file."""
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import duckdb
-import pandas as pd
-from support.settings import override_settings
+from segdata_spec.manifest import FeatureSetPin
 
 from mermaid_classifier.pyspacer.dataset import TrainingDataset
-from mermaid_classifier.pyspacer.options import DatasetOptions
+from mermaid_classifier.pyspacer.options import DatasetOptions, PinnedDataset
+from pyspacer.segdata_fixtures import (
+    FakeS3,
+    Image,
+    label_row,
+    load_training_dataset,
+    publish_dataset,
+)
 
-
-def _write_parquet(directory: str, name: str, df: pd.DataFrame) -> str:
-    path = str(Path(directory) / name)
-    conn = duckdb.connect()
-    conn.register("df", df)
-    conn.execute(f"COPY (SELECT * FROM df) TO '{path}' (FORMAT parquet)")
-    conn.close()
-    return path
+# CoralNet label 100 maps to ba-1, 200 to ba-2.
+CORALNET_MAPPING = [
+    {
+        "provider_id": str(label_id),
+        "provider_label": f"label {label_id}",
+        "benthic_attribute_id": ba,
+        "benthic_attribute_name": ba,
+        "growth_form_id": None,
+        "growth_form_name": None,
+    }
+    for label_id, ba in ((100, "ba-1"), (200, "ba-2"))
+]
 
 
 class FilteredAnnotationsOnlyTest(unittest.TestCase):
-    def test_builds_table_without_touching_features(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        mermaid = pd.DataFrame(
-            {
-                "image_id": ["i1", "i1", "i2"],
-                "row": [1, 2, 1],
-                "col": [1, 2, 1],
-                "benthic_attribute_id": ["ba_a", "ba_b", "ba_a"],
-                "growth_form_id": ["", "", ""],
-            }
-        )
-        lookup = pd.DataFrame({"image_id": ["i1", "i2"], "project_id": ["p1", "p2"]})
-        options = DatasetOptions(
-            mermaid_project_lookup_uri=_write_parquet(tmp.name, "lookup.parquet", lookup)
-        )
-        with (
-            override_settings(
-                aws_anonymous="True",
-                mermaid_annotations_parquet_pattern=_write_parquet(
-                    tmp.name, "mermaid.parquet", mermaid
-                ),
-            ),
-            mock.patch.object(TrainingDataset, "feature_source_prefixes") as prefixes,
-            mock.patch("s3fs.core.S3FileSystem.find") as find,
-            mock.patch("mermaid_classifier.pyspacer.dataset.download_features_parallel") as dl,
-        ):
-            dataset = TrainingDataset.filtered_annotations_only(options)
-            self.addCleanup(dataset.cleanup)
-            rows = dataset.duck_conn.execute(
-                "SELECT project_id, benthic_attribute_id, is_holdout, is_excluded"
-                " FROM annotations ORDER BY project_id, row"
-            ).fetchall()
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-        self.assertEqual(
-            rows,
-            [
-                ("p1", "ba_a", False, False),
-                ("p1", "ba_b", False, False),
-                ("p2", "ba_a", False, False),
-            ],
+    def _write(self, name: str, text: str) -> str:
+        path = self.tmp / name
+        path.write_text(text)
+        return str(path)
+
+    def test_rolls_up_filters_and_tags_without_touching_features(self):
+        fake = FakeS3()
+        pin = publish_dataset(
+            fake,
+            "coralnet-raw",
+            [Image("i1", "s1"), Image("i2", "s2")],
+            [("i1", 1, 1, 100), ("i1", 2, 2, 200), ("i2", 1, 1, 200)],
+            [label_row(100), label_row(200)],
         )
-        prefixes.assert_not_called()
-        find.assert_not_called()
-        dl.assert_not_called()
+        options = DatasetOptions(
+            datasets=[
+                PinnedDataset(
+                    pin=pin,
+                    features=FeatureSetPin(
+                        dataset=pin, family="efficientnet-v1", manifest_sha256="0"
+                    ),
+                    labels="coralnet",
+                )
+            ],
+            # ba-2 rolls up to ba-9, and only ba-9 is kept.
+            label_rollup_spec_csv=self._write(
+                "rollups.csv", "from_ba_id,from_gf_id,to_ba_id,to_gf_id\nba-2,,ba-9,\n"
+            ),
+            included_labels_csv=self._write("included.csv", "ba_id,gf_id\nba-9,\n"),
+            holdout_groups_csv=self._write("holdout.csv", "site,group_id,fold\ncoralnet,2,test\n"),
+        )
+        refuse = AssertionError("filtered_annotations_only must not touch feature sets")
+        with (
+            mock.patch.object(TrainingDataset, "fetch_feature_indexes", side_effect=refuse),
+            mock.patch.object(TrainingDataset, "sync_feature_vectors", side_effect=refuse),
+            mock.patch("mermaid_classifier.pyspacer.dataset.sync_feature_set", side_effect=refuse),
+        ):
+            dataset = load_training_dataset(
+                fake,
+                options,
+                CORALNET_MAPPING,
+                filtered_only=True,
+                feature_cache_dir=str(self.tmp / "cache"),
+            )
+        self.addCleanup(dataset.cleanup)
+
+        rows = dataset.duck_conn.execute(
+            "SELECT image_id, benthic_attribute_id, is_holdout FROM annotations ORDER BY image_id"
+        ).fetchall()
+        self.assertEqual(rows, [("i1", "ba-9", False), ("i2", "ba-9", True)])
+        self.assertEqual(fake.feature_gets(), [])
 
 
 if __name__ == "__main__":

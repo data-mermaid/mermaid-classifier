@@ -38,6 +38,7 @@ def _synthetic_annotations(seed: int = 0, grouped: bool = False) -> pd.DataFrame
         for j in range(weight):
             rows.append(
                 {
+                    "dataset": "coralnet-raw",
                     "site": "coralnet",
                     "project_id": f"p{(idx // 5) % 4}" if grouped else "p1",
                     "image_id": f"img_{idx // 5:05d}" if grouped else f"img_{idx:05d}",

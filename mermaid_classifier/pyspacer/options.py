@@ -3,16 +3,22 @@ Dataclass option containers and the Sites enum for the training pipeline.
 
 - Sites: enum for data sources (CORALNET, MERMAID).
 - Artifacts: namespace for training artifacts.
+- PinnedDataset: one pinned dataset version and its feature set.
 - DatasetOptions: options controlling which data goes into training.
 - TrainingOptions: options controlling the training process.
 - MLflowOptions: options for MLflow experiment tracking.
+- training_data_lineage, lineage_params, groups_lineage, mapping_lineage: the pins and
+  content hashes a run records in model.json and as MLflow params.
 """
 
 import dataclasses
 import enum
-from typing import Literal
+import hashlib
+from collections.abc import Mapping
+from typing import Any, Literal
 
 import pandas as pd
+from segdata_spec.manifest import FeatureSetPin, Pin
 
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.training.sample_weighting import SampleWeightingOptions
@@ -40,18 +46,42 @@ class Artifacts:
     unmapped_labels: pd.DataFrame
 
 
+LabelKind = Literal["coralnet", "mermaid"]
+
+
+@dataclasses.dataclass(frozen=True)
+class PinnedDataset:
+    """
+    One dataset version a run trains on.
+
+    pin -- the dataset version (name, version, manifest sha256).
+    features -- the feature set read for that version.
+    labels -- how the points' label_id maps to MERMAID BA+GF: 'coralnet'
+      label IDs go through CoralNetMermaidMapping; 'mermaid' label IDs
+      carry their BA id and growth form name in labels.parquet.
+    groups_csv -- local path of a file naming one dataset group per line
+      to train on; None trains on every group.
+    """
+
+    pin: Pin
+    features: FeatureSetPin
+    labels: LabelKind
+    groups_csv: str | None = None
+
+
 @dataclasses.dataclass
 class DatasetOptions:
     """
-    include_mermaid
+    datasets
 
-    Whether to include MERMAID annotations or not. False can be useful for
-    any troubleshooting which is CoralNet specific.
+    The pinned dataset versions whose points train the model, each with
+    the feature set read for it (see PinnedDataset).
 
-    coralnet_manifest_uri
+    taxonomy
 
-    S3 URI (or local path) of the CoralNet manifest parquet; None disables
-    CoralNet.
+    Pin of the mermaid-benthic taxonomy version that resolves the growth
+    form names of every `labels="mermaid"` dataset. Required when any
+    dataset has those labels.
 
     drop_growthforms
 
@@ -138,6 +168,7 @@ class DatasetOptions:
       the CSV. Rows of groups in that fold are tagged is_holdout. When it
       is a fold number, rows of the 'test' groups are tagged is_excluded
       and dropped, so a CV run neither trains nor evaluates on them.
+    - Listing a MERMAID group requires mermaid_project_lookup_uri.
 
     holdout_max_per_class
 
@@ -186,21 +217,16 @@ class DatasetOptions:
     feature_extractor_weights
 
     URI of the EfficientNet weights that produced this run's feature
-    vectors. Where a feature prefix carries an ``_extractor_spec.json``
-    sidecar the two must agree; where it does not -- CoralNet's public
-    bucket, which we read but do not write -- this is the only record of
-    what the vectors mean.
+    vectors. Every feature set's manifest records its extractor, and each
+    must agree with this declaration.
     """
 
-    include_mermaid: bool = True
-    coralnet_manifest_uri: str | None = None
+    datasets: list[PinnedDataset] = dataclasses.field(default_factory=list)
+    taxonomy: Pin | None = None
     # Which EfficientNet produced the .featurevector files this run trains
     # on. A head is fitted to feature vectors, never to pixels, so this is
-    # the run's statement of what its inputs mean; TrainingDataset hashes it
-    # and seals the result into the released manifest. Required in practice
-    # for any source whose prefix carries no _extractor_spec.json — which
-    # TrainingDataset enforces, since a dataclass cannot put a mandatory
-    # field after defaulted ones.
+    # the run's statement of what its inputs mean. TrainingDataset requires
+    # it, since a dataclass cannot put a mandatory field after defaulted ones.
     feature_extractor_weights: str | None = None
     drop_growthforms: bool = False
     label_rollup_spec_csv: str | None = None
@@ -222,6 +248,120 @@ class DatasetOptions:
     # mermaid_classifier.training.sample_weighting for available
     # strategies.
     weighting: SampleWeightingOptions | None = None
+
+
+def groups_lineage(groups: frozenset[str] | None) -> dict[str, Any] | None:
+    """Identify a group selection by the sha256 of its sorted, newline-joined groups.
+
+    None (every group of the version) stays None.
+    """
+    if groups is None:
+        return None
+    digest = hashlib.sha256("\n".join(sorted(groups)).encode()).hexdigest()
+    return {"sha256": digest, "n": len(groups)}
+
+
+def mapping_lineage(mapping: pd.DataFrame) -> dict[str, Any]:
+    """Identify a label mapping by the sha256 of its canonical CSV.
+
+    Columns are put in sorted order and rows sorted by every column, so neither
+    order changes the hash.
+    """
+    columns: list[str] = sorted(str(column) for column in mapping.columns)
+    canonical = mapping.reindex(columns=columns).sort_values(by=columns)
+    csv_bytes = canonical.to_csv(index=False, lineterminator="\n").encode()
+    return {"sha256": hashlib.sha256(csv_bytes).hexdigest(), "n": len(mapping)}
+
+
+def training_data_lineage(
+    options: DatasetOptions,
+    groups: Mapping[str, frozenset[str] | None],
+    coralnet_mapping: pd.DataFrame | None = None,
+    *,
+    lookup_sha256: str | None = None,
+    holdout_sha256: str | None = None,
+    holdout_n: int = 0,
+) -> dict[str, Any]:
+    """The dataset, group-selection, feature-set and taxonomy pins a run trains on.
+
+    `groups` maps each dataset name to its resolved group selection.
+    `coralnet_mapping` is the label mapping the run used; it is recorded only
+    when a dataset has `labels == "coralnet"`.
+    `lookup_sha256` and `holdout_sha256` are the sha256 of the lookup and holdout
+    CSV bytes the run read (`holdout_n` is the CSV's group count); each block is
+    recorded only when its file was read.
+    """
+    taxonomy = options.taxonomy
+    lineage: dict[str, Any] = {
+        "datasets": [
+            {
+                "name": source.pin.name,
+                "version": source.pin.version,
+                "manifest_sha256": source.pin.manifest_sha256,
+                "labels": source.labels,
+                "features": {
+                    "family": source.features.family,
+                    "manifest_sha256": source.features.manifest_sha256,
+                },
+                "groups": groups_lineage(groups[source.pin.name]),
+            }
+            for source in options.datasets
+        ],
+        "taxonomy": None
+        if taxonomy is None
+        else {
+            "name": taxonomy.name,
+            "version": taxonomy.version,
+            "manifest_sha256": taxonomy.manifest_sha256,
+        },
+    }
+    if coralnet_mapping is not None and any(
+        source.labels == "coralnet" for source in options.datasets
+    ):
+        lineage["coralnet_label_mapping"] = mapping_lineage(coralnet_mapping)
+    lookup_uri = options.mermaid_project_lookup_uri
+    if lookup_uri and lookup_sha256 is not None:
+        lineage["mermaid_project_lookup"] = {"uri": lookup_uri, "sha256": lookup_sha256}
+    if options.holdout_groups_csv and holdout_sha256 is not None:
+        lineage["holdout_groups"] = {
+            "sha256": holdout_sha256,
+            "n": holdout_n,
+            "fold": options.holdout_fold,
+        }
+    return lineage
+
+
+def lineage_params(lineage: dict[str, Any]) -> dict[str, str]:
+    """Flatten `training_data_lineage` into MLflow params, one per pinned value."""
+    params: dict[str, str] = {}
+    for entry in lineage["datasets"]:
+        prefix = f"dataset/{entry['name']}"
+        params[f"{prefix}/version"] = entry["version"]
+        params[f"{prefix}/manifest_sha256"] = entry["manifest_sha256"]
+        params[f"{prefix}/labels"] = entry["labels"]
+        params[f"{prefix}/features/family"] = entry["features"]["family"]
+        params[f"{prefix}/features/manifest_sha256"] = entry["features"]["manifest_sha256"]
+        selection = entry["groups"]
+        params[f"{prefix}/groups_sha256"] = "all" if selection is None else selection["sha256"]
+        params[f"{prefix}/groups_n"] = "all" if selection is None else str(selection["n"])
+    taxonomy = lineage["taxonomy"]
+    if taxonomy is not None:
+        params[f"taxonomy/{taxonomy['name']}/version"] = taxonomy["version"]
+        params[f"taxonomy/{taxonomy['name']}/manifest_sha256"] = taxonomy["manifest_sha256"]
+    mapping = lineage.get("coralnet_label_mapping")
+    if mapping is not None:
+        params["coralnet_label_mapping/sha256"] = mapping["sha256"]
+        params["coralnet_label_mapping/n"] = str(mapping["n"])
+    lookup = lineage.get("mermaid_project_lookup")
+    if lookup is not None:
+        params["mermaid_project_lookup/uri"] = lookup["uri"]
+        params["mermaid_project_lookup/sha256"] = lookup["sha256"]
+    holdout = lineage.get("holdout_groups")
+    if holdout is not None:
+        params["holdout_groups/sha256"] = holdout["sha256"]
+        params["holdout_groups/n"] = str(holdout["n"])
+        params["holdout_groups/fold"] = holdout["fold"]
+    return params
 
 
 @dataclasses.dataclass

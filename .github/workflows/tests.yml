@@ -23,8 +23,6 @@ jobs:
           egress-policy: block
           # download.pytorch.org: uv.lock references both pytorch hosts,
           # though only the r2 one appeared in the audit.
-          # extensions.duckdb.org:80: httpfs install_extension fallback in
-          # pyspacer/dataset.py. Port 80, not 443 -- do not "correct" it.
           # release-assets.githubusercontent.com / objects.githubusercontent.com:
           # cover uv's managed-Python download path, which release-asset
           # requests to github.com redirect to.
@@ -38,7 +36,6 @@ jobs:
             files.pythonhosted.org:443
             download.pytorch.org:443
             download-r2.pytorch.org:443
-            extensions.duckdb.org:80
             release-assets.githubusercontent.com:443
             objects.githubusercontent.com:443
 

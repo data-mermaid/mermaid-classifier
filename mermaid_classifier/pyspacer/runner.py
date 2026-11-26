@@ -40,6 +40,8 @@ from mermaid_classifier.pyspacer.options import (
     DatasetOptions,
     MLflowOptions,
     TrainingOptions,
+    lineage_params,
+    training_data_lineage,
 )
 from mermaid_classifier.pyspacer.settings import (
     set_env_vars_for_packages,
@@ -265,6 +267,8 @@ class MLflowTrainingRunner(TrainingRunner):
         # harmless.
         set_env_vars_for_packages()
 
+        self._training_data: dict[str, Any] | None = None
+
         time_taken = mlflow_connect()
         logger.info(f"Time to connect to MLflow tracking: {time_taken}")
 
@@ -302,8 +306,6 @@ class MLflowTrainingRunner(TrainingRunner):
             mlflow.log_params(training_options_to_log)
 
             dataset_options_to_log = {
-                "include_mermaid": self.dataset_options.include_mermaid,
-                "coralnet_manifest_uri": self.dataset_options.coralnet_manifest_uri or "",
                 "drop_growthforms": self.dataset_options.drop_growthforms,
                 "label_rollup_spec_csv": os.path.basename(
                     self.dataset_options.label_rollup_spec_csv or ""
@@ -355,6 +357,8 @@ class MLflowTrainingRunner(TrainingRunner):
                     run_name=run_name, cleanup_dataset=False
                 )
                 assert self.dataset is not None  # set by base TrainingRunner.run()
+                training_data = self._training_data
+                assert training_data is not None  # set by log_dataset_artifacts()
 
                 # Weighting artifacts/metrics are stashed by the base run()
                 # via _compute_class_weights. Log them now.
@@ -402,6 +406,7 @@ class MLflowTrainingRunner(TrainingRunner):
                         artifact_dir,
                         reference_features=ref_features,
                         extractor=extractor_spec,
+                        training_data=training_data,
                     )
                     model_json = artifact_dir / "model.json"
                     # ManifestError on schema/class-count/input_dim mismatch.
@@ -505,6 +510,31 @@ class MLflowTrainingRunner(TrainingRunner):
                     step=0,  # type: ignore[arg-type]
                 )
 
+    def _log_training_data(self) -> dict[str, Any]:
+        """Log the training-data lineage as params and each group selection as a CSV.
+
+        Returns the lineage block that model.json records.
+        """
+        assert self.dataset is not None  # set by base TrainingRunner.run()
+        groups = self.dataset.groups
+        # Set by read_datasets only when a coralnet dataset is present.
+        mapping = getattr(self.dataset.artifacts, "coralnet_label_mapping", None)
+        training_data = training_data_lineage(
+            self.dataset_options,
+            groups,
+            mapping,
+            lookup_sha256=self.dataset.mermaid_project_lookup_sha256,
+            holdout_sha256=self.dataset.holdout_groups_sha256,
+            holdout_n=len(self.dataset.holdout_groups.group_folds),
+        )
+        mlflow.log_params(lineage_params(training_data))
+        for name, selection in groups.items():
+            if selection is not None:
+                mlflow.log_text(
+                    "".join(f"{group}\n" for group in sorted(selection)), f"groups/{name}.csv"
+                )
+        return training_data
+
     def _get_model_name(self):
         """
         Model name for MLflow logging purposes.
@@ -530,9 +560,11 @@ class MLflowTrainingRunner(TrainingRunner):
                 as_path = Path(self.dataset_options.label_rollup_spec_csv)
                 model_name += f"-Rollup{self.alphanumeric_only_str(as_path.stem)}"
 
-            if self.dataset_options.coralnet_manifest_uri:
-                as_path = Path(self.dataset_options.coralnet_manifest_uri)
-                model_name += f"-{self.alphanumeric_only_str(as_path.stem)}"
+            for source in self.dataset_options.datasets:
+                # e.g. -coralnetraw202611245ab21b3
+                model_name += "-" + self.alphanumeric_only_str(
+                    f"{source.pin.name}{source.pin.version}"
+                )
 
             if (subsample := self.dataset_options.subsample) is not None:
                 # e.g. -SubStratified400000 or -SubBalanced1770000
@@ -703,6 +735,9 @@ class MLflowTrainingRunner(TrainingRunner):
         assert self.dataset is not None
 
         artifacts = self.dataset.artifacts
+
+        # Logged before training so a run that fails mid-training still carries its pins.
+        self._training_data = self._log_training_data()
 
         mlflow.log_text(
             "id\n" + "\n".join(self.dataset.coralnet_source_ids),

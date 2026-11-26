@@ -20,6 +20,10 @@ class ShardConfigTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ShardConfig(items_from="x.csv", workers=-1, per_worker_arg="--ids")
 
+    def test_items_column_without_items_from_is_refused(self):
+        with self.assertRaises(ValidationError):
+            ShardConfig(items_column="id", workers=2, per_worker_arg="--shard")
+
 
 class ParseRunConfigTest(unittest.TestCase):
     def test_training_only(self):
@@ -99,7 +103,7 @@ class ParseRunConfigTest(unittest.TestCase):
                     "volume_gb": 1,
                     "max_runtime_hours": 1,
                 },
-                "dataset": {"include_mermaid": False},
+                "dataset": {"datasets": []},
                 "mlflow": {"experiment_name": "foo"},
             }
         )

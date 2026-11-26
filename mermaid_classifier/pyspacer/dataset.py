@@ -1,29 +1,48 @@
 """
 TrainingDataset: loads, transforms, and prepares annotation data for training.
 
-Reads CoralNet manifest parquet and MERMAID Parquet via DuckDB,
-maps CoralNet label IDs to MERMAID BA+GF, applies rollup/filter specs,
-validates feature vector availability, and produces pyspacer-ready
-train/ref/val splits.
+Syncs pinned segdata-spec dataset versions and their feature sets, maps each
+version's label IDs to MERMAID BA+GF, applies rollup/filter specs, checks
+feature coverage, and produces pyspacer-ready train/ref/val splits.
 """
 
 import functools
-import json
+import hashlib
+import io
 import os
 import re
 import tempfile
+import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from io import StringIO
-from typing import Self, TextIO
+from pathlib import Path
+from typing import Any, Self, TextIO
 
+import boto3
 import duckdb
 import pandas as pd
-from s3fs.core import S3FileSystem
+import pyarrow as pa
+import pyarrow.compute as pc
+from botocore import UNSIGNED
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError
+from segdata_spec import DATASET_BUCKET
+from segdata_spec.manifest import FeatureSetManifest
+from segdata_spec.read import (
+    FeatureSet,
+    Taxonomy,
+    VersionTables,
+    open_feature_set,
+    open_tables,
+    open_taxonomy,
+)
+from segdata_spec.sync import FeatureSyncResult, sync_feature_set, sync_tables
 from spacer.data_classes import Annotation, DataLocation, ImageLabels, LabelId
 from spacer.messages import TrainingTaskLabels
 from spacer.task_utils import SplitMode, preprocess_labels
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from mermaid_classifier.common.benthic_attributes import (
     CoralNetMermaidMapping,
@@ -38,14 +57,12 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
-from mermaid_classifier.common.s3_utils import EMPTY_SHA256, download_features_parallel
+from mermaid_classifier.common.s3_utils import is_s3_uri, parse_s3_uri
 from mermaid_classifier.pyspacer._pipeline_utils import section_profiling
-from mermaid_classifier.pyspacer.extraction import (
-    SIDECAR_FILENAME,
-    extractor_spec_from_weights,
-)
+from mermaid_classifier.pyspacer.extraction import extractor_spec_from_weights
 from mermaid_classifier.pyspacer.inference import ExtractorSpec
 from mermaid_classifier.pyspacer.label_specs import (
+    HOLDOUT_TEST_FOLD,
     HoldoutGroups,
     ImageExclusionFilter,
     LabelFilter,
@@ -54,6 +71,8 @@ from mermaid_classifier.pyspacer.label_specs import (
 from mermaid_classifier.pyspacer.options import (
     Artifacts,
     DatasetOptions,
+    LabelKind,
+    PinnedDataset,
     Sites,
 )
 from mermaid_classifier.pyspacer.settings import settings
@@ -66,6 +85,13 @@ from mermaid_classifier.training.subsample import (
 )
 
 logger = logging_config_for_script("train")
+
+# Transient network failures of a feature download. botocore wraps most stream
+# failures in BotoCoreError subclasses, but a raw urllib3 error can escape a body
+# read. segdata-spec's integrity errors are not in this tuple and are never retried.
+TRANSIENT_SYNC_ERRORS = (BotoCoreError, ProtocolError, ReadTimeoutError)
+SYNC_ATTEMPTS = 3
+SYNC_RETRY_DELAY_SECONDS = 1.0
 
 
 def _load_csv_spec[T: CsvSpec](path: str | None, factory: Callable[[TextIO], T]) -> T:
@@ -80,13 +106,247 @@ def _load_csv_spec[T: CsvSpec](path: str | None, factory: Callable[[TextIO], T])
     return factory(StringIO(""))
 
 
+# pyarrow ships no type stubs, so its tables are typed as Any.
+_Table = Any
+
+# The manifest source type of a dataset whose label IDs are CoralNet label IDs.
+CORALNET_SOURCE_TYPE = "coralnet-scrape"
+
+# label_id -> MERMAID BA+GF for one dataset version; a null BA is an unmapped label.
+_LABEL_TABLE_SCHEMA = pa.schema(
+    [
+        pa.field("label_id", pa.int32()),
+        pa.field("benthic_attribute_id", pa.string()),
+        pa.field("growth_form_id", pa.string()),
+    ]
+)
+
+
+def make_s3_client(max_workers: int) -> Any:
+    """A boto3 S3 client with a pooled connection per download worker."""
+    config = Config(
+        max_pool_connections=max_workers,
+        region_name=settings.aws_region,
+        retries={"mode": "standard", "max_attempts": 10},
+    )
+    if settings.aws_anonymous == "True":
+        config = config.merge(Config(signature_version=UNSIGNED))
+    return boto3.client(
+        "s3",
+        config=config,
+        aws_access_key_id=settings.aws_key_id,
+        aws_secret_access_key=settings.aws_secret,
+        aws_session_token=settings.aws_session_token,
+    )
+
+
+def read_groups_csv(path: str) -> frozenset[str]:
+    """The dataset groups `path` names, one per line; blank lines are skipped."""
+    groups = frozenset(line.strip() for line in Path(path).read_text().splitlines() if line.strip())
+    if not groups:
+        raise ValueError(f"{path} names no dataset group")
+    return groups
+
+
+def resolve_groups(options: DatasetOptions) -> dict[str, frozenset[str] | None]:
+    """Each dataset's group selection from its groups_csv; None selects every group."""
+    return {
+        source.pin.name: None if source.groups_csv is None else read_groups_csv(source.groups_csv)
+        for source in options.datasets
+    }
+
+
+def select_groups(images: _Table, groups: frozenset[str] | None, dataset: str) -> _Table:
+    """The `images` rows in `groups`, or every row for None."""
+    if groups is None:
+        return images
+    absent = groups - set(images.column("group").to_pylist())
+    if absent:
+        raise ValueError(f"{dataset}: groups not in the dataset version: {sorted(absent)}")
+    return images.filter(
+        pa.array([group in groups for group in images.column("group").to_pylist()])
+    )
+
+
+def check_labels_kind(labels: _Table, kind: LabelKind, dataset: str, source_type: str) -> None:
+    """Refuse a `labels:` kind that labels.parquet or the manifest's source contradicts.
+
+    MERMAID labels carry a benthic attribute id on every row; CoralNet labels
+    carry none, since CoralNetMermaidMapping supplies them, and come only from
+    a CoralNet scrape.
+    """
+    if kind == "coralnet" and source_type != CORALNET_SOURCE_TYPE:
+        raise ValueError(
+            f"{dataset} is declared `labels: coralnet`, but its manifest's source type is"
+            f" {source_type!r}, not {CORALNET_SOURCE_TYPE!r}"
+        )
+    n_mapped = labels.num_rows - labels.column("mermaid_benthic_attribute_id").null_count
+    if kind == "coralnet" and n_mapped:
+        raise ValueError(
+            f"{dataset} is declared `labels: coralnet`, but {n_mapped} of its"
+            " labels.parquet rows carry a MERMAID benthic attribute id"
+        )
+    if kind == "mermaid" and n_mapped < labels.num_rows:
+        raise ValueError(
+            f"{dataset} is declared `labels: mermaid`, but {labels.num_rows - n_mapped} of its"
+            " labels.parquet rows carry no MERMAID benthic attribute id"
+        )
+
+
+def coralnet_label_table(labels: _Table, mapping: CoralNetMermaidMapping) -> _Table:
+    """Map each CoralNet label ID in `labels` to its MERMAID BA+GF."""
+    rows: list[dict[str, Any]] = []
+    for label_id in labels.column("label_id").to_pylist():
+        key = str(label_id)
+        entry = mapping.mapping.get(key)
+        rows.append(
+            {
+                "label_id": label_id,
+                "benthic_attribute_id": None if entry is None else entry.benthic_attribute_id,
+                "growth_form_id": None if entry is None else entry.growth_form_id,
+            }
+        )
+    return pa.Table.from_pylist(rows, schema=_LABEL_TABLE_SCHEMA)
+
+
+def mermaid_label_table(labels: _Table, growth_forms: _Table, dataset: str) -> _Table:
+    """Map each label to its recorded BA and to the id of its growth form name.
+
+    An empty or null growth form name is no growth form, stored as ''.
+    """
+    gf_ids = dict(
+        zip(
+            growth_forms.column("name").to_pylist(),
+            growth_forms.column("id").to_pylist(),
+            strict=True,
+        )
+    )
+    names: list[str | None] = labels.column("mermaid_growth_form").to_pylist()
+    unknown = sorted({name for name in names if name and name not in gf_ids})
+    if unknown:
+        raise ValueError(f"{dataset}: growth forms absent from the pinned taxonomy: {unknown}")
+    return pa.table(
+        {
+            "label_id": labels.column("label_id"),
+            "benthic_attribute_id": labels.column("mermaid_benthic_attribute_id"),
+            "growth_form_id": [gf_ids[name] if name else "" for name in names],
+        },
+        schema=_LABEL_TABLE_SCHEMA,
+    )
+
+
+def project_id(group: str, site: Sites) -> str:
+    """A CoralNet group `s<id>` is source `<id>`; MERMAID images share one project."""
+    return group.removeprefix("s") if site is Sites.CORALNET else "all"
+
+
+def dataset_annotations(
+    points: _Table, images: _Table, label_table: _Table, *, site: Sites, dataset: str
+) -> _Table:
+    """One annotation row per point of an image in `images`, with its mapped BA+GF."""
+    _check_label_ids_present(points, label_table, dataset)
+    projects = pa.table(
+        {
+            "image_id": images.column("image_id"),
+            "project_id": [project_id(group, site) for group in images.column("group").to_pylist()],
+        }
+    )
+    joined = (
+        points.select(["image_id", "row", "col", "label_id"])
+        .join(projects, "image_id", join_type="inner")
+        .join(label_table, "label_id", join_type="left outer")
+    )
+    n = joined.num_rows
+    return (
+        joined.set_column(
+            joined.schema.get_field_index("label_id"),
+            "label_id",
+            pc.cast(joined.column("label_id"), pa.string()),
+        )
+        .append_column("site", pa.array([site.value] * n, pa.string()))
+        .append_column("dataset", pa.array([dataset] * n, pa.string()))
+        .append_column("bucket", pa.array([DATASET_BUCKET] * n, pa.string()))
+    )
+
+
+def _check_label_ids_present(points: _Table, label_table: _Table, dataset: str) -> None:
+    """Refuse points whose label_id has no row in the dataset's label table."""
+    known = set(label_table.column("label_id").to_pylist())
+    missing = sorted(set(points.column("label_id").to_pylist()) - known)
+    if missing:
+        raise ValueError(
+            f"{dataset}: {len(missing)} point label ids are absent from labels.parquet,"
+            f" e.g. {missing[:5]}"
+        )
+
+
+def _sync_with_retries(dataset: str, sync: Callable[[], FeatureSyncResult]) -> FeatureSyncResult:
+    """Run `sync`, retrying transient network errors; the last failure propagates.
+
+    A retry resumes from the verified files already in the shared cache dir.
+    """
+    for attempt in range(1, SYNC_ATTEMPTS + 1):
+        try:
+            return sync()
+        except TRANSIENT_SYNC_ERRORS as error:
+            if attempt == SYNC_ATTEMPTS:
+                raise
+            logger.warning(
+                "Feature sync for %s failed (attempt %d of %d): %r; retrying",
+                dataset,
+                attempt,
+                SYNC_ATTEMPTS,
+                error,
+            )
+            time.sleep(SYNC_RETRY_DELAY_SECONDS)
+    raise AssertionError("unreachable")
+
+
+def feature_set_extractor(manifest: FeatureSetManifest) -> ExtractorSpec:
+    """The ExtractorSpec a feature set's manifest records."""
+    fields = ExtractorSpec.__dataclass_fields__
+    return ExtractorSpec.from_dict({name: manifest.extractor.get(name) for name in fields})
+
+
+def _read_holdout_groups(path: str | None) -> tuple[HoldoutGroups, str | None]:
+    """The holdout spec at `path` and the sha256 of the bytes it was parsed from.
+
+    An unset path is an empty spec with no hash.
+    """
+    if not path:
+        return HoldoutGroups(StringIO("")), None
+    data = Path(path).read_bytes()
+    # TextIOWrapper decodes as open() does, so the spec matches a direct read.
+    return HoldoutGroups(io.TextIOWrapper(io.BytesIO(data))), hashlib.sha256(data).hexdigest()
+
+
+def _holdout_groups_unselected(
+    holdout_groups: HoldoutGroups,
+    options: DatasetOptions,
+    groups: Mapping[str, frozenset[str] | None],
+) -> dict[str, str]:
+    """The CoralNet holdout groups a coralnet groups_csv leaves out, as `s<id>` name -> fold.
+
+    MERMAID holdout groups are projects, which no groups_csv selects among.
+    """
+    selections = [
+        groups[source.pin.name] for source in options.datasets if source.labels == "coralnet"
+    ]
+    return {
+        f"s{group_id}": fold
+        for (site, group_id), fold in sorted(holdout_groups.group_folds.items())
+        if site == Sites.CORALNET.value
+        and any(
+            selection is not None and f"s{group_id}" not in selection for selection in selections
+        )
+    }
+
+
 class TrainingDataset:
     # Set by _dedupe_points; merged into train_summary_stats.
     _dedupe_stats: dict[str, int] | None = None
     # Set by _log_split_drops; classes the train/ref/val split removed.
     _split_dropped_bagfs: int = 0
-    # Only __init__ creates a temp feature dir; cleanup() tolerates its absence.
-    _feature_temp_dir: tempfile.TemporaryDirectory[str] | None = None
 
     def __init__(self, options: DatasetOptions):
         self._setup_annotation_reading(options)
@@ -99,18 +359,13 @@ class TrainingDataset:
         # holdout cap; None otherwise.
         self._subsample_group_audit_df: pd.DataFrame | None = None
         self._holdout_audit_df: pd.DataFrame | None = None
-        if settings.feature_cache_dir:
-            os.makedirs(settings.feature_cache_dir, exist_ok=True)
-            self._feature_dir = settings.feature_cache_dir
-            self._feature_temp_dir = None
-        else:
-            self._feature_temp_dir = tempfile.TemporaryDirectory(prefix="mermaid_features_")
-            self._feature_dir = self._feature_temp_dir.name
-        # Maps a downloaded feature vector's local path (used as the key of
-        # the filesystem DataLocations in self.labels) back to its original
+        # Maps a cached feature vector's local path (used as the key of
+        # the filesystem DataLocations in self.labels) back to its
         # (bucket, feature_vector) S3 location. add_training_set_names() needs
         # this to match the labels to the annotations table.
         self._feature_path_to_s3_location: dict[str, tuple[str, str]] = {}
+        # The synced feature set of each dataset, by dataset name.
+        self._feature_sets: dict[str, FeatureSet] = {}
 
         # Set once the feature sources are resolved; runner.py seals it
         # into the exported manifest.
@@ -121,35 +376,24 @@ class TrainingDataset:
         # Evaluation-only rows; filled by prep_annotations_for_pyspacer.
         self.holdout_labels = ImageLabels()
 
-        self.load_filtered_annotations()
+        client = make_s3_client(settings.download_max_workers)
 
-        if self.options.holdout_groups_csv:
-            # Test groups leave a CV run entirely: neither trained on nor
-            # evaluated. Holdout rows stay, tagged, for later steps.
-            self.duck_conn.execute("DELETE FROM annotations WHERE is_excluded")
+        # Test-fold rows are tagged and dropped here, before any feature file
+        # is fetched for them.
+        self.load_filtered_annotations(client)
 
-        if options.include_mermaid or options.coralnet_manifest_uri:
-            feature_prefixes = self.feature_source_prefixes()
+        # Each set's manifest and index only: a run whose feature sets
+        # disagree with its declared extractor downloads no feature file.
+        with self.section_profiling("Resolving feature-extractor provenance"):
+            indexes = self.fetch_feature_indexes(client)
+            self.extractor_spec = self.resolve_extractor_spec(
+                {name: result.manifest for name, result in indexes.items()}
+            )
 
-            # Before the listing below, which is the slow part: a run whose
-            # feature sources disagree about their extractor is not worth
-            # enumerating.
-            with self.section_profiling("Resolving feature-extractor provenance"):
-                self.extractor_spec = self.resolve_extractor_spec(feature_prefixes)
-
-            # We'll check the annotation data's feature paths against the
-            # feature vectors that are actually present in S3, for every
-            # site that has annotations.
-
-            with self.section_profiling("Detecting missing feature vectors"):
-                # First, list the feature paths present in S3 for each site
-                # (this can take a while). The listings return `bucket/key`
-                # strings, which match the `feature_full` we build per row.
-                present: set[str] = set()
-                for prefix in feature_prefixes:
-                    present |= set(self.s3.find(path=prefix))
-                # Check against annotation data.
-                self.handle_missing_feature_vectors(present)
+        with self.section_profiling("Detecting missing feature vectors"):
+            self.handle_missing_feature_vectors(
+                {name: result.index for name, result in indexes.items()}
+            )
 
         if options.subsample is not None:
             # Runs after the missing-feature-vector drop above, so per-class
@@ -157,10 +401,14 @@ class TrainingDataset:
             with self.section_profiling("Per-class subsampling"):
                 self._apply_subsample(options.subsample)
 
+        # Before the sync below, so capped-out holdout rows are never fetched.
         if options.holdout_max_per_class is not None:
             seed = options.subsample.seed if options.subsample is not None else 0
             with self.section_profiling("Capping holdout rows per class"):
                 self._cap_holdout_rows(options.holdout_max_per_class, seed)
+
+        with self.section_profiling("Syncing feature vectors"):
+            self.sync_feature_vectors(client)
 
         self.labels = self.prep_annotations_for_pyspacer()
 
@@ -173,21 +421,30 @@ class TrainingDataset:
     def filtered_annotations_only(cls, options: DatasetOptions) -> Self:
         """
         Build only the filtered `annotations` table (read, rollup, filter,
-        dedupe, holdout-tag), with no feature-vector listing, download or
-        extractor resolution. The returned dataset is not trainable.
+        dedupe, holdout-tag), with no feature index fetch, feature download
+        or extractor resolution. The returned dataset is not trainable.
         """
         dataset = cls.__new__(cls)
         dataset._setup_annotation_reading(options)  # pyright: ignore[reportPrivateUsage]  # classmethod initialising its own instance
-        dataset.load_filtered_annotations()
+        dataset.load_filtered_annotations(make_s3_client(settings.download_max_workers))
         return dataset
 
     def _setup_annotation_reading(self, options: DatasetOptions) -> None:
-        """Set the state `load_filtered_annotations` needs: specs, S3, DuckDB."""
+        """Set the state `load_filtered_annotations` needs: specs, cache dir, DuckDB."""
         self.options = options
+        # Resolved once: the lineage a run records must describe the selection
+        # read here, even if a groups file changes afterwards.
+        self.groups = resolve_groups(options)
         self.artifacts = Artifacts()
         self.profiled_sections = []
+        if settings.feature_cache_dir:
+            os.makedirs(settings.feature_cache_dir, exist_ok=True)
+            self._feature_dir = settings.feature_cache_dir
+            self._feature_temp_dir = None
+        else:
+            self._feature_temp_dir = tempfile.TemporaryDirectory(prefix="mermaid_features_")
+            self._feature_dir = self._feature_temp_dir.name
 
-        # CoralNet data is defined by a manifest parquet (None disables it).
         self.coralnet_source_ids: list[str] = []
 
         self.rollup_spec = _load_csv_spec(options.label_rollup_spec_csv, LabelRollupSpec)
@@ -206,9 +463,19 @@ class TrainingDataset:
             options.excluded_images_csv, ImageExclusionFilter
         )
 
-        self.holdout_groups = _load_csv_spec(options.holdout_groups_csv, HoldoutGroups)
-        # Fail on a bad fold before any data is read.
+        # The hash is of the bytes parsed here, so lineage describes what this run read.
+        self.holdout_groups, self.holdout_groups_sha256 = _read_holdout_groups(
+            options.holdout_groups_csv
+        )
+        self.mermaid_project_lookup_sha256: str | None = None
+        # Fail on a bad holdout spec before any data is read.
         self.holdout_groups.validate_holdout_fold(options.holdout_fold)
+        self._check_holdout_groups_can_match()
+
+        self._duck_conn = None
+
+    def _check_holdout_groups_can_match(self) -> None:
+        """Raise for a listed holdout group no row of this run can belong to."""
         # Without the lookup every MERMAID row is project 'all', so no
         # listed MERMAID project can match.
         mermaid_groups = sorted(
@@ -216,133 +483,56 @@ class TrainingDataset:
             for site, group_id in self.holdout_groups.group_folds
             if site == Sites.MERMAID.value
         )
-        if options.include_mermaid and mermaid_groups and not options.mermaid_project_lookup_uri:
+        has_mermaid = any(source.labels == "mermaid" for source in self.options.datasets)
+        if has_mermaid and mermaid_groups and not self.options.mermaid_project_lookup_uri:
             raise ValueError(
                 f"holdout_groups_csv lists MERMAID group(s) {mermaid_groups}, but"
                 f" mermaid_project_lookup_uri is unset, so no MERMAID row has a project."
             )
+        unselected = _holdout_groups_unselected(self.holdout_groups, self.options, self.groups)
+        # Groups in other CV folds are training data in this run, so their absence only warns.
+        active_folds = {HOLDOUT_TEST_FOLD, self.options.holdout_fold}
+        active = sorted(name for name, fold in unselected.items() if fold in active_folds)
+        inactive = sorted(name for name, fold in unselected.items() if fold not in active_folds)
+        if active:
+            raise ValueError(
+                f"holdout_groups_csv lists group(s) {active} in the test fold or holdout_fold"
+                f" {self.options.holdout_fold!r} that the coralnet dataset's groups_csv does"
+                f" not select, so no row of them is read. Add them to the groups_csv or"
+                f" remove them from the holdout CSV."
+            )
+        if inactive:
+            logger.warning(
+                "holdout_groups_csv lists group(s) %s in other folds that the coralnet"
+                " dataset's groups_csv does not select, so no row of them is read.",
+                inactive,
+            )
 
-        # https://s3fs.readthedocs.io/en/latest/api.html#s3fs.core.S3FileSystem
-        self.s3 = S3FileSystem(
-            anon=settings.aws_anonymous == "True",
-            key=settings.aws_key_id,
-            secret=settings.aws_secret,
-            token=settings.aws_session_token,
-        )
-        self._duck_conn = None
-
-    def load_filtered_annotations(self) -> None:
+    def load_filtered_annotations(self, client: Any) -> None:
         """
-        Populate the `annotations` table: read the CoralNet and MERMAID
-        annotations, roll up and filter labels, drop excluded images,
-        check the MERMAID project-lookup tolerance on the surviving images,
-        dedupe points, and tag holdout groups (is_holdout / is_excluded).
+        Populate the `annotations` table: read the pinned datasets' tables,
+        roll up and filter labels, drop excluded images, check the MERMAID
+        project-lookup tolerance on the surviving images, dedupe points, tag
+        holdout groups (is_holdout / is_excluded), and delete excluded rows.
 
-        Needs no feature-vector listing or download.
+        Fetches no feature index or feature file.
         """
-        if self.options.coralnet_manifest_uri:
-            with self.section_profiling("Reading CoralNet annotations"):
-                self.read_coralnet_manifest()
-        else:
-            # An empty dataframe
-            self.artifacts.coralnet_project_stats = pd.DataFrame()
-
-        if self.options.include_mermaid:
-            with self.section_profiling("Reading MERMAID annotations"):
-                self.read_mermaid_data()
-        else:
-            self.artifacts.mermaid_project_stats = pd.DataFrame()
+        with self.section_profiling("Reading dataset versions"):
+            self.read_datasets(client)
 
         # Now this should have annotations populated.
         if not self.duckdb_annotations_table_exists():
-            raise ValueError(
-                "No annotations from CoralNet or MERMAID, even before label filtering."
-            )
-
-        def _annotations_stats() -> tuple[int, int]:
-            # (annotation rows, distinct feature_vector i.e. unique images)
-            return self.duck_conn.execute(  # pyright: ignore[reportReturnType]  # duckdb fetchone returns tuple[Any, ...] | None but we know it's always (int, int)
-                "SELECT COUNT(*), COUNT(DISTINCT feature_vector) FROM annotations"
-            ).fetchone()
+            raise ValueError("No annotations in the pinned datasets, even before label filtering.")
 
         # Lets holdout tagging tell a mistyped group from one filtering emptied.
-        groups_read: set[tuple[str, str]] = set()
-        if not self.holdout_groups.is_empty():
-            groups_read = {
-                (str(site), str(project_id))
-                for site, project_id in self.duck_conn.execute(
-                    "SELECT DISTINCT site, project_id FROM annotations"
-                ).fetchall()
-            }
+        groups_read = self._groups_read() if not self.holdout_groups.is_empty() else set()
 
         with self.section_profiling("Rollups and filtering"):
-            ann_before, img_before = _annotations_stats()
-            logger.info(
-                "Before rollups/filtering: %s annotations, %s unique images",
-                f"{ann_before:,}",
-                f"{img_before:,}",
-            )
-
-            if self.options.drop_growthforms:
-                # Clear all annotations' growth forms.
-                duckdb_transform_column(
-                    duck_conn=self.duck_conn,
-                    duck_table_name="annotations",
-                    column_name="growth_form_id",
-                    transform_func=lambda x: "",
-                )
-
-            # Roll up BAGFs.
-            self.rollup_spec.roll_up_in_duckdb(
-                duck_conn=self.duck_conn,
-                duck_table_name="annotations",
-            )
-            ann_after_rollup, img_after_rollup = _annotations_stats()
-            logger.info(
-                "After rollups: %s annotations (-%s), %s unique images (-%s)",
-                f"{ann_after_rollup:,}",
-                f"{ann_before - ann_after_rollup:,}",
-                f"{img_after_rollup:,}",
-                f"{img_before - img_after_rollup:,}",
-            )
-
-            # Filter out BAGFs we don't want.
-            self.label_filter.filter_in_duckdb(
-                duck_conn=self.duck_conn,
-                duck_table_name="annotations",
-            )
-            ann_after_filter, img_after_filter = _annotations_stats()
-            logger.info(
-                "After included-labels filter: %s annotations (-%s), %s unique images (-%s)",
-                f"{ann_after_filter:,}",
-                f"{ann_after_rollup - ann_after_filter:,}",
-                f"{img_after_filter:,}",
-                f"{img_after_rollup - img_after_filter:,}",
-            )
-
-            # Remove any images excluded wholesale (e.g. a frozen
-            # evaluation probe's held-out set), regardless of label.
-            self.image_exclusion_filter.filter_in_duckdb(
-                duck_conn=self.duck_conn,
-                duck_table_name="annotations",
-            )
-            ann_after_exclusion, img_after_exclusion = _annotations_stats()
-            logger.info(
-                "After image exclusion: %s annotations (-%s), %s unique images (-%s)",
-                f"{ann_after_exclusion:,}",
-                f"{ann_after_filter - ann_after_exclusion:,}",
-                f"{img_after_exclusion:,}",
-                f"{img_after_filter - img_after_exclusion:,}",
-            )
-            logger.info(
-                "Rollups+filter+exclusion retained %.1f%% of annotations, %.1f%% of unique images",
-                100.0 * ann_after_exclusion / max(ann_before, 1),
-                100.0 * img_after_exclusion / max(img_before, 1),
-            )
+            self._roll_up_and_filter()
 
         # Only unmatched images that survive the filters can reach training
         # or evaluation, so only those count against the tolerance.
-        if self.options.include_mermaid and self.options.mermaid_project_lookup_uri:
+        if self.mermaid_project_lookup_sha256 is not None:
             self._check_unmatched_mermaid_images()
 
         with self.section_profiling("Deduplicating points"):
@@ -356,10 +546,97 @@ class TrainingDataset:
                 groups_read=groups_read,
             )
 
+        if self.options.holdout_groups_csv:
+            # Test groups leave a CV run entirely: neither trained on nor
+            # evaluated. Holdout rows stay, tagged, for later steps.
+            self.duck_conn.execute("DELETE FROM annotations WHERE is_excluded")
+
+    def _groups_read(self) -> set[tuple[str, str]]:
+        """The (site, project_id) groups in the annotations table."""
+        return {
+            (str(site), str(project_id))
+            for site, project_id in self.duck_conn.execute(
+                "SELECT DISTINCT site, project_id FROM annotations"
+            ).fetchall()
+        }
+
+    def _roll_up_and_filter(self) -> None:
+        """Clear growth forms if asked, roll up, filter labels and exclude images, logging counts."""
+
+        def _annotations_stats() -> tuple[int, int]:
+            # (annotation rows, unique images)
+            return self.duck_conn.execute(  # pyright: ignore[reportReturnType]  # duckdb fetchone returns tuple[Any, ...] | None but we know it's always (int, int)
+                "SELECT COUNT(*), COUNT(DISTINCT (dataset, image_id)) FROM annotations"
+            ).fetchone()
+
+        ann_before, img_before = _annotations_stats()
+        logger.info(
+            "Before rollups/filtering: %s annotations, %s unique images",
+            f"{ann_before:,}",
+            f"{img_before:,}",
+        )
+
+        if self.options.drop_growthforms:
+            # Clear all annotations' growth forms.
+            duckdb_transform_column(
+                duck_conn=self.duck_conn,
+                duck_table_name="annotations",
+                column_name="growth_form_id",
+                transform_func=lambda x: "",
+            )
+
+        # Roll up BAGFs.
+        self.rollup_spec.roll_up_in_duckdb(
+            duck_conn=self.duck_conn,
+            duck_table_name="annotations",
+        )
+        ann_after_rollup, img_after_rollup = _annotations_stats()
+        logger.info(
+            "After rollups: %s annotations (-%s), %s unique images (-%s)",
+            f"{ann_after_rollup:,}",
+            f"{ann_before - ann_after_rollup:,}",
+            f"{img_after_rollup:,}",
+            f"{img_before - img_after_rollup:,}",
+        )
+
+        # Filter out BAGFs we don't want.
+        self.label_filter.filter_in_duckdb(
+            duck_conn=self.duck_conn,
+            duck_table_name="annotations",
+        )
+        ann_after_filter, img_after_filter = _annotations_stats()
+        logger.info(
+            "After included-labels filter: %s annotations (-%s), %s unique images (-%s)",
+            f"{ann_after_filter:,}",
+            f"{ann_after_rollup - ann_after_filter:,}",
+            f"{img_after_filter:,}",
+            f"{img_after_rollup - img_after_filter:,}",
+        )
+
+        # Remove any images excluded wholesale (e.g. a frozen
+        # evaluation probe's held-out set), regardless of label.
+        self.image_exclusion_filter.filter_in_duckdb(
+            duck_conn=self.duck_conn,
+            duck_table_name="annotations",
+        )
+        ann_after_exclusion, img_after_exclusion = _annotations_stats()
+        logger.info(
+            "After image exclusion: %s annotations (-%s), %s unique images (-%s)",
+            f"{ann_after_exclusion:,}",
+            f"{ann_after_filter - ann_after_exclusion:,}",
+            f"{img_after_exclusion:,}",
+            f"{img_after_filter - img_after_exclusion:,}",
+        )
+        logger.info(
+            "Rollups+filter+exclusion retained %.1f%% of annotations, %.1f%% of unique images",
+            100.0 * ann_after_exclusion / max(ann_before, 1),
+            100.0 * img_after_exclusion / max(img_before, 1),
+        )
+
     def _dedupe_points(self) -> None:
         """
         Make `annotations` hold at most one row per point, keyed by
-        (bucket, feature_vector, row, col).
+        (dataset, image_id, row, col).
 
         Runs after rollup and filtering, so conflicts are judged on the
         final BA+GF. A point whose rows carry more than one distinct
@@ -367,7 +644,7 @@ class TrainingDataset:
         other point keeps one row: the first when ordered by every column,
         so the choice does not depend on scan order.
         """
-        point_key = "bucket, feature_vector, row, col"
+        point_key = "dataset, image_id, row, col"
         order_by = ", ".join(
             f'"{name}"'
             for (name,) in self.duck_conn.execute(
@@ -513,10 +790,10 @@ class TrainingDataset:
                 ]
             )
             partition_by = "benthic_attribute_id, growth_form_id, site, project_id"
-            # md5 of the seed-salted feature vector clusters a group's rows
+            # md5 of the seed-salted image identity clusters a group's rows
             # by image, and is the same in every DuckDB version, which
-            # hash() is not; feature_vector breaks digest ties.
-            order_by = f"md5('{int(opts.seed)}' || feature_vector), feature_vector, row, col"
+            # hash() is not; the identity breaks digest ties.
+            order_by = f"md5('{int(opts.seed)}' || dataset || '/' || image_id), dataset, image_id, row, col"
             join_using = "benthic_attribute_id, growth_form_id, site, project_id"
         else:
             allocation_df = pd.DataFrame(
@@ -623,14 +900,11 @@ class TrainingDataset:
         """Cap each class's holdout rows at ``max_per_class``.
 
         Keeps whole images first: within a class (not per group), rows are
-        ordered by a seeded md5 of the feature vector, so the survivors
+        ordered by a seeded md5 of the dataset and image id, so the survivors
         cluster by image. Non-holdout rows are untouched. A no-op, leaving
         ``_holdout_audit_df`` None, when there are no holdout rows.
         """
         self._holdout_audit_df = None
-        if not self._has_holdout_column():
-            return
-
         available_rows = self.duck_conn.execute(
             "SELECT benthic_attribute_id, growth_form_id, COUNT(*)"
             " FROM annotations WHERE is_holdout"
@@ -646,8 +920,8 @@ class TrainingDataset:
             "   SELECT *,"
             "          ROW_NUMBER() OVER ("
             "              PARTITION BY benthic_attribute_id, growth_form_id"
-            f"              ORDER BY md5('{int(seed)}' || feature_vector),"
-            "                       feature_vector, site, project_id, image_id, row, col"
+            f"              ORDER BY md5('{int(seed)}' || dataset || '/' || image_id),"
+            "                       dataset, image_id, site, project_id, row, col"
             "          ) AS _rn"
             "   FROM annotations WHERE is_holdout"
             " )"
@@ -692,73 +966,78 @@ class TrainingDataset:
         with section_profiling(self.profiled_sections, section_name):
             yield
 
-    def read_mermaid_data(self):
-        parquet_path = settings.mermaid_annotations_parquet_pattern.format(
-            mermaid_train_data_bucket=settings.mermaid_train_data_bucket,
+    def read_datasets(self, client: Any) -> None:
+        """Sync every pinned version's tables and load their points as annotations."""
+        cache_dir = Path(self._feature_dir)
+        pins = {source.pin.name: source.pin for source in self.options.datasets}
+        sync_tables(client, pins, cache_dir, bucket=DATASET_BUCKET, taxonomy=self.options.taxonomy)
+        taxonomy = (
+            None
+            if self.options.taxonomy is None
+            else open_taxonomy(cache_dir, DATASET_BUCKET, self.options.taxonomy)
         )
-
-        if self.duckdb_annotations_table_exists():
-            # INSERT INTO ... BY NAME ... means that we don't have to match
-            # the column order of the existing table.
-            # https://duckdb.org/docs/stable/sql/statements/insert#insert-into--by-name
-            query_start = "INSERT INTO annotations BY NAME"
-        else:
-            # Didn't read any CoralNet data, so we have to create
-            # the annotations table.
-            query_start = "CREATE TABLE annotations AS"
-        lookup_uri = self.options.mermaid_project_lookup_uri
-        if lookup_uri:
-            self._check_project_lookup_is_one_to_one(lookup_uri)
-            # One project per image (checked above), so the join cannot
-            # fan out rows; a lookup repeating an image/project pair is fine.
-            project_sql = "COALESCE(l.project_id, 'unknown')"
-            from_sql = (
-                f"read_parquet('{parquet_path}') m"
-                f" LEFT JOIN ("
-                f"  SELECT CAST(image_id AS VARCHAR) AS image_id,"
-                f"   min(CAST(project_id AS VARCHAR)) AS project_id"
-                f"  FROM read_parquet(?) GROUP BY 1) l"
-                f" ON CAST(m.image_id AS VARCHAR) = l.image_id"
+        coralnet_mapping = CoralNetMermaidMapping()
+        for source in self.options.datasets:
+            tables = open_tables(cache_dir, DATASET_BUCKET, source.pin)
+            self._append_annotations(
+                self._source_annotations(source, tables, taxonomy, coralnet_mapping)
             )
-            params = [lookup_uri]
-        else:
-            project_sql = "'all'"
-            from_sql = f"read_parquet('{parquet_path}') m"
-            params = []
+
+        lookup_uri = self.options.mermaid_project_lookup_uri
+        if lookup_uri and any(source.labels == "mermaid" for source in self.options.datasets):
+            lookup_path = self._local_lookup_path(client, lookup_uri)
+            self.mermaid_project_lookup_sha256 = hashlib.sha256(
+                Path(lookup_path).read_bytes()
+            ).hexdigest()
+            self._apply_mermaid_project_lookup(lookup_path)
+
+        # Project-level stats before any filtering, unmapped labels included.
+        self.artifacts.coralnet_project_stats = self.compute_project_stats(
+            site=Sites.CORALNET.value
+        )
+        self.artifacts.mermaid_project_stats = self.compute_project_stats(site=Sites.MERMAID.value)
+
+        if any(source.labels == "coralnet" for source in self.options.datasets):
+            self.artifacts.coralnet_label_mapping = coralnet_mapping.get_dataframe()
+            self._drop_unmapped_labels()
+            self.coralnet_source_ids = [
+                str(r[0])
+                for r in self.duck_conn.execute(
+                    "SELECT DISTINCT project_id FROM annotations WHERE site = ?"
+                    " ORDER BY CAST(project_id AS INTEGER)",
+                    [Sites.CORALNET.value],
+                ).fetchall()
+            ]
+
+    def _local_lookup_path(self, client: Any, lookup_uri: str) -> str:
+        """`lookup_uri` itself when local; an S3 lookup is fetched into the cache dir first."""
+        if not is_s3_uri(lookup_uri):
+            return lookup_uri
+        bucket, key = parse_s3_uri(lookup_uri)
+        local_path = Path(self._feature_dir) / "mermaid_project_lookup" / bucket / key
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(client.get_object(Bucket=bucket, Key=key)["Body"].read())
+        return str(local_path)
+
+    def _apply_mermaid_project_lookup(self, lookup_path: str) -> None:
+        """Give each MERMAID row its image's project from the lookup; 'unknown' if absent."""
+        self._check_project_lookup_is_one_to_one(lookup_path)
+        # One project per image (checked above), so the join cannot fan out
+        # rows; a lookup repeating an image/project pair is fine.
         self.duck_conn.execute(
-            query_start + f" SELECT"
-            f"  CAST(m.image_id AS VARCHAR) AS image_id, m.row, m.col,"
-            f"  m.benthic_attribute_id,"
-            f"  COALESCE(m.growth_form_id, '') AS growth_form_id,"
-            f" '{Sites.MERMAID.value}' AS site,"
-            f" '{settings.mermaid_train_data_bucket}' AS bucket,"
-            f" {project_sql} AS project_id,"
-            f"  concat('mermaid/', m.image_id, '_featurevector')"
-            f"   AS feature_vector"
-            f" FROM {from_sql}",
-            params,
+            "CREATE OR REPLACE TABLE annotations AS"
+            " SELECT a.* REPLACE ("
+            f"  CASE WHEN a.site = '{Sites.MERMAID.value}'"
+            "   THEN COALESCE(l.project_id, 'unknown') ELSE a.project_id END AS project_id)"
+            " FROM annotations a"
+            " LEFT JOIN ("
+            "  SELECT CAST(image_id AS VARCHAR) AS image_id,"
+            "   min(CAST(project_id AS VARCHAR)) AS project_id"
+            "  FROM read_parquet(?) GROUP BY 1) l"
+            f" ON a.site = '{Sites.MERMAID.value}' AND a.image_id = l.image_id",
+            [lookup_path],
         )
-        if lookup_uri:
-            self._log_unmatched_mermaid_images("before filters")
-
-        # Get project-level stats before applying any further filters.
-        self.artifacts.mermaid_project_stats = self.compute_project_stats(
-            site=Sites.MERMAID.value, has_training_sets=False
-        )
-
-        # growth_form_id at this point is a real UUID, '' (for absent growth form),
-        # or the legacy literal string 'None'. Normalize 'None' to ''.
-        def transform_func(gf_id: str | None) -> str | None:
-            if gf_id == "None":
-                return ""
-            return gf_id
-
-        duckdb_transform_column(
-            duck_conn=self.duck_conn,
-            duck_table_name="annotations",
-            column_name="growth_form_id",
-            transform_func=transform_func,
-        )
+        self._log_unmatched_mermaid_images("before filters")
 
     def _check_project_lookup_is_one_to_one(self, lookup_uri: str) -> None:
         """Raise if the lookup maps any image to more than one project."""
@@ -774,33 +1053,24 @@ class TrainingDataset:
                 f" such as: {[r[0] for r in ambiguous]}"
             )
 
-    def _count_unmatched_mermaid_images(self) -> tuple[int, int]:
-        """(MERMAID images with project_id 'unknown', distinct MERMAID images) in `annotations`."""
+    def _log_unmatched_mermaid_images(self, stage: str) -> tuple[int, int]:
+        """Log and return (MERMAID images with project_id 'unknown', distinct MERMAID images)."""
         unmatched, total = self.duck_conn.execute(
             "SELECT count(DISTINCT image_id) FILTER (WHERE project_id = 'unknown'),"
             " count(DISTINCT image_id)"
             f" FROM annotations WHERE site = '{Sites.MERMAID.value}'"
         ).fetchall()[0]
-        return unmatched, total
-
-    def _log_unmatched_mermaid_images(self, stage: str) -> None:
-        unmatched, total = self._count_unmatched_mermaid_images()
         logger.info(
             "MERMAID project lookup left %s of %s image(s) unmatched (project_id 'unknown') %s.",
             f"{unmatched:,}",
             f"{total:,}",
             stage,
         )
+        return unmatched, total
 
     def _check_unmatched_mermaid_images(self) -> None:
         """Log MERMAID images the lookup left as 'unknown' after the filters; raise if too many."""
-        unmatched, total = self._count_unmatched_mermaid_images()
-        logger.info(
-            "MERMAID project lookup left %s of %s image(s) unmatched (project_id 'unknown')"
-            " after filters.",
-            f"{unmatched:,}",
-            f"{total:,}",
-        )
+        unmatched, total = self._log_unmatched_mermaid_images("after filters")
         allowed = settings.mermaid_project_lookup_percent_unmatched_allowed
         if unmatched > total * allowed / 100:
             raise RuntimeError(
@@ -810,107 +1080,45 @@ class TrainingDataset:
                 f" MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED setting."
             )
 
-    def read_coralnet_manifest(self):
+    def _source_annotations(
+        self,
+        source: PinnedDataset,
+        tables: VersionTables,
+        taxonomy: Taxonomy | None,
+        coralnet_mapping: CoralNetMermaidMapping,
+    ) -> _Table:
+        name = source.pin.name
+        if tables.points is None:
+            raise ValueError(f"{name} is not a points dataset, so it has no points to train on")
+        check_labels_kind(tables.labels, source.labels, name, tables.manifest.source.type)
+        if source.labels == "coralnet":
+            label_table = coralnet_label_table(tables.labels, coralnet_mapping)
+        elif taxonomy is None:
+            raise ValueError(f"{name} has `labels: mermaid`, which needs a taxonomy pin")
+        else:
+            label_table = mermaid_label_table(tables.labels, taxonomy.growth_forms, name)
+        return dataset_annotations(
+            tables.points,
+            select_groups(tables.images, self.groups[name], name),
+            label_table,
+            site=Sites(source.labels),
+            dataset=name,
+        )
+
+    def _append_annotations(self, table: _Table) -> None:
         if self.duckdb_annotations_table_exists():
-            # Since CoralNet's data is not formatted to the open data
-            # bucket's specs yet, it's easier to read in CN data first,
-            # then transform the table to open data format, then read
-            # in MERMAID data.
-            #
-            # As opposed to reading MERMAID first, transforming to CN
-            # format, reading in CN, and transforming back to open data
-            # format.
-            raise RuntimeError(
-                "Due to format technicalities, CoralNet data must be read in before MERMAID data."
-            )
-
-        manifest_uri = self.options.coralnet_manifest_uri
-
-        # Read the manifest parquet into the `annotations` table, normalizing
-        # to the open data bucket column layout (row, col, image_id, label_id,
-        # site, bucket, project_id, feature_vector). The manifest is a
-        # per-annotation-point dataset; label mapping, rollups, and filtering
-        # happen downstream below, exactly as for the old per-source CSV path.
+            # BY NAME: the column order of the existing table need not match.
+            query_start = "INSERT INTO annotations BY NAME"
+        else:
+            query_start = "CREATE TABLE annotations AS"
+        self.duck_conn.register("_dataset_annotations", table)
         try:
-            self.duck_conn.execute(
-                "CREATE TABLE annotations AS"
-                " SELECT"
-                "  row,"
-                "  col,"
-                "  CAST(image_id AS VARCHAR) AS image_id,"
-                "  CAST(coralnet_id AS VARCHAR) AS label_id,"
-                f"  '{Sites.CORALNET.value}' AS site,"
-                f"  '{settings.coralnet_train_data_bucket}' AS bucket,"
-                "  CAST(source_id AS VARCHAR) AS project_id,"
-                # e.g. s123/features/i456.featurevector
-                "  's' || CAST(source_id AS VARCHAR) || '/features/i' || CAST(image_id AS VARCHAR)"
-                "   || '.featurevector' AS feature_vector"
-                " FROM read_parquet(?)"
-                # Defense-in-depth: the inner join in build_manifest_relation
-                # already excludes null image_id, but guard here in case the
-                # parquet was produced by another path.
-                " WHERE image_id IS NOT NULL AND image_id <> ''",
-                [manifest_uri],
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to read CoralNet manifest parquet at '{manifest_uri}'. "
-                f"It must be readable and contain columns: "
-                f"source_id, image_id, row, col, coralnet_id. "
-                f"Underlying error: {exc}"
-            ) from exc
+            self.duck_conn.execute(f"{query_start} SELECT * FROM _dataset_annotations")
+        finally:
+            self.duck_conn.unregister("_dataset_annotations")
 
-        self.coralnet_source_ids = [
-            str(r[0])
-            for r in self.duck_conn.execute(
-                "SELECT DISTINCT project_id FROM annotations ORDER BY CAST(project_id AS INTEGER)"
-            ).fetchall()
-        ]
-
-        # Get project-level stats before applying any further filters.
-        self.artifacts.coralnet_project_stats = self.compute_project_stats(
-            site=Sites.CORALNET.value, has_training_sets=False
-        )
-
-        label_mapping = CoralNetMermaidMapping()
-        self.artifacts.coralnet_label_mapping = label_mapping.get_dataframe()
-
-        # Add BAs and GFs to the DuckDB table, using
-        # our mapping from CoralNet label IDs to MERMAID BAs/GFs.
-        def label_to_ba(label: str | None) -> str | None:
-            if label is None or label not in label_mapping:
-                return None
-            entry = label_mapping[label]
-            return entry.benthic_attribute_id
-
-        duckdb_add_column(
-            duck_conn=self.duck_conn,
-            duck_table_name="annotations",
-            base_column_name="label_id",
-            new_column_name="benthic_attribute_id",
-            base_to_new_func=label_to_ba,
-        )
-
-        def label_to_gf(label: str | None) -> str | None:
-            if label is None or label not in label_mapping:
-                return None
-            entry = label_mapping[label]
-            return entry.growth_form_id
-
-        duckdb_add_column(
-            duck_conn=self.duck_conn,
-            duck_table_name="annotations",
-            base_column_name="label_id",
-            new_column_name="growth_form_id",
-            base_to_new_func=label_to_gf,
-        )
-
-        # The BA IS NULL rows are the ones that aren't mapped to
-        # anything in MERMAID. Save stats on these rows.
-        #
-        # TODO: It could be nice to include label names in this artifact.
-        #  That would require reading in some data which maps
-        #  CoralNet label IDs to names.
+    def _drop_unmapped_labels(self) -> None:
+        """Record, then drop, the CoralNet points whose label maps to no MERMAID BA."""
         self.artifacts.unmapped_labels = self.duck_conn.execute(
             "SELECT"
             " label_id,"
@@ -921,8 +1129,6 @@ class TrainingDataset:
             " GROUP BY label_id"
             " ORDER BY num_annotations DESC"
         ).fetch_df()
-
-        # Then filter out those rows before moving on.
         self.duck_conn.execute("DELETE FROM annotations WHERE benthic_attribute_id IS NULL")
 
     def duckdb_annotations_table_exists(self) -> bool:
@@ -934,133 +1140,109 @@ class TrainingDataset:
         # Result should be [] if doesn't exist, which 'bools' to False.
         return bool(table_query_result)
 
-    def feature_source_prefixes(self) -> list[str]:
-        """The S3 prefixes this run's `.featurevector` files are read from."""
-        prefixes: list[str] = []
-        if self.options.include_mermaid:
-            prefixes.append(f"s3://{settings.mermaid_train_data_bucket}/mermaid/")
-        if self.options.coralnet_manifest_uri:
-            prefixes.append(f"s3://{settings.coralnet_train_data_bucket}/")
-        return prefixes
+    def fetch_feature_indexes(self, client: Any) -> dict[str, FeatureSyncResult]:
+        """Each dataset's verified feature-set manifest and index, by dataset name.
 
-    def read_extractor_sidecar(self, prefix: str) -> ExtractorSpec | None:
-        """The spec the job that wrote `prefix` left there, if it left one.
-
-        None for a prefix we read but do not produce -- CoralNet's public
-        bucket -- which the run's own declaration has to cover instead.
+        Selecting no image fetches no feature file.
         """
-        key = prefix + SIDECAR_FILENAME
-        if not self.s3.exists(key):
-            return None
-        return ExtractorSpec.from_dict(json.loads(self.s3.cat_file(key)))
+        return {
+            source.pin.name: sync_feature_set(
+                client,
+                source.features,
+                Path(self._feature_dir),
+                bucket=DATASET_BUCKET,
+                image_ids=[],
+                max_workers=settings.download_max_workers,
+            )
+            for source in self.options.datasets
+        }
 
-    def resolve_extractor_spec(self, prefixes: list[str]) -> ExtractorSpec:
+    def resolve_extractor_spec(self, manifests: Mapping[str, FeatureSetManifest]) -> ExtractorSpec:
         """One extractor for the whole run, or refuse to train.
 
         A head fitted across two feature spaces is wrong in a way no later
         gate detects: the artifact loads, the parity gate passes, and every
-        score is drawn from a distribution the head never saw. So sources
-        that disagree stop the run here.
-
-        `dataset.feature_extractor_weights` is checked against every sidecar
-        rather than merely filling gaps, which is what catches a config
-        naming weights the bucket was not built with.
+        score is drawn from a distribution the head never saw. So a feature
+        set whose extractor differs from `dataset.feature_extractor_weights`
+        stops the run here.
         """
-        declared = (
-            extractor_spec_from_weights(self.options.feature_extractor_weights)
-            if self.options.feature_extractor_weights
-            else None
-        )
-
-        found: dict[str, ExtractorSpec] = {}
-        for prefix in prefixes:
-            sidecar = self.read_extractor_sidecar(prefix)
-            if sidecar is not None:
-                if sidecar.weights_sha256 == EMPTY_SHA256:
-                    raise ValueError(
-                        f"{prefix}{SIDECAR_FILENAME} predates the #112 fix: its"
-                        " weights_sha256 is the hash of an empty file, so the hash is"
-                        " unrecorded. The feature vectors are not necessarily wrong."
-                        " Confirm which weights produced them, then rewrite the sidecar"
-                        " with the correct weights_sha256."
-                    )
-                found[prefix] = sidecar
-            elif declared is not None:
-                found[prefix] = declared
-            else:
-                raise ValueError(
-                    f"{prefix} carries no {SIDECAR_FILENAME}, and this run declares no"
-                    " dataset.feature_extractor_weights, so nothing records which"
-                    " extractor produced its feature vectors. Set that field in the"
-                    " training config."
-                )
-        if declared is not None:
-            found["dataset.feature_extractor_weights"] = declared
-
-        if len({spec.identity() for spec in found.values()}) > 1:
-            detail = "\n".join(f"  {src}: {spec.describe()}" for src, spec in found.items())
+        if not self.options.feature_extractor_weights:
             raise ValueError(
-                "Feature sources disagree about which extractor produced them, so"
-                f" their vectors are not comparable:\n{detail}"
+                "This run declares no dataset.feature_extractor_weights, so nothing"
+                " checks which extractor produced its feature sets. Set that field in"
+                " the training config."
             )
-
-        # Prefer a producer's own record over the run's declaration: both
-        # name the same bytes, but the sidecar names where they were used.
-        spec = next(
-            (found[prefix] for prefix in prefixes if prefix in found),
-            declared,
-        )
-        assert spec is not None  # every prefix either resolved or raised above
+        declared = extractor_spec_from_weights(self.options.feature_extractor_weights)
+        found = {
+            f"{name} feature set {manifest.family}": feature_set_extractor(manifest)
+            for name, manifest in manifests.items()
+        }
+        differing = {
+            source: spec for source, spec in found.items() if spec.identity() != declared.identity()
+        }
+        if differing:
+            detail = "\n".join(
+                f"  {source}: {spec.describe()}" for source, spec in differing.items()
+            )
+            raise ValueError(
+                "Feature sets record a different extractor from"
+                f" dataset.feature_extractor_weights ({declared.describe()}), so"
+                f" their vectors are not what this run declares:\n{detail}"
+            )
+        # A producer's own record names where the weights were used.
+        spec = next(iter(found.values()), declared)
         logger.info("Feature extractor for this run: %s", spec.describe())
         return spec
 
-    def handle_missing_feature_vectors(self, present_feature_paths: set[str]) -> None:
-        # Check every site's annotation feature paths against the set of
-        # feature vectors actually present in S3. Annotations whose feature
-        # vector is absent are dropped (and the run aborts if too many are
-        # missing). `present_feature_paths` holds `bucket/key` strings, the
-        # same shape as the `feature_full` we build per annotation row.
+    def handle_missing_feature_vectors(self, indexes: Mapping[str, _Table]) -> None:
+        """Drop annotations of images their dataset's feature index lacks.
 
-        # Build the annotation data's full feature paths, in DuckDB.
-        self.duck_conn.execute(
-            "CREATE OR REPLACE TABLE annotations AS"
-            " SELECT *,"
-            "  bucket || '/' || feature_vector AS feature_full"
-            " FROM annotations"
+        Images absent from the index count against
+        TRAINING_INPUTS_PERCENT_MISSING_ALLOWED, as a share of the distinct
+        images in the annotations table; above it the run stops.
+        """
+        names = [name for name, index in indexes.items() for _ in range(index.num_rows)]
+        indexed = pd.DataFrame(  # noqa: F841  # pyright: ignore[reportUnusedVariable]  # referenced by name in DuckDB SQL via Python-scope scanning
+            {
+                "dataset": names,
+                "image_id": [
+                    i for index in indexes.values() for i in index.column("image_id").to_pylist()
+                ],
+                "feature_vector": [
+                    k for index in indexes.values() for k in index.column("key").to_pylist()
+                ],
+            }
         )
 
         with (
-            duckdb_temp_table_name(self.duck_conn) as s3_features_table_name,
-            duckdb_temp_table_name(self.duck_conn) as missing_features_table_name,
+            duckdb_temp_table_name(self.duck_conn) as indexed_table_name,
+            duckdb_temp_table_name(self.duck_conn) as missing_table_name,
         ):
-            # Get the S3 feature paths into another table.
-            s3_paths_df = pd.DataFrame({"feature_full": list(present_feature_paths)})  # noqa: F841  # pyright: ignore[reportUnusedVariable]  # referenced by name in DuckDB SQL via Python-scope scanning
             self.duck_conn.execute(
-                f"CREATE TEMP TABLE {s3_features_table_name} AS SELECT * FROM s3_paths_df"
+                f"CREATE TEMP TABLE {indexed_table_name} AS"
+                " SELECT dataset, image_id, feature_vector FROM indexed"
             )
 
             in_annotations_count = self.duck_conn.execute(
-                "SELECT COUNT(DISTINCT feature_full) FROM annotations"
+                "SELECT COUNT(DISTINCT (dataset, image_id)) FROM annotations"
             ).fetchall()[0][0]
 
-            # Get the annotation feature paths that are missing from S3,
-            # into another table.
             self.duck_conn.execute(
-                f"CREATE TABLE {missing_features_table_name} AS"
-                f" SELECT DISTINCT a.feature_full FROM annotations a"
-                f" LEFT JOIN {s3_features_table_name} s USING (feature_full)"
-                # Annotations whose features are not found in S3.
-                f" WHERE s.feature_full IS NULL"
+                f"CREATE TABLE {missing_table_name} AS"
+                f" SELECT DISTINCT a.dataset, a.image_id FROM annotations a"
+                f" LEFT JOIN {indexed_table_name} f USING (dataset, image_id)"
+                f" WHERE f.feature_vector IS NULL"
             )
-
             missing_count = self.duck_conn.execute(
-                f"SELECT COUNT(*) FROM {missing_features_table_name}"
+                f"SELECT COUNT(*) FROM {missing_table_name}"
             ).fetchall()[0][0]
-
-            result_tuples = self.duck_conn.execute(
-                f"SELECT feature_full FROM {missing_features_table_name} LIMIT 3"
-            ).fetchall()
-            missing_examples = [tup[0] for tup in result_tuples]
+            missing_examples = [
+                tup[0]
+                for tup in self.duck_conn.execute(
+                    f"SELECT dataset || '/' || image_id FROM {missing_table_name}"
+                    " ORDER BY dataset, image_id LIMIT 3"
+                ).fetchall()
+            ]
 
             # Abort if too many are missing (check before mutating).
             examples_str = "\n".join(missing_examples)
@@ -1069,7 +1251,7 @@ class TrainingDataset:
             )
             if missing_count > missing_threshold:
                 raise RuntimeError(
-                    f"Too many feature vectors are missing"
+                    f"Too many images have no feature vector"
                     f" ({missing_count}), such as:"
                     f"\n{examples_str}"
                     f"\nYou can configure the tolerance for missing"
@@ -1077,161 +1259,133 @@ class TrainingDataset:
                     f" TRAINING_INPUTS_PERCENT_MISSING_ALLOWED setting."
                 )
 
-            # Filter out missing feature vectors from annotations table.
+            # Keep the annotations whose image is indexed, with its feature key.
             self.duck_conn.execute(
                 f"CREATE OR REPLACE TABLE annotations AS"
-                f" SELECT a.* FROM annotations a"
-                f" LEFT JOIN {s3_features_table_name} s USING (feature_full)"
-                # Keep annotations whose features are found in S3.
-                f" WHERE s.feature_full IS NOT NULL"
+                f" SELECT a.*, f.feature_vector FROM annotations a"
+                f" JOIN {indexed_table_name} f USING (dataset, image_id)"
             )
 
-        # Don't need the feature_full column anymore.
-        self.duck_conn.execute("ALTER TABLE annotations DROP feature_full")
-
-        # Log a warning if any are missing.
         if missing_count > 0:
             logger.warning(
-                f"Skipping {missing_count} feature vector(s) because"
-                f" the files aren't in S3."
+                f"Skipping {missing_count} image(s) because"
+                f" their dataset's feature set does not index them."
                 f" Example(s):"
                 f"\n{examples_str}"
             )
 
+    def sync_feature_vectors(self, client: Any) -> None:
+        """Download and verify the feature file of every image still in the annotations."""
+        cache_dir = Path(self._feature_dir)
+        for source in self.options.datasets:
+            image_ids = [
+                row[0]
+                for row in self.duck_conn.execute(
+                    "SELECT DISTINCT image_id FROM annotations WHERE dataset = ? ORDER BY image_id",
+                    [source.pin.name],
+                ).fetchall()
+            ]
+            logger.info("Syncing features for %s: %d images", source.pin.name, len(image_ids))
+            start = time.monotonic()
+            _sync_with_retries(
+                source.pin.name,
+                functools.partial(
+                    sync_feature_set,
+                    client,
+                    source.features,
+                    cache_dir,
+                    bucket=DATASET_BUCKET,
+                    image_ids=image_ids,
+                    max_workers=settings.download_max_workers,
+                ),
+            )
+            logger.info(
+                "Synced features for %s in %.1f s", source.pin.name, time.monotonic() - start
+            )
+            self._feature_sets[source.pin.name] = open_feature_set(
+                cache_dir, DATASET_BUCKET, source.features
+            )
+
     def prep_annotations_for_pyspacer(self) -> TrainingTaskLabels:
         """
-        Download the feature vectors and split the annotations into
-        train/ref/val by `options.split_mode`.
+        Build PySpacer labels from the synced feature files and split them
+        into train/ref/val by `options.split_mode`.
 
         Holdout rows (is_holdout) take no part in the split: they become
         `self.holdout_labels`, which is empty when there are none.
         """
         has_holdout = self._has_holdout_column()
-        with self.section_profiling("Collecting feature paths"):
+        with self.section_profiling("Building PySpacer labels"):
             annotations_by_image = duckdb_grouped_rows(
                 duck_conn=self.duck_conn,
                 duck_table_name="annotations",
                 grouping_column_names=["bucket", "feature_vector"],
                 extra_order_column_names=["row", "col"],
             )
-
-            # First pass: collect annotations and unique S3 keys.
-            s3_keys: dict[tuple[str, str], str] = {}
-            tmp_root = self._feature_dir
-            # (bucket, key, site, project_id, split annotations, holdout annotations)
-            image_data: list[tuple[str, str, str, str, list[Annotation], list[Annotation]]] = []
+            labels_data = ImageLabels()
+            holdout_data = ImageLabels()
 
             for rows in annotations_by_image:
                 # Here, in one loop iteration, we're given all the
                 # annotation rows for a single image.
                 first_row = rows[0]
-                bucket = str(first_row["bucket"])
-                feature_bucket_path = str(first_row["feature_vector"])
-                site = str(first_row["site"])
-                project_id = str(first_row["project_id"])
+                feature_set = self._feature_sets[str(first_row["dataset"])]
+                local_path = str(feature_set.path(str(first_row["image_id"])))
+                # add_training_set_names maps the cached path back to the
+                # annotations table's (bucket, feature_vector).
+                self._feature_path_to_s3_location[local_path] = (
+                    str(first_row["bucket"]),
+                    str(first_row["feature_vector"]),
+                )
 
                 image_annotations: list[Annotation] = []
                 holdout_annotations: list[Annotation] = []
-
-                # One annotation per row.
                 for row in rows:
-                    bagf = combine_ba_gf(
-                        str(row["benthic_attribute_id"]), str(row["growth_form_id"])
-                    )
-
                     annotation = (
                         int(row["row"]),
                         int(row["col"]),
-                        bagf,
+                        combine_ba_gf(str(row["benthic_attribute_id"]), str(row["growth_form_id"])),
                     )
                     if has_holdout and bool(row["is_holdout"]):
                         holdout_annotations.append(annotation)
                     else:
                         image_annotations.append(annotation)
 
-                s3_key = (bucket, feature_bucket_path)
-                if s3_key not in s3_keys:
-                    local_path = os.path.join(tmp_root, bucket, feature_bucket_path)
-                    s3_keys[s3_key] = local_path
-                    # Remember how to get back from the local download path
-                    # to the original S3 location, for add_training_set_names.
-                    self._feature_path_to_s3_location[local_path] = s3_key
-
-                image_data.append(
-                    (
-                        bucket,
-                        feature_bucket_path,
-                        site,
-                        project_id,
-                        image_annotations,
-                        holdout_annotations,
-                    )
-                )
-
-        # Parallel download of all feature vectors from S3.
-        with self.section_profiling("Downloading feature vectors"):
-            failed_keys = download_features_parallel(
-                s3_keys, max_workers=settings.download_max_workers
-            )
-
-        if failed_keys:
-            # The downloader's per-key warning lands on a different logger
-            # than train.log; naming the keys here reaches a post-mortem.
-            logger.warning(
-                f"{len(failed_keys)} feature vector download(s) failed: {sorted(failed_keys)}"
-            )
-
-        with self.section_profiling("Building PySpacer labels"):
-            # Build ImageLabels with filesystem DataLocations.
-            labels_data = ImageLabels()
-            holdout_data = ImageLabels()
-
-            for (
-                bucket,
-                feature_bucket_path,
-                site,
-                project_id,
-                image_annotations,
-                holdout_annotations,
-            ) in image_data:
-                # Skip images whose feature file failed to download.
-                if (bucket, feature_bucket_path) in failed_keys:
-                    continue
-
-                local_path = s3_keys[(bucket, feature_bucket_path)]
-
-                feature_loc = DataLocation(
-                    storage_type="filesystem",
-                    key=local_path,
-                )
+                feature_loc = DataLocation(storage_type="filesystem", key=local_path)
                 if image_annotations:
                     labels_data.add_image(feature_loc, image_annotations)
                 if holdout_annotations:
                     holdout_data.add_image(feature_loc, holdout_annotations)
-                self.feature_loc_to_source[feature_loc] = (site, project_id)
+                self.feature_loc_to_source[feature_loc] = (
+                    str(first_row["site"]),
+                    str(first_row["project_id"]),
+                )
 
             self.holdout_labels = holdout_data
 
         with self.section_profiling(f"Splitting train/ref/val ({self.options.split_mode})"):
-            if self.options.split_mode == "images":
-                subsample = self.options.subsample
-                split = preprocess_labels(
-                    split_by_image(
-                        labels_data,
-                        self.options.ref_val_ratios,
-                        seed=subsample.seed if subsample is not None else 0,
-                        # The download dir differs per run; the S3 location does not.
-                        stable_key=lambda loc: "/".join(self._feature_path_to_s3_location[loc.key]),
-                    )
-                )
-            else:
-                split = preprocess_labels(
-                    labels_data,
-                    split_ratios=self.options.ref_val_ratios,
-                    split_mode=SplitMode.POINTS_STRATIFIED,
-                )
+            split = self._split_labels(labels_data)
         self._log_split_drops(labels_data, split)
         return split
+
+    def _split_labels(self, labels_data: ImageLabels) -> TrainingTaskLabels:
+        """Split `labels_data` into train/ref/val by `options.split_mode`."""
+        if self.options.split_mode == "images":
+            subsample = self.options.subsample
+            return preprocess_labels(
+                split_by_image(
+                    labels_data,
+                    self.options.ref_val_ratios,
+                    seed=subsample.seed if subsample is not None else 0,
+                    # The cache dir differs per run; the S3 location does not.
+                    stable_key=lambda loc: "/".join(self._feature_path_to_s3_location[loc.key]),
+                )
+            )
+        return preprocess_labels(
+            labels_data,
+            split_ratios=self.options.ref_val_ratios,
+            split_mode=SplitMode.POINTS_STRATIFIED,
+        )
 
     def _log_split_drops(self, before: ImageLabels, after: TrainingTaskLabels) -> None:
         """
@@ -1276,55 +1430,10 @@ class TrainingDataset:
     @property
     def duck_conn(self):
         """
-        Return a DuckDB connection which includes the ability to read
-        files from S3.
-
-        Each TrainingDataset instance only establishes such a connection
-        once.
-
-        Limitation: each TrainingDataset can only read from a single S3
-        region.
+        Return this TrainingDataset's DuckDB connection, made once.
         """
         if self._duck_conn is None:
             self._duck_conn = duckdb.connect()
-
-            # Load the DuckDB extension which allows reading remote files
-            # from S3.
-            # https://duckdb.org/docs/stable/core_extensions/httpfs/overview
-            try:
-                self._duck_conn.load_extension("httpfs")
-            except duckdb.IOException:
-                # Extension not installed yet.
-                self._duck_conn.install_extension("httpfs")
-                self._duck_conn.load_extension("httpfs")
-
-            # Configure region and auth, if present.
-            # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api
-            #
-            # Beware not to use the deprecated S3 API, which has syntax like
-            # `SET s3_region = 'us-east-1'`:
-            # https://duckdb.org/docs/stable/core_extensions/httpfs/s3api_legacy_authentication
-
-            if settings.aws_anonymous == "False":
-                if settings.aws_key_id:
-                    # Manual provision of a key.
-                    query = (
-                        f"CREATE OR REPLACE SECRET secret ("
-                        f" TYPE s3,"
-                        f" PROVIDER config,"
-                        f" KEY_ID '{settings.aws_key_id}',"
-                        f" SECRET '{settings.aws_secret}',"
-                    )
-                    if settings.aws_session_token:
-                        query += f" SESSION_TOKEN '{settings.aws_session_token}',"
-                else:
-                    # The credential_chain provider allows automatically
-                    # fetching AWS credentials, like through the IMDS.
-                    query = "CREATE OR REPLACE SECRET secret ( TYPE s3, PROVIDER credential_chain,"
-                query += f" REGION '{settings.aws_region}')"
-
-                self._duck_conn.execute(query)
-
         return self._duck_conn
 
     def compute_project_stats(
@@ -1357,7 +1466,7 @@ class TrainingDataset:
 
     def add_training_set_names(self):
         """
-        Match up DuckDB annotations with train/ref/val.
+        Match up DuckDB annotations with train/ref/val/holdout.
         This will add a training_set column to the annotations table.
         """
         # A duplicated key would fan each label row out in the join below.

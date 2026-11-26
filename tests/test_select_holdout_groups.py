@@ -20,8 +20,15 @@ from mermaid_classifier.sagemaker.config import TrainingRunConfig  # noqa: E402
 
 PARENT_YAML = textwrap.dedent("""
     dataset:
-      include_mermaid: true
-      coralnet_manifest_uri: s3://bucket/manifest.parquet
+      datasets:
+        - name: coralnet-raw
+          version: 20261124-5ab21b3
+          manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+          features:
+            family: efficientnet-v1
+            manifest_sha256: abababababababababababababababababababababababababababababababab
+          labels: coralnet
+          groups_csv: groups.csv
       feature_extractor_weights: s3://bucket/efficientnet.pt
       label_rollup_spec_csv: rollups.csv
       included_labels_csv: included_labels.csv
@@ -76,6 +83,7 @@ class WriteFoldConfigsTest(unittest.TestCase):
         (self.parent / "training_config.yaml").write_text(PARENT_YAML)
         (self.parent / "rollups.csv").write_text("r\n")
         (self.parent / "included_labels.csv").write_text("i\n")
+        (self.parent / "groups.csv").write_text("s1\n")
         self.groups = self.root / "elsewhere.csv"
         self.groups.write_text("site,group_id,fold\ncoralnet,1,0\n")
 
@@ -98,6 +106,9 @@ class WriteFoldConfigsTest(unittest.TestCase):
             self.assertEqual(
                 Path(options.holdout_groups_csv or "").read_bytes(), self.groups.read_bytes()
             )
+            dataset_groups = Path(options.datasets[0].groups_csv or "")
+            self.assertEqual(dataset_groups, fold_dir / "groups.csv")
+            self.assertEqual(dataset_groups.read_text(), "s1\n")
 
     def test_parent_without_mlflow_names_is_an_error(self):
         (self.parent / "training_config.yaml").write_text(
@@ -147,7 +158,7 @@ class ConfigEnvReachesSettingsTest(unittest.TestCase):
     """The config `env` block must be applied before pyspacer's import-time Settings() is built."""
 
     def test_env_block_value_reaches_settings_in_a_fresh_interpreter(self):
-        yaml_text = PARENT_YAML + "env:\n  CORALNET_TRAIN_DATA_BUCKET: sentinel-bucket\n"
+        yaml_text = PARENT_YAML + "env:\n  MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED: '37'\n"
         snippet = textwrap.dedent("""
             import sys
             from pathlib import Path
@@ -156,11 +167,15 @@ class ConfigEnvReachesSettingsTest(unittest.TestCase):
             shg.load_config_then_pyspacer(Path(sys.argv[1]))
             from mermaid_classifier.pyspacer.settings import settings
 
-            print(settings.coralnet_train_data_bucket)
+            print(settings.mermaid_project_lookup_percent_unmatched_allowed)
         """)
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / shg.CONFIG_FILENAME).write_text(yaml_text)
-            env = {k: v for k, v in os.environ.items() if k != "CORALNET_TRAIN_DATA_BUCKET"}
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k != "MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED"
+            }
             env["PYTHONPATH"] = os.pathsep.join([str(SCRIPTS_DIR), env.get("PYTHONPATH", "")])
             result = subprocess.run(
                 [sys.executable, "-c", snippet, td],
@@ -171,4 +186,4 @@ class ConfigEnvReachesSettingsTest(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "sentinel-bucket")
+        self.assertEqual(result.stdout.strip(), "37")
