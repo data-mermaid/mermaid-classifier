@@ -17,8 +17,8 @@ the feature-set index. To parallelize across machines, use
 parallel SageMaker ProcessingJobs. Each worker handles a disjoint share of the
 images (`--shard i/n`, split by a stable hash of the image id).
 
-Training does not read these families yet; it still reads the CoralNet-layout
-bucket named by `CORALNET_TRAIN_DATA_BUCKET`.
+Training reads these families through the feature-set pins in its config's
+`datasets:` entries.
 
 > The launcher convention (role ARN, bucket, schema, ECR tagging) is
 > defined in

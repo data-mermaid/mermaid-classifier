@@ -25,7 +25,7 @@ Most steps have both a local path and a SageMaker path:
 **Script:** `generate_training_config.py`
 
 **When:** Whenever you need a new or updated CoralNet→MERMAID label-mapping
-directory (rollup CSV + included-labels CSV). Run this once per taxonomy
+directory (rollup CSV + included-labels CSV + `groups.csv`). Run this once per taxonomy
 revision. The output is written in-repo under `sagemaker/configs/` (default
 `coralnet_top108`) so it can be committed and consumed repo-root-relative by
 downstream scripts; pass `--output-dir` to choose a different config name. Its
@@ -53,8 +53,8 @@ run on CPU.
 
 The script does not publish a feature-set index: `segdata features attach`
 (segdata-etl, in the mermaid-segmentation repo) adopts the family's files and
-publishes the index. Training today does not read these families: it points at a
-CoralNet-layout bucket through `CORALNET_TRAIN_DATA_BUCKET`.
+publishes the index. Training reads these families through the feature-set pins
+in its config's `datasets:` entries.
 
 The two scripts do the *same* extraction; they differ in how they run it:
 

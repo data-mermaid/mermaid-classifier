@@ -179,8 +179,8 @@ Edit:
 - `sagemaker/runs/my-run.yaml` to adjust the SageMaker shape
   (`job.image`, `job.instance_type`, `job.max_runtime_hours`, etc.).
 - `sagemaker/configs/my-run/training_config.yaml` to point at your
-  CoralNet manifest (`dataset.coralnet_manifest_uri`, built ahead of time by
-  `scripts/build_coralnet_manifest.py`) and your rollups / included-labels
+  pinned dataset versions (`dataset.datasets`, plus `dataset.taxonomy` for
+  `labels: mermaid`), their `groups.csv`, and your rollups / included-labels
   CSVs (the CSV paths are resolved as siblings of the YAML, so just
   `rollups.csv`, not `/abs/path/rollups.csv`). Replace the placeholder CSVs
   with the real ones for your experiment.
