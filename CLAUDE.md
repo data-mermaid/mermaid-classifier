@@ -114,7 +114,10 @@ both in memory) → log model, metrics, confusion matrices to MLflow. The
 `DatasetOptions` / `TrainingOptions` / `MLflowOptions` dataclasses live in
 `options.py`. Lineage (dataset, feature-set and taxonomy pins; group-selection sha256
 and count) goes to MLflow params (`dataset/<name>/...`, `taxonomy/<name>/...`), to
-`groups/<name>.csv` artifacts, and to `model.json` under `training_data`.
+`groups/<name>.csv` artifacts, and to `model.json` under `training_data`. For runs with
+any `labels: coralnet` dataset, lineage also holds `coralnet_label_mapping: {sha256, n}`, a
+fingerprint of the live CoralNet→MERMAID mapping the run used (`mapping_lineage` in
+`options.py`), logged to MLflow before training starts (`MLflowTrainingRunner.log_dataset_artifacts`).
 Cross-cutting helpers (`section_profiling`,
 `download_features_parallel`) in `_pipeline_utils.py`.
 

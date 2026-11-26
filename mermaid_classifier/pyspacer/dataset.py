@@ -302,6 +302,9 @@ def feature_set_extractor(manifest: FeatureSetManifest) -> ExtractorSpec:
 class TrainingDataset:
     def __init__(self, options: DatasetOptions):
         self.options = options
+        # Resolved once: the lineage a run records must describe the selection
+        # read here, even if a groups file changes afterwards.
+        self.groups = resolve_groups(options)
         self.artifacts = Artifacts()
         self.profiled_sections = []
         # Populated by _apply_subsample if subsampling is enabled; stays
@@ -648,10 +651,9 @@ class TrainingDataset:
             raise ValueError(f"{name} has `labels: mermaid`, which needs a taxonomy pin")
         else:
             label_table = mermaid_label_table(tables.labels, taxonomy.growth_forms, name)
-        groups = None if source.groups_csv is None else read_groups_csv(source.groups_csv)
         return dataset_annotations(
             tables.points,
-            select_groups(tables.images, groups, name),
+            select_groups(tables.images, self.groups[name], name),
             label_table,
             site=Sites(source.labels),
             dataset=name,

@@ -21,7 +21,7 @@ from segdata_spec.sync import sync_feature_set
 from support.dataset import make_dataset
 from urllib3.exceptions import ProtocolError
 
-from mermaid_classifier.pyspacer.dataset import TrainingDataset
+from mermaid_classifier.pyspacer.dataset import TrainingDataset, resolve_groups
 from mermaid_classifier.pyspacer.options import DatasetOptions, PinnedDataset
 from pyspacer.segdata_fixtures import (
     BUCKET,
@@ -90,6 +90,7 @@ class ReadDatasetsTest(unittest.TestCase):
 
     def _read(self, *sources: PinnedDataset, taxonomy: Pin | None = None) -> None:
         self.dataset.options = DatasetOptions(datasets=list(sources), taxonomy=taxonomy)
+        self.dataset.groups = resolve_groups(self.dataset.options)
         with _mapping_patch():
             self.dataset.read_datasets(self.fake)
 
@@ -374,6 +375,35 @@ class FeatureSyncRetryTest(_FullLoad):
             m for m in logs.output if "INFO" in m and "coralnet-raw" in m and "3 images" in m
         ]
         self.assertEqual(len(syncing), 1)
+        self.assertTrue(
+            any("INFO" in m and "Synced features for coralnet-raw" in m for m in logs.output)
+        )
+
+    def test_a_retry_resumes_from_the_cache_instead_of_refetching_features(self):
+        pin = self.publish_coralnet(THREE_IMAGES)
+        features = publish_feature_set(self.fake, pin, ["i1", "i2", "i3"])
+        real_get = self.fake.get_object
+        fetched = []
+
+        def drop_after_two_features(**kwargs: Any) -> Any:
+            if kwargs["Key"].endswith(".featurevector"):
+                if len(fetched) == 2:
+                    fetched.append(None)
+                    raise ConnectionClosedError(endpoint_url="https://s3")
+                fetched.append(kwargs["Key"])
+            return real_get(**kwargs)
+
+        delay = mock.patch("mermaid_classifier.pyspacer.dataset.SYNC_RETRY_DELAY_SECONDS", 0)
+        with (
+            mock.patch.object(self.fake, "get_object", side_effect=drop_after_two_features),
+            delay,
+            self.assertLogs("train", level="WARNING"),
+        ):
+            self.load(_source(pin, features, labels="coralnet"), download_max_workers=1)
+
+        keys = self.fake.feature_gets()
+        self.assertEqual(len(keys), 3)
+        self.assertEqual(len(set(keys)), 3)
 
 
 def _raise_or_sync(errors: list[Exception], *args: Any, **kwargs: Any) -> Any:
@@ -402,6 +432,7 @@ class LabelIntegrityTest(_FullLoad):
                 dataset.options = DatasetOptions(
                     datasets=[_source(pin, labels=labels_kind)], taxonomy=taxonomy
                 )
+                dataset.groups = resolve_groups(dataset.options)
                 with (
                     _mapping_patch(),
                     self.assertRaisesRegex(ValueError, rf"d-{kind}.*\[99\]"),

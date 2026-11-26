@@ -7,6 +7,8 @@ Dataclass option containers and the Sites enum for the training pipeline.
 - DatasetOptions: options controlling which data goes into training.
 - TrainingOptions: options controlling the training process.
 - MLflowOptions: options for MLflow experiment tracking.
+- training_data_lineage, lineage_params, groups_lineage, mapping_lineage: the pins a run records
+  in model.json and as MLflow params.
 """
 
 import dataclasses
@@ -207,15 +209,31 @@ def groups_lineage(groups: frozenset[str] | None) -> dict[str, Any] | None:
     return {"sha256": digest, "n": len(groups)}
 
 
+def mapping_lineage(mapping: pd.DataFrame) -> dict[str, Any]:
+    """Identify a label mapping by the sha256 of its canonical CSV.
+
+    Columns are put in sorted order and rows sorted by every column, so neither
+    order changes the hash.
+    """
+    columns: list[str] = sorted(str(column) for column in mapping.columns)
+    canonical = mapping.reindex(columns=columns).sort_values(by=columns)
+    csv_bytes = canonical.to_csv(index=False, lineterminator="\n").encode()
+    return {"sha256": hashlib.sha256(csv_bytes).hexdigest(), "n": len(mapping)}
+
+
 def training_data_lineage(
-    options: DatasetOptions, groups: Mapping[str, frozenset[str] | None]
+    options: DatasetOptions,
+    groups: Mapping[str, frozenset[str] | None],
+    coralnet_mapping: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """The dataset, group-selection, feature-set and taxonomy pins a run trains on.
 
     `groups` maps each dataset name to its resolved group selection.
+    `coralnet_mapping` is the label mapping the run used; it is recorded only
+    when a dataset has `labels == "coralnet"`.
     """
     taxonomy = options.taxonomy
-    return {
+    lineage: dict[str, Any] = {
         "datasets": [
             {
                 "name": source.pin.name,
@@ -238,6 +256,11 @@ def training_data_lineage(
             "manifest_sha256": taxonomy.manifest_sha256,
         },
     }
+    if coralnet_mapping is not None and any(
+        source.labels == "coralnet" for source in options.datasets
+    ):
+        lineage["coralnet_label_mapping"] = mapping_lineage(coralnet_mapping)
+    return lineage
 
 
 def lineage_params(lineage: dict[str, Any]) -> dict[str, str]:
@@ -257,6 +280,10 @@ def lineage_params(lineage: dict[str, Any]) -> dict[str, str]:
     if taxonomy is not None:
         params[f"taxonomy/{taxonomy['name']}/version"] = taxonomy["version"]
         params[f"taxonomy/{taxonomy['name']}/manifest_sha256"] = taxonomy["manifest_sha256"]
+    mapping = lineage.get("coralnet_label_mapping")
+    if mapping is not None:
+        params["coralnet_label_mapping/sha256"] = mapping["sha256"]
+        params["coralnet_label_mapping/n"] = str(mapping["n"])
     return params
 
 
