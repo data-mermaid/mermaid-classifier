@@ -25,6 +25,9 @@ class _Options:
     holdout_groups_csv: str | None
     holdout_fold: int | str
     included_labels_csv: str | None = None
+    datasets: tuple[()] = ()
+    taxonomy: None = None
+    mermaid_project_lookup_uri: None = None
 
 
 def _dataset():
@@ -42,7 +45,9 @@ def _dataset():
             ("ba2", "gf", "coralnet", "10"),
         ],
     )
-    return SimpleNamespace(duck_conn=conn, cleanup=mock.Mock())
+    return SimpleNamespace(
+        duck_conn=conn, groups={}, mermaid_project_lookup_sha256=None, cleanup=mock.Mock()
+    )
 
 
 class ParseArgsTest(unittest.TestCase):

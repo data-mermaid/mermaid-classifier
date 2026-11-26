@@ -60,6 +60,7 @@ from mermaid_classifier.common.benthic_attributes import (
     GrowthFormLibrary,
 )
 from mermaid_classifier.pyspacer.settings import set_env_vars_for_packages
+from mermaid_classifier.training.class_support import lineage_mismatches, provenance_path
 
 # A CoralNet dataset group: `s` followed by the source id.
 _CORALNET_GROUP = re.compile(r"s[0-9]+")
@@ -1009,6 +1010,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--training-config",
+        type=Path,
+        default=None,
+        help=(
+            "training_config.yaml the generated config trains with. Its dataset, group,"
+            " taxonomy and project-lookup pins must match the support counts'"
+            " provenance sidecar (only with --min-support-counts)."
+        ),
+    )
+    p.add_argument(
+        "--allow-unverified-support-counts",
+        action="store_true",
+        help=(
+            "Use the support counts without checking their pins when --training-config"
+            " or the counts' provenance sidecar is missing (only with --min-support-counts)."
+        ),
+    )
+    p.add_argument(
         "--skip-validation",
         action="store_true",
         help="Skip round-tripping outputs through pipeline schemas (useful for tests).",
@@ -1016,10 +1035,78 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _lookup_sha256(uri: str) -> str:
+    """sha256 of the project lookup's bytes, fetched from S3 for an s3:// URI."""
+    from mermaid_classifier.common.s3_utils import is_s3_uri, parse_s3_uri
+
+    if not is_s3_uri(uri):
+        return hashlib.sha256(Path(uri).read_bytes()).hexdigest()
+    from mermaid_classifier.pyspacer.dataset import make_s3_client
+
+    bucket, key = parse_s3_uri(uri)
+    body = make_s3_client(1).get_object(Bucket=bucket, Key=key)["Body"].read()
+    return hashlib.sha256(body).hexdigest()
+
+
+def _training_config_lineage(config_path: Path) -> dict[str, Any]:
+    """The pins a count against `config_path` records, as its provenance sidecar holds them."""
+    from mermaid_classifier.pyspacer.dataset import resolve_groups
+    from mermaid_classifier.pyspacer.options import training_data_lineage
+    from mermaid_classifier.sagemaker.config import TrainingRunConfig
+
+    config = TrainingRunConfig.from_yaml_path(config_path)
+    options, _, _ = config.build_options(config_dir=config_path.parent)
+    # A count hashes the lookup only when a MERMAID dataset reads it.
+    lookup_sha256 = None
+    if options.mermaid_project_lookup_uri and any(
+        source.labels == "mermaid" for source in options.datasets
+    ):
+        lookup_sha256 = _lookup_sha256(options.mermaid_project_lookup_uri)
+    # No holdout hash is passed, so the lineage carries no holdout block, as in the count.
+    lineage = training_data_lineage(options, resolve_groups(options), lookup_sha256=lookup_sha256)
+    return json.loads(json.dumps(lineage))
+
+
+def verify_support_counts(
+    counts_path: Path, training_config: Path | None, allow_unverified: bool
+) -> None:
+    """Refuse support counts whose provenance sidecar does not match `training_config`.
+
+    A missing `training_config` or sidecar is refused unless `allow_unverified`.
+    """
+    sidecar = provenance_path(counts_path)
+    missing = None
+    if training_config is None:
+        missing = "--min-support-counts needs --training-config to check the counts' pins"
+    elif not sidecar.exists():
+        missing = f"support counts provenance sidecar {sidecar} not found"
+    if missing is not None:
+        if not allow_unverified:
+            raise ValueError(
+                f"{missing}; pass --allow-unverified-support-counts to skip the check."
+            )
+        logger.warning("%s; using the counts unverified.", missing)
+        return
+    assert training_config is not None
+    mismatches = lineage_mismatches(
+        json.loads(sidecar.read_text()), _training_config_lineage(training_config)
+    )
+    if mismatches:
+        raise ValueError(
+            f"support counts {counts_path} were counted against other pins than"
+            f" --training-config {training_config} (expected): {'; '.join(mismatches)}."
+            " Recount with scripts/count_class_support.py against that config."
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     set_env_vars_for_packages()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
+    if args.min_support_counts is not None:
+        verify_support_counts(
+            args.min_support_counts, args.training_config, args.allow_unverified_support_counts
+        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,7 +1,9 @@
 """Count annotation points per (class, group) for a config, and write them to a CSV.
 
 Reads the config's annotations (read, rollup, filter, dedupe; no feature
-listing or download) and writes ``class_key, site, project_id, n``. A group is
+listing or download) and writes ``class_key, site, project_id, n``, plus a
+``<out stem>.provenance.json`` sidecar recording the dataset, group, taxonomy and
+project-lookup pins counted, which generate_training_config.py checks. A group is
 a CoralNet source or a MERMAID project; a class key is ``<ba>::<gf>``, so an
 empty growth form leaves a trailing ``::``. Prints points and distinct groups
 per class. With ``--check-min-points`` / ``--check-min-groups`` it then exits
@@ -19,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
+import json
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -108,7 +111,8 @@ def main(argv: list[str] | None = None) -> None:
 
     _resolve_local_aws_credentials()
 
-    from mermaid_classifier.training.class_support import class_group_counts
+    from mermaid_classifier.pyspacer.options import training_data_lineage
+    from mermaid_classifier.training.class_support import class_group_counts, provenance_path
 
     config, training_dataset_cls = load_config_then_pyspacer(config_dir)
     dataset_options, _, _ = config.build_options(config_dir=config_dir)
@@ -125,6 +129,13 @@ def main(argv: list[str] | None = None) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     counts.to_csv(out_path, index=False)
     print(f"Wrote {len(counts)} class-group rows to {out_path}")
+    # The holdout CSV is cleared above, so the lineage records no holdout block.
+    lineage = training_data_lineage(
+        dataset_options, dataset.groups, lookup_sha256=dataset.mermaid_project_lookup_sha256
+    )
+    sidecar = provenance_path(out_path)
+    sidecar.write_text(json.dumps(lineage, indent=2, sort_keys=True) + "\n")
+    print(f"Wrote the counted pins to {sidecar}")
     checking = args.check_min_points > 0 or args.check_min_groups > 0
     keys: list[str] = []
     if checking and dataset_options.included_labels_csv:

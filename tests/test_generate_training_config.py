@@ -8,6 +8,7 @@ walk, the Porites GF-bucket logic, and the EXCLUDED_NAMES filter.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import io
@@ -19,12 +20,15 @@ import tempfile
 import unittest
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+import duckdb
 from support.paths import add_scripts_to_path
 
 add_scripts_to_path()
 
+import count_class_support as ccs  # noqa: E402
 import generate_training_config as gtc  # noqa: E402
 
 from mermaid_classifier.common.benthic_attributes import (  # noqa: E402
@@ -761,7 +765,12 @@ class MinSupportTests(_GenerateConfigTestCase):
         counts_csv = self.tmp / "support_counts.csv"
         _write_counts_csv(counts_csv, counts)
         self.run_main(
-            extra_args=["--min-support-counts", str(counts_csv), *flags],
+            extra_args=[
+                "--min-support-counts",
+                str(counts_csv),
+                "--allow-unverified-support-counts",
+                *flags,
+            ],
             cn_entries=COARSEN_CN_ENTRIES if cn_entries is None else cn_entries,
         )
 
@@ -1146,6 +1155,170 @@ class CoarseningOffTests(_GenerateConfigTestCase):
         self.run_main(cn_entries=COARSEN_CN_ENTRIES)
         self.assertEqual(self.get_rollup_lookup(), UNCOARSENED_ROLLUPS)
         self.assertEqual(self.get_included_set(), UNCOARSENED_INCLUDED)
+
+
+LOOKUP_URI = "s3://lookup-bucket/mermaid_image_projects.parquet"
+LOOKUP_BYTES = b"lookup parquet bytes"
+LOOKUP_SHA256 = hashlib.sha256(LOOKUP_BYTES).hexdigest()
+
+
+def _training_config_yaml(coralnet_version: str) -> str:
+    return f"""\
+dataset:
+  datasets:
+    - name: coralnet-raw
+      version: {coralnet_version}
+      manifest_sha256: {"a" * 64}
+      features:
+        family: efficientnet-v1
+        manifest_sha256: {"b" * 64}
+      labels: coralnet
+      groups_csv: groups.csv
+    - name: mermaid
+      version: 20261124-0000002
+      manifest_sha256: {"c" * 64}
+      features:
+        family: efficientnet-v1
+        manifest_sha256: {"d" * 64}
+      labels: mermaid
+  taxonomy:
+    version: 20261124-0000003
+    manifest_sha256: {"e" * 64}
+  feature_extractor_weights: s3://weights-bucket/efficientnet_weights.pt
+  mermaid_project_lookup_uri: {LOOKUP_URI}
+  holdout_groups_csv: holdout_groups.csv
+training: {{}}
+mlflow: {{}}
+"""
+
+
+class _FakeLookupClient:
+    """An S3 client holding only the project lookup object."""
+
+    def get_object(self, Bucket: str, Key: str) -> dict[str, io.BytesIO]:  # noqa: N803 -- boto3 names
+        if (Bucket, Key) != ("lookup-bucket", "mermaid_image_projects.parquet"):
+            raise KeyError((Bucket, Key))
+        return {"Body": io.BytesIO(LOOKUP_BYTES)}
+
+
+class SupportCountsProvenanceTests(_GenerateConfigTestCase):
+    """count_class_support records the pins it counted; the generator checks
+    them against --training-config before rolling up."""
+
+    NAMES = ["Hard coral", "Acroporidae", "Acropora humilis", "Turf algae"]
+
+    def setUp(self):
+        super().setUp()
+        _write_labels_csv(self.labels_csv, self.NAMES)
+        self.counts_csv = self.tmp / "support_counts.csv"
+        self.sidecar = self.tmp / "support_counts.provenance.json"
+        # Acropora humilis is thin and rolls via Acropora up to Acroporidae.
+        self.counts = _well_supported_counts(self.NAMES)
+        self.counts[_key(ACROPORA_HUMILIS)] = _support(30, 1, 2, 3)
+
+    def write_config(self, name: str, coralnet_version: str = "20261124-0000001") -> Path:
+        config_dir = self.tmp / name
+        config_dir.mkdir()
+        (config_dir / "groups.csv").write_text("s10\ns20\n")
+        (config_dir / "holdout_groups.csv").write_text("site,group_id,fold\ncoralnet,10,test\n")
+        path = config_dir / "training_config.yaml"
+        path.write_text(_training_config_yaml(coralnet_version))
+        return path
+
+    def _counted_dataset(self, options, lookup_sha256: str | None) -> SimpleNamespace:
+        conn = duckdb.connect()
+        conn.execute(
+            "CREATE TABLE annotations (benthic_attribute_id VARCHAR, growth_form_id VARCHAR,"
+            " site VARCHAR, project_id VARCHAR)"
+        )
+        for class_key, groups in self.counts.items():
+            ba_id, _, gf_id = class_key.partition("::")
+            for site, n in groups.items():
+                conn.execute(
+                    "INSERT INTO annotations SELECT ?, ?, ?, 'proj' FROM range(?)",
+                    [ba_id, gf_id, site, n],
+                )
+        from mermaid_classifier.pyspacer.dataset import resolve_groups
+
+        return SimpleNamespace(
+            duck_conn=conn,
+            groups=resolve_groups(options),
+            mermaid_project_lookup_sha256=lookup_sha256,
+            cleanup=mock.Mock(),
+        )
+
+    def count(self, config_path: Path, lookup_sha256: str | None = LOOKUP_SHA256) -> None:
+        from mermaid_classifier.sagemaker.config import TrainingRunConfig
+
+        config = TrainingRunConfig.from_yaml_path(config_path)
+        dataset_cls = mock.Mock()
+        dataset_cls.filtered_annotations_only.side_effect = lambda options: self._counted_dataset(
+            options, lookup_sha256
+        )
+        with (
+            mock.patch.object(ccs, "_resolve_local_aws_credentials"),
+            mock.patch.object(ccs, "load_config_then_pyspacer", return_value=(config, dataset_cls)),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            ccs.main(["--config-dir", str(config_path.parent), "--out", str(self.counts_csv)])
+
+    def generate(self, *args: str) -> None:
+        with mock.patch(
+            "mermaid_classifier.pyspacer.dataset.make_s3_client", return_value=_FakeLookupClient()
+        ):
+            self.run_main(
+                extra_args=["--min-support-counts", str(self.counts_csv), *args],
+                cn_entries=COARSEN_CN_ENTRIES,
+            )
+
+    def assert_rolled_up(self) -> None:
+        self.assertEqual(
+            {ba for (ba, _) in self.get_included_set()}, {HARD_CORAL, ACROPORIDAE, TURF_ALGAE}
+        )
+        self.assertEqual(self.get_rollup_lookup()[(ACROPORA_HUMILIS, "")], (ACROPORIDAE, ""))
+
+    def test_counts_from_the_same_config_are_accepted_and_rolled_up(self):
+        config = self.write_config("cfg")
+        self.count(config)
+        sidecar = json.loads(self.sidecar.read_text())
+        self.assertEqual(
+            sidecar["mermaid_project_lookup"], {"uri": LOOKUP_URI, "sha256": LOOKUP_SHA256}
+        )
+        self.assertNotIn("holdout_groups", sidecar)
+        self.generate("--training-config", str(config))
+        self.assert_rolled_up()
+
+    def test_counts_from_other_pins_are_refused_naming_the_field(self):
+        counted = self.write_config("counted")
+        cases = {
+            "coralnet version": (
+                self.write_config("other", coralnet_version="20261125-0000009"),
+                LOOKUP_SHA256,
+                r"datasets\.coralnet-raw\.version",
+            ),
+            "lookup sha256": (counted, "0" * 64, r"mermaid_project_lookup\.sha256"),
+        }
+        for case, (target, counted_lookup_sha256, field) in cases.items():
+            with self.subTest(case):
+                self.count(counted, lookup_sha256=counted_lookup_sha256)
+                with self.assertRaisesRegex(ValueError, field):
+                    self.generate("--training-config", str(target))
+
+    def test_missing_sidecar_is_refused_unless_allowed(self):
+        config = self.write_config("cfg")
+        self.count(config)
+        self.sidecar.unlink()
+        with self.assertRaisesRegex(ValueError, "provenance.*--allow-unverified-support-counts"):
+            self.generate("--training-config", str(config))
+        self.generate("--training-config", str(config), "--allow-unverified-support-counts")
+        self.assert_rolled_up()
+
+    def test_counts_without_a_training_config_are_refused_unless_allowed(self):
+        self.count(self.write_config("cfg"))
+        with self.assertRaisesRegex(ValueError, "--training-config"):
+            self.generate()
+        self.generate("--allow-unverified-support-counts")
+        self.assert_rolled_up()
 
 
 if __name__ == "__main__":
