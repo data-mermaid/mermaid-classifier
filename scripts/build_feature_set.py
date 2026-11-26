@@ -12,6 +12,11 @@ so a family never holds vectors from two extractors. Every vector is put with
 ``If-None-Match: *``: the bucket refuses unconditional puts, and a file that
 already exists is never replaced.
 
+A family's files are keyed by image id alone, so dataset versions that share
+an image store share them. Within a family an image's points must therefore not
+change across versions: ``segdata features attach`` refuses a vector that lacks
+one of the version's points.
+
 This script does not publish a feature-set index. ``segdata features attach``
 adopts the family's files for a version and publishes the index.
 
@@ -96,6 +101,7 @@ from typing import Any
 
 import boto3
 import pyarrow as pa
+import pyarrow.compute as _pc
 from botocore.exceptions import ClientError
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.features import claim_extractor, feature_file_key
@@ -105,8 +111,14 @@ from segdata_spec.sync import sync_tables
 
 logger = logging.getLogger("build_feature_set")
 
+# pyarrow.compute's functions are generated at import, so the type checker cannot see them.
+pc: Any = _pc
+
 DEFAULT_AWS_PROFILE = "wcs"
 DEFAULT_MAX_IO_WORKERS = 16
+# SageMaker uploads this directory when a processing job ends; logs default here when it exists.
+PROCESSING_OUTPUT_DIR = Path("/opt/ml/processing/output")
+PROGRESS_LOG_EVERY = 500
 
 # (shard index, shard count), 0 <= index < count.
 Shard = tuple[int, int]
@@ -197,13 +209,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--error-log",
         type=Path,
-        help="Append-only CSV for per-image failures. Default: build_feature_set_errors_<ts>.csv",
+        help="Append-only CSV for per-image failures. Default: build_feature_set_errors_<ts>.csv in "
+        "/opt/ml/processing/output when it exists, else the current directory.",
     )
     p.add_argument(
         "--progress-log",
         type=Path,
         help="Append-only JSONL for (image, outcome). "
-        "Default: build_feature_set_progress_<ts>.jsonl",
+        "Default: build_feature_set_progress_<ts>.jsonl, in the same directory as the error log.",
     )
     p.add_argument("--log-level", default="INFO")
     return p
@@ -246,18 +259,29 @@ def select_images(
     Raises:
         ValueError: ``groups`` names a group the version does not have.
     """
-    ids: list[str] = images.column("image_id").to_pylist()
-    row_groups: list[str] = images.column("group").to_pylist()
     if groups is not None:
-        absent = groups - set(row_groups)
+        absent = groups - set(pc.unique(images.column("group")).to_pylist())
         if absent:
             raise ValueError(f"groups not in the dataset version: {sorted(absent)}")
-    mask = [
-        (groups is None or group in groups)
-        and (shard is None or shard_of(image_id, shard[1]) == shard[0])
-        for image_id, group in zip(ids, row_groups, strict=True)
-    ]
-    return images.filter(pa.array(mask, pa.bool_()))
+        images = images.filter(
+            pc.is_in(images.column("group"), value_set=pa.array(sorted(groups), pa.string()))
+        )
+    if shard is not None:
+        index, count = shard
+        ids: list[str] = images.column("image_id").to_pylist()
+        images = images.filter(pa.array([shard_of(i, count) == index for i in ids], pa.bool_()))
+    return images
+
+
+def check_image_ids(image_ids: Iterable[str]) -> None:
+    """Refuse ids that are not plain file names: empty, a leading ``.``, ``/`` or ``..``.
+
+    Raises:
+        ValueError: Names up to ten offending ids.
+    """
+    bad = [i for i in image_ids if not i or i.startswith(".") or "/" in i or ".." in i]
+    if bad:
+        raise ValueError(f"{len(bad)} image id(s) are not plain file names: {bad[:10]}")
 
 
 def rowcols_by_image(
@@ -267,14 +291,16 @@ def rowcols_by_image(
     """Return each image's distinct (row, col) points, sorted; an image with none maps to []."""
     wanted = set(image_ids)
     out: dict[str, set[tuple[int, int]]] = {i: set() for i in wanted}
+    mine = points.filter(
+        pc.is_in(points.column("image_id"), value_set=pa.array(sorted(wanted), pa.string()))
+    )
     for image_id, row, col in zip(
-        points.column("image_id").to_pylist(),
-        points.column("row").to_pylist(),
-        points.column("col").to_pylist(),
+        mine.column("image_id").to_pylist(),
+        mine.column("row").to_pylist(),
+        mine.column("col").to_pylist(),
         strict=True,
     ):
-        if image_id in wanted:
-            out[image_id].add((int(row), int(col)))
+        out[image_id].add((int(row), int(col)))
     return {i: sorted(rcs) for i, rcs in out.items()}
 
 
@@ -292,6 +318,8 @@ def is_precondition_failed(exc: ClientError) -> bool:
     )
 
 
+# The family prefix and file names follow segdata-spec v0.2.0's key layout
+# (features/<store>/<family>/<image_id>[~<suffix>].featurevector), which has no public prefix helper.
 def feature_family_prefix(image_store: ImageStore, bucket: str, family: str) -> str:
     """Return ``features/<store>/<family>/``, the prefix every family file is under.
 
@@ -319,7 +347,11 @@ def download_image(client: Any, bucket: str, key: str, etag: str, dest: Path) ->
         ClientError: 412 PreconditionFailed when the object changed, or any other S3 error.
     """
     data = client.get_object(Bucket=bucket, Key=key, IfMatch=etag)["Body"].read()
-    dest.write_bytes(data)
+    try:
+        dest.write_bytes(data)
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
     return dest
 
 
@@ -592,6 +624,18 @@ def _prefetched[T, R](
         yield pending.popleft()
 
 
+def scratch_stem(image_id: str) -> str:
+    """Return the scratch file stem for ``image_id``: its sha256, never the id itself."""
+    return hashlib.sha256(image_id.encode("utf-8")).hexdigest()
+
+
+def progress_line(done: int, total: int, elapsed_s: float) -> str:
+    """Describe ``done`` of ``total`` images with the rate so far and the ETA at that rate."""
+    rate = done / elapsed_s if elapsed_s > 0 else 0.0
+    eta_s = (total - done) / rate if rate > 0 else float("inf")
+    return f"{done}/{total} images, {rate:.2f} img/s, ETA {eta_s / 60:.1f} min"
+
+
 def process_job(
     client: Any,
     bucket: str,
@@ -602,7 +646,7 @@ def process_job(
     workdir: Path,
 ) -> bool:
     """Extract one downloaded image and put its vector; return whether it was written."""
-    feature_path = workdir / f"{job.image_id}.featurevector"
+    feature_path = workdir / f"{scratch_stem(job.image_id)}.featurevector"
     try:
         extract_to_file(extractor, job.image_id, image_path, job.rowcols, feature_path)
         return put_feature(client, bucket, feature_key, feature_path.read_bytes())
@@ -631,7 +675,8 @@ def run(
     Raises:
         PinMismatch: The dataset manifest differs from ``pin``; nothing is claimed or read.
         ExtractorMismatch: The family is claimed by another extractor; no image is read.
-        ValueError: The version has no points table, or ``groups`` names an absent group.
+        ValueError: The version has no points table, ``groups`` names an absent group, or a
+            selected image id is not a plain file name; raised before the claim.
     """
     counters = RunCounters()
     tables = load_tables(client, pin, cache_dir, bucket)
@@ -639,6 +684,7 @@ def run(
         raise ValueError(f"{pin.name} {pin.version} is a dense dataset: it has no points to embed")
     store: ImageStore = tables.manifest.image_store
     selected = select_images(tables.images, groups, shard)
+    check_image_ids(selected.column("image_id").to_pylist())
     counters.images_selected = selected.num_rows
     logger.info("Selected %d image(s) of %s %s.", selected.num_rows, pin.name, pin.version)
 
@@ -673,10 +719,13 @@ def run(
 
         def fetch(job: ImageJob) -> Path:
             suffix = PurePosixPath(job.key).suffix
-            dest = workdir / f"{hashlib.sha256(job.image_id.encode()).hexdigest()}{suffix}"
+            dest = workdir / f"{scratch_stem(job.image_id)}{suffix}"
             return download_image(client, store.bucket, store.prefix + job.key, job.etag, dest)
 
-        for job, future in _prefetched(executor, jobs, fetch, max(1, max_io_workers) * 2):
+        started = time.monotonic()
+        for done, (job, future) in enumerate(
+            _prefetched(executor, jobs, fetch, max(1, max_io_workers) * 2), start=1
+        ):
             _run_one(
                 client,
                 bucket,
@@ -690,6 +739,8 @@ def run(
                 progress_writer,
                 error_writer,
             )
+            if done % PROGRESS_LOG_EVERY == 0 or done == len(jobs):
+                logger.info(progress_line(done, len(jobs), time.monotonic() - started))
     return counters
 
 
@@ -764,7 +815,20 @@ def _make_s3_client(max_io_workers: int) -> Any:
     from botocore.config import Config
 
     # Prefetch threads, the main thread's put and its listing share the pool.
-    return boto3.client("s3", config=Config(max_pool_connections=max_io_workers + 2))
+    return boto3.client(
+        "s3",
+        config=Config(
+            max_pool_connections=max_io_workers + 2,
+            retries={"mode": "adaptive", "max_attempts": 8},
+            connect_timeout=10,
+            read_timeout=60,
+        ),
+    )
+
+
+def default_log_dir() -> Path:
+    """Return the processing output dir inside a SageMaker job, else the current directory."""
+    return PROCESSING_OUTPUT_DIR if PROCESSING_OUTPUT_DIR.is_dir() else Path(".")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -805,8 +869,9 @@ def main(argv: list[str] | None = None) -> int:
 
     pin = Pin(name=args.dataset, version=args.version, manifest_sha256=args.manifest_sha256)
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    error_log_path = args.error_log or Path(f"build_feature_set_errors_{ts}.csv")
-    progress_log_path = args.progress_log or Path(f"build_feature_set_progress_{ts}.jsonl")
+    log_dir = default_log_dir()
+    error_log_path = args.error_log or log_dir / f"build_feature_set_errors_{ts}.csv"
+    progress_log_path = args.progress_log or log_dir / f"build_feature_set_progress_{ts}.jsonl"
 
     with (
         open(error_log_path, "a", newline="") as error_f,
