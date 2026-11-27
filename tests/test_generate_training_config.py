@@ -608,6 +608,39 @@ class IsSpeciesTests(unittest.TestCase):
     def test_orphan_species_name_is_species(self):
         self.assertTrue(gtc.is_species(ACANTHASTER_PLANCI, self.ba_lib))
 
+    def test_orphan_binomial_under_unrelated_parent_is_species(self):
+        ba_id = "ba-paracor-0000-0000-000000000099"
+        record = _ba_record(ba_id, "Paracorynactis hoplites", ORPHAN_FAMILY)
+        self.ba_lib.by_id[ba_id] = record
+        self.ba_lib.by_name[record["name"]] = record
+        self.ba_lib.by_parent.setdefault(ORPHAN_FAMILY, []).append(record)
+        self.assertTrue(gtc.is_species(ba_id, self.ba_lib))
+
+    def _add_ba(self, ba_id: str, name: str, parent: str) -> None:
+        record = _ba_record(ba_id, name, parent)
+        self.ba_lib.by_id[ba_id] = record
+        self.ba_lib.by_name[name] = record
+        self.ba_lib.by_parent.setdefault(parent, []).append(record)
+
+    def test_subgenus_binomial_under_its_genus_is_species(self):
+        genus_id = "ba-montipora-0000-0000-0000000000a1"
+        species_id = "ba-montfol-0000-0000-0000000000a2"
+        self._add_ba(genus_id, "Montipora", HARD_CORAL)
+        self._add_ba(species_id, "Montipora (Montipora) foliosa", genus_id)
+        self.assertTrue(gtc.is_species(species_id, self.ba_lib))
+
+    def test_binomial_under_algae_suffixed_genus_is_species(self):
+        genus_id = "ba-halimeda-0000-0000-0000000000a3"
+        species_id = "ba-halopun-0000-0000-0000000000a4"
+        self._add_ba(genus_id, "Halimeda-algae", TURF_ALGAE)
+        self._add_ba(species_id, "Halimeda opuntia", genus_id)
+        self.assertTrue(gtc.is_species(species_id, self.ba_lib))
+
+    def test_binomial_under_unrelated_single_word_parent_is_not_species(self):
+        ba_id = "ba-favfrag-0000-0000-0000000000a5"
+        self._add_ba(ba_id, "Favia fragum", ACROPORA)
+        self.assertFalse(gtc.is_species(ba_id, self.ba_lib))
+
     def test_genus_and_common_names_are_not_species(self):
         for ba_id in (ACROPORA, HARD_CORAL, TURF_ALGAE, BARE_SUBSTRATE, ORPHAN_BA):
             with self.subTest(ba_id=ba_id):
@@ -689,11 +722,54 @@ class CoarseningTests(_GenerateConfigTestCase):
         self.assertIn("| Helioseris cucullata | Hard coral | Agariciidae |", readme)
         self.assertIn("Classes added as roll-up targets (1): Agariciidae.", readme)
 
+    def test_region_flag_alone_does_not_roll_up_species(self):
+        self.run_coarsened("--roll-up-region-specific")
+        rollups = self.get_rollup_lookup()
+        for key, target in UNCOARSENED_ROLLUPS.items():
+            if key[0] == ACROPORA_HUMILIS:
+                self.assertEqual(rollups[key], target)
+        self.assertIn((PORITES_ASTREOIDES, ""), self.get_included_set())
+        self.assertEqual(rollups[(AGARICIA_AGARICITES, "")], (AGARICIIDAE, ""))
+
     def test_readme_lists_each_class_change(self):
         self.run_coarsened("--roll-up-species", "--roll-up-region-specific")
         readme = (self.output_dir / "README.md").read_text()
+        self.assertIn("Labels whose class changes (5)", readme)
         self.assertIn("| Agaricia agaricites | Agaricia agaricites | Agariciidae |", readme)
         self.assertIn("| Porites astreoides | Porites astreoides | Porites |", readme)
+
+    def test_readme_names_the_class_set_when_rules_are_active(self):
+        self.run_coarsened("--roll-up-species", "--roll-up-region-specific")
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn(
+            "2. If already in the class set (the top-108 after the roll-up rules,"
+            " see Coarsened labels below), keep as-is.",
+            readme,
+        )
+        self.assertIn(
+            "3. Otherwise walk parents (nearest first) to find a class-set ancestor.",
+            readme,
+        )
+        self.assertIn("every other class-set BA contributes 1 row", readme)
+        self.assertIn("(species or genus -> class-set ancestor)", readme)
+        self.assertNotIn("every other top-108 BA contributes 1 row", readme)
+        self.assertNotIn("If already in the top-108 set, keep as-is.", readme)
+
+    def _orphan_warnings(self, *flags: str) -> list[str]:
+        with self.assertLogs(gtc.logger, "WARNING") as captured:
+            # assertLogs requires at least one record.
+            gtc.logger.warning("sentinel")
+            self.run_coarsened(*flags)
+        return [m for m in captured.output if any(name in m for name in gtc.ORPHAN_SPECIES_NAMES)]
+
+    def test_species_roll_up_warns_about_absent_orphan_names(self):
+        warnings = self._orphan_warnings("--roll-up-species")
+        self.assertTrue(any("Paracorynactis hoplites" in m for m in warnings))
+        self.assertFalse(any("Acanthaster planci" in m for m in warnings))
+
+    def test_no_orphan_warning_without_species_roll_up(self):
+        self.assertEqual(self._orphan_warnings("--roll-up-region-specific"), [])
+        self.assertEqual(self._orphan_warnings(), [])
 
     def test_label_with_no_coarser_ancestor_is_kept(self):
         self.ba_lib.region_ids_by_id[TURF_ALGAE] = frozenset({REGION_ATLANTIC})
@@ -1114,7 +1190,7 @@ class OutputStabilityTests(_GenerateConfigTestCase):
         ("--roll-up-species", "--roll-up-region-specific"): {
             "rollups.csv": "674fc1b5a8b6ae0456fadfb92dc8b33d2a55e72b11558556dede4a6fa75a23cf",
             "included_labels.csv": "52fad936d0e2df235c096668b84703f20308afc806bd51912f4ad80db1de5b35",
-            "README.md": "4b8c49803c1b8a54be68a219f49b42fb07dc3373ca00eeb05e14722015133b04",
+            "README.md": "0c8115874ab082dfc04c86eac35df1bb4530d750f395a2b1420d61d8068ff076",
         },
     }
 
@@ -1141,27 +1217,27 @@ class OutputStabilityTests(_GenerateConfigTestCase):
 # fixtures with both roll-up options off, as produced before the roll-up
 # options existed.
 UNCOARSENED_ROLLUPS = {
-    ("ba-acrhum-0000-0000-000000000004", ""): ("ba-acropora-0000-0000-000000000003", ""),
-    ("ba-acrhum-0000-0000-000000000004", GF_MASSIVE): (ACROPORA, ""),
+    (ACROPORA_HUMILIS, ""): (ACROPORA, ""),
+    (ACROPORA_HUMILIS, GF_MASSIVE): (ACROPORA, ""),
     (ACROPORA, GF_BRANCHING): (ACROPORA, ""),
-    ("ba-acroporidae-000-0000-000000000002", ""): ("ba-hardcoral-0000-0000-000000000001", ""),
+    (ACROPORIDAE, ""): (HARD_CORAL, ""),
     (AGARICIA_AGARICITES, GF_FOLIOSE): (AGARICIA_AGARICITES, ""),
-    (HELIOSERIS_CUCULLATA, ""): ("ba-hardcoral-0000-0000-000000000001", ""),
-    ("ba-porann-0000-0000-00000000000f", ""): (PORITES, ""),
-    ("ba-porcom-0000-0000-00000000000d", ""): (PORITES, GF_BRANCHING),
+    (HELIOSERIS_CUCULLATA, ""): (HARD_CORAL, ""),
+    (PORITES_ANNAE, ""): (PORITES, ""),
+    (PORITES_COMPRESSA, ""): (PORITES, GF_BRANCHING),
     (PORITES, GF_ENCRUSTING): (PORITES, ""),
     (PORITES, GF_FOLIOSE): (PORITES, ""),
-    ("ba-porlob-0000-0000-00000000000c", ""): (PORITES, GF_MASSIVE),
-    ("ba-porrus-0000-0000-00000000000e", ""): (PORITES, ""),
+    (PORITES_LOBATA, ""): (PORITES, GF_MASSIVE),
+    (PORITES_RUS, ""): (PORITES, ""),
 }
 UNCOARSENED_INCLUDED = {
     (ACROPORA, ""),
     (AGARICIA_AGARICITES, ""),
     (AGARICIA, ""),
-    ("ba-bare-0000-0000-000000000011", ""),
+    (BARE_SUBSTRATE, ""),
     (ACANTHASTER_PLANCI, ""),
-    ("ba-hardcoral-0000-0000-000000000001", ""),
-    ("ba-poras-0000-0000-000000000010", ""),
+    (HARD_CORAL, ""),
+    (PORITES_ASTREOIDES, ""),
     (PORITES, ""),
     (PORITES, GF_BRANCHING),
     (PORITES, GF_MASSIVE),
@@ -1178,6 +1254,10 @@ class CoarseningOffTests(_GenerateConfigTestCase):
         self.run_main(cn_entries=COARSEN_CN_ENTRIES)
         self.assertEqual(self.get_rollup_lookup(), UNCOARSENED_ROLLUPS)
         self.assertEqual(self.get_included_set(), UNCOARSENED_INCLUDED)
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertNotIn("Coarsened labels", readme)
+        self.assertIn("If already in the top-108 set, keep as-is.", readme)
+        self.assertIn("every other top-108 BA contributes 1 row", readme)
 
 
 LOOKUP_URI = "s3://lookup-bucket/mermaid_image_projects.parquet"
