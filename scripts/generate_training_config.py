@@ -102,8 +102,10 @@ ORPHAN_SPECIES_NAMES = (
     "Enhalus acoroides",
     "Linckia laevigata",
     "Neopetrosia chaliniformis",
+    "Paracorynactis hoplites",
     "Pinctada margaritifera",
     "Pinctada maxima",
+    "Platyzoanthus mussoides",
     "Radianthus magnifica",
     "Radianthus malu",
     "Spirobranchus giganteus",
@@ -315,6 +317,13 @@ def is_species(ba_id: str, ba_lib: BenthicAttributeLibrary) -> bool:
         return False
     genus = name.split(" ", 1)[0]
     return any(_genus_name(ba_lib.id_to_name(a)) == genus for a in ba_lib.get_ancestor_ids(ba_id))
+
+
+def _warn_missing_orphan_species(ba_lib: BenthicAttributeLibrary) -> None:
+    """Warn about each ORPHAN_SPECIES_NAMES entry the live API no longer has."""
+    for name in ORPHAN_SPECIES_NAMES:
+        if name not in ba_lib.by_name:
+            logger.warning("ORPHAN_SPECIES_NAMES entry not in MERMAID API: %s", name)
 
 
 def is_region_specific(ba_id: str, ba_lib: BenthicAttributeLibrary) -> bool:
@@ -816,6 +825,7 @@ def main(argv: list[str] | None = None) -> int:
     predicates: list[BaPredicate] = []
     coarsening_rules: list[str] = []
     if args.roll_up_species:
+        _warn_missing_orphan_species(ba_lib)
         predicates.append(is_species)
         coarsening_rules.append("species")
     if args.roll_up_region_specific:

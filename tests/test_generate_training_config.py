@@ -601,6 +601,14 @@ class IsSpeciesTests(unittest.TestCase):
     def test_orphan_species_name_is_species(self):
         self.assertTrue(gtc.is_species(ACANTHASTER_PLANCI, self.ba_lib))
 
+    def test_orphan_binomial_under_unrelated_parent_is_species(self):
+        ba_id = "ba-paracor-0000-0000-000000000099"
+        record = _ba_record(ba_id, "Paracorynactis hoplites", ORPHAN_FAMILY)
+        self.ba_lib.by_id[ba_id] = record
+        self.ba_lib.by_name[record["name"]] = record
+        self.ba_lib.by_parent.setdefault(ORPHAN_FAMILY, []).append(record)
+        self.assertTrue(gtc.is_species(ba_id, self.ba_lib))
+
     def test_genus_and_common_names_are_not_species(self):
         for ba_id in (ACROPORA, HARD_CORAL, TURF_ALGAE, BARE_SUBSTRATE, ORPHAN_BA):
             with self.subTest(ba_id=ba_id):
@@ -687,6 +695,22 @@ class CoarseningTests(_GenerateConfigTestCase):
         readme = (self.output_dir / "README.md").read_text()
         self.assertIn("| Agaricia agaricites | Agaricia agaricites | Agariciidae |", readme)
         self.assertIn("| Porites astreoides | Porites astreoides | Porites |", readme)
+
+    def _orphan_warnings(self, *flags: str) -> list[str]:
+        with self.assertLogs(gtc.logger, "WARNING") as captured:
+            # assertLogs requires at least one record.
+            gtc.logger.warning("sentinel")
+            self.run_coarsened(*flags)
+        return [m for m in captured.output if any(name in m for name in gtc.ORPHAN_SPECIES_NAMES)]
+
+    def test_species_roll_up_warns_about_absent_orphan_names(self):
+        warnings = self._orphan_warnings("--roll-up-species")
+        self.assertTrue(any("Paracorynactis hoplites" in m for m in warnings))
+        self.assertFalse(any("Acanthaster planci" in m for m in warnings))
+
+    def test_no_orphan_warning_without_species_roll_up(self):
+        self.assertEqual(self._orphan_warnings("--roll-up-region-specific"), [])
+        self.assertEqual(self._orphan_warnings(), [])
 
     def test_label_with_no_coarser_ancestor_is_kept(self):
         self.ba_lib.region_ids_by_id[TURF_ALGAE] = frozenset({REGION_ATLANTIC})
