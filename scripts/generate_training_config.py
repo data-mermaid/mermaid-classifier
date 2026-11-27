@@ -639,7 +639,15 @@ def write_readme(
 ) -> None:
     cli = " ".join(sys.argv)
     coarsening_block = ""
+    class_set_step2 = "the top-108 set"
+    class_set_ancestor = "top-108 ancestor"
+    class_set_ba = "top-108 BA"
     if coarsening_rules:
+        class_set_step2 = (
+            "the class set (the top-108 after the roll-up rules, see Coarsened labels below)"
+        )
+        class_set_ancestor = "class-set ancestor"
+        class_set_ba = "class-set BA"
         added = added_classes or []
         changes = class_change_rows or []
         coarsening_block = (
@@ -688,8 +696,8 @@ in CoralNet -> MERMAID -> top-108 hierarchy-walk space, against the live
 MERMAID API. For each CoralNet-mapped benthic attribute:
 
 1. If the BA is in `EXCLUDED_NAMES` ({", ".join(EXCLUDED_NAMES)}), drop entirely.
-2. If already in the top-108 set, keep as-is.
-3. Otherwise walk parents (nearest first) to find a top-108 ancestor.
+2. If already in {class_set_step2}, keep as-is.
+3. Otherwise walk parents (nearest first) to find a {class_set_ancestor}.
 4. Otherwise drop the label (`LabelFilter` removes it at training time).
 
 ## Source-of-truth inputs
@@ -709,10 +717,10 @@ Live MERMAID API (snapshotted at run time):
   (pass-through; no filtering). Name it in the training config's `groups_csv`.
 - `included_labels.csv` - **{counts["n_included"]}** `(ba_id, gf_id)` rows
   (Porites contributes 3 rows for the Branching / Massive / other-none buckets;
-  every other top-108 BA contributes 1 row).
+  every other {class_set_ba} contributes 1 row).
 - `rollups.csv` - **{counts["n_rollups"]}** unique `(from_ba, from_gf)` rows:
     - GF-collapse rows (top-108 BA with non-bucket GF -> same BA, empty GF): {counts["n_gf_collapse"]}
-    - cross-BA rollups (species or genus -> top-108 ancestor): {counts["n_cross_ba"]}
+    - cross-BA rollups (species or genus -> {class_set_ancestor}): {counts["n_cross_ba"]}
 
 ### Porites buckets
 

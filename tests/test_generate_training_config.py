@@ -696,6 +696,23 @@ class CoarseningTests(_GenerateConfigTestCase):
         self.assertIn("| Agaricia agaricites | Agaricia agaricites | Agariciidae |", readme)
         self.assertIn("| Porites astreoides | Porites astreoides | Porites |", readme)
 
+    def test_readme_names_the_class_set_when_rules_are_active(self):
+        self.run_coarsened("--roll-up-species", "--roll-up-region-specific")
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertIn(
+            "2. If already in the class set (the top-108 after the roll-up rules,"
+            " see Coarsened labels below), keep as-is.",
+            readme,
+        )
+        self.assertIn(
+            "3. Otherwise walk parents (nearest first) to find a class-set ancestor.",
+            readme,
+        )
+        self.assertIn("every other class-set BA contributes 1 row", readme)
+        self.assertIn("(species or genus -> class-set ancestor)", readme)
+        self.assertNotIn("every other top-108 BA contributes 1 row", readme)
+        self.assertNotIn("If already in the top-108 set, keep as-is.", readme)
+
     def _orphan_warnings(self, *flags: str) -> list[str]:
         with self.assertLogs(gtc.logger, "WARNING") as captured:
             # assertLogs requires at least one record.
@@ -760,6 +777,10 @@ class CoarseningOffTests(_GenerateConfigTestCase):
         self.run_main(cn_entries=COARSEN_CN_ENTRIES)
         self.assertEqual(self.get_rollup_lookup(), UNCOARSENED_ROLLUPS)
         self.assertEqual(self.get_included_set(), UNCOARSENED_INCLUDED)
+        readme = (self.output_dir / "README.md").read_text()
+        self.assertNotIn("Coarsened labels", readme)
+        self.assertIn("If already in the top-108 set, keep as-is.", readme)
+        self.assertIn("every other top-108 BA contributes 1 row", readme)
 
 
 if __name__ == "__main__":
