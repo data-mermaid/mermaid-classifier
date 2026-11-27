@@ -15,7 +15,7 @@
 # --config-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_fold{k}/
 #
 # Compute mirrors coralnet-top108-full.yaml, but the balanced subsample is sized
-# at about 18.8M annotations (pending the K recount on the pinned datasets), so
+# at about 18.8M annotations (K = 94 classes, 200,000 per class), so
 # check instance and volume size against that figure.
 #
 # max_runtime_hours is a ceiling, not a target: the job stops when training
