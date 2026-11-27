@@ -31,8 +31,9 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
+from mermaid_classifier.common.holdout import HOLDOUT_TEST_FOLD, SITES, is_cv_fold
+
 POINT_KEY = ["bucket", "feature_vector", "row", "col"]
-SITES = ("coralnet", "mermaid")
 PER_CLASS_METRICS = ("recall", "precision", "f1")
 SCALAR_METRICS = ("accuracy", "macro_recall", "macro_precision", "macro_f1")
 CI_PERCENTILES = (2.5, 97.5)
@@ -66,7 +67,7 @@ def concat_folds(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def _fold_number(run_id: str, value: str | None) -> int:
-    if value is None or not value.isascii() or not value.isdigit():
+    if value is None or not is_cv_fold(value):
         raise ValueError(
             f"run {run_id} has holdout_fold={value!r}; a CV fold run needs an integer"
             f" holdout_fold param (the 'test' run is not a fold)."
@@ -77,8 +78,8 @@ def _fold_number(run_id: str, value: str | None) -> int:
 def selection_folds(groups: bytes) -> int:
     """K of a `holdout_groups.csv`: its distinct non-`test` folds must be exactly 0..K-1."""
     reader = csv.DictReader(io.StringIO(groups.decode()))
-    values = {row["fold"] for row in reader} - {"test"}
-    if not all(v.isascii() and v.isdigit() for v in values):
+    values = {row["fold"] for row in reader} - {HOLDOUT_TEST_FOLD}
+    if not all(is_cv_fold(v) for v in values):
         raise ValueError(f"holdout_groups.csv has non-integer fold values {sorted(values)}.")
     found = {int(v) for v in values}
     if not found or found != set(range(len(found))):

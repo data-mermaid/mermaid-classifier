@@ -20,14 +20,15 @@ from typing import Any, Literal
 import pandas as pd
 from segdata_spec.manifest import FeatureSetPin, Pin
 
+from mermaid_classifier.common.holdout import CORALNET_SITE, MERMAID_SITE
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.training.sample_weighting import SampleWeightingOptions
 from mermaid_classifier.training.subsample import SubsampleOptions
 
 
 class Sites(enum.Enum):
-    CORALNET = "coralnet"
-    MERMAID = "mermaid"
+    CORALNET = CORALNET_SITE
+    MERMAID = MERMAID_SITE
 
 
 class Artifacts:

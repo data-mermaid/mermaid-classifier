@@ -31,6 +31,8 @@ from pydantic import (
 )
 from segdata_spec.manifest import FeatureSetPin, Pin, Version
 
+from mermaid_classifier.common.holdout import HOLDOUT_TEST_FOLD, MERMAID_SITE, is_cv_fold
+
 # Mirrors the MLflow registered-model name regex enforced by the
 # SageMaker MLflow registry. Validating at config load fails the job
 # cheaply (before any training work) instead of at the very end after
@@ -173,7 +175,7 @@ class DatasetConfig(BaseModel):
     def _holdout_fold_is_test_or_integer(cls, v: object) -> object:
         if isinstance(v, int) and not isinstance(v, bool):
             v = str(v)
-        if not isinstance(v, str) or not (v == "test" or (v.isascii() and v.isdigit())):
+        if not isinstance(v, str) or not (v == HOLDOUT_TEST_FOLD or is_cv_fold(v)):
             raise ValueError(f"holdout_fold must be 'test' or a non-negative integer, got {v!r}")
         return v
 
@@ -217,7 +219,7 @@ class DatasetConfig(BaseModel):
             mermaid_groups = sorted(
                 str(row.get("group_id"))
                 for row in csv.DictReader(csv_file)
-                if row.get("site") == "mermaid"
+                if row.get("site") == MERMAID_SITE
             )
         if mermaid_groups:
             raise ValueError(
