@@ -6,6 +6,7 @@ version's label IDs to MERMAID BA+GF, applies rollup/filter specs, checks
 feature coverage, and produces pyspacer-ready train/ref/val splits.
 """
 
+import dataclasses
 import functools
 import hashlib
 import io
@@ -308,16 +309,20 @@ def feature_set_extractor(manifest: FeatureSetManifest) -> ExtractorSpec:
     return ExtractorSpec.from_dict({name: manifest.extractor.get(name) for name in fields})
 
 
-def _read_holdout_groups(path: str | None) -> tuple[HoldoutGroups, str | None]:
-    """The holdout spec at `path` and the sha256 of the bytes it was parsed from.
+def _read_holdout_groups(path: str | None) -> tuple[HoldoutGroups, str | None, bytes | None]:
+    """The holdout spec at `path`, the sha256 of the bytes it was parsed from, and those bytes.
 
-    An unset path is an empty spec with no hash.
+    An unset path is an empty spec with no hash and no bytes.
     """
     if not path:
-        return HoldoutGroups(StringIO("")), None
+        return HoldoutGroups(StringIO("")), None, None
     data = Path(path).read_bytes()
     # TextIOWrapper decodes as open() does, so the spec matches a direct read.
-    return HoldoutGroups(io.TextIOWrapper(io.BytesIO(data))), hashlib.sha256(data).hexdigest()
+    return (
+        HoldoutGroups(io.TextIOWrapper(io.BytesIO(data))),
+        hashlib.sha256(data).hexdigest(),
+        data,
+    )
 
 
 def _holdout_groups_unselected(
@@ -325,8 +330,10 @@ def _holdout_groups_unselected(
     options: DatasetOptions,
     groups: Mapping[str, frozenset[str] | None],
 ) -> dict[str, str]:
-    """The CoralNet holdout groups a coralnet groups_csv leaves out, as `s<id>` name -> fold.
+    """The CoralNet holdout groups no coralnet dataset reads, as `s<id>` name -> fold.
 
+    A group is unselected only when every coralnet dataset has a groups_csv and
+    none of them lists it; a dataset without a groups_csv reads every group.
     MERMAID holdout groups are projects, which no groups_csv selects among.
     """
     selections = [
@@ -336,29 +343,76 @@ def _holdout_groups_unselected(
         f"s{group_id}": fold
         for (site, group_id), fold in sorted(holdout_groups.group_folds.items())
         if site == Sites.CORALNET.value
-        and any(
+        and bool(selections)
+        and all(
             selection is not None and f"s{group_id}" not in selection for selection in selections
         )
     }
 
 
+def _seeded_image_order(seed: int) -> str:
+    """A SQL ORDER BY key that clusters rows by image in a seed-shuffled order.
+
+    md5 is the same in every DuckDB version, which hash() is not.
+    """
+    return f"md5('{int(seed)}' || dataset || '/' || image_id)"
+
+
+@dataclasses.dataclass(frozen=True)
+class _SubsampleAllocation:
+    """How many rows each partition of the subsample keeps, and how they are ranked.
+
+    group_available and group_quotas are keyed (ba, gf, site, project_id) and are
+    non-empty only for a per-group (source_spread) allocation.
+    """
+
+    allocation_df: pd.DataFrame
+    partition_by: str
+    order_by: str
+    join_using: str
+    group_quotas: dict[tuple[str, str, str, str], int]
+    group_available: dict[tuple[str, str, str, str], int]
+
+
+def _ordered_allocation(targets: Mapping[tuple[str, str], int]) -> _SubsampleAllocation:
+    """Per-class targets, taking each class's first rows in (site, project, image, point) order."""
+    allocation_df = pd.DataFrame(
+        [
+            {
+                "benthic_attribute_id": ba,
+                "growth_form_id": gf,
+                "target_n": int(n),
+            }
+            for (ba, gf), n in targets.items()
+        ]
+    )
+    return _SubsampleAllocation(
+        allocation_df=allocation_df,
+        partition_by="benthic_attribute_id, growth_form_id",
+        # (site, project_id, image_id, row, col) is unique per annotation, so
+        # the row order is total across processes.
+        order_by="site, project_id, image_id, row, col",
+        join_using="benthic_attribute_id, growth_form_id",
+        group_quotas={},
+        group_available={},
+    )
+
+
 class TrainingDataset:
     # Set by _dedupe_points; merged into train_summary_stats.
     _dedupe_stats: dict[str, int] | None = None
+    # Set by _apply_subsample when it selects rows; the runner logs nothing while None.
+    _subsample_audit_df: pd.DataFrame | None = None
+    _subsample_realized_total: int | None = None
+    # Set only by source_spread (per class x group); None otherwise.
+    _subsample_group_audit_df: pd.DataFrame | None = None
+    # Set by _cap_holdout_rows when there are holdout rows to cap.
+    _holdout_audit_df: pd.DataFrame | None = None
     # Set by _log_split_drops; classes the train/ref/val split removed.
     _split_dropped_bagfs: int = 0
 
     def __init__(self, options: DatasetOptions):
         self._setup_annotation_reading(options)
-        # Populated by _apply_subsample if subsampling is enabled; stays
-        # None otherwise. The runner's MLflow logging path checks for
-        # None so the no-subsample path stays artifact-free.
-        self._subsample_audit_df: pd.DataFrame | None = None
-        self._subsample_realized_total: int | None = None
-        # Set only by source_spread (per class x group) and by an applied
-        # holdout cap; None otherwise.
-        self._subsample_group_audit_df: pd.DataFrame | None = None
-        self._holdout_audit_df: pd.DataFrame | None = None
         # Maps a cached feature vector's local path (used as the key of
         # the filesystem DataLocations in self.labels) back to its
         # (bucket, feature_vector) S3 location. add_training_set_names() needs
@@ -464,8 +518,8 @@ class TrainingDataset:
         )
 
         # The hash is of the bytes parsed here, so lineage describes what this run read.
-        self.holdout_groups, self.holdout_groups_sha256 = _read_holdout_groups(
-            options.holdout_groups_csv
+        self.holdout_groups, self.holdout_groups_sha256, self.holdout_groups_bytes = (
+            _read_holdout_groups(options.holdout_groups_csv)
         )
         self.mermaid_project_lookup_sha256: str | None = None
         # Fail on a bad holdout spec before any data is read.
@@ -689,17 +743,25 @@ class TrainingDataset:
         )
 
     def _has_holdout_column(self) -> bool:
+        """Whether the annotations table carries an ``is_holdout`` column.
+
+        Production always has it: load_filtered_annotations tags every row via
+        HoldoutGroups.tag_in_duckdb, even with an empty spec. The probe exists for
+        callers that build ``annotations`` directly, e.g.
+        tests/training/test_subsample/test_subsample_in_duckdb.py and
+        tests/pyspacer/test_training_dataset_pipeline.py.
+        """
         columns = self.duck_conn.execute("DESCRIBE annotations").fetchall()
         return any(c[0] == "is_holdout" for c in columns)
 
     def _apply_subsample(self, opts: SubsampleOptions) -> None:
         """Deterministic per-class subsampling of the annotations table.
 
-        Replaces the old non-deterministic ``annotation_limit`` block.
         Runs after rollup + included-labels filter, before the
         train/ref/val split. Only rows with ``is_holdout = FALSE`` take
         part: per-class targets come from their counts, and holdout rows
         pass through untouched (``_cap_holdout_rows`` bounds those).
+        Resets the subsample audits first, so an empty table leaves them None.
 
         Pipeline (all in DuckDB, in-process):
 
@@ -710,7 +772,7 @@ class TrainingDataset:
              per-class target row counts. Strategy is dispatched by
              ``opts.strategy`` (today: 'stratified' or 'balanced'; new
              strategies plug in via ``training/subsample/registry.py``).
-          3. Select rows per class, by ``opts.within_class``:
+          3. Build the allocation by ``opts.within_class``:
              * ``'ordered'``: a deterministic ROW_NUMBER() partitioned
                by class and ordered by ``(site, project_id, image_id,
                row, col)``, keeping ``_rn <= target``.
@@ -722,16 +784,11 @@ class TrainingDataset:
              Both orderings are total, so the subsample is identical
              across processes and DuckDB thread counts.
           4. Replace the ``annotations`` table with the surviving rows
-             and stash realized per-class counts for the MLflow audit.
-
-        Extension hooks:
-          * Stratify at a coarser level by changing the PARTITION BY
-            columns and surfacing a ``stratification_level`` field on
-            ``SubsampleOptions``.
-          * Bootstrap oversampling for rare classes would be a
-            UNION-ALL pass over the surviving rows; gate on a new
-            ``opts.oversample`` field.
+             and stash the realized per-class counts (and, for
+             source_spread, per-(class, group) counts) for the MLflow audit.
         """
+        self._subsample_audit_df = None
+        self._subsample_realized_total = None
         self._subsample_group_audit_df = None
         has_holdout = self._has_holdout_column()
         # Holdout rows are set aside from the subsample, not counted in it.
@@ -756,65 +813,77 @@ class TrainingDataset:
         # Step 2: dispatch to the strategy registry.
         targets = compute_per_class_targets(opts, class_counts)
 
-        # Step 3: register the allocation as a DuckDB DataFrame and JOIN it
-        # against a deterministic ROW_NUMBER. We pass the dataframe via
-        # the connection's variable namespace (``df`` -> SQL view).
-        group_available: dict[tuple[str, str, str, str], int] = {}
-        group_quotas: dict[tuple[str, str, str, str], int] = {}
+        # Step 3: the allocation, joined against a deterministic ROW_NUMBER.
         if opts.within_class == "source_spread":
-            group_rows = self.duck_conn.execute(
-                "SELECT benthic_attribute_id, growth_form_id, site, project_id, COUNT(*)"
-                f" FROM {candidates}"
-                " GROUP BY ALL"
-                " ORDER BY ALL"
-            ).fetchall()
-            per_class_groups: dict[tuple[str, str], dict[tuple[str, str], int]] = {}
-            for ba, gf, site, project_id, n in group_rows:
-                group_available[(ba, gf, site, project_id)] = n
-                per_class_groups.setdefault((ba, gf), {})[(site, project_id)] = n
-            for (ba, gf), groups in per_class_groups.items():
-                for (site, project_id), quota in water_fill(
-                    groups, targets.get((ba, gf), 0)
-                ).items():
-                    group_quotas[(ba, gf, site, project_id)] = quota
-            allocation_df = pd.DataFrame(
-                [
-                    {
-                        "benthic_attribute_id": ba,
-                        "growth_form_id": gf,
-                        "site": site,
-                        "project_id": project_id,
-                        "target_n": int(quota),
-                    }
-                    for (ba, gf, site, project_id), quota in group_quotas.items()
-                ]
-            )
-            partition_by = "benthic_attribute_id, growth_form_id, site, project_id"
-            # md5 of the seed-salted image identity clusters a group's rows
-            # by image, and is the same in every DuckDB version, which
-            # hash() is not; the identity breaks digest ties.
-            order_by = f"md5('{int(opts.seed)}' || dataset || '/' || image_id), dataset, image_id, row, col"
-            join_using = "benthic_attribute_id, growth_form_id, site, project_id"
+            allocation = self._source_spread_allocation(candidates, targets, opts.seed)
         else:
-            allocation_df = pd.DataFrame(
-                [
-                    {
-                        "benthic_attribute_id": ba,
-                        "growth_form_id": gf,
-                        "target_n": int(n),
-                    }
-                    for (ba, gf), n in targets.items()
-                ]
-            )
-            partition_by = "benthic_attribute_id, growth_form_id"
-            # The (site, project_id, image_id, row, col) tuple is unique
-            # per annotation in this schema (CoralNet and MERMAID both
-            # produce point-level rows keyed this way), giving a fully
-            # deterministic row order across processes.
-            order_by = "site, project_id, image_id, row, col"
-            join_using = "benthic_attribute_id, growth_form_id"
+            allocation = _ordered_allocation(targets)
+        self._select_allocated_rows(allocation, candidates, has_holdout)
 
-        self.duck_conn.register("_subsample_targets", allocation_df)
+        # Step 4: the after-the-fact audit trail, confirming in MLflow that
+        # two parallel runs saw the same data.
+        per_class_audit = self._per_class_subsample_audit(candidates, class_counts, targets)
+        self._subsample_audit_df = per_class_audit
+        if allocation.group_available:
+            self._subsample_group_audit_df = self._per_group_subsample_audit(candidates, allocation)
+
+        realized_total = int(per_class_audit["realized_n"].sum())
+        self._subsample_realized_total = realized_total
+        logger.info(
+            f"Subsample applied: strategy={opts.strategy!r},"
+            f" within_class={opts.within_class!r},"
+            f" classes={len(class_counts)},"
+            f" target_total={opts.total_annotations},"
+            f" realized_total={realized_total}"
+        )
+
+    def _source_spread_allocation(
+        self, candidates: str, targets: Mapping[tuple[str, str], int], seed: int
+    ) -> _SubsampleAllocation:
+        """Each class's target split across its (site, project_id) groups by ``water_fill``."""
+        group_rows = self.duck_conn.execute(
+            "SELECT benthic_attribute_id, growth_form_id, site, project_id, COUNT(*)"
+            f" FROM {candidates}"
+            " GROUP BY ALL"
+            " ORDER BY ALL"
+        ).fetchall()
+        group_available: dict[tuple[str, str, str, str], int] = {}
+        per_class_groups: dict[tuple[str, str], dict[tuple[str, str], int]] = {}
+        for ba, gf, site, project_id, n in group_rows:
+            group_available[(ba, gf, site, project_id)] = n
+            per_class_groups.setdefault((ba, gf), {})[(site, project_id)] = n
+        group_quotas: dict[tuple[str, str, str, str], int] = {}
+        for (ba, gf), groups in per_class_groups.items():
+            for (site, project_id), quota in water_fill(groups, targets.get((ba, gf), 0)).items():
+                group_quotas[(ba, gf, site, project_id)] = quota
+        allocation_df = pd.DataFrame(
+            [
+                {
+                    "benthic_attribute_id": ba,
+                    "growth_form_id": gf,
+                    "site": site,
+                    "project_id": project_id,
+                    "target_n": int(quota),
+                }
+                for (ba, gf, site, project_id), quota in group_quotas.items()
+            ]
+        )
+        return _SubsampleAllocation(
+            allocation_df=allocation_df,
+            partition_by="benthic_attribute_id, growth_form_id, site, project_id",
+            # The seeded md5 clusters a group's rows by image; the identity breaks digest ties.
+            order_by=f"{_seeded_image_order(seed)}, dataset, image_id, row, col",
+            join_using="benthic_attribute_id, growth_form_id, site, project_id",
+            group_quotas=group_quotas,
+            group_available=group_available,
+        )
+
+    def _select_allocated_rows(
+        self, allocation: _SubsampleAllocation, candidates: str, has_holdout: bool
+    ) -> None:
+        """Replace ``annotations`` with each partition's first ``target_n`` candidate rows,
+        plus every holdout row."""
+        self.duck_conn.register("_subsample_targets", allocation.allocation_df)
         try:
             holdout_union = " UNION ALL BY NAME SELECT * FROM annotations WHERE is_holdout"
             self.duck_conn.execute(
@@ -822,22 +891,26 @@ class TrainingDataset:
                 " WITH numbered AS ("
                 "   SELECT *,"
                 f"          ROW_NUMBER() OVER ("
-                f"              PARTITION BY {partition_by}"
-                f"              ORDER BY {order_by}"
+                f"              PARTITION BY {allocation.partition_by}"
+                f"              ORDER BY {allocation.order_by}"
                 "          ) AS _rn"
                 f"   FROM {candidates}"
                 " )"
                 " SELECT n.* EXCLUDE (_rn)"
                 " FROM numbered n"
-                f" JOIN _subsample_targets t USING ({join_using})"
+                f" JOIN _subsample_targets t USING ({allocation.join_using})"
                 " WHERE n._rn <= t.target_n" + (holdout_union if has_holdout else "")
             )
         finally:
             self.duck_conn.unregister("_subsample_targets")
 
-        # Step 4: log realized per-class counts. This is the after-the-
-        # fact audit trail: lets us confirm in MLflow that two parallel
-        # runs really did see the same data.
+    def _per_class_subsample_audit(
+        self,
+        candidates: str,
+        class_counts: Mapping[tuple[str, str], int],
+        targets: Mapping[tuple[str, str], int],
+    ) -> pd.DataFrame:
+        """Each class's pre-subsample count, target and realized count."""
         realized_rows = self.duck_conn.execute(
             "SELECT benthic_attribute_id, growth_form_id, COUNT(*) AS n"
             f" FROM {candidates}"
@@ -845,8 +918,7 @@ class TrainingDataset:
             " ORDER BY benthic_attribute_id, growth_form_id"
         ).fetchall()
         realized_by_cls = {(ba, gf): n for ba, gf, n in realized_rows}
-
-        per_class_audit = pd.DataFrame(
+        return pd.DataFrame(
             [
                 {
                     "benthic_attribute_id": ba,
@@ -858,42 +930,30 @@ class TrainingDataset:
                 for (ba, gf) in sorted(class_counts)
             ]
         )
-        # Stash on self; logged to MLflow by the runner alongside the
-        # other dataset artifacts.
-        self._subsample_audit_df = per_class_audit
 
-        if opts.within_class == "source_spread":
-            realized_group_rows = self.duck_conn.execute(
-                "SELECT benthic_attribute_id, growth_form_id, site, project_id, COUNT(*)"
-                f" FROM {candidates}"
-                " GROUP BY ALL"
-            ).fetchall()
-            realized_by_group = {
-                (ba, gf, site, pid): n for ba, gf, site, pid, n in realized_group_rows
-            }
-            self._subsample_group_audit_df = pd.DataFrame(
-                [
-                    {
-                        "benthic_attribute_id": ba,
-                        "growth_form_id": gf,
-                        "site": site,
-                        "project_id": project_id,
-                        "available": group_available[(ba, gf, site, project_id)],
-                        "quota": group_quotas[(ba, gf, site, project_id)],
-                        "realized": realized_by_group.get((ba, gf, site, project_id), 0),
-                    }
-                    for (ba, gf, site, project_id) in sorted(group_available)
-                ]
-            )
-
-        realized_total = int(per_class_audit["realized_n"].sum())
-        self._subsample_realized_total = realized_total
-        logger.info(
-            f"Subsample applied: strategy={opts.strategy!r},"
-            f" within_class={opts.within_class!r},"
-            f" classes={len(class_counts)},"
-            f" target_total={opts.total_annotations},"
-            f" realized_total={realized_total}"
+    def _per_group_subsample_audit(
+        self, candidates: str, allocation: _SubsampleAllocation
+    ) -> pd.DataFrame:
+        """Each (class, group)'s available rows, quota and realized count."""
+        realized_group_rows = self.duck_conn.execute(
+            "SELECT benthic_attribute_id, growth_form_id, site, project_id, COUNT(*)"
+            f" FROM {candidates}"
+            " GROUP BY ALL"
+        ).fetchall()
+        realized_by_group = {(ba, gf, site, pid): n for ba, gf, site, pid, n in realized_group_rows}
+        return pd.DataFrame(
+            [
+                {
+                    "benthic_attribute_id": ba,
+                    "growth_form_id": gf,
+                    "site": site,
+                    "project_id": project_id,
+                    "available": allocation.group_available[(ba, gf, site, project_id)],
+                    "quota": allocation.group_quotas[(ba, gf, site, project_id)],
+                    "realized": realized_by_group.get((ba, gf, site, project_id), 0),
+                }
+                for (ba, gf, site, project_id) in sorted(allocation.group_available)
+            ]
         )
 
     def _cap_holdout_rows(self, max_per_class: int, seed: int = 0) -> None:
@@ -920,7 +980,7 @@ class TrainingDataset:
             "   SELECT *,"
             "          ROW_NUMBER() OVER ("
             "              PARTITION BY benthic_attribute_id, growth_form_id"
-            f"              ORDER BY md5('{int(seed)}' || dataset || '/' || image_id),"
+            f"              ORDER BY {_seeded_image_order(seed)},"
             "                       dataset, image_id, site, project_id, row, col"
             "          ) AS _rn"
             "   FROM annotations WHERE is_holdout"

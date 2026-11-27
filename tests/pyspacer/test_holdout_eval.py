@@ -1,14 +1,18 @@
 """Tests for holdout evaluation and the metrics prefix it relies on."""
 
+import dataclasses
 import types
 import unittest
 from unittest import mock
 
 import duckdb
+import pandas as pd
 from spacer.data_classes import DataLocation, ImageLabels
 
 from mermaid_classifier.pyspacer import holdout_eval
 from mermaid_classifier.pyspacer.metrics import MetricsCoordinator
+from mermaid_classifier.pyspacer.metrics import registry as metrics_registry
+from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
 from pyspacer.metrics_test_helpers import (
     MockBALibrary,
     MockClf,
@@ -31,6 +35,32 @@ def _fake_evaluate_classifier(clf, labels):
     """Predict A1 for every point, walking images and points in order."""
     gts = [label for loc in labels.keys() for _r, _c, label in labels[loc]]  # noqa: SIM118 -- ImageLabels is not a dict
     return gts, ["A1::"] * len(gts), [0.9] * len(gts)
+
+
+def _per_point_evaluate_classifier(clf, labels):
+    """Score each point as image*100 + row*10 + col; predict A1 for row 1, else A2."""
+    gts, ests, scores = [], [], []
+    for loc in labels.keys():  # noqa: SIM118 -- ImageLabels is not a dict
+        image_no = int(loc.key[-1])
+        for row, col, label in labels[loc]:
+            gts.append(label)
+            ests.append("A1::" if row == 1 else "A2::")
+            scores.append(float(image_no * 100 + row * 10 + col))
+    return gts, ests, scores
+
+
+def _audit(*realized_available):
+    return pd.DataFrame(
+        [
+            {
+                "benthic_attribute_id": f"C{i}",
+                "growth_form_id": "",
+                "available": available,
+                "realized": realized,
+            }
+            for i, (realized, available) in enumerate(realized_available)
+        ]
+    )
 
 
 def _make_dataset():
@@ -61,6 +91,7 @@ def _make_dataset():
         " 'train', FALSE, FALSE)"
     )
     return types.SimpleNamespace(
+        _holdout_audit_df=None,
         holdout_labels=labels,
         duck_conn=conn,
         feature_loc_to_source=loc_to_source,
@@ -164,6 +195,41 @@ class HoldoutEvaluationTest(unittest.TestCase):
         self.assertIn("holdout/precision_macro", coord_metrics)
         self.assertTrue(all(n.startswith("holdout/") for n in coord_metrics))
 
+    def test_each_annotation_row_carries_its_own_prediction(self):
+        patcher = mock.patch.object(
+            holdout_eval, "evaluate_classifier", _per_point_evaluate_classifier
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        ev = holdout_eval.evaluate_holdout(self.clf, self.dataset)
+        df = holdout_eval.holdout_annotations_df(self.dataset.duck_conn, ev.points)
+        expected = {
+            ("cn/img1", 1, 1): ("A1::", 111.0),
+            ("cn/img1", 2, 2): ("A2::", 122.0),
+            ("cn/img1", 3, 3): ("A2::", 133.0),
+            ("cn/img2", 1, 1): ("A1::", 211.0),
+            ("cn/img2", 2, 2): ("A2::", 222.0),
+            ("mm/img3", 1, 1): ("A1::", 311.0),
+            ("mm/img3", 2, 2): ("A2::", 322.0),
+        }
+        got = {
+            (r.feature_vector, r.row, r.col): (r.pred_bagf, r.pred_score) for r in df.itertuples()
+        }
+        self.assertEqual(got, expected)
+
+    def test_prediction_count_mismatch_raises(self):
+        def short(clf, labels):
+            gts, ests, scores = _fake_evaluate_classifier(clf, labels)
+            return gts[:-1], ests[:-1], scores[:-1]
+
+        with (
+            mock.patch.object(holdout_eval, "evaluate_classifier", short),
+            self.assertRaisesRegex(
+                ValueError, r"Holdout point count \(7\) does not match the number of predictions"
+            ),
+        ):
+            holdout_eval.evaluate_holdout(self.clf, self.dataset)
+
     def test_no_holdout_rows_logs_nothing(self):
         self.dataset.holdout_labels = ImageLabels()
         with (
@@ -182,6 +248,55 @@ class HoldoutEvaluationTest(unittest.TestCase):
         m_mlflow.log_metric.assert_not_called()
         m_df.assert_not_called()
         m_eval.assert_not_called()
+
+
+class CoverSkipTest(unittest.TestCase):
+    """Holdout cover metrics are skipped only when the per-class cap trimmed a class."""
+
+    def setUp(self):
+        self.dataset = _make_dataset()
+        self.clf = MockClf(["A1::", "A2::"])
+        patcher = mock.patch.object(holdout_eval, "evaluate_classifier", _fake_evaluate_classifier)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _cover_ran(self, audit) -> bool:
+        self.dataset._holdout_audit_df = audit
+        ran: list[str] = []
+
+        def _cover(_ctx):
+            ran.append("cover")
+            return MetricGroupResult()
+
+        patched = [
+            dataclasses.replace(spec, func=_cover) if spec.name == "cover" else spec
+            for spec in metrics_registry.METRIC_GROUPS
+        ]
+        with (
+            mock.patch.object(metrics_registry, "METRIC_GROUPS", patched),
+            mock.patch.object(holdout_eval, "mlflow"),
+            mock.patch.object(holdout_eval, "log_dataframe"),
+            mock.patch(f"{COORD}.mlflow"),
+            mock.patch(f"{COORD}.log_dataframe"),
+        ):
+            holdout_eval.log_holdout_evaluation(
+                dataset=self.dataset,
+                clf_calibrated=self.clf,
+                predictor=None,
+                ba_library=MockBALibrary(),
+                gf_library=MockGFLibrary(),
+                format_func=format_metric,
+            )
+        return bool(ran)
+
+    def test_cover_skipped_when_a_class_was_trimmed(self):
+        self.assertFalse(self._cover_ran(_audit((5, 5), (3, 4))))
+
+    def test_cover_runs_when_no_class_was_trimmed(self):
+        self.assertTrue(self._cover_ran(_audit((5, 5), (4, 4))))
+
+    def test_cover_runs_without_an_audit(self):
+        self.assertTrue(self._cover_ran(None))
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ import duckdb
 
 from mermaid_classifier.pyspacer.metrics import MetricsContext, MetricsCoordinator
 from mermaid_classifier.pyspacer.metrics import registry as metrics_registry
+from mermaid_classifier.pyspacer.metrics._results import MetricGroupResult
 from pyspacer.metrics_test_helpers import (
     make_ctx,
 )
@@ -77,6 +78,44 @@ def _make_bad_ctx() -> MetricsContext:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+class SkipGroupsTest(unittest.TestCase):
+    """skip_groups removes named groups from the groups that run."""
+
+    def _ran_groups(self, **kwargs) -> list[str]:
+        ran: list[str] = []
+
+        def _recorder(name):
+            def _func(_ctx):
+                ran.append(name)
+                return MetricGroupResult()
+
+            return _func
+
+        patched = [
+            dataclasses.replace(spec, func=_recorder(spec.name))
+            for spec in metrics_registry.METRIC_GROUPS
+        ]
+        ctx = _make_ctx()
+        ctx.dataset = mock.MagicMock()  # makes the dataset-gated groups applicable
+        with (
+            mock.patch.object(metrics_registry, "METRIC_GROUPS", patched),
+            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.mlflow"),
+            mock.patch("mermaid_classifier.pyspacer.metrics.coordinator.log_dataframe"),
+            mock.patch.object(MetricsCoordinator, "_precompute_probabilities"),
+        ):
+            MetricsCoordinator(ctx, duckdb.connect(), **kwargs).compute_and_log_all()
+        return ran
+
+    def test_cover_runs_by_default(self):
+        self.assertIn("cover", self._ran_groups())
+
+    def test_skipped_group_does_not_run_and_others_do(self):
+        ran = self._ran_groups(skip_groups=frozenset({"cover"}))
+        self.assertNotIn("cover", ran)
+        self.assertIn("per_source", ran)
+        self.assertIn("precision_recall_f1", ran)
 
 
 class HappyPathTest(unittest.TestCase):

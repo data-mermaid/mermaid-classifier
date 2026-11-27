@@ -7,10 +7,14 @@ only points whose ground-truth class the model knows. Confidence intervals
 come from a cluster bootstrap that resamples whole groups (``site:project_id``)
 with replacement, because points from one source are not independent.
 
-Macro metrics average over the classes present in the ground truth of the
-full set, a fixed class list across resamples. A class never predicted has
-precision 0. A prediction outside the ground-truth class list counts against
-recall and accuracy.
+The point estimate's macro averages run over the classes present in the full
+set's ground truth. The bootstrap CI's macro averages run over the classes
+present in each resample's ground truth, so a resample missing a (typically
+rare, lower-scoring) class can shift the macro CI relative to the estimate.
+A class present in the ground truth but never predicted has precision 0; a
+class absent from both in a resample has no precision for that resample. A
+prediction outside the ground-truth class list counts against recall and
+accuracy.
 """
 
 from __future__ import annotations
@@ -27,8 +31,9 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
+from mermaid_classifier.common.holdout import HOLDOUT_TEST_FOLD, SITES, is_cv_fold
+
 POINT_KEY = ["bucket", "feature_vector", "row", "col"]
-SITES = ("coralnet", "mermaid")
 PER_CLASS_METRICS = ("recall", "precision", "f1")
 SCALAR_METRICS = ("accuracy", "macro_recall", "macro_precision", "macro_f1")
 CI_PERCENTILES = (2.5, 97.5)
@@ -62,7 +67,7 @@ def concat_folds(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def _fold_number(run_id: str, value: str | None) -> int:
-    if value is None or not value.isascii() or not value.isdigit():
+    if value is None or not is_cv_fold(value):
         raise ValueError(
             f"run {run_id} has holdout_fold={value!r}; a CV fold run needs an integer"
             f" holdout_fold param (the 'test' run is not a fold)."
@@ -73,8 +78,8 @@ def _fold_number(run_id: str, value: str | None) -> int:
 def selection_folds(groups: bytes) -> int:
     """K of a `holdout_groups.csv`: its distinct non-`test` folds must be exactly 0..K-1."""
     reader = csv.DictReader(io.StringIO(groups.decode()))
-    values = {row["fold"] for row in reader} - {"test"}
-    if not all(v.isascii() and v.isdigit() for v in values):
+    values = {row["fold"] for row in reader} - {HOLDOUT_TEST_FOLD}
+    if not all(is_cv_fold(v) for v in values):
         raise ValueError(f"holdout_groups.csv has non-integer fold values {sorted(values)}.")
     found = {int(v) for v in values}
     if not found or found != set(range(len(found))):
@@ -172,7 +177,7 @@ def _metric_arrays(
     """Metrics over a leading resample axis: inputs are (R, K) and (R,)."""
     with np.errstate(divide="ignore", invalid="ignore"):
         recall = np.where(gt > 0, tp / gt, np.nan)
-        precision = np.where(pred > 0, tp / pred, 0.0)
+        precision = np.where(pred > 0, tp / pred, np.where(gt > 0, 0.0, np.nan))
         denom = precision + np.nan_to_num(recall)
         f1 = np.where(denom > 0, 2 * precision * np.nan_to_num(recall) / denom, 0.0)
         f1 = np.where(gt > 0, f1, np.nan)

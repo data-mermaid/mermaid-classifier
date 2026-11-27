@@ -20,14 +20,15 @@ from typing import Any, Literal
 import pandas as pd
 from segdata_spec.manifest import FeatureSetPin, Pin
 
+from mermaid_classifier.common.holdout import CORALNET_SITE, MERMAID_SITE
 from mermaid_classifier.pyspacer.settings import settings
 from mermaid_classifier.training.sample_weighting import SampleWeightingOptions
 from mermaid_classifier.training.subsample import SubsampleOptions
 
 
 class Sites(enum.Enum):
-    CORALNET = "coralnet"
-    MERMAID = "mermaid"
+    CORALNET = CORALNET_SITE
+    MERMAID = MERMAID_SITE
 
 
 class Artifacts:
@@ -175,6 +176,12 @@ class DatasetOptions:
     Caps each class's holdout rows (keeping whole images first, in seeded
     md5 order) to bound the feature downloads for evaluation. None keeps
     every holdout row. Has no effect when nothing is held out.
+    The cap is per class, so an image can lose only some of its points:
+    holdout accuracy and the CV metrics are measured on a per-class-capped
+    mix, not the natural class mix, and the holdout cover metrics are
+    skipped whenever the cap trims a class. The seeded md5 order is seeded
+    by subsample.seed (0 with no subsample block), the same seed that
+    drives the image split.
 
     ref_val_ratios
 

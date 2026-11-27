@@ -9,7 +9,7 @@ from spacer.data_classes import DataLocation, ImageLabels
 from spacer.messages import TrainingTaskLabels
 from spacer.task_utils import preprocess_labels
 
-from mermaid_classifier.pyspacer.splitting import split_by_image
+from mermaid_classifier.pyspacer.splitting import _repair_missing_classes, split_by_image
 
 
 def _labels(images: dict[str, list[str]]) -> ImageLabels:
@@ -187,3 +187,77 @@ class InvalidRatiosTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepairMissingClassesTest(unittest.TestCase):
+    @staticmethod
+    def _build(spec: dict[str, dict[str, list[str]]], digests: dict[str, int]):
+        """Sets from {set: {image: classes}} and one-byte digests per image."""
+        locs = {key: DataLocation("filesystem", key) for m in spec.values() for key in m}
+        sets = {
+            name: {
+                locs[key]: [(0, n, c) for n, c in enumerate(classes)] for key, classes in m.items()
+            }
+            for name, m in spec.items()
+        }
+        return sets, {locs[key]: bytes([d]) for key, d in digests.items()}
+
+    @staticmethod
+    def _membership(sets) -> dict[str, str]:
+        return {loc.key: name for name, members in sets.items() for loc in members}
+
+    @staticmethod
+    def _pairs(sets) -> set[tuple[str, str]]:
+        return {
+            (name, label)
+            for name, members in sets.items()
+            for annotations in members.values()
+            for _, _, label in annotations
+        }
+
+    def test_plain_move_takes_the_lowest_digest_eligible_image(self):
+        # X is missing from val. train holds two X-only images (no class is
+        # stranded by moving either), so the lower-digest t2 moves.
+        sets, digests = self._build(
+            {
+                "train": {"t1": ["X"], "t2": ["X"], "t3": ["Y"]},
+                "ref": {"r1": ["X"], "r2": ["Y"]},
+                "val": {"v1": ["Y"]},
+            },
+            {"t1": 2, "t2": 1, "t3": 3, "r1": 0, "r2": 4, "v1": 5},
+        )
+        before = self._pairs(sets)
+
+        _repair_missing_classes(sets, digests)
+
+        self.assertEqual(
+            self._membership(sets),
+            {"t1": "train", "t2": "val", "t3": "train", "r1": "ref", "r2": "ref", "v1": "val"},
+        )
+        after = self._pairs(sets)
+        self.assertLessEqual(before, after)
+        self.assertEqual(after - before, {("val", "X")})
+
+    def test_swap_runs_when_every_move_would_strand_a_class(self):
+        # X is missing from val. t1 is the only Y in train, t2 the only Z in
+        # train, and r1 is ref's only image: any plain move strands a class.
+        # t1 (lowest digest) swaps with v1, which holds the Y it takes away.
+        sets, digests = self._build(
+            {
+                "train": {"t1": ["X", "Y"], "t2": ["X", "Z"]},
+                "ref": {"r1": ["X", "Y", "Z"]},
+                "val": {"v1": ["Y"], "v2": ["Z"]},
+            },
+            {"t1": 1, "t2": 2, "r1": 3, "v1": 4, "v2": 5},
+        )
+        before = self._pairs(sets)
+
+        _repair_missing_classes(sets, digests)
+
+        self.assertEqual(
+            self._membership(sets),
+            {"t1": "val", "t2": "train", "r1": "ref", "v1": "train", "v2": "val"},
+        )
+        after = self._pairs(sets)
+        self.assertLessEqual(before, after)
+        self.assertEqual(after - before, {("val", "X")})

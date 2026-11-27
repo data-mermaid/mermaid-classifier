@@ -14,9 +14,10 @@
 # The CV fold runs reuse this file with
 # --config-dir sagemaker/configs/coralnet_all_plus_mermaid_coarse_grouped_fold{k}/
 #
-# Compute mirrors coralnet-top108-full.yaml, but the balanced subsample is sized
-# at about 18.8M annotations (K = 94 classes, 200,000 per class), so
-# check instance and volume size against that figure.
+# The job block matches coralnet-all-mermaid-coarse.yaml. The balanced
+# subsample is about 18.8M annotations (K = 94 classes, 200,000 per class),
+# and the SageMaker smoke run planned at the top of the stack confirms this
+# instance and volume at that size.
 #
 # max_runtime_hours is a ceiling, not a target: the job stops when training
 # finishes (early_stopping_patience=3), and you pay only for actual runtime.

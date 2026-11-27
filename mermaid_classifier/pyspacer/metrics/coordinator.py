@@ -30,11 +30,14 @@ class MetricsCoordinator:
         ctx: MetricsContext,
         duck_conn: duckdb.DuckDBPyConnection,
         prefix: str = "",
+        skip_groups: frozenset[str] = frozenset(),
     ):
         self.ctx = ctx
         self.duck_conn = duck_conn
         # Prepended to every metric name and artifact path, e.g. "holdout/".
         self.prefix = prefix
+        # Metric group names left out of the run.
+        self.skip_groups = skip_groups
 
     def compute_and_log_all(self):
         """Run all applicable metric groups and log to MLflow."""
@@ -53,6 +56,8 @@ class MetricsCoordinator:
             self._precompute_probabilities()
 
         for name, func in applicable_metric_groups(self.ctx):
+            if name in self.skip_groups:
+                continue
             try:
                 result = func(self.ctx)
                 self._log_result(result)

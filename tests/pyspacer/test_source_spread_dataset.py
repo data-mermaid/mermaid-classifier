@@ -26,13 +26,27 @@ _GROUPS = [
 ]
 
 
+# Two non-holdout classes with different group sizes (48 and 53 rows).
+_TWO_CLASS_GROUPS = [
+    (("coralnet", "c1", False), "ba_c", 1, 4),  # 4 rows
+    (("coralnet", "c2", False), "ba_c", 3, 8),  # 24 rows
+    (("coralnet", "c3", False), "ba_c", 2, 10),  # 20 rows
+    (("coralnet", "d1", False), "ba_d", 2, 6),  # 12 rows
+    (("coralnet", "d2", False), "ba_d", 4, 9),  # 36 rows
+    (("coralnet", "d3", False), "ba_d", 1, 5),  # 5 rows
+]
+
 _DATASET = "coralnet-raw"
 
 
-def _seed(dataset: NoInitDataset, feature_layout: str = "{project}/{ba}_img{i}.fv") -> None:
+def _seed(
+    dataset: NoInitDataset,
+    feature_layout: str = "{project}/{ba}_img{i}.fv",
+    groups: list = _GROUPS,
+) -> None:
     """Seed the table; `feature_layout` formats each image's feature key."""
     rows = []
-    for (site, project, holdout), ba, n_images, points in _GROUPS:
+    for (site, project, holdout), ba, n_images, points in groups:
         for i in range(n_images):
             for p in range(points):
                 rows.append(
@@ -173,6 +187,39 @@ class SourceSpreadTest(_Base):
         )
         self.assertEqual(audit.iloc[0].to_dict()["pre_count"], 106)
         self.assertEqual(audit.iloc[0].to_dict()["realized_n"], 30)
+
+
+class TwoClassSourceSpreadTest(_Base):
+    # Total 40 over two classes gives each a target of 20.
+    # ba_c groups 4 / 24 / 20: level 8, quotas 4 / 8 / 8.
+    # ba_d groups 12 / 36 / 5: level 7 leaves 1 over, which goes to the
+    # first group below its size in key order (d1): quotas 8 / 7 / 5.
+    opts = SubsampleOptions(strategy="balanced", total_annotations=40, within_class="source_spread")
+
+    def setUp(self):
+        super().setUp()
+        _seed(self.dataset, groups=_TWO_CLASS_GROUPS)
+        # Rows stored highest-first, so only the (row, col) tie-break puts the
+        # lowest points of a partly kept image first.
+        self.dataset.duck_conn.execute(
+            "CREATE OR REPLACE TABLE annotations AS SELECT * FROM annotations ORDER BY row DESC"
+        )
+        self.dataset.duck_conn.execute("SET threads TO 1")
+        self.dataset._apply_subsample(self.opts)
+
+    def test_each_class_realizes_its_own_group_quotas(self):
+        realized = {p: sum(c.values()) for p, c in self._per_image("true").items()}
+        self.assertEqual(realized, {"c1": 4, "c2": 8, "c3": 8, "d1": 8, "d2": 7, "d3": 5})
+
+    def test_partly_kept_image_is_the_second_by_md5_with_its_lowest_points(self):
+        # d1: quota 8 over 6-point images = the first image whole, then the
+        # second image's points (0, 0) and (1, 1).
+        whole, partial = _md5_ranked_images("d1", "ba_d", 2)
+        self.assertEqual(self._per_image("project_id = 'd1'")["d1"], {whole: 6, partial: 2})
+        kept = self.dataset.duck_conn.execute(
+            "SELECT row, col FROM annotations WHERE image_id = ? ORDER BY row, col", [partial]
+        ).fetchall()
+        self.assertEqual(kept, [(0, 0), (1, 1)])
 
 
 class OrderedModeTest(_Base):

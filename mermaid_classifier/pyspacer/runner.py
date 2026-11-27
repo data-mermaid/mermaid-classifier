@@ -651,7 +651,8 @@ class MLflowTrainingRunner(TrainingRunner):
         ``stratification_level``, the same audit covers it without
         changes here.
         """
-        df = getattr(self.dataset, "_subsample_audit_df", None)
+        assert self.dataset is not None
+        df = self.dataset._subsample_audit_df  # pyright: ignore[reportPrivateUsage]  # audits the dataset stashes for this runner
         if df is not None and not df.empty:
             out = self._with_class_names(df)[
                 [
@@ -667,20 +668,21 @@ class MLflowTrainingRunner(TrainingRunner):
             self.log_dataframe(out, "subsample/per_class_counts")
 
         # Only source_spread produces the per-(class, group) audit.
-        group_df = getattr(self.dataset, "_subsample_group_audit_df", None)
+        group_df = self.dataset._subsample_group_audit_df  # pyright: ignore[reportPrivateUsage]  # audits the dataset stashes for this runner
         if group_df is not None and not group_df.empty:
             self.log_dataframe(
                 self._with_class_names(group_df),
                 "subsample/per_class_group_counts",
             )
 
-        realized = getattr(self.dataset, "_subsample_realized_total", None)
+        realized = self.dataset._subsample_realized_total  # pyright: ignore[reportPrivateUsage]  # audits the dataset stashes for this runner
         if realized is not None:
             mlflow.log_metric("subsample/realized_total", float(realized), step=0)
 
     def _log_holdout_audit(self) -> None:
         """Log the per-class holdout cap audit; nothing if no cap applied."""
-        df = getattr(self.dataset, "_holdout_audit_df", None)
+        assert self.dataset is not None
+        df = self.dataset._holdout_audit_df  # pyright: ignore[reportPrivateUsage]  # audits the dataset stashes for this runner
         if df is None or df.empty:
             return
         self.log_dataframe(self._with_class_names(df), "holdout/per_class_counts")
@@ -753,7 +755,10 @@ class MLflowTrainingRunner(TrainingRunner):
         mlflow.log_text(self.dataset.rollup_spec.csv_text, "rollup_spec.csv")
 
         if not self.dataset.holdout_groups.is_empty():
-            mlflow.log_text(self.dataset.holdout_groups.csv_text, "holdout_groups.csv")
+            # A non-empty spec was read from a file, so its bytes are set.
+            assert self.dataset.holdout_groups_bytes is not None
+            # The file's own bytes, so the artifact hashes to the lineage sha256.
+            mlflow.log_text(self.dataset.holdout_groups_bytes.decode("utf-8"), "holdout_groups.csv")
             mlflow.log_param("holdout_groups_count", len(self.dataset.holdout_groups.group_folds))
 
         # Number of images and annotations from each CN source and from

@@ -25,6 +25,7 @@ from mermaid_classifier.common.duckdb_utils import (
     duckdb_temp_table_name,
     duckdb_transform_column,
 )
+from mermaid_classifier.common.holdout import HOLDOUT_TEST_FOLD, is_cv_fold
 
 logger = logging.getLogger(__name__)
 
@@ -302,9 +303,6 @@ class ImageExclusionFilter(CsvSpec):
         )
 
 
-HOLDOUT_TEST_FOLD = "test"
-
-
 class HoldoutGroups(CsvSpec):
     """
     A CSV-defined spec assigning groups to the held-out test set or a
@@ -332,7 +330,7 @@ class HoldoutGroups(CsvSpec):
         site = str(row["site"])
         group_id = str(row["group_id"])
         fold = str(row["fold"])
-        if not (fold == HOLDOUT_TEST_FOLD or (fold.isascii() and fold.isdigit())):
+        if not (fold == HOLDOUT_TEST_FOLD or is_cv_fold(fold)):
             raise ValueError(
                 f"Holdout fold must be '{HOLDOUT_TEST_FOLD}' or a non-negative"
                 f" integer; got {fold!r} for group ({site}, {group_id})."

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from mermaid_classifier.training.cv_aggregate import (
+    _metric_arrays,
     cluster_bootstrap_intervals,
     cluster_counts,
     combine_cv_runs,
@@ -196,6 +197,63 @@ class BootstrapTest(unittest.TestCase):
         counts = cluster_counts(df["gt_bagf"], df["pred_bagf"], df["project_id"])
         lo, hi = cluster_bootstrap_intervals(counts, reps=400, seed=0)
         self.assertEqual((lo["accuracy"], hi["accuracy"]), (0.0, 1.0))
+
+
+class PrecisionAbsenceTest(unittest.TestCase):
+    def test_precision_is_nan_only_when_class_is_absent_from_gt_and_pred(self):
+        # Columns: absent from both, in gt never predicted, predicted never in gt.
+        tp = np.array([[0.0, 0.0, 0.0]])
+        gt = np.array([[0.0, 2.0, 0.0]])
+        pred = np.array([[0.0, 0.0, 3.0]])
+        m = _metric_arrays(tp, gt, pred, np.array([5.0]))
+        precision = m["precision"][0]
+        self.assertTrue(np.isnan(precision[0]))
+        self.assertEqual(precision[1], 0.0)
+        self.assertEqual(precision[2], 0.0)
+        np.testing.assert_allclose(m["f1"][0], [np.nan, 0.0, np.nan])
+
+    def test_rare_class_precision_interval_ignores_resamples_missing_it(self):
+        # "r" occurs only in cluster 1 (2 of 3 predictions right); resamples
+        # without that cluster have no precision for it rather than 0.
+        df = pd.concat(
+            [_rows(["r", "r", "a"], ["r", "r", "r"], project="1")]
+            + [_rows(["a"] * 3, ["a"] * 3, project=str(p), start=10 * p) for p in (2, 3, 4)],
+            ignore_index=True,
+        )
+        counts = cluster_counts(df["gt_bagf"], df["pred_bagf"], df["project_id"])
+        lo, hi = cluster_bootstrap_intervals(counts, reps=200, seed=0)
+        r = counts.classes.index("r")
+        self.assertAlmostEqual(lo["precision"][r], 2 / 3)
+        self.assertAlmostEqual(hi["precision"][r], 2 / 3)
+
+
+class SummaryClusterKeyTest(unittest.TestCase):
+    @staticmethod
+    def _all_accuracy_ci(df: pd.DataFrame) -> tuple[float, float]:
+        summary = summarize(df, reps=400, seed=0)
+        row = summary[(summary["scope"] == "all") & (summary["metric"] == "accuracy")].iloc[0]
+        return row["ci_low"], row["ci_high"]
+
+    def test_projects_are_resampled_whole(self):
+        df = pd.concat(
+            [
+                _rows(["a"] * 20, ["a"] * 20, project="1"),
+                _rows(["a"] * 20, ["b"] * 20, project="2", start=100),
+            ],
+            ignore_index=True,
+        )
+        self.assertEqual(self._all_accuracy_ci(df), (0.0, 1.0))
+
+    def test_same_project_id_on_different_sites_stays_separate(self):
+        # Merged into one cluster the accuracy would be 0.5 in every resample.
+        df = pd.concat(
+            [
+                _rows(["a"] * 20, ["a"] * 20, site="coralnet", project="1"),
+                _rows(["a"] * 20, ["b"] * 20, site="mermaid", project="1"),
+            ],
+            ignore_index=True,
+        )
+        self.assertEqual(self._all_accuracy_ci(df), (0.0, 1.0))
 
 
 class SummaryTest(unittest.TestCase):

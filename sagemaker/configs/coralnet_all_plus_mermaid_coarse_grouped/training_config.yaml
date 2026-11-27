@@ -23,6 +23,12 @@
 #
 # NOTE: images the feature sets do not index count against
 # TRAINING_INPUTS_PERCENT_MISSING_ALLOWED below.
+#
+# Class ed845b8e-4be9-4cb3-8ace-fcb7410a5381:: has no points in the test fold
+# (22 points in 3 groups), so this test run cannot score it. It and
+# ee3b17dd-36f3-4a99-bc2d-a95f5d39bac1:: also have no points in CV folds 1 and
+# 4, but the CV aggregate pools every fold's holdout, so both are scored from
+# folds 0, 2 and 3 (see holdout_groups_coverage.csv).
 
 dataset:
   # Image-grouped split: all annotations of an image stay in one split.

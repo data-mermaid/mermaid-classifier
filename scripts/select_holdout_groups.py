@@ -31,6 +31,8 @@ from classifier_train import (
     _resolve_local_aws_credentials,  # pyright: ignore[reportPrivateUsage]  # shared local-credential bootstrap
 )
 
+from mermaid_classifier.common.holdout import CORALNET_SITE, HOLDOUT_TEST_FOLD, MERMAID_SITE
+
 if TYPE_CHECKING:
     from mermaid_classifier.pyspacer.dataset import TrainingDataset
     from mermaid_classifier.sagemaker.config import TrainingRunConfig
@@ -40,7 +42,6 @@ WORKSPACE_ROOT = REPO_ROOT.parent
 DEFAULT_BETA_SOURCES = WORKSPACE_ROOT / "sagemaker" / "sources" / "OldCoralNetSourcesToKeep.csv"
 CONFIG_FILENAME = "training_config.yaml"
 COVERAGE_SUFFIX = "_coverage.csv"
-MERMAID_SITE = "mermaid"
 
 
 def read_beta_sources(path: Path) -> set[str]:
@@ -189,7 +190,7 @@ def count_without_holdout(
 
     dataset_options, _, _ = config.build_options(config_dir=config_dir)
     dataset_options = dataclasses.replace(
-        dataset_options, holdout_groups_csv=None, holdout_fold="test"
+        dataset_options, holdout_groups_csv=None, holdout_fold=HOLDOUT_TEST_FOLD
     )
     dataset = training_dataset_cls.filtered_annotations_only(dataset_options)
     try:
@@ -289,7 +290,7 @@ def main(argv: list[str] | None = None) -> None:
     coralnet_ids = {
         str(p)
         for site, p in zip(counts["site"], counts["project_id"], strict=True)
-        if site == "coralnet"
+        if site == CORALNET_SITE
     }
     print(
         f"{len(beta_sources)} Beta source ids; {len(beta_sources & coralnet_ids)} of them are"

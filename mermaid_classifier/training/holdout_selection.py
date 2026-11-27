@@ -13,12 +13,12 @@ import math
 
 import pandas as pd
 
+from mermaid_classifier.common.holdout import CORALNET_SITE, HOLDOUT_TEST_FOLD
+
 Group = tuple[str, str]
 
-TEST_FOLD = "test"
 # Rows whose MERMAID image has no project; they always train.
 UNKNOWN_GROUP = "unknown"
-CORALNET_SITE = "coralnet"
 _COUNT_COLUMNS = ("class_key", "site", "project_id", "n")
 
 
@@ -153,7 +153,7 @@ def select_holdout(
                 test_points[(site, c)] = test_points.get((site, c), 0) + n
                 test_group_count[c] = test_group_count.get(c, 0) + 1
 
-    assignments: dict[Group, str] = dict.fromkeys(test_groups, TEST_FOLD)
+    assignments: dict[Group, str] = dict.fromkeys(test_groups, HOLDOUT_TEST_FOLD)
     remaining = sorted(g for g in class_points if g[1] != UNKNOWN_GROUP and g not in test_groups)
     assignments.update(_assign_folds(class_points, remaining, params))
     return HoldoutSelection(assignments=assignments, warnings=warnings)
@@ -210,7 +210,7 @@ def site_test_shares(counts: pd.DataFrame, assignments: dict[Group, str]) -> dic
     for site in sorted({g[0] for g in points}):
         here = [g for g in points if g[0] == site]
         known = [g for g in here if g[1] != UNKNOWN_GROUP]
-        tests = [g for g in here if assignments.get(g) == TEST_FOLD]
+        tests = [g for g in here if assignments.get(g) == HOLDOUT_TEST_FOLD]
         shares[site] = SiteShare(
             test_groups=len(tests),
             groups=len(known),
@@ -238,10 +238,10 @@ def build_coverage_report(
         entry["total_groups"] = len(set(groups))
         entry["total_points"] = sum(points)
         entry["test_groups"] = len(
-            {g for g, f in zip(groups, folds_of, strict=True) if f == TEST_FOLD}
+            {g for g, f in zip(groups, folds_of, strict=True) if f == HOLDOUT_TEST_FOLD}
         )
         entry["test_points"] = sum(
-            n for n, f in zip(points, folds_of, strict=True) if f == TEST_FOLD
+            n for n, f in zip(points, folds_of, strict=True) if f == HOLDOUT_TEST_FOLD
         )
         for site in sites:
             at_site = [str(s) == site for s in sub["site"]]
@@ -251,7 +251,7 @@ def build_coverage_report(
             entry[f"test_points_{site}"] = sum(
                 n
                 for n, f, here in zip(points, folds_of, at_site, strict=True)
-                if here and f == TEST_FOLD
+                if here and f == HOLDOUT_TEST_FOLD
             )
         entry["train_groups"] = entry["total_groups"] - entry["test_groups"]  # pyright: ignore[reportOperatorIssue]
         for fold in range(folds):
