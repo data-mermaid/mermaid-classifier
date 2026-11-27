@@ -159,6 +159,9 @@ class DatasetConfig(BaseModel):
     holdout_groups_csv: str | None = None
     # 'test' or a CV fold number; YAML's bare `holdout_fold: 2` is coerced.
     holdout_fold: str = "test"
+    # Per-class cap: an image can lose only some points, so holdout accuracy and
+    # CV metrics reflect a capped class mix; holdout cover is skipped when it trims.
+    # The md5 order is seeded by subsample.seed (0 without one), as the image split is.
     holdout_max_per_class: int | None = Field(default=3000, gt=0)
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
     split_mode: Literal["points", "images"] = "points"

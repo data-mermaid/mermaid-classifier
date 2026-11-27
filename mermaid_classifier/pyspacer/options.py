@@ -175,6 +175,12 @@ class DatasetOptions:
     Caps each class's holdout rows (keeping whole images first, in seeded
     md5 order) to bound the feature downloads for evaluation. None keeps
     every holdout row. Has no effect when nothing is held out.
+    The cap is per class, so an image can lose only some of its points:
+    holdout accuracy and the CV metrics are measured on a per-class-capped
+    mix, not the natural class mix, and the holdout cover metrics are
+    skipped whenever the cap trims a class. The seeded md5 order is seeded
+    by subsample.seed (0 with no subsample block), the same seed that
+    drives the image split.
 
     ref_val_ratios
 

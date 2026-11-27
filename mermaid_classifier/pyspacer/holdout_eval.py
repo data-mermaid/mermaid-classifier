@@ -144,6 +144,13 @@ def per_site_metrics(
     return metrics
 
 
+def _trimmed_class_count(audit: pd.DataFrame | None) -> int:
+    """Number of classes whose holdout rows the per-class cap trimmed."""
+    if audit is None:
+        return 0
+    return int((audit["realized"] < audit["available"]).sum())
+
+
 def log_holdout_evaluation(
     *,
     dataset: typing.Any,
@@ -184,4 +191,15 @@ def log_holdout_evaluation(
         clf=predictor,
         eval_labels=evaluation.known_labels,
     )
-    MetricsCoordinator(ctx, duck_conn=duck_conn, prefix=HOLDOUT_PREFIX).compute_and_log_all()
+    skip_groups: frozenset[str] = frozenset()
+    n_trimmed = _trimmed_class_count(dataset._holdout_audit_df)  # pyright: ignore[reportPrivateUsage]  # read-only audit of the holdout cap
+    if n_trimmed > 0:
+        logger.info(
+            "Holdout cover metrics skipped: the per-class holdout cap trimmed %d class(es),"
+            " so per-image cover would reflect the cap",
+            n_trimmed,
+        )
+        skip_groups = frozenset({"cover"})
+    MetricsCoordinator(
+        ctx, duck_conn=duck_conn, prefix=HOLDOUT_PREFIX, skip_groups=skip_groups
+    ).compute_and_log_all()
