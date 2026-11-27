@@ -739,6 +739,7 @@ def _well_supported_counts(names: list[str]) -> dict[str, dict[str, int]]:
 # Eleven classes, so one class absent from the counts stays within the 10% allowance.
 ELEVEN_CLASS_NAMES = TOP108_NAMES + ["Acroporidae", "Agaricia", "Helioseris cucullata"]
 CORAL_RUBBLE = "ba-rubble-0000-0000-00000000001d"
+THIN_PARENT = "ba-thinp-0000-0000-00000000001e"
 
 
 class MinSupportTests(_GenerateConfigTestCase):
@@ -987,6 +988,28 @@ class MinSupportTests(_GenerateConfigTestCase):
         readme = (self.output_dir / "README.md").read_text()
         self.assertIn("| Coral rubble | Coral rubble | (dropped) |", readme)
 
+    def test_thin_child_of_a_thin_dropped_parent_is_dropped(self):
+        # Coral rubble rolls into X before X is judged; X then drops at Dead
+        # coral (excluded), so Coral rubble's final target is None too.
+        self.add_ba(THIN_PARENT, "Thin parent", DEAD_CORAL)
+        self.add_ba(CORAL_RUBBLE, "Coral rubble", THIN_PARENT)
+        self.run_min_support(
+            ["Hard coral", "Bare substrate", "Thin parent", "Coral rubble", "Turf algae"],
+            {
+                _key(THIN_PARENT): _support(10, 1),
+                _key(CORAL_RUBBLE): _support(10, 1),
+            },
+            cn_entries=COARSEN_CN_ENTRIES + [_entry("rb", CORAL_RUBBLE, "", "Coral rubble")],
+        )
+        readme = (self.output_dir / "README.md").read_text()
+        row = next(
+            line for line in readme.splitlines() if line.startswith("| Coral rubble | 10 | 1 |")
+        )
+        self.assertTrue(row.endswith("| (dropped) |"), row)
+        self.assertNotIn(THIN_PARENT, self.included_bas())
+        self.assertNotIn(CORAL_RUBBLE, self.included_bas())
+        self.assertNotIn((CORAL_RUBBLE, ""), self.get_rollup_lookup())
+
     def test_thin_porites_species_class_is_credited_to_its_bucket(self):
         # Massive (250 points) is thin alone; with Porites astreoides
         # (inherent massive, 250 points) credited to it, it passes both floors.
@@ -1163,8 +1186,24 @@ LOOKUP_SHA256 = hashlib.sha256(LOOKUP_BYTES).hexdigest()
 
 
 def _training_config_yaml(
-    coralnet_version: str, taxonomy_version: str, lookup_uri: str | None
+    coralnet_version: str,
+    taxonomy_version: str,
+    lookup_uri: str | None,
+    mermaid_dataset: bool = True,
 ) -> str:
+    mermaid_lines = (
+        f"""\
+    - name: mermaid
+      version: 20261124-0000002
+      manifest_sha256: {"c" * 64}
+      features:
+        family: efficientnet-v1
+        manifest_sha256: {"d" * 64}
+      labels: mermaid
+"""
+        if mermaid_dataset
+        else ""
+    )
     lookup_line = "" if lookup_uri is None else f"  mermaid_project_lookup_uri: {lookup_uri}\n"
     return f"""\
 dataset:
@@ -1177,14 +1216,7 @@ dataset:
         manifest_sha256: {"b" * 64}
       labels: coralnet
       groups_csv: groups.csv
-    - name: mermaid
-      version: 20261124-0000002
-      manifest_sha256: {"c" * 64}
-      features:
-        family: efficientnet-v1
-        manifest_sha256: {"d" * 64}
-      labels: mermaid
-  taxonomy:
+{mermaid_lines}  taxonomy:
     version: {taxonomy_version}
     manifest_sha256: {"e" * 64}
   feature_extractor_weights: s3://weights-bucket/efficientnet_weights.pt
@@ -1194,13 +1226,12 @@ mlflow: {{}}
 """
 
 
-class _FakeLookupClient:
-    """An S3 client holding only the project lookup object."""
-
-    def get_object(self, Bucket: str, Key: str) -> dict[str, io.BytesIO]:  # noqa: N803 -- boto3 names
-        if (Bucket, Key) != ("lookup-bucket", "mermaid_image_projects.parquet"):
-            raise KeyError((Bucket, Key))
-        return {"Body": io.BytesIO(LOOKUP_BYTES)}
+def _hash_uri(uri: str) -> str:
+    """Stands in for the S3 hasher: the project lookup's digest for its URI,
+    the file's own digest for a local path."""
+    if uri == LOOKUP_URI:
+        return LOOKUP_SHA256
+    return hashlib.sha256(Path(uri).read_bytes()).hexdigest()
 
 
 class SupportCountsProvenanceTests(_GenerateConfigTestCase):
@@ -1224,13 +1255,16 @@ class SupportCountsProvenanceTests(_GenerateConfigTestCase):
         coralnet_version: str = "20261124-0000001",
         taxonomy_version: str = "20261124-0000003",
         lookup_uri: str | None = LOOKUP_URI,
+        mermaid_dataset: bool = True,
     ) -> Path:
         config_dir = self.tmp / name
         config_dir.mkdir()
         (config_dir / "groups.csv").write_text("s10\ns20\n")
         (config_dir / "holdout_groups.csv").write_text("site,group_id,fold\ncoralnet,10,test\n")
         path = config_dir / "training_config.yaml"
-        path.write_text(_training_config_yaml(coralnet_version, taxonomy_version, lookup_uri))
+        path.write_text(
+            _training_config_yaml(coralnet_version, taxonomy_version, lookup_uri, mermaid_dataset)
+        )
         return path
 
     def _counted_dataset(self, options, lookup_sha256: str | None) -> SimpleNamespace:
@@ -1271,9 +1305,7 @@ class SupportCountsProvenanceTests(_GenerateConfigTestCase):
             ccs.main(["--config-dir", str(config_path.parent), "--out", str(self.counts_csv)])
 
     def generate(self, *args: str) -> None:
-        with mock.patch(
-            "mermaid_classifier.pyspacer.dataset.make_s3_client", return_value=_FakeLookupClient()
-        ):
+        with mock.patch("mermaid_classifier.common.s3_utils.sha256_of_uri", _hash_uri):
             self.run_main(
                 extra_args=["--min-support-counts", str(self.counts_csv), *args],
                 cn_entries=COARSEN_CN_ENTRIES,
@@ -1328,6 +1360,13 @@ class SupportCountsProvenanceTests(_GenerateConfigTestCase):
                     (counted.parent / "groups.csv").write_text(groups)
                 with self.assertRaisesRegex(ValueError, field):
                     self.generate("--training-config", str(target))
+
+    def test_target_config_with_an_extra_dataset_is_refused_naming_its_field(self):
+        counted = self.write_config("counted", mermaid_dataset=False)
+        self.count(counted, lookup_sha256=None)
+        target = self.write_config("target")
+        with self.assertRaisesRegex(ValueError, r"datasets\.mermaid\.version"):
+            self.generate("--training-config", str(target))
 
     def test_mismatch_is_refused_even_with_the_allow_flag(self):
         config = self.write_config("cfg")

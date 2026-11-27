@@ -411,35 +411,16 @@ class MinSupportResult(NamedTuple):
     """BAs of the classes that dropped: annotations reaching one drop too."""
 
 
-def apply_min_support(
+def check_counts_match_classes(
     classes: set[ClassKey],
     counts: dict[ClassKey, ClassSupport],
-    ba_lib: BenthicAttributeLibrary,
-    excluded_uuids: set[str],
-    porites_uuid: str | None,
-    bucket_gf_uuid_lookup: dict[str, str],
-    species_gf_lookup: dict[str, str],
-    min_points: int,
-    min_groups: int,
-    allow_unknown_keys: bool = False,
-    allow_absent_classes: bool = False,
-) -> MinSupportResult:
-    """Roll each class below either floor into its parent, deepest
-    taxonomy level first, returning the final classes, each roll-up with
-    its final target (None when dropped), and the dropped BAs.
-
-    Every thin class at a level merges before the next level up is judged,
-    so thin siblings combine in their parent. A Porites GF bucket sits
-    between Porites and its children and merges into `(Porites, '')`, which
-    is judged on its union with the surviving buckets and carries them when
-    it rolls. A class rolling into Porites goes to its species' bucket. A
-    class whose parent is missing or excluded drops.
-
-    Raises ValueError when `counts` has keys that are not classes (unless
+    allow_unknown_keys: bool,
+    allow_absent_classes: bool,
+) -> None:
+    """Raise ValueError when `counts` has keys that are not classes (unless
     `allow_unknown_keys`), or lacks more than MAX_ABSENT_CLASS_SHARE of the
     classes (unless `allow_absent_classes`): either suggests the counts come
-    from another config.
-    """
+    from another config. Logs a warning for each tolerated mismatch."""
     unknown = sorted(set(counts) - classes)
     if unknown:
         if not allow_unknown_keys:
@@ -466,6 +447,42 @@ def apply_min_support(
                 f" over {MAX_ABSENT_CLASS_SHARE:.0%} (counts from another config?; pass"
                 f" --allow-absent-support-classes if the counts cover a source subset): {absent}"
             )
+
+
+def apply_min_support(
+    classes: set[ClassKey],
+    counts: dict[ClassKey, ClassSupport],
+    ba_lib: BenthicAttributeLibrary,
+    excluded_uuids: set[str],
+    porites_uuid: str | None,
+    bucket_gf_uuid_lookup: dict[str, str],
+    species_gf_lookup: dict[str, str],
+    min_points: int,
+    min_groups: int,
+    allow_unknown_keys: bool = False,
+    allow_absent_classes: bool = False,
+) -> MinSupportResult:
+    """Roll each class below either floor into its parent, deepest
+    taxonomy level first, returning the final classes, each roll-up with
+    its final target (None when dropped), and the dropped BAs.
+
+    Every thin class at a level merges before the next level up is judged,
+    so thin siblings combine in their parent. A Porites GF bucket sits
+    between Porites and its children and merges into `(Porites, '')`, which
+    is judged on its union with the surviving buckets and carries them when
+    it rolls. A class rolling into Porites goes to its species' bucket. A
+    class whose parent is missing or excluded drops.
+
+    The floors are judged on the counted (pre-roll-up) attribution. A class
+    that min-support creates as a roll-up target also takes its parent's
+    other non-class descendants away from a higher ancestor, so that
+    ancestor may end up with less support than it was judged on. Running
+    `scripts/count_class_support.py --check-min-points/--check-min-groups`
+    against the generated config verifies the final classes.
+
+    Raises ValueError as `check_counts_match_classes` does.
+    """
+    check_counts_match_classes(classes, counts, allow_unknown_keys, allow_absent_classes)
     support = {
         key: ClassSupport(counts[key].points, set(counts[key].groups))
         if key in counts
@@ -983,6 +1000,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Counts CSV (class_key, site, project_id, n) for the coarsened classes."
             " Rolls each class below --min-points or --min-groups up to its parent."
+            " Floors are judged on the counted (pre-roll-up) attribution: a class that"
+            " min-support creates as a roll-up target also takes its parent's other"
+            " non-class descendants away from a higher ancestor, so that ancestor may end"
+            " up with less support than it was judged on. Run scripts/count_class_support.py"
+            " --check-min-points/--check-min-groups against the generated config to verify"
+            " the final classes."
         ),
     )
     p.add_argument(
@@ -1041,21 +1064,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _lookup_sha256(uri: str) -> str:
-    """sha256 of the project lookup's bytes, fetched from S3 for an s3:// URI."""
-    from mermaid_classifier.common.s3_utils import is_s3_uri, parse_s3_uri
-
-    if not is_s3_uri(uri):
-        return hashlib.sha256(Path(uri).read_bytes()).hexdigest()
-    from mermaid_classifier.pyspacer.dataset import make_s3_client
-
-    bucket, key = parse_s3_uri(uri)
-    body = make_s3_client(1).get_object(Bucket=bucket, Key=key)["Body"].read()
-    return hashlib.sha256(body).hexdigest()
-
-
 def _training_config_lineage(config_path: Path) -> dict[str, Any]:
     """The pins a count against `config_path` records, as its provenance sidecar holds them."""
+    from mermaid_classifier.common.s3_utils import sha256_of_uri
     from mermaid_classifier.pyspacer.dataset import resolve_groups
     from mermaid_classifier.pyspacer.options import training_data_lineage
     from mermaid_classifier.sagemaker.config import TrainingRunConfig
@@ -1067,7 +1078,7 @@ def _training_config_lineage(config_path: Path) -> dict[str, Any]:
     if options.mermaid_project_lookup_uri and any(
         source.labels == "mermaid" for source in options.datasets
     ):
-        lookup_sha256 = _lookup_sha256(options.mermaid_project_lookup_uri)
+        lookup_sha256 = sha256_of_uri(options.mermaid_project_lookup_uri)
     # No holdout hash is passed, so the lineage carries no holdout block, as in the count.
     lineage = training_data_lineage(options, resolve_groups(options), lookup_sha256=lookup_sha256)
     return json.loads(json.dumps(lineage))
@@ -1104,6 +1115,83 @@ def verify_support_counts(
             f" --training-config {training_config} (expected): {'; '.join(mismatches)}."
             " Recount with scripts/count_class_support.py against that config."
         )
+
+
+def _class_name(
+    key: ClassKey | None, ba_lib: BenthicAttributeLibrary, gf_library: GrowthFormLibrary
+) -> str:
+    """Display name of a class, empty for None."""
+    if key is None:
+        return ""
+    ba_id, gf_id = key
+    name = ba_lib.id_to_name(ba_id)
+    return f"{name}::{gf_library.id_to_name(gf_id)}" if gf_id else name
+
+
+class MinSupportStep(NamedTuple):
+    top108_uuids: set[str]
+    bucket_gf_uuid_lookup: dict[str, str]
+    dropped_bas: set[str]
+    rolled_classes: set[ClassKey]
+    min_support_rows: list[tuple[str, int, int, str]]
+    rule: str
+    """The coarsening-rule description recorded in the README."""
+
+
+def _min_support_step(
+    args: argparse.Namespace,
+    top108_uuids: set[str],
+    ba_lib: BenthicAttributeLibrary,
+    gf_library: GrowthFormLibrary,
+    excluded_uuids: set[str],
+    porites_uuid: str | None,
+    bucket_gf_uuid_lookup: dict[str, str],
+    species_gf_lookup: dict[str, str],
+) -> MinSupportStep:
+    """Apply --min-support-counts to the coarsened classes."""
+    pre_min_support_classes = set(
+        build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)
+    )
+    final_classes, rolled, dropped_bas = apply_min_support(
+        pre_min_support_classes,
+        read_support_counts(args.min_support_counts),
+        ba_lib,
+        excluded_uuids,
+        porites_uuid,
+        bucket_gf_uuid_lookup,
+        species_gf_lookup,
+        args.min_points,
+        args.min_groups,
+        allow_unknown_keys=args.allow_unknown_support_keys,
+        allow_absent_classes=args.allow_absent_support_classes,
+    )
+    # A merged bucket maps to '', so its annotations land in (Porites, '').
+    merged_bucket_lookup = {
+        name: gf if (porites_uuid, gf) in final_classes else ""
+        for name, gf in bucket_gf_uuid_lookup.items()
+    }
+    rule = (
+        f"min support (>= {args.min_points} points and >= {args.min_groups} groups,"
+        f" counts from {args.min_support_counts.name}, deepest level first,"
+        " Porites judged with its surviving growth-form buckets)"
+    )
+    rows = [
+        (
+            _class_name(r.class_key, ba_lib, gf_library),
+            r.points,
+            r.n_groups,
+            _class_name(r.target, ba_lib, gf_library),
+        )
+        for r in rolled
+    ]
+    return MinSupportStep(
+        {ba for ba, _ in final_classes},
+        merged_bucket_lookup,
+        dropped_bas,
+        pre_min_support_classes - final_classes,
+        rows,
+        rule,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1175,45 +1263,22 @@ def main(argv: list[str] | None = None) -> int:
     rolled_classes: set[ClassKey] = set()
     if args.min_support_counts is not None:
         audits["support_counts"] = _file_audit(args.min_support_counts)
-        pre_min_support_classes = set(
-            build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)
-        )
-        final_classes, rolled, dropped_bas = apply_min_support(
-            pre_min_support_classes,
-            read_support_counts(args.min_support_counts),
+        step = _min_support_step(
+            args,
+            top108_uuids,
             ba_lib,
+            gf_library,
             excluded_uuids,
             porites_uuid,
             bucket_gf_uuid_lookup,
             species_gf_lookup,
-            args.min_points,
-            args.min_groups,
-            allow_unknown_keys=args.allow_unknown_support_keys,
-            allow_absent_classes=args.allow_absent_support_classes,
         )
-        rolled_classes = pre_min_support_classes - final_classes
-        top108_uuids = {ba for ba, _ in final_classes}
-        # A merged bucket maps to '', so its annotations land in (Porites, '').
-        bucket_gf_uuid_lookup = {
-            name: gf if (porites_uuid, gf) in final_classes else ""
-            for name, gf in bucket_gf_uuid_lookup.items()
-        }
-        coarsening_rules.append(
-            f"min support (>= {args.min_points} points and >= {args.min_groups} groups,"
-            f" counts from {args.min_support_counts.name}, deepest level first,"
-            " Porites judged with its surviving growth-form buckets)"
-        )
-
-        def class_name(key: ClassKey | None) -> str:
-            if key is None:
-                return ""
-            ba_id, gf_id = key
-            name = ba_lib.id_to_name(ba_id)
-            return f"{name}::{gf_library.id_to_name(gf_id)}" if gf_id else name
-
-        min_support_rows = [
-            (class_name(r.class_key), r.points, r.n_groups, class_name(r.target)) for r in rolled
-        ]
+        top108_uuids = step.top108_uuids
+        bucket_gf_uuid_lookup = step.bucket_gf_uuid_lookup
+        dropped_bas = step.dropped_bas
+        rolled_classes = step.rolled_classes
+        min_support_rows = step.min_support_rows
+        coarsening_rules.append(step.rule)
     changes = class_changes(
         {e.benthic_attribute_id for e in cn_mapping.mapping.values() if e.benthic_attribute_id}
         | uncoarsened_uuids,
