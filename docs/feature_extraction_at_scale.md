@@ -117,7 +117,7 @@ processing:
     - --manifest-sha256=<manifest sha256 of the pinned version>
     - --family=efficientnet-b0-v1
     - --cache-dir=/opt/ml/processing/segdata-cache
-    - --weights=s3://2605-coralnet-public-sources/efficientnet_weights.pt
+    - --weights=s3://mermaid-config/classifier/v1/efficientnet_weights.pt
     - --device=cuda
     - --no-aws-bootstrap
   shard:
