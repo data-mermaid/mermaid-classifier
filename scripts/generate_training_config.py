@@ -13,6 +13,11 @@ For each CoralNet-mapped benthic attribute:
 3. Otherwise walk parents (nearest first) to find a top-108 ancestor.
 4. Otherwise drop the label.
 
+With --roll-up-species and/or --roll-up-region-specific, each top-108 BA
+that is a species, or that MERMAID lists in exactly one region, is
+replaced in the top-108 set by its nearest ancestor that is neither, so
+its annotations roll up to that ancestor.
+
 Porites is the one BA that retains growth-form distinctions: three
 buckets (Branching, Massive, other/none) appear as separate classes in
 included_labels.csv. Porites species and Porites genus annotations are
@@ -35,9 +40,10 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 import pandas as pd
 
@@ -79,6 +85,37 @@ PORITES_KEPT_GF_NAMES = ("Branching", "Massive")
 # entirely (not rolled up to a parent — see priority_notes in the labels
 # CSV for rationale; e.g. Dead coral would otherwise pollute Bare substrate).
 EXCLUDED_NAMES = ("Dead coral", "Bleached coral", "Other invertebrates")
+
+# Genus-species names, optionally with a parenthesized subgenus.
+SPECIES_NAME_PATTERN = re.compile(r"^[A-Z][a-z]+( \([A-Z][a-z]+\))? [a-z]+$")
+# Genus BAs whose name is disambiguated with a suffix, e.g. Turbinaria-coral.
+GENUS_NAME_SUFFIXES = ("-coral", "-algae")
+# Species whose genus is not one of their ancestors in the MERMAID tree,
+# so the name-vs-ancestor check in is_species cannot recognize them.
+ORPHAN_SPECIES_NAMES = (
+    "Acanthaster planci",
+    "Balanophyllia (Balanophyllia) elegans",
+    "Culcita novaeguineae",
+    "Culicia tenella",
+    "Didemnum molle",
+    "Diplosoma virens",
+    "Enhalus acoroides",
+    "Linckia laevigata",
+    "Neopetrosia chaliniformis",
+    "Paracorynactis hoplites",
+    "Pinctada margaritifera",
+    "Pinctada maxima",
+    "Platyzoanthus mussoides",
+    "Radianthus magnifica",
+    "Radianthus malu",
+    "Spirobranchus giganteus",
+    "Stephanocoenia intersepta",
+    "Stephanometra indica",
+    "Stichaster australis",
+    "Svenzea zeai",
+    "Trididemnum solidum",
+    "Verongula rigida",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +292,161 @@ def resolve_excluded_uuids(
     return out
 
 
+# ---------- Step A2: coarsen the top-108 set ----------
+
+BaPredicate = Callable[[str, BenthicAttributeLibrary], bool]
+
+
+def _genus_name(ba_name: str) -> str:
+    for suffix in GENUS_NAME_SUFFIXES:
+        ba_name = ba_name.removesuffix(suffix)
+    return ba_name
+
+
+def is_species(ba_id: str, ba_lib: BenthicAttributeLibrary) -> bool:
+    """A BA is a species when its name is a binomial whose genus is one of
+    its ancestors, or when it is listed in ORPHAN_SPECIES_NAMES.
+
+    The MERMAID tree carries no taxonomic rank, so rank is inferred from
+    the name; the ancestor check rejects common names like "Hard coral".
+    """
+    name = ba_lib.id_to_name(ba_id)
+    if name in ORPHAN_SPECIES_NAMES:
+        return True
+    if not SPECIES_NAME_PATTERN.match(name):
+        return False
+    genus = name.split(" ", 1)[0]
+    return any(_genus_name(ba_lib.id_to_name(a)) == genus for a in ba_lib.get_ancestor_ids(ba_id))
+
+
+def _warn_missing_orphan_species(ba_lib: BenthicAttributeLibrary) -> None:
+    """Warn about each ORPHAN_SPECIES_NAMES entry the live API no longer has."""
+    for name in ORPHAN_SPECIES_NAMES:
+        if name not in ba_lib.by_name:
+            logger.warning("ORPHAN_SPECIES_NAMES entry not in MERMAID API: %s", name)
+
+
+def is_region_specific(ba_id: str, ba_lib: BenthicAttributeLibrary) -> bool:
+    """True when MERMAID lists the BA in exactly one region."""
+    return len(ba_lib.region_ids_by_id.get(ba_id, frozenset())) == 1
+
+
+def _nearest_ancestor(
+    ba_id: str, ba_lib: BenthicAttributeLibrary, pred: Callable[[str], bool]
+) -> str | None:
+    """The first ancestor of the BA, walking leaf-first, that satisfies pred."""
+    return next((a for a in reversed(ba_lib.get_ancestor_ids(ba_id)) if pred(a)), None)
+
+
+def coarsen_top108(
+    top108_uuids: set[str],
+    ba_lib: BenthicAttributeLibrary,
+    excluded_uuids: set[str],
+    predicates: list[BaPredicate],
+) -> set[str]:
+    """Replace each top-108 BA that matches any predicate with its nearest
+    ancestor that matches none.
+
+    A replacement that is an excluded BA is not added. A BA with no
+    non-matching ancestor stays in the set, since nothing coarser exists.
+    """
+
+    def matches(ba_id: str) -> bool:
+        return any(p(ba_id, ba_lib) for p in predicates)
+
+    coarsened: set[str] = set()
+    for ba_id in sorted(top108_uuids):
+        if not matches(ba_id):
+            coarsened.add(ba_id)
+            continue
+        replacement = _nearest_ancestor(ba_id, ba_lib, lambda a: not matches(a))
+        if replacement is None:
+            logger.warning(
+                "%s matches a roll-up rule but has no coarser ancestor; keeping it.",
+                ba_lib.id_to_name(ba_id),
+            )
+            coarsened.add(ba_id)
+        elif replacement not in excluded_uuids:
+            coarsened.add(replacement)
+    return coarsened
+
+
+def _nearest_included(
+    ba_id: str, ba_lib: BenthicAttributeLibrary, included: set[str]
+) -> str | None:
+    """The BA itself if included, else its nearest included ancestor."""
+    if ba_id in included:
+        return ba_id
+    return _nearest_ancestor(ba_id, ba_lib, lambda a: a in included)
+
+
+def class_changes(
+    ba_ids: set[str],
+    ba_lib: BenthicAttributeLibrary,
+    excluded_uuids: set[str],
+    before: set[str],
+    after: set[str],
+) -> list[tuple[str, str | None, str | None]]:
+    """(BA, class before, class after) for each BA whose class differs
+    between two included sets; None means its annotations drop."""
+    changes: list[tuple[str, str | None, str | None]] = []
+    for ba_id in sorted(ba_ids):
+        if ba_id in excluded_uuids or ba_id not in ba_lib.by_id:
+            continue
+        old = _nearest_included(ba_id, ba_lib, before)
+        new = _nearest_included(ba_id, ba_lib, after)
+        if old != new:
+            changes.append((ba_id, old, new))
+    return changes
+
+
+class Coarsening(NamedTuple):
+    included_uuids: set[str]
+    rules: list[str]
+    added_classes: list[str]
+    class_change_rows: list[tuple[str, str, str]]
+
+
+def apply_coarsening(
+    top108_uuids: set[str],
+    ba_lib: BenthicAttributeLibrary,
+    cn_mapping: CoralNetMermaidMapping,
+    excluded_uuids: set[str],
+    *,
+    roll_up_species: bool,
+    roll_up_region_specific: bool,
+) -> Coarsening:
+    """Coarsen the top-108 set by the enabled rules, with the README's
+    rule names, added class names and (BA, before, after) change rows."""
+    predicates: list[BaPredicate] = []
+    rules: list[str] = []
+    if roll_up_species:
+        _warn_missing_orphan_species(ba_lib)
+        predicates.append(is_species)
+        rules.append("species")
+    if roll_up_region_specific:
+        predicates.append(is_region_specific)
+        rules.append("region-specific (exactly one MERMAID region)")
+    included_uuids = coarsen_top108(top108_uuids, ba_lib, excluded_uuids, predicates)
+    changes = class_changes(
+        {e.benthic_attribute_id for e in cn_mapping.mapping.values() if e.benthic_attribute_id}
+        | top108_uuids,
+        ba_lib,
+        excluded_uuids,
+        top108_uuids,
+        included_uuids,
+    )
+    return Coarsening(
+        included_uuids,
+        rules,
+        sorted(ba_lib.id_to_name(b) for b in included_uuids - top108_uuids),
+        sorted(
+            (ba_lib.id_to_name(ba), ba_lib.id_to_name(old or ""), ba_lib.id_to_name(new or ""))
+            for ba, old, new in changes
+        ),
+    )
+
+
 # ---------- Step B: hierarchy walk -> rollup rows ----------
 
 
@@ -303,15 +495,10 @@ def build_rollup_rows(
             )
             continue
 
-        # Determine target_ba via the hierarchy walk (or self if in top-108).
-        if src_ba in top108_uuids:
-            target_ba = src_ba
-        else:
-            ancestors_leaf_first = list(reversed(ba_lib.get_ancestor_ids(src_ba)))
-            target_ba = next((a for a in ancestors_leaf_first if a in top108_uuids), None)
-            if target_ba is None:
-                dropped["no_top_level"] += 1
-                continue
+        target_ba = _nearest_included(src_ba, ba_lib, top108_uuids)
+        if target_ba is None:
+            dropped["no_top_level"] += 1
+            continue
 
         # Determine target_gf. Porites is special; everyone else collapses.
         if porites_uuid is not None and target_ba == porites_uuid:
@@ -446,8 +633,36 @@ def write_readme(
     counts: dict[str, Any],
     unresolved_top108: list[str],
     excluded_top108_seen: list[str],
+    coarsening_rules: list[str] | None = None,
+    added_classes: list[str] | None = None,
+    class_change_rows: list[tuple[str, str, str]] | None = None,
 ) -> None:
     cli = " ".join(sys.argv)
+    coarsening_block = ""
+    class_set_step2 = "the top-108 set"
+    class_set_ancestor = "top-108 ancestor"
+    class_set_ba = "top-108 BA"
+    if coarsening_rules:
+        class_set_step2 = (
+            "the class set (the top-108 after the roll-up rules, see Coarsened labels below)"
+        )
+        class_set_ancestor = "class-set ancestor"
+        class_set_ba = "class-set BA"
+        added = added_classes or []
+        changes = class_change_rows or []
+        coarsening_block = (
+            "\n## Coarsened labels\n\n"
+            f"Rules: {', '.join(coarsening_rules)}.\n\n"
+            f"Classes added as roll-up targets ({len(added)}):"
+            f" {', '.join(added) or 'none'}.\n\n"
+            f"Labels whose class changes ({len(changes)}), CoralNet-mapped or"
+            " top-108:\n\n"
+            "| Label | Class without rules | Class with rules |\n| --- | --- | --- |\n"
+            + "".join(
+                f"| {ba} | {old or '(dropped)'} | {new or '(dropped)'} |\n"
+                for ba, old, new in changes
+            )
+        )
     unresolved_block = ""
     if unresolved_top108:
         unresolved_block = (
@@ -481,8 +696,8 @@ in CoralNet -> MERMAID -> top-108 hierarchy-walk space, against the live
 MERMAID API. For each CoralNet-mapped benthic attribute:
 
 1. If the BA is in `EXCLUDED_NAMES` ({", ".join(EXCLUDED_NAMES)}), drop entirely.
-2. If already in the top-108 set, keep as-is.
-3. Otherwise walk parents (nearest first) to find a top-108 ancestor.
+2. If already in {class_set_step2}, keep as-is.
+3. Otherwise walk parents (nearest first) to find a {class_set_ancestor}.
 4. Otherwise drop the label (`LabelFilter` removes it at training time).
 
 ## Source-of-truth inputs
@@ -502,10 +717,10 @@ Live MERMAID API (snapshotted at run time):
   (pass-through; no filtering). Name it in the training config's `groups_csv`.
 - `included_labels.csv` - **{counts["n_included"]}** `(ba_id, gf_id)` rows
   (Porites contributes 3 rows for the Branching / Massive / other-none buckets;
-  every other top-108 BA contributes 1 row).
+  every other {class_set_ba} contributes 1 row).
 - `rollups.csv` - **{counts["n_rollups"]}** unique `(from_ba, from_gf)` rows:
     - GF-collapse rows (top-108 BA with non-bucket GF -> same BA, empty GF): {counts["n_gf_collapse"]}
-    - cross-BA rollups (species or genus -> top-108 ancestor): {counts["n_cross_ba"]}
+    - cross-BA rollups (species or genus -> {class_set_ancestor}): {counts["n_cross_ba"]}
 
 ### Porites buckets
 
@@ -546,7 +761,7 @@ self-contained (i.e. usable without setting
 `(BA, GF)` pair present in the live CoralNet->MERMAID mapping and emits
 one rollup row per pair. Most pairs collapse to `(top-108 BA, '')`;
 Porites is the only exception (see above).
-{unresolved_block}"""
+{coarsening_block}{unresolved_block}"""
     out_path.write_text(body)
 
 
@@ -605,6 +820,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Top-108 source-of-truth. Filter is `top100 == 1`.",
     )
     p.add_argument(
+        "--roll-up-species",
+        action="store_true",
+        help="Replace species in the top-108 set with their nearest coarser ancestor.",
+    )
+    p.add_argument(
+        "--roll-up-region-specific",
+        action="store_true",
+        help=(
+            "Replace BAs that MERMAID lists in exactly one region with their"
+            " nearest ancestor not listed in exactly one region (and, with"
+            " --roll-up-species, not a species)."
+        ),
+    )
+    p.add_argument(
         "--skip-validation",
         action="store_true",
         help="Skip round-tripping outputs through pipeline schemas (useful for tests).",
@@ -653,6 +882,15 @@ def main(argv: list[str] | None = None) -> int:
 
     top108_uuids, unresolved, excluded_top108_seen = resolve_top108_uuids(top108_df, ba_lib)
     excluded_uuids = resolve_excluded_uuids(ba_lib)
+    coarsening = apply_coarsening(
+        top108_uuids,
+        ba_lib,
+        cn_mapping,
+        excluded_uuids,
+        roll_up_species=args.roll_up_species,
+        roll_up_region_specific=args.roll_up_region_specific,
+    )
+    included_uuids = coarsening.included_uuids
     try:
         porites_uuid: str | None = ba_lib.name_to_id(PORITES_NAME)
     except KeyError:
@@ -667,13 +905,13 @@ def main(argv: list[str] | None = None) -> int:
         cn_mapping,
         ba_lib,
         gf_library,
-        top108_uuids,
+        included_uuids,
         porites_uuid,
         excluded_uuids,
         bucket_gf_uuid_lookup,
         species_gf_lookup,
     )
-    included_rows = build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)
+    included_rows = build_included_label_rows(included_uuids, porites_uuid, bucket_gf_uuid_lookup)
 
     n_sources = write_groups_csv(args.sources_csv, args.output_dir / "groups.csv")
     n_rollups = write_rollups_csv(rollup_rows, args.output_dir / "rollups.csv")
@@ -700,6 +938,9 @@ def main(argv: list[str] | None = None) -> int:
         counts=counts,
         unresolved_top108=unresolved,
         excluded_top108_seen=excluded_top108_seen,
+        coarsening_rules=coarsening.rules,
+        added_classes=coarsening.added_classes,
+        class_change_rows=coarsening.class_change_rows,
     )
 
     if not args.skip_validation:
