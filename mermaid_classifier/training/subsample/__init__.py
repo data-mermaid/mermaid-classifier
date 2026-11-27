@@ -11,6 +11,8 @@ Public API:
     SUBSAMPLE_STRATEGIES         -- tuple of allowed strategy names.
     compute_per_class_targets    -- dispatch entry point used by the
                                     pipeline.
+    water_fill                   -- per-group quota allocator for
+                                    ``within_class='source_spread'``.
 
 Extension points (see options.py and registry.py for details):
 
@@ -33,9 +35,11 @@ from mermaid_classifier.training.subsample.registry import (
     SUBSAMPLE_STRATEGIES,
     compute_per_class_targets,
 )
+from mermaid_classifier.training.subsample.source_spread import water_fill
 
 __all__ = [
     "SubsampleOptions",
     "SUBSAMPLE_STRATEGIES",
     "compute_per_class_targets",
+    "water_fill",
 ]

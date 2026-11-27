@@ -291,6 +291,15 @@ class MissingFeaturesTest(_FullLoad):
             self.load(source, training_inputs_percent_missing_allowed=33)
         self.assertEqual(self.fake.feature_gets(), [])
 
+    def test_the_project_lookup_tolerance_does_not_loosen_it(self):
+        source = self._publish()
+        with self.assertRaisesRegex(RuntimeError, "coralnet-raw/i2"):
+            self.load(
+                source,
+                training_inputs_percent_missing_allowed=33,
+                mermaid_project_lookup_percent_unmatched_allowed=100,
+            )
+
 
 class FeatureSyncRetryTest(_FullLoad):
     """sync_feature_vectors retries transient network errors and nothing else."""

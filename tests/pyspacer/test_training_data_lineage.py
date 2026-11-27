@@ -1,5 +1,6 @@
 """The training-data pins a run records: MLflow params and the model.json block."""
 
+import dataclasses
 import hashlib
 import unittest
 
@@ -158,6 +159,43 @@ class CoralNetMappingLineageTest(unittest.TestCase):
         params = lineage_params(self._mapping_block(mapping))
         self.assertEqual(params["coralnet_label_mapping/sha256"], MAPPING_SHA256)
         self.assertEqual(params["coralnet_label_mapping/n"], "2")
+
+
+LOOKUP_SHA256 = "1" * 64
+HOLDOUT_SHA256 = "2" * 64
+
+
+class HoldoutLineageTest(unittest.TestCase):
+    """The lookup and holdout hashes a run read are recorded and flattened."""
+
+    def test_lookup_and_holdout_are_recorded_and_flattened(self):
+        options = dataclasses.replace(
+            OPTIONS,
+            mermaid_project_lookup_uri="s3://bucket/lookup.parquet",
+            holdout_groups_csv="/configs/x/holdout_groups.csv",
+            holdout_fold="0",
+        )
+
+        lineage = training_data_lineage(
+            options, GROUPS, lookup_sha256=LOOKUP_SHA256, holdout_sha256=HOLDOUT_SHA256, holdout_n=2
+        )
+        params = lineage_params(lineage)
+
+        self.assertEqual(
+            lineage["mermaid_project_lookup"],
+            {"uri": "s3://bucket/lookup.parquet", "sha256": LOOKUP_SHA256},
+        )
+        self.assertEqual(lineage["holdout_groups"], {"sha256": HOLDOUT_SHA256, "n": 2, "fold": "0"})
+        self.assertEqual(
+            {k: v for k, v in params.items() if not k.startswith(("dataset/", "taxonomy/"))},
+            {
+                "mermaid_project_lookup/uri": "s3://bucket/lookup.parquet",
+                "mermaid_project_lookup/sha256": LOOKUP_SHA256,
+                "holdout_groups/sha256": HOLDOUT_SHA256,
+                "holdout_groups/n": "2",
+                "holdout_groups/fold": "0",
+            },
+        )
 
 
 if __name__ == "__main__":

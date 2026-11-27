@@ -122,6 +122,22 @@ class SubsampleStepTest(unittest.TestCase):
         count = self.dataset.duck_conn.execute("SELECT count(*) FROM annotations").fetchone()[0]
         self.assertEqual(count, 0)
 
+    def test_an_empty_table_clears_audits_left_by_an_earlier_subsample(self):
+        stale = pd.DataFrame({"benthic_attribute_id": ["ba_a"]})
+        self.dataset._subsample_audit_df = stale
+        self.dataset._subsample_realized_total = 6
+        self.dataset._subsample_group_audit_df = stale
+        self.dataset.duck_conn.execute("DELETE FROM annotations")
+
+        with self.assertLogs(logger="train", level="WARNING"):
+            self.dataset._apply_subsample(
+                SubsampleOptions(strategy="balanced", total_annotations=6)
+            )
+
+        self.assertIsNone(self.dataset._subsample_audit_df)
+        self.assertIsNone(self.dataset._subsample_realized_total)
+        self.assertIsNone(self.dataset._subsample_group_audit_df)
+
 
 # ---------------------------------------------------------------------------
 # 3. prep_annotations_for_pyspacer + split

@@ -14,6 +14,7 @@ so callers can sequence env-var application correctly.
 
 from __future__ import annotations
 
+import csv
 import re
 from pathlib import Path
 from typing import Annotated, Literal
@@ -24,10 +25,13 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 from segdata_spec.manifest import FeatureSetPin, Pin, Version
+
+from mermaid_classifier.common.holdout import HOLDOUT_TEST_FOLD, MERMAID_SITE, is_cv_fold
 
 # Mirrors the MLflow registered-model name regex enforced by the
 # SageMaker MLflow registry. Validating at config load fails the job
@@ -35,6 +39,10 @@ from segdata_spec.manifest import FeatureSetPin, Pin, Version
 # `mlflow.sklearn.log_model(registered_model_name=...)` has spent hours
 # of compute.
 _MLFLOW_MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,56}$")
+
+# Validation-context key carrying the YAML's directory, against which
+# relative CSV paths resolve.
+CONFIG_DIR_CONTEXT_KEY = "config_dir"
 
 
 class SubsampleConfig(BaseModel):
@@ -48,6 +56,8 @@ class SubsampleConfig(BaseModel):
     strategy: str = "stratified"
     total_annotations: int | None = None
     min_per_class: int = 0
+    within_class: Literal["ordered", "source_spread"] = "ordered"
+    seed: int = 0
 
     @model_validator(mode="after")
     def _validate_via_options(self) -> SubsampleConfig:
@@ -59,6 +69,8 @@ class SubsampleConfig(BaseModel):
             strategy=self.strategy,
             total_annotations=self.total_annotations,
             min_per_class=self.min_per_class,
+            within_class=self.within_class,
+            seed=self.seed,
         )
         return self
 
@@ -145,12 +157,30 @@ class DatasetConfig(BaseModel):
     included_labels_csv: str | None = None
     excluded_labels_csv: str | None = None
     excluded_images_csv: str | None = None
+    mermaid_project_lookup_uri: str | None = None
+    holdout_groups_csv: str | None = None
+    # 'test' or a CV fold number; YAML's bare `holdout_fold: 2` is coerced.
+    holdout_fold: str = "test"
+    # Per-class cap: an image can lose only some points, so holdout accuracy and
+    # CV metrics reflect a capped class mix; holdout cover is skipped when it trims.
+    # The md5 order is seeded by subsample.seed (0 without one), as the image split is.
+    holdout_max_per_class: int | None = Field(default=3000, gt=0)
     ref_val_ratios: tuple[float, float] = (0.1, 0.1)
+    split_mode: Literal["points", "images"] = "points"
     subsample: SubsampleConfig | None = None
     weighting: WeightingConfig | None = None
 
+    @field_validator("holdout_fold", mode="before")
+    @classmethod
+    def _holdout_fold_is_test_or_integer(cls, v: object) -> object:
+        if isinstance(v, int) and not isinstance(v, bool):
+            v = str(v)
+        if not isinstance(v, str) or not (v == HOLDOUT_TEST_FOLD or is_cv_fold(v)):
+            raise ValueError(f"holdout_fold must be 'test' or a non-negative integer, got {v!r}")
+        return v
+
     @model_validator(mode="after")
-    def _check_datasets(self) -> DatasetConfig:
+    def _check_datasets(self, info: ValidationInfo) -> DatasetConfig:
         names = [entry.name for entry in self.datasets]
         repeated = sorted({name for name in names if names.count(name) > 1})
         if repeated:
@@ -167,7 +197,35 @@ class DatasetConfig(BaseModel):
             raise ValueError(
                 "a `labels: mermaid` dataset needs a `taxonomy:` pin to resolve growth forms"
             )
+        self._check_mermaid_holdout_has_lookup(info)
         return self
+
+    def _check_mermaid_holdout_has_lookup(self, info: ValidationInfo) -> None:
+        """Refuse MERMAID holdout groups without a project lookup to give MERMAID rows a project.
+
+        The holdout CSV resolves against the `config_dir` validation context, which
+        `TrainingRunConfig.from_yaml_path` supplies. Without that context, or before
+        scripts/select_holdout_groups.py has written the CSV, the check is skipped and
+        TrainingDataset makes it at load.
+        """
+        context = info.context if isinstance(info.context, dict) else {}
+        config_dir = context.get(CONFIG_DIR_CONTEXT_KEY)
+        if self.holdout_groups_csv is None or self.mermaid_project_lookup_uri or config_dir is None:
+            return
+        csv_path = self.holdout_groups_csv_path(Path(config_dir))
+        if csv_path is None or not csv_path.is_file():
+            return
+        with csv_path.open(newline="") as csv_file:
+            mermaid_groups = sorted(
+                str(row.get("group_id"))
+                for row in csv.DictReader(csv_file)
+                if row.get("site") == MERMAID_SITE
+            )
+        if mermaid_groups:
+            raise ValueError(
+                f"holdout_groups_csv lists MERMAID group(s) {mermaid_groups[:5]}, but"
+                " mermaid_project_lookup_uri is unset, so no MERMAID row has a project"
+            )
 
     def label_rollup_spec_csv_path(self, base: Path) -> Path | None:
         return None if self.label_rollup_spec_csv is None else base / self.label_rollup_spec_csv
@@ -180,6 +238,9 @@ class DatasetConfig(BaseModel):
 
     def excluded_images_csv_path(self, base: Path) -> Path | None:
         return None if self.excluded_images_csv is None else base / self.excluded_images_csv
+
+    def holdout_groups_csv_path(self, base: Path) -> Path | None:
+        return None if self.holdout_groups_csv is None else base / self.holdout_groups_csv
 
 
 class TrainingConfig(BaseModel):
@@ -236,7 +297,7 @@ class TrainingRunConfig(BaseModel):
     def from_yaml_path(cls, path: str | Path) -> TrainingRunConfig:
         text = Path(path).read_text()
         raw = yaml.safe_load(text) or {}
-        return cls.model_validate(raw)
+        return cls.model_validate(raw, context={CONFIG_DIR_CONTEXT_KEY: Path(path).parent})
 
     def apply_env(self) -> None:
         """Apply the `env` block to os.environ.
@@ -277,6 +338,8 @@ class TrainingRunConfig(BaseModel):
                 strategy=d.subsample.strategy,
                 total_annotations=d.subsample.total_annotations,
                 min_per_class=d.subsample.min_per_class,
+                within_class=d.subsample.within_class,
+                seed=d.subsample.seed,
             )
 
         weighting = None
@@ -308,7 +371,12 @@ class TrainingRunConfig(BaseModel):
             included_labels_csv=_resolve(d.included_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             excluded_labels_csv=_resolve(d.excluded_labels_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
             excluded_images_csv=_resolve(d.excluded_images_csv_path(config_dir)),  # pyright: ignore[reportArgumentType]  # DatasetOptions accepts str|None
+            mermaid_project_lookup_uri=d.mermaid_project_lookup_uri,
+            holdout_groups_csv=_resolve(d.holdout_groups_csv_path(config_dir)),
+            holdout_fold=d.holdout_fold,
+            holdout_max_per_class=d.holdout_max_per_class,
             ref_val_ratios=tuple(d.ref_val_ratios),  # pyright: ignore[reportArgumentType]  # runtime tuple[float,float] matches DatasetOptions
+            split_mode=d.split_mode,
             subsample=subsample,
             weighting=weighting,
         )

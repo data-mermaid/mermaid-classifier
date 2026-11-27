@@ -220,6 +220,152 @@ class StrictSchemaTest(unittest.TestCase):
                 TrainingRunConfig.from_yaml_path(path)
 
 
+class HoldoutOptionsTest(unittest.TestCase):
+    """The grouped-holdout fields parse, resolve, and default to today's behaviour."""
+
+    def _build(self, extra_dataset_yaml: str = ""):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"].update(_yaml.safe_load(extra_dataset_yaml) or {})
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            path = _write(tmp, _yaml.dump(base))
+            config = TrainingRunConfig.from_yaml_path(path)
+            return config, config.build_options(config_dir=tmp)[0], tmp
+
+    def test_defaults_reproduce_the_ungrouped_run(self):
+        config, dataset, _ = self._build()
+        self.assertIsNone(config.dataset.mermaid_project_lookup_uri)
+        self.assertIsNone(config.dataset.holdout_groups_csv)
+        self.assertEqual(config.dataset.holdout_fold, "test")
+        self.assertIsNone(dataset.mermaid_project_lookup_uri)
+        self.assertIsNone(dataset.holdout_groups_csv)
+        self.assertEqual(dataset.holdout_fold, "test")
+
+    def test_fields_reach_dataset_options(self):
+        _, dataset, tmp = self._build(
+            textwrap.dedent("""\
+                mermaid_project_lookup_uri: s3://private/lookup.parquet
+                holdout_groups_csv: holdout_groups.csv
+                holdout_fold: "2"
+            """)
+        )
+        self.assertEqual(dataset.mermaid_project_lookup_uri, "s3://private/lookup.parquet")
+        self.assertEqual(dataset.holdout_groups_csv, str(tmp / "holdout_groups.csv"))
+        self.assertEqual(dataset.holdout_fold, "2")
+
+    def test_split_mode_defaults_to_points_and_reaches_dataset_options(self):
+        config, dataset, _ = self._build()
+        self.assertEqual(config.dataset.split_mode, "points")
+        self.assertEqual(dataset.split_mode, "points")
+        _, dataset, _ = self._build("split_mode: images")
+        self.assertEqual(dataset.split_mode, "images")
+
+    def test_unknown_split_mode_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._build("split_mode: vectors")
+
+    def test_integer_fold_in_yaml_is_accepted_as_a_string(self):
+        config, _, _ = self._build("holdout_fold: 3")
+        self.assertEqual(config.dataset.holdout_fold, "3")
+
+    def test_invalid_fold_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._build("holdout_fold: fold-a")
+
+
+class MermaidHoldoutNeedsLookupTest(unittest.TestCase):
+    """A holdout CSV listing MERMAID projects needs the lookup that gives MERMAID rows a project."""
+
+    def _load(self, holdout_csv: str, lookup: str | None = None) -> TrainingRunConfig:
+        base = yaml.safe_load(MINIMAL_YAML)
+        base["dataset"]["holdout_groups_csv"] = "holdout_groups.csv"
+        if lookup is not None:
+            base["dataset"]["mermaid_project_lookup_uri"] = lookup
+        with TemporaryDirectory() as td:
+            (Path(td) / "holdout_groups.csv").write_text(holdout_csv)
+            return TrainingRunConfig.from_yaml_path(_write(Path(td), yaml.dump(base)))
+
+    def test_mermaid_groups_without_a_lookup_are_rejected(self):
+        with self.assertRaisesRegex(ValidationError, "mermaid_project_lookup_uri"):
+            self._load("site,group_id,fold\ncoralnet,7,test\nmermaid,P1,0\n")
+
+    def test_mermaid_groups_with_a_lookup_load(self):
+        config = self._load(
+            "site,group_id,fold\nmermaid,P1,test\n", lookup="s3://bucket/lookup.parquet"
+        )
+        self.assertEqual(config.dataset.mermaid_project_lookup_uri, "s3://bucket/lookup.parquet")
+
+    def test_coralnet_only_groups_need_no_lookup(self):
+        config = self._load("site,group_id,fold\ncoralnet,7,test\n")
+        self.assertIsNone(config.dataset.mermaid_project_lookup_uri)
+
+
+class SourceSpreadOptionsTest(unittest.TestCase):
+    """within_class, seed and holdout_max_per_class parse and default to today's behaviour."""
+
+    def _build(self, dataset_patch: dict):
+        import yaml as _yaml
+
+        base = _yaml.safe_load(MINIMAL_YAML)
+        base["dataset"].update(dataset_patch)
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            path = _write(tmp, _yaml.dump(base))
+            config = TrainingRunConfig.from_yaml_path(path)
+            return config, config.build_options(config_dir=tmp)[0]
+
+    def test_defaults_reproduce_the_ordered_subsample_and_default_holdout_cap(self):
+        config, dataset = self._build({})
+        assert config.dataset.subsample is not None
+        assert dataset.subsample is not None
+        self.assertEqual(config.dataset.subsample.within_class, "ordered")
+        self.assertEqual(config.dataset.subsample.seed, 0)
+        self.assertEqual(dataset.subsample.within_class, "ordered")
+        self.assertEqual(dataset.subsample.seed, 0)
+        self.assertEqual(config.dataset.holdout_max_per_class, 3000)
+        self.assertEqual(dataset.holdout_max_per_class, 3000)
+
+    def test_fields_reach_the_option_dataclasses(self):
+        _, dataset = self._build(
+            {
+                "subsample": {
+                    "strategy": "balanced",
+                    "total_annotations": 1000,
+                    "within_class": "source_spread",
+                    "seed": 5,
+                },
+                "holdout_max_per_class": 500,
+            }
+        )
+        assert dataset.subsample is not None
+        self.assertEqual(dataset.subsample.within_class, "source_spread")
+        self.assertEqual(dataset.subsample.seed, 5)
+        self.assertEqual(dataset.holdout_max_per_class, 500)
+
+    def test_null_holdout_cap_disables_the_cap(self):
+        config, dataset = self._build({"holdout_max_per_class": None})
+        self.assertIsNone(config.dataset.holdout_max_per_class)
+        self.assertIsNone(dataset.holdout_max_per_class)
+
+    def test_unknown_within_class_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._build(
+                {
+                    "subsample": {
+                        "strategy": "balanced",
+                        "total_annotations": 1000,
+                        "within_class": "random",
+                    }
+                }
+            )
+
+    def test_non_positive_holdout_cap_rejected(self):
+        with self.assertRaises(ValidationError):
+            self._build({"holdout_max_per_class": 0})
+
+
 def _load_dict(raw: dict) -> TrainingRunConfig:
     with TemporaryDirectory() as td:
         return TrainingRunConfig.from_yaml_path(_write(Path(td), yaml.dump(raw)))

@@ -41,13 +41,14 @@ def compute_cover(ctx: MetricsContext) -> MetricGroupResult:
     gt_labels = [classes_str[i] for i in val_results.gt]
     est_labels = [classes_str[i] for i in val_results.est]
 
-    n_images = len(list(dataset.labels.val.keys()))
+    eval_labels = ctx.evaluated_labels()
+    n_images = len(list(eval_labels.keys()))
     true_cover_matrix = np.zeros((n_images, n_classes))
     pred_cover_matrix = np.zeros((n_images, n_classes))
     offset = 0
 
-    for img_idx, feature_loc in enumerate(dataset.labels.val.keys()):
-        n_points = len(dataset.labels.val[feature_loc])
+    for img_idx, feature_loc in enumerate(eval_labels.keys()):
+        n_points = len(eval_labels[feature_loc])
         img_gts = gt_labels[offset : offset + n_points]
         img_ests = est_labels[offset : offset + n_points]
         offset += n_points

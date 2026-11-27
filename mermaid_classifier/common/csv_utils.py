@@ -5,10 +5,13 @@ import typing
 import pandas as pd
 
 
-def csv_to_dataframe(csv_file: typing.TextIO):
+def csv_to_dataframe(csv_file: typing.TextIO, dtype: type[str] | None = None):
     """
     CSV file to pandas dataframe. Use this for non-mathematical data
     such as strings or integers that just represent IDs.
+
+    `dtype=str` keeps every column as text, so a value like 0 is not
+    inferred as an int (which would then read as blank).
 
     Throws pd.errors.EmptyDataError if there's no CSV data.
     """
@@ -19,6 +22,7 @@ def csv_to_dataframe(csv_file: typing.TextIO):
         # check if it's NaN, when we're not dealing with mathematical
         # data in the first place.
         keep_default_na=False,
+        dtype=dtype,
     )
 
 
@@ -41,6 +45,8 @@ class CsvSpec(abc.ABC):
     """
 
     column_specs: list[ColumnSpec]
+    # Set to str for a spec whose values can be falsy numbers, such as 0.
+    read_dtype: type[str] | None = None
 
     def __init__(self, csv_file: typing.TextIO):
 
@@ -49,7 +55,7 @@ class CsvSpec(abc.ABC):
         csv_file.seek(0)
 
         try:
-            self.csv_dataframe = csv_to_dataframe(csv_file)
+            self.csv_dataframe = csv_to_dataframe(csv_file, dtype=self.read_dtype)
         except pd.errors.EmptyDataError:
             # It just errors if there's no CSV data, so we manually
             # create an empty dataframe in this case.

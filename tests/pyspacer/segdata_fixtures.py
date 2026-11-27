@@ -17,6 +17,7 @@ from typing import Any
 from unittest import mock
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import (
@@ -309,6 +310,22 @@ def publish_taxonomy(fake: FakeS3, growth_forms: Mapping[str, str]) -> Pin:
     return Pin(name="mermaid-benthic", version=VERSION, manifest_sha256=manifest_sha256(data))
 
 
+def write_project_lookup(path: str, image_projects: Sequence[tuple[str, str]]) -> str:
+    """Write a MERMAID image -> project lookup parquet from (image_id, project_id) rows."""
+    pq.write_table(
+        pa.table(
+            {
+                "image_id": [image_id for image_id, _ in image_projects],
+                "project_id": [project for _, project in image_projects],
+                "project_name": [f"name-{project}" for _, project in image_projects],
+                "site_id": [f"site-{project}" for _, project in image_projects],
+            }
+        ),
+        path,
+    )
+    return path
+
+
 class _NameLibrary:
     def id_to_name(self, value: str | None) -> str | None:
         return value
@@ -319,9 +336,12 @@ def load_training_dataset(
     options: Any,
     coralnet_mapping: Sequence[Mapping[str, Any]],
     extractor: Mapping[str, Any] = EXTRACTOR,
+    filtered_only: bool = False,
     **settings: Any,
 ) -> Any:
     """Run a real TrainingDataset.__init__ against ``fake``.
+
+    ``filtered_only`` runs TrainingDataset.filtered_annotations_only instead.
 
     ``coralnet_mapping`` stands in for the MERMAID API's CoralNet label mapping,
     ``extractor`` for the spec read off ``options.feature_extractor_weights``, and
@@ -352,4 +372,6 @@ def load_training_dataset(
             return_value=_NameLibrary(),
         ),
     ):
+        if filtered_only:
+            return TrainingDataset.filtered_annotations_only(options)
         return TrainingDataset(options)
