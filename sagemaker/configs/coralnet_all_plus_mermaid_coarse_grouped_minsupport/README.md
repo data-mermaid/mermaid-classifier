@@ -1,6 +1,6 @@
 # Training Config: coralnet_all_plus_mermaid_coarse_grouped_minsupport
 
-Generated 2026-11-26 23:31 UTC by
+Generated 2026-11-27 16:31 UTC by
 `scripts/generate_training_config.py`. Regenerate with:
 
 ```
@@ -22,8 +22,8 @@ in CoralNet -> MERMAID -> top-108 hierarchy-walk space, against the live
 MERMAID API. For each CoralNet-mapped benthic attribute:
 
 1. If the BA is in `EXCLUDED_NAMES` (Dead coral, Bleached coral, Other invertebrates), drop entirely.
-2. If already in the top-108 set, keep as-is.
-3. Otherwise walk parents (nearest first) to find a top-108 ancestor.
+2. If already in the class set (the top-108 after the roll-up rules, see Coarsened labels below), keep as-is.
+3. Otherwise walk parents (nearest first) to find a class-set ancestor.
 4. Otherwise drop the label (`LabelFilter` removes it at training time).
 
 ## Source-of-truth inputs
@@ -44,10 +44,10 @@ Live MERMAID API (snapshotted at run time):
   is not kept: the training config names no `groups_csv`, so every group trains.
 - `included_labels.csv` - **82** `(ba_id, gf_id)` rows
   (Porites contributes 3 rows for the Branching / Massive / other-none buckets;
-  every other top-108 BA contributes 1 row).
+  every other class-set BA contributes 1 row).
 - `rollups.csv` - **260** unique `(from_ba, from_gf)` rows:
     - GF-collapse rows (top-108 BA with non-bucket GF -> same BA, empty GF): 37
-    - cross-BA rollups (species or genus -> top-108 ancestor): 223
+    - cross-BA rollups (species or genus -> class-set ancestor): 223
 
 ### Porites buckets
 
