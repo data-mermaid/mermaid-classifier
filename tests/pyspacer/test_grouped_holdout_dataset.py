@@ -102,7 +102,7 @@ class MermaidProjectLookupTest(_Harness):
         mermaid_images: list[str],
         lookup: list[tuple[str, str]],
         coralnet_images: tuple[Image, ...] = (),
-        lookup_allowed: int = 0,
+        lookup_allowed: int | None = 0,
         missing_allowed: int = 0,
     ):
         pin, taxonomy = self.publish_mermaid([(i, 1, 1, 1) for i in mermaid_images])
@@ -120,7 +120,12 @@ class MermaidProjectLookupTest(_Harness):
         dataset.groups = resolve_groups(dataset.options)
         with (
             override_settings(
-                mermaid_project_lookup_percent_unmatched_allowed=lookup_allowed,
+                # None leaves the shipped default in place.
+                **(
+                    {}
+                    if lookup_allowed is None
+                    else {"mermaid_project_lookup_percent_unmatched_allowed": lookup_allowed}
+                ),
                 training_inputs_percent_missing_allowed=missing_allowed,
             ),
             mock.patch(
@@ -158,6 +163,11 @@ class MermaidProjectLookupTest(_Harness):
             RuntimeError, "Regenerate the lookup.*MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED"
         ):
             self._read(images, [(i, "P1") for i in images[:-1]], missing_allowed=10)
+
+    def test_single_unmatched_image_raises_under_the_shipped_default(self):
+        images = [f"m{n}" for n in range(10)]
+        with self.assertRaisesRegex(RuntimeError, "project lookup"):
+            self._read(images, [(i, "P1") for i in images[:-1]], lookup_allowed=None)
 
     def test_raising_lookup_tolerance_allows_single_unmatched_image(self):
         images = [f"m{n}" for n in range(10)]
