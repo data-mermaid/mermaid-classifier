@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import duckdb
 
-from mermaid_classifier.training.class_support import class_group_counts
+from mermaid_classifier.training.class_support import class_group_counts, lineage_mismatches
 
 COLUMNS = ["class_key", "site", "project_id", "n"]
 
@@ -55,6 +55,21 @@ class ClassGroupCountsTest(unittest.TestCase):
         df = class_group_counts(_dataset([]))
         self.assertEqual(list(df.columns), COLUMNS)
         self.assertEqual(len(df), 0)
+
+
+class LineageMismatchesTest(unittest.TestCase):
+    def test_dataset_only_in_expected_reads_none_on_the_recorded_side(self):
+        recorded = {"datasets": [{"name": "a", "pin": "1"}]}
+        expected = {"datasets": [{"name": "a", "pin": "1"}, {"name": "b", "pin": "2"}]}
+        mismatches = lineage_mismatches(recorded, expected)
+        self.assertTrue(mismatches)
+        for line in mismatches:
+            self.assertTrue(line.startswith("datasets.b"), line)
+            self.assertIn("recorded None", line)
+
+    def test_identical_lineages_have_no_mismatches(self):
+        lineage = {"datasets": [{"name": "a", "pin": "1"}], "taxonomy": "t"}
+        self.assertEqual(lineage_mismatches(lineage, dict(lineage)), [])
 
 
 if __name__ == "__main__":
