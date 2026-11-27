@@ -5,6 +5,7 @@ stand-in captures its keyword arguments and stops the run there, so the test
 reads what reached model.json. MLflow logs to a file store in a temp dir.
 """
 
+import hashlib
 import shutil
 import tempfile
 import unittest
@@ -20,7 +21,7 @@ from segdata_spec.manifest import FeatureSetPin, Pin
 from support.extractor import make_extractor_spec
 from support.settings import override_settings
 
-from mermaid_classifier.pyspacer.dataset import resolve_groups
+from mermaid_classifier.pyspacer.dataset import _read_holdout_groups, resolve_groups
 from mermaid_classifier.pyspacer.options import DatasetOptions, MLflowOptions, PinnedDataset
 from mermaid_classifier.pyspacer.runner import MLflowTrainingRunner, TrainingRunner
 
@@ -69,6 +70,24 @@ class RunnerLineageWiringTest(unittest.TestCase):
                 )
             ],
         )
+        # False stands in an empty holdout spec; True reads holdout_csv as the dataset does.
+        self.read_holdout = False
+
+    def _holdout_state(self) -> dict:
+        if not self.read_holdout:
+            return {
+                "holdout_groups": SimpleNamespace(
+                    is_empty=lambda: True, group_folds={("mermaid", "P1"): "test"}
+                ),
+                "holdout_groups_sha256": HOLDOUT_SHA256,
+                "holdout_groups_bytes": None,
+            }
+        holdout_groups, sha256, data = _read_holdout_groups(str(self.holdout_csv))
+        return {
+            "holdout_groups": holdout_groups,
+            "holdout_groups_sha256": sha256,
+            "holdout_groups_bytes": data,
+        }
 
     def _fake_training(self, runner, run_name=None, cleanup_dataset=True):
         duck_conn = duckdb.connect()
@@ -92,10 +111,11 @@ class RunnerLineageWiringTest(unittest.TestCase):
             coralnet_source_ids=[],
             label_filter=SimpleNamespace(inclusion=True, csv_text=""),
             rollup_spec=SimpleNamespace(csv_text=""),
-            holdout_groups=SimpleNamespace(
-                is_empty=lambda: True, group_folds={("mermaid", "P1"): "test"}
-            ),
-            holdout_groups_sha256=HOLDOUT_SHA256,
+            **self._holdout_state(),
+            _subsample_audit_df=None,
+            _subsample_group_audit_df=None,
+            _subsample_realized_total=None,
+            _holdout_audit_df=None,
             mermaid_project_lookup_sha256=LOOKUP_SHA256,
             compute_project_stats=lambda **_kwargs: pd.DataFrame(),
             labels=SimpleNamespace(
@@ -181,6 +201,28 @@ class RunnerLineageWiringTest(unittest.TestCase):
         self.assertEqual(
             training_data["holdout_groups"], {"sha256": HOLDOUT_SHA256, "n": 1, "fold": "test"}
         )
+
+    def test_the_logged_holdout_csv_hashes_to_the_lineage_sha256(self):
+        cases = {
+            "CRLF line endings": b"site,group_id,fold\r\nmermaid,P1,test\r\n",
+            "UTF-8 BOM": b"\xef\xbb\xbfsite,group_id,fold\nmermaid,P1,test\n",
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                self.holdout_csv.write_bytes(data)
+                self.read_holdout = True
+                with mock.patch.object(mlflow, "log_text", wraps=mlflow.log_text) as log_text:
+                    training_data = self._run()["training_data"]
+
+                [logged] = [
+                    c.args[0]
+                    for c in log_text.call_args_list
+                    if c.args[1:] == ("holdout_groups.csv",)
+                ]
+                self.assertEqual(
+                    hashlib.sha256(logged.encode("utf-8")).hexdigest(),
+                    training_data["holdout_groups"]["sha256"],
+                )
 
 
 if __name__ == "__main__":
