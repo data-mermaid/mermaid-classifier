@@ -7,10 +7,14 @@ only points whose ground-truth class the model knows. Confidence intervals
 come from a cluster bootstrap that resamples whole groups (``site:project_id``)
 with replacement, because points from one source are not independent.
 
-Macro metrics average over the classes present in the ground truth of the
-full set, a fixed class list across resamples. A class never predicted has
-precision 0. A prediction outside the ground-truth class list counts against
-recall and accuracy.
+The point estimate's macro averages run over the classes present in the full
+set's ground truth. The bootstrap CI's macro averages run over the classes
+present in each resample's ground truth, so a resample missing a (typically
+rare, lower-scoring) class can shift the macro CI relative to the estimate.
+A class present in the ground truth but never predicted has precision 0; a
+class absent from both in a resample has no precision for that resample. A
+prediction outside the ground-truth class list counts against recall and
+accuracy.
 """
 
 from __future__ import annotations
@@ -172,7 +176,7 @@ def _metric_arrays(
     """Metrics over a leading resample axis: inputs are (R, K) and (R,)."""
     with np.errstate(divide="ignore", invalid="ignore"):
         recall = np.where(gt > 0, tp / gt, np.nan)
-        precision = np.where(pred > 0, tp / pred, 0.0)
+        precision = np.where(pred > 0, tp / pred, np.where(gt > 0, 0.0, np.nan))
         denom = precision + np.nan_to_num(recall)
         f1 = np.where(denom > 0, 2 * precision * np.nan_to_num(recall) / denom, 0.0)
         f1 = np.where(gt > 0, f1, np.nan)
