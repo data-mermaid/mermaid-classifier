@@ -43,7 +43,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 import pandas as pd
 
@@ -331,6 +331,13 @@ def is_region_specific(ba_id: str, ba_lib: BenthicAttributeLibrary) -> bool:
     return len(ba_lib.region_ids_by_id.get(ba_id, frozenset())) == 1
 
 
+def _nearest_ancestor(
+    ba_id: str, ba_lib: BenthicAttributeLibrary, pred: Callable[[str], bool]
+) -> str | None:
+    """The first ancestor of the BA, walking leaf-first, that satisfies pred."""
+    return next((a for a in reversed(ba_lib.get_ancestor_ids(ba_id)) if pred(a)), None)
+
+
 def coarsen_top108(
     top108_uuids: set[str],
     ba_lib: BenthicAttributeLibrary,
@@ -352,8 +359,7 @@ def coarsen_top108(
         if not matches(ba_id):
             coarsened.add(ba_id)
             continue
-        ancestors_leaf_first = list(reversed(ba_lib.get_ancestor_ids(ba_id)))
-        replacement = next((a for a in ancestors_leaf_first if not matches(a)), None)
+        replacement = _nearest_ancestor(ba_id, ba_lib, lambda a: not matches(a))
         if replacement is None:
             logger.warning(
                 "%s matches a roll-up rule but has no coarser ancestor; keeping it.",
@@ -371,8 +377,7 @@ def _nearest_included(
     """The BA itself if included, else its nearest included ancestor."""
     if ba_id in included:
         return ba_id
-    ancestors_leaf_first = reversed(ba_lib.get_ancestor_ids(ba_id))
-    return next((a for a in ancestors_leaf_first if a in included), None)
+    return _nearest_ancestor(ba_id, ba_lib, lambda a: a in included)
 
 
 def class_changes(
@@ -393,6 +398,53 @@ def class_changes(
         if old != new:
             changes.append((ba_id, old, new))
     return changes
+
+
+class Coarsening(NamedTuple):
+    included_uuids: set[str]
+    rules: list[str]
+    added_classes: list[str]
+    class_change_rows: list[tuple[str, str, str]]
+
+
+def apply_coarsening(
+    top108_uuids: set[str],
+    ba_lib: BenthicAttributeLibrary,
+    cn_mapping: CoralNetMermaidMapping,
+    excluded_uuids: set[str],
+    *,
+    roll_up_species: bool,
+    roll_up_region_specific: bool,
+) -> Coarsening:
+    """Coarsen the top-108 set by the enabled rules, with the README's
+    rule names, added class names and (BA, before, after) change rows."""
+    predicates: list[BaPredicate] = []
+    rules: list[str] = []
+    if roll_up_species:
+        _warn_missing_orphan_species(ba_lib)
+        predicates.append(is_species)
+        rules.append("species")
+    if roll_up_region_specific:
+        predicates.append(is_region_specific)
+        rules.append("region-specific (exactly one MERMAID region)")
+    included_uuids = coarsen_top108(top108_uuids, ba_lib, excluded_uuids, predicates)
+    changes = class_changes(
+        {e.benthic_attribute_id for e in cn_mapping.mapping.values() if e.benthic_attribute_id}
+        | top108_uuids,
+        ba_lib,
+        excluded_uuids,
+        top108_uuids,
+        included_uuids,
+    )
+    return Coarsening(
+        included_uuids,
+        rules,
+        sorted(ba_lib.id_to_name(b) for b in included_uuids - top108_uuids),
+        sorted(
+            (ba_lib.id_to_name(ba), ba_lib.id_to_name(old or ""), ba_lib.id_to_name(new or ""))
+            for ba, old, new in changes
+        ),
+    )
 
 
 # ---------- Step B: hierarchy walk -> rollup rows ----------
@@ -822,25 +874,15 @@ def main(argv: list[str] | None = None) -> int:
 
     top108_uuids, unresolved, excluded_top108_seen = resolve_top108_uuids(top108_df, ba_lib)
     excluded_uuids = resolve_excluded_uuids(ba_lib)
-    predicates: list[BaPredicate] = []
-    coarsening_rules: list[str] = []
-    if args.roll_up_species:
-        _warn_missing_orphan_species(ba_lib)
-        predicates.append(is_species)
-        coarsening_rules.append("species")
-    if args.roll_up_region_specific:
-        predicates.append(is_region_specific)
-        coarsening_rules.append("region-specific (exactly one MERMAID region)")
-    uncoarsened_uuids = top108_uuids
-    top108_uuids = coarsen_top108(uncoarsened_uuids, ba_lib, excluded_uuids, predicates)
-    changes = class_changes(
-        {e.benthic_attribute_id for e in cn_mapping.mapping.values() if e.benthic_attribute_id}
-        | uncoarsened_uuids,
-        ba_lib,
-        excluded_uuids,
-        uncoarsened_uuids,
+    coarsening = apply_coarsening(
         top108_uuids,
+        ba_lib,
+        cn_mapping,
+        excluded_uuids,
+        roll_up_species=args.roll_up_species,
+        roll_up_region_specific=args.roll_up_region_specific,
     )
+    included_uuids = coarsening.included_uuids
     try:
         porites_uuid: str | None = ba_lib.name_to_id(PORITES_NAME)
     except KeyError:
@@ -855,13 +897,13 @@ def main(argv: list[str] | None = None) -> int:
         cn_mapping,
         ba_lib,
         gf_library,
-        top108_uuids,
+        included_uuids,
         porites_uuid,
         excluded_uuids,
         bucket_gf_uuid_lookup,
         species_gf_lookup,
     )
-    included_rows = build_included_label_rows(top108_uuids, porites_uuid, bucket_gf_uuid_lookup)
+    included_rows = build_included_label_rows(included_uuids, porites_uuid, bucket_gf_uuid_lookup)
 
     n_sources = write_groups_csv(args.sources_csv, args.output_dir / "groups.csv")
     n_rollups = write_rollups_csv(rollup_rows, args.output_dir / "rollups.csv")
@@ -888,12 +930,9 @@ def main(argv: list[str] | None = None) -> int:
         counts=counts,
         unresolved_top108=unresolved,
         excluded_top108_seen=excluded_top108_seen,
-        coarsening_rules=coarsening_rules,
-        added_classes=sorted(ba_lib.id_to_name(b) for b in top108_uuids - uncoarsened_uuids),
-        class_change_rows=sorted(
-            (ba_lib.id_to_name(ba), ba_lib.id_to_name(old or ""), ba_lib.id_to_name(new or ""))
-            for ba, old, new in changes
-        ),
+        coarsening_rules=coarsening.rules,
+        added_classes=coarsening.added_classes,
+        class_change_rows=coarsening.class_change_rows,
     )
 
     if not args.skip_validation:
