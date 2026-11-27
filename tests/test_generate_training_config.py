@@ -609,6 +609,31 @@ class IsSpeciesTests(unittest.TestCase):
         self.ba_lib.by_parent.setdefault(ORPHAN_FAMILY, []).append(record)
         self.assertTrue(gtc.is_species(ba_id, self.ba_lib))
 
+    def _add_ba(self, ba_id: str, name: str, parent: str) -> None:
+        record = _ba_record(ba_id, name, parent)
+        self.ba_lib.by_id[ba_id] = record
+        self.ba_lib.by_name[name] = record
+        self.ba_lib.by_parent.setdefault(parent, []).append(record)
+
+    def test_subgenus_binomial_under_its_genus_is_species(self):
+        genus_id = "ba-montipora-0000-0000-0000000000a1"
+        species_id = "ba-montfol-0000-0000-0000000000a2"
+        self._add_ba(genus_id, "Montipora", HARD_CORAL)
+        self._add_ba(species_id, "Montipora (Montipora) foliosa", genus_id)
+        self.assertTrue(gtc.is_species(species_id, self.ba_lib))
+
+    def test_binomial_under_algae_suffixed_genus_is_species(self):
+        genus_id = "ba-halimeda-0000-0000-0000000000a3"
+        species_id = "ba-halopun-0000-0000-0000000000a4"
+        self._add_ba(genus_id, "Halimeda-algae", TURF_ALGAE)
+        self._add_ba(species_id, "Halimeda opuntia", genus_id)
+        self.assertTrue(gtc.is_species(species_id, self.ba_lib))
+
+    def test_binomial_under_unrelated_single_word_parent_is_not_species(self):
+        ba_id = "ba-favfrag-0000-0000-0000000000a5"
+        self._add_ba(ba_id, "Favia fragum", ACROPORA)
+        self.assertFalse(gtc.is_species(ba_id, self.ba_lib))
+
     def test_genus_and_common_names_are_not_species(self):
         for ba_id in (ACROPORA, HARD_CORAL, TURF_ALGAE, BARE_SUBSTRATE, ORPHAN_BA):
             with self.subTest(ba_id=ba_id):
@@ -690,9 +715,19 @@ class CoarseningTests(_GenerateConfigTestCase):
         self.assertIn("| Helioseris cucullata | Hard coral | Agariciidae |", readme)
         self.assertIn("Classes added as roll-up targets (1): Agariciidae.", readme)
 
+    def test_region_flag_alone_does_not_roll_up_species(self):
+        self.run_coarsened("--roll-up-region-specific")
+        rollups = self.get_rollup_lookup()
+        for key, target in UNCOARSENED_ROLLUPS.items():
+            if key[0] == ACROPORA_HUMILIS:
+                self.assertEqual(rollups[key], target)
+        self.assertIn((PORITES_ASTREOIDES, ""), self.get_included_set())
+        self.assertEqual(rollups[(AGARICIA_AGARICITES, "")], (AGARICIIDAE, ""))
+
     def test_readme_lists_each_class_change(self):
         self.run_coarsened("--roll-up-species", "--roll-up-region-specific")
         readme = (self.output_dir / "README.md").read_text()
+        self.assertIn("Labels whose class changes (5)", readme)
         self.assertIn("| Agaricia agaricites | Agaricia agaricites | Agariciidae |", readme)
         self.assertIn("| Porites astreoides | Porites astreoides | Porites |", readme)
 
@@ -740,27 +775,27 @@ class CoarseningTests(_GenerateConfigTestCase):
 # fixtures with both roll-up options off, as produced before the roll-up
 # options existed.
 UNCOARSENED_ROLLUPS = {
-    ("ba-acrhum-0000-0000-000000000004", ""): ("ba-acropora-0000-0000-000000000003", ""),
-    ("ba-acrhum-0000-0000-000000000004", GF_MASSIVE): (ACROPORA, ""),
+    (ACROPORA_HUMILIS, ""): (ACROPORA, ""),
+    (ACROPORA_HUMILIS, GF_MASSIVE): (ACROPORA, ""),
     (ACROPORA, GF_BRANCHING): (ACROPORA, ""),
-    ("ba-acroporidae-000-0000-000000000002", ""): ("ba-hardcoral-0000-0000-000000000001", ""),
+    (ACROPORIDAE, ""): (HARD_CORAL, ""),
     (AGARICIA_AGARICITES, GF_FOLIOSE): (AGARICIA_AGARICITES, ""),
-    (HELIOSERIS_CUCULLATA, ""): ("ba-hardcoral-0000-0000-000000000001", ""),
-    ("ba-porann-0000-0000-00000000000f", ""): (PORITES, ""),
-    ("ba-porcom-0000-0000-00000000000d", ""): (PORITES, GF_BRANCHING),
+    (HELIOSERIS_CUCULLATA, ""): (HARD_CORAL, ""),
+    (PORITES_ANNAE, ""): (PORITES, ""),
+    (PORITES_COMPRESSA, ""): (PORITES, GF_BRANCHING),
     (PORITES, GF_ENCRUSTING): (PORITES, ""),
     (PORITES, GF_FOLIOSE): (PORITES, ""),
-    ("ba-porlob-0000-0000-00000000000c", ""): (PORITES, GF_MASSIVE),
-    ("ba-porrus-0000-0000-00000000000e", ""): (PORITES, ""),
+    (PORITES_LOBATA, ""): (PORITES, GF_MASSIVE),
+    (PORITES_RUS, ""): (PORITES, ""),
 }
 UNCOARSENED_INCLUDED = {
     (ACROPORA, ""),
     (AGARICIA_AGARICITES, ""),
     (AGARICIA, ""),
-    ("ba-bare-0000-0000-000000000011", ""),
+    (BARE_SUBSTRATE, ""),
     (ACANTHASTER_PLANCI, ""),
-    ("ba-hardcoral-0000-0000-000000000001", ""),
-    ("ba-poras-0000-0000-000000000010", ""),
+    (HARD_CORAL, ""),
+    (PORITES_ASTREOIDES, ""),
     (PORITES, ""),
     (PORITES, GF_BRANCHING),
     (PORITES, GF_MASSIVE),
