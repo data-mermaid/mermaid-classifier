@@ -1,0 +1,36 @@
+{
+  "counts_sha256": "931dd70e6e8ceee4cd61d43732f6490c471899ec295f6e9a662792e6c96b3869",
+  "datasets": [
+    {
+      "features": {
+        "family": "efficientnet-v1",
+        "manifest_sha256": "c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e"
+      },
+      "groups": null,
+      "labels": "coralnet",
+      "manifest_sha256": "b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b",
+      "name": "coralnet-raw",
+      "version": "20261124-5ab21b3"
+    },
+    {
+      "features": {
+        "family": "efficientnet-v1",
+        "manifest_sha256": "f3ca2077a54e4b811877425fd783a6fd14dbc7dd66671da886a9a5bbadc5ac97"
+      },
+      "groups": null,
+      "labels": "mermaid",
+      "manifest_sha256": "f7a1495475bcf0feeedfe91230e376233a41a00d22c57209eac8142865b049a8",
+      "name": "mermaid",
+      "version": "20261124-cfc389d"
+    }
+  ],
+  "mermaid_project_lookup": {
+    "sha256": "4c243b530772810d260b0f584034618b66cd6aa850edc1f4367ed95a7820319c",
+    "uri": "s3://dev-datamermaid-sm-sources/etl-outputs/mermaid/mermaid_image_projects_20261019.parquet"
+  },
+  "taxonomy": {
+    "manifest_sha256": "fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43",
+    "name": "mermaid-benthic",
+    "version": "20261124-e6abfad"
+  }
+}
