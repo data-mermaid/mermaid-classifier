@@ -23,12 +23,17 @@ import csv
 import dataclasses
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pandas as pd
 import yaml
 from classifier_train import (
     _resolve_local_aws_credentials,  # pyright: ignore[reportPrivateUsage]  # shared local-credential bootstrap
 )
+
+if TYPE_CHECKING:
+    from mermaid_classifier.pyspacer.dataset import TrainingDataset
+    from mermaid_classifier.sagemaker.config import TrainingRunConfig
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT = REPO_ROOT.parent
@@ -114,7 +119,8 @@ def write_fold_configs(config_dir: Path, groups_csv: Path, folds: int) -> list[P
     return written
 
 
-def _resolve(path: str, base: Path) -> Path:
+def resolve_path(path: str, base: Path) -> Path:
+    """`path` made absolute against `base` when relative, then resolved."""
     p = Path(path)
     return (p if p.is_absolute() else base / p).resolve()
 
@@ -135,7 +141,7 @@ def resolve_out_path(
         raise ValueError("The parent config sets no dataset.holdout_groups_csv.")
     if out is None:
         return parent or config_dir / "holdout_groups.csv"
-    path = _resolve(out, REPO_ROOT)
+    path = resolve_path(out, REPO_ROOT)
     if write_fold_configs and path != parent:
         raise ValueError(
             f"--out {path} is not the parent's dataset.holdout_groups_csv ({parent}); fold"
@@ -159,6 +165,40 @@ def load_config_then_pyspacer(config_dir: Path):
     from mermaid_classifier.pyspacer.dataset import TrainingDataset
 
     return config, TrainingDataset
+
+
+class CountedSupport(NamedTuple):
+    """Per-(class, group) counts plus the options, groups and lookup hash they came from."""
+
+    counts: pd.DataFrame
+    dataset_options: Any
+    groups: Any
+    lookup_sha256: str | None
+
+
+def count_without_holdout(
+    config: TrainingRunConfig, training_dataset_cls: type[TrainingDataset], config_dir: Path
+) -> CountedSupport:
+    """
+    Count points per (class, group) over all data, ignoring any holdout CSV.
+
+    An existing holdout CSV must not tag or drop rows, so the options returned
+    carry no holdout.
+    """
+    from mermaid_classifier.training.class_support import class_group_counts
+
+    dataset_options, _, _ = config.build_options(config_dir=config_dir)
+    dataset_options = dataclasses.replace(
+        dataset_options, holdout_groups_csv=None, holdout_fold="test"
+    )
+    dataset = training_dataset_cls.filtered_annotations_only(dataset_options)
+    try:
+        counts = class_group_counts(dataset)
+    finally:
+        dataset.cleanup()
+    return CountedSupport(
+        counts, dataset_options, dataset.groups, dataset.mermaid_project_lookup_sha256
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -212,12 +252,11 @@ def selection_params(args: argparse.Namespace):
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    config_dir = _resolve(args.config_dir, REPO_ROOT)
-    beta_sources = read_beta_sources(_resolve(args.beta_sources, REPO_ROOT))
+    config_dir = resolve_path(args.config_dir, REPO_ROOT)
+    beta_sources = read_beta_sources(resolve_path(args.beta_sources, REPO_ROOT))
 
     _resolve_local_aws_credentials()
 
-    from mermaid_classifier.training.class_support import class_group_counts
     from mermaid_classifier.training.holdout_selection import (
         build_coverage_report,
         coverage_warnings,
@@ -235,17 +274,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    dataset_options, _, _ = config.build_options(config_dir=config_dir)
-    # Selection runs on all data: an existing holdout CSV must not tag or drop rows.
-    dataset_options = dataclasses.replace(
-        dataset_options, holdout_groups_csv=None, holdout_fold="test"
-    )
-
-    dataset = training_dataset_cls.filtered_annotations_only(dataset_options)
-    try:
-        counts = class_group_counts(dataset)
-    finally:
-        dataset.cleanup()
+    counts, dataset_options, _, _ = count_without_holdout(config, training_dataset_cls, config_dir)
     has_mermaid = any(source.labels == "mermaid" for source in dataset_options.datasets)
     if has_mermaid and not dataset_options.mermaid_project_lookup_uri:
         print(

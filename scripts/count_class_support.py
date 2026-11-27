@@ -9,6 +9,10 @@ a CoralNet source or a MERMAID project; a class key is ``<ba>::<gf>``, so an
 empty growth form leaves a trailing ``::``. Prints points and distinct groups
 per class. With ``--check-min-points`` / ``--check-min-groups`` it then exits
 non-zero if any counted class is below either floor, listing each one.
+The group floor (``--check-min-groups``, and the min-support
+roll-up that reads these counts) counts all groups, held-out test groups included,
+because the counts describe each class independently of any holdout and holdout
+selection reads the same all-data counts.
 
 Usage (from the repo root)::
 
@@ -21,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import dataclasses
 import hashlib
 import json
 import logging
@@ -34,8 +37,9 @@ from classifier_train import (
 )
 from select_holdout_groups import (
     REPO_ROOT,
-    _resolve,  # pyright: ignore[reportPrivateUsage]  # shared path resolution
+    count_without_holdout,
     load_config_then_pyspacer,
+    resolve_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,16 +115,18 @@ def below_floors(summary: pd.DataFrame, min_points: int, min_groups: int) -> pd.
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    config_dir = _resolve(args.config_dir, REPO_ROOT)
-    out_path = _resolve(args.out, REPO_ROOT)
+    config_dir = resolve_path(args.config_dir, REPO_ROOT)
+    out_path = resolve_path(args.out, REPO_ROOT)
 
     _resolve_local_aws_credentials()
 
     from mermaid_classifier.pyspacer.options import training_data_lineage
-    from mermaid_classifier.training.class_support import class_group_counts, provenance_path
+    from mermaid_classifier.training.class_support import provenance_path
 
     config, training_dataset_cls = load_config_then_pyspacer(config_dir)
-    dataset_options, _, _ = config.build_options(config_dir=config_dir)
+    counts, dataset_options, groups, lookup_sha256 = count_without_holdout(
+        config, training_dataset_cls, config_dir
+    )
     if not dataset_options.mermaid_project_lookup_uri and any(
         source.labels == "mermaid" for source in dataset_options.datasets
     ):
@@ -128,15 +134,6 @@ def main(argv: list[str] | None = None) -> None:
             "The config pins a MERMAID dataset but sets no mermaid_project_lookup_uri,"
             " so all MERMAID rows count as a single group (project 'all')."
         )
-    # Counts cover all data: an existing holdout CSV must not tag or drop rows.
-    dataset_options = dataclasses.replace(
-        dataset_options, holdout_groups_csv=None, holdout_fold="test"
-    )
-    dataset = training_dataset_cls.filtered_annotations_only(dataset_options)
-    try:
-        counts = class_group_counts(dataset)
-    finally:
-        dataset.cleanup()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sidecar = provenance_path(out_path)
@@ -144,10 +141,8 @@ def main(argv: list[str] | None = None) -> None:
     sidecar.unlink(missing_ok=True)
     counts.to_csv(out_path, index=False)
     print(f"Wrote {len(counts)} class-group rows to {out_path}")
-    # The holdout CSV is cleared above, so the lineage records no holdout block.
-    lineage = training_data_lineage(
-        dataset_options, dataset.groups, lookup_sha256=dataset.mermaid_project_lookup_sha256
-    )
+    # count_without_holdout clears the holdout, so the lineage records no holdout block.
+    lineage = training_data_lineage(dataset_options, groups, lookup_sha256=lookup_sha256)
     lineage["counts_sha256"] = hashlib.sha256(out_path.read_bytes()).hexdigest()
     sidecar.write_text(json.dumps(lineage, indent=2, sort_keys=True) + "\n")
     print(f"Wrote the counted pins to {sidecar}")
