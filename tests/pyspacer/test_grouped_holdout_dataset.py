@@ -94,15 +94,21 @@ class _Harness(unittest.TestCase):
         return dataset
 
 
+def _points(image_ids: list[str]) -> list[tuple[str, int, int, int]]:
+    """One ba_a point per image."""
+    return [(image_id, 1, 1, 1) for image_id in image_ids]
+
+
 class MermaidProjectLookupTest(_Harness):
-    """read_datasets gives each MERMAID row its image's project from the lookup."""
+    """read_datasets gives each MERMAID row its image's project from the lookup; the
+    filtered load checks the unmatched tolerance on the images that survive the filters."""
 
     def _read(
         self,
         mermaid_images: list[str],
         lookup: list[tuple[str, str]],
         coralnet_images: tuple[Image, ...] = (),
-        lookup_allowed: int | None = 0,
+        lookup_allowed: int = 0,
         missing_allowed: int = 0,
     ):
         pin, taxonomy = self.publish_mermaid([(i, 1, 1, 1) for i in mermaid_images])
@@ -120,12 +126,7 @@ class MermaidProjectLookupTest(_Harness):
         dataset.groups = resolve_groups(dataset.options)
         with (
             override_settings(
-                # None leaves the shipped default in place.
-                **(
-                    {}
-                    if lookup_allowed is None
-                    else {"mermaid_project_lookup_percent_unmatched_allowed": lookup_allowed}
-                ),
+                mermaid_project_lookup_percent_unmatched_allowed=lookup_allowed,
                 training_inputs_percent_missing_allowed=missing_allowed,
             ),
             mock.patch(
@@ -134,6 +135,50 @@ class MermaidProjectLookupTest(_Harness):
             ),
         ):
             dataset.read_datasets(self.fake)
+        return dataset
+
+    def _load(
+        self,
+        points: list[tuple[str, int, int, int]],
+        lookup: list[tuple[str, str]],
+        lookup_allowed: int | None = 0,
+        missing_allowed: int = 0,
+        excluded_images: tuple[str, ...] = (),
+        included_labels: tuple[str, ...] = (),
+    ) -> TrainingDataset:
+        """Run the filtered-annotations load, where the unmatched check lives."""
+        pin, taxonomy = self.publish_mermaid(points)
+        excluded_csv = included_csv = None
+        if excluded_images:
+            excluded_csv = self.write(
+                "excluded.csv", "image_id\n" + "".join(f"{i}\n" for i in excluded_images)
+            )
+        if included_labels:
+            included_csv = self.write(
+                "included.csv", "ba_id,gf_id\n" + "".join(f"{b},\n" for b in included_labels)
+            )
+        options = DatasetOptions(
+            datasets=[_unsynced(pin, "mermaid")],
+            taxonomy=taxonomy,
+            mermaid_project_lookup_uri=self.lookup(lookup),
+            excluded_images_csv=excluded_csv,
+            included_labels_csv=included_csv,
+        )
+        dataset = load_training_dataset(
+            self.fake,
+            options,
+            CORALNET_MAPPING,
+            filtered_only=True,
+            feature_cache_dir=str(self.tmp / "cache"),
+            # None leaves the shipped default in place.
+            **(
+                {}
+                if lookup_allowed is None
+                else {"mermaid_project_lookup_percent_unmatched_allowed": lookup_allowed}
+            ),
+            training_inputs_percent_missing_allowed=missing_allowed,
+        )
+        self.addCleanup(dataset.cleanup)
         return dataset
 
     def _projects(self, dataset) -> dict[str, str]:
@@ -150,29 +195,57 @@ class MermaidProjectLookupTest(_Harness):
         self.assertEqual(stats["project_id"].tolist(), ["P1", "P2"])
 
     def test_unmatched_images_are_unknown_within_tolerance(self):
-        dataset = self._read(["m1", "m2"], [("m1", "P1")], lookup_allowed=60)
+        dataset = self._load(_points(["m1", "m2"]), [("m1", "P1")], lookup_allowed=60)
         self.assertEqual(self._projects(dataset), {"m1": "P1", "m2": "unknown"})
 
     def test_unmatched_over_tolerance_raises(self):
         with self.assertRaisesRegex(RuntimeError, "project lookup"):
-            self._read(["m1", "m2"], [("m1", "P1")], lookup_allowed=10)
+            self._load(_points(["m1", "m2"]), [("m1", "P1")], lookup_allowed=10)
 
     def test_single_unmatched_image_raises_despite_generous_missing_fv_tolerance(self):
         images = [f"m{n}" for n in range(10)]
         with self.assertRaisesRegex(
             RuntimeError, "Regenerate the lookup.*MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED"
         ):
-            self._read(images, [(i, "P1") for i in images[:-1]], missing_allowed=10)
+            self._load(_points(images), [(i, "P1") for i in images[:-1]], missing_allowed=10)
 
     def test_single_unmatched_image_raises_under_the_shipped_default(self):
         images = [f"m{n}" for n in range(10)]
         with self.assertRaisesRegex(RuntimeError, "project lookup"):
-            self._read(images, [(i, "P1") for i in images[:-1]], lookup_allowed=None)
+            self._load(_points(images), [(i, "P1") for i in images[:-1]], lookup_allowed=None)
 
     def test_raising_lookup_tolerance_allows_single_unmatched_image(self):
         images = [f"m{n}" for n in range(10)]
-        dataset = self._read(images, [(i, "P1") for i in images[:-1]], lookup_allowed=10)
+        dataset = self._load(_points(images), [(i, "P1") for i in images[:-1]], lookup_allowed=10)
         self.assertEqual(self._projects(dataset)["m9"], "unknown")
+
+    def test_read_keeps_unmatched_images_unknown_without_checking(self):
+        dataset = self._read(["m1", "m2"], [("m1", "P1")])
+        self.assertEqual(self._projects(dataset), {"m1": "P1", "m2": "unknown"})
+
+    def test_excluded_unmatched_image_does_not_raise(self):
+        dataset = self._load(_points(["m1", "m2"]), [("m1", "P1")], excluded_images=("m2",))
+        self.assertEqual(self._projects(dataset), {"m1": "P1"})
+
+    def test_unmatched_image_that_is_not_excluded_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "project lookup"):
+            self._load(_points(["m1", "m2", "m3"]), [("m1", "P1")], excluded_images=("m3",))
+
+    def test_unmatched_image_with_all_labels_filtered_out_does_not_raise(self):
+        points = [("m1", 1, 1, 1), ("m2", 1, 1, 2)]
+        dataset = self._load(points, [("m1", "P1")], included_labels=("ba_a",))
+        self.assertEqual(self._projects(dataset), {"m1": "P1"})
+
+    def test_denominator_counts_only_surviving_images(self):
+        # 1 unmatched of 2 survivors is 50%; counting the excluded image too
+        # would read 1 of 3 and slip under a 40% tolerance.
+        with self.assertRaisesRegex(RuntimeError, r"\(1 of 2\)"):
+            self._load(
+                _points(["m1", "m2", "m3"]),
+                [("m1", "P1"), ("m3", "P1")],
+                lookup_allowed=40,
+                excluded_images=("m3",),
+            )
 
     def test_image_in_two_projects_raises(self):
         with self.assertRaisesRegex(ValueError, "more than one project"):

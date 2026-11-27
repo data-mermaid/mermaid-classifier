@@ -565,7 +565,8 @@ class TrainingDataset:
     def load_filtered_annotations(self, client: Any) -> None:
         """
         Populate the `annotations` table: read the pinned datasets' tables,
-        roll up and filter labels, drop excluded images, dedupe points, tag
+        roll up and filter labels, drop excluded images, check the MERMAID
+        project-lookup tolerance on the surviving images, dedupe points, tag
         holdout groups (is_holdout / is_excluded), and delete excluded rows.
 
         Fetches no feature index or feature file.
@@ -582,6 +583,11 @@ class TrainingDataset:
 
         with self.section_profiling("Rollups and filtering"):
             self._roll_up_and_filter()
+
+        # Only unmatched images that survive the filters can reach training
+        # or evaluation, so only those count against the tolerance.
+        if self.mermaid_project_lookup_sha256 is not None:
+            self._check_unmatched_mermaid_images()
 
         with self.section_profiling("Deduplicating points"):
             self._dedupe_points()
@@ -1091,7 +1097,7 @@ class TrainingDataset:
             f" ON a.site = '{Sites.MERMAID.value}' AND a.image_id = l.image_id",
             [lookup_path],
         )
-        self._check_unmatched_mermaid_images()
+        self._log_unmatched_mermaid_images("before filters")
 
     def _check_project_lookup_is_one_to_one(self, lookup_uri: str) -> None:
         """Raise if the lookup maps any image to more than one project."""
@@ -1107,18 +1113,24 @@ class TrainingDataset:
                 f" such as: {[r[0] for r in ambiguous]}"
             )
 
-    def _check_unmatched_mermaid_images(self) -> None:
-        """Log MERMAID images the lookup left as 'unknown'; raise if too many."""
+    def _log_unmatched_mermaid_images(self, stage: str) -> tuple[int, int]:
+        """Log and return (MERMAID images with project_id 'unknown', distinct MERMAID images)."""
         unmatched, total = self.duck_conn.execute(
             "SELECT count(DISTINCT image_id) FILTER (WHERE project_id = 'unknown'),"
             " count(DISTINCT image_id)"
             f" FROM annotations WHERE site = '{Sites.MERMAID.value}'"
         ).fetchall()[0]
         logger.info(
-            "MERMAID project lookup left %s of %s image(s) unmatched (project_id 'unknown').",
+            "MERMAID project lookup left %s of %s image(s) unmatched (project_id 'unknown') %s.",
             f"{unmatched:,}",
             f"{total:,}",
+            stage,
         )
+        return unmatched, total
+
+    def _check_unmatched_mermaid_images(self) -> None:
+        """Log MERMAID images the lookup left as 'unknown' after the filters; raise if too many."""
+        unmatched, total = self._log_unmatched_mermaid_images("after filters")
         allowed = settings.mermaid_project_lookup_percent_unmatched_allowed
         if unmatched > total * allowed / 100:
             raise RuntimeError(

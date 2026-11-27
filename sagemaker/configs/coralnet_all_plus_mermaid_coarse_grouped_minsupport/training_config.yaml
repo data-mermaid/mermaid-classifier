@@ -1,0 +1,86 @@
+# Training run: the coarse label set plus a min-support roll-up. Classes need
+# >= 500 points and >= 10 groups; classes below that are rolled up deepest
+# level first. The generation commands are in README.md and the per-class
+# counts are in support_counts.csv.
+#
+# Datasets, taxonomy, MERMAID lookup, split and subsample settings match
+# ../coralnet_all_plus_mermaid_coarse_grouped/training_config.yaml. The holdout
+# groups (holdout_groups.csv) are a byte-identical copy of that config's file,
+# so results are comparable with a run of the grouped config. Earlier
+# min-support runs (daa1b079, 31c89e1b) used the retired data path and a
+# different holdout, so they are not comparable.
+#
+# NOTE: images the feature sets do not index count against
+# TRAINING_INPUTS_PERCENT_MISSING_ALLOWED below.
+
+dataset:
+  # Image-grouped split: all annotations of an image stay in one split.
+  split_mode: images
+  # Every CoralNet source (no groups_csv) plus every MERMAID image.
+  datasets:
+    - name: coralnet-raw
+      version: 20261124-5ab21b3
+      manifest_sha256: b74e2a9fa32b340e117c0e6f2e0c6fcc64dc1d2df5011778ba0bde76e2568e8b
+      features:
+        family: efficientnet-v1
+        manifest_sha256: c557feffdeb3f89ec82270563b2942d0c4bbe7c976a3568cb92bb91dcfe9935e
+      labels: coralnet
+    - name: mermaid
+      version: 20261124-cfc389d
+      manifest_sha256: f7a1495475bcf0feeedfe91230e376233a41a00d22c57209eac8142865b049a8
+      features:
+        family: efficientnet-v1
+        manifest_sha256: f3ca2077a54e4b811877425fd783a6fd14dbc7dd66671da886a9a5bbadc5ac97
+      labels: mermaid
+  # Resolves the MERMAID dataset's growth-form names to ids.
+  taxonomy:
+    version: 20261124-e6abfad
+    manifest_sha256: fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43
+  # Private bucket. The lookup must never go to the public coral-reef-training bucket.
+  # Generated 2026-10-19 from prod (read-only). Verified 2026-11-26 to cover all
+  # 18,002 images of mermaid@20261124-cfc389d (49 projects). Unmatched MERMAID
+  # images fail the run (MERMAID_PROJECT_LOOKUP_PERCENT_UNMATCHED_ALLOWED defaults to 0).
+  mermaid_project_lookup_uri: s3://dev-datamermaid-sm-sources/etl-outputs/mermaid/mermaid_image_projects_20261019.parquet
+  # Byte-identical copy of the grouped config's selection. Do not regenerate it.
+  holdout_groups_csv: holdout_groups.csv
+  holdout_fold: test
+  holdout_max_per_class: 3000
+  # The EfficientNet that produced this run's feature vectors.
+  feature_extractor_weights: s3://mermaid-config/classifier/v1/efficientnet_weights.pt
+  drop_growthforms: false
+  label_rollup_spec_csv: rollups.csv
+  included_labels_csv: included_labels.csv
+  ref_val_ratios: [0.1, 0.1]
+  # Class-balanced subsampling. The per-class cap is total_annotations // K,
+  # where K counts the classes with rows after rollup. K = 82 for this
+  # min-support class set (counted 2026-11-26), so 16,400,000 keeps the
+  # per-class cap at 200,000 (the coarse grouped config's 94 classes use
+  # 18,800,000 for the same cap).
+  subsample:
+    strategy: balanced
+    total_annotations: 16400000
+    min_per_class: 200
+    # Spreads each class's quota across sources. Seed salts the per-image hash.
+    within_class: source_spread
+    seed: 0
+  weighting:
+    enabled: true
+    weight_ratio_cap: 5000.0
+
+training:
+  epochs: 40
+  early_stopping_patience: 3
+
+mlflow:
+  experiment_name: coralnet-all-mermaid-coarse-grouped-minsupport
+  model_name: coralnet-all-mermaid-coarse-grouped-minsupport
+
+env:
+  # MLFLOW_TRACKING_SERVER is set by the launcher from --mlflow-tracking-uri;
+  # do not override here.
+  # The measured upstream gap is ~7.3% of distinct CoralNet feature vectors
+  # (raw images absent upstream — unfixable). The threshold is measured on
+  # distinct feature vectors, so "5" would abort the run; "10" tolerates the
+  # gap and drops the unbacked annotations.
+  TRAINING_INPUTS_PERCENT_MISSING_ALLOWED: "10"
+  MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
