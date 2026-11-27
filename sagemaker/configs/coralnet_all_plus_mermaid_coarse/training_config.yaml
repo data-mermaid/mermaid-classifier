@@ -46,8 +46,10 @@ dataset:
   included_labels_csv: included_labels.csv
   ref_val_ratios: [0.1, 0.1]
   # Class-balanced subsampling. The per-class cap is total_annotations // K,
-  # where K counts the classes with rows after rollup. The value below is
-  # pending a recount of K on the pinned datasets and will be backfilled.
+  # where K counts the classes with rows after rollup. K = 94 classes have
+  # rows on the pinned datasets (recounted 2026-11-26 with
+  # scripts/count_class_support.py), so 18,800,000 holds a per-class cap of
+  # 200,000.
   subsample:
     strategy: balanced
     total_annotations: 18800000
